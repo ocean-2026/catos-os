@@ -1,0 +1,59 @@
+# CatOS working tree -- ignore build artifacts, disk images and logs.
+# Everything ignored here is either reproducible from source or a bulky
+# earlier drop; the repository tracks source, documentation and tests.
+
+# The GRUB boot template is a required build input for build.sh, so it
+# stays tracked even though it is an .iso (exceptions must precede rules).
+!kernel_v25/build/catos_work.iso
+
+# Kernel build scripts that happen to live in the build/ directory are
+# tracked; everything else produced there is not.
+!kernel_v25/build/*.py
+!kernel_v25/build/catos_work.iso
+
+# ---- compiled objects and intermediate link output ----
+*.o
+*.obj
+*.elf
+*.pe
+*.map
+kernel_v25/build/*.bin
+kernel_v25/extapp/build/*
+!kernel_v25/extapp/build/mkce.py
+
+# ---- bootable artifacts / disk images (hundreds of MB) ----
+*.iso
+*.img
+*.vhdx
+*.vhd
+*.qcow2
+
+# ---- archives of earlier drops ----
+*.zip
+
+# ---- debug logs and traces ----
+*.log
+*.dump
+*.ppm
+
+# ---- bulk reference trees kept outside version control ----
+# Working copies of earlier drops, not sources of truth:
+ot/
+extracted/
+tmp/
+archive_*_2026-*/
+Catos_Better_better/
+.staging_unpack/
+.dsh-acl-diagnostics/
+.backups/
+
+# ---- compiler test scratch ----
+tests/cc_work/
+
+# ---- OS / editor noise ----
+desktop.ini
+Thumbs.db
+.DS_Store
+*.swp
+__pycache__/
+*.pyc

@@ -1,0 +1,24 @@
+# experience.md - 开发经验记录
+
+格式：[所属项目][经验]内容
+
+- [ot][经验] 黑盒探测优先于猜测：execve 实现前用 argv_probe.c 实测内核 CE 调用约定（argv@0x0147c500/字符串@0x0147c540/esp/ce_main@0x02000000/api 表@0x0101c280），所有常量来自实测而非文档推导
+- [ot][经验] 裸函数（naked）内无操作数 asm 用**单 %** 寄存器，扩展 asm（有操作数）用 **%%**；混用报 "bad register name"（exec_tramp 踩过）
+- [ot][经验] QEMU sendkey 数字参数（0xNN）语义在 QKeyCode/PS/2 扫描码间不可靠（实测 0x2d 时 x 时 v），**键名模式（sendkey c）更稳定**；长 hold 参数（sendkey o 1000）不改善 CatOS 接收率
+- [ot][经验] 跳板/桩代码用 `__attribute__((naked))` + 纯汇编 + `exec_tramp_end` 取长度差拷贝，避免内联函数地址问题；用 objdump 反汇编核对每条指令机器码再进 VM
+- [ot][经验] exec 场景（覆写自身镜像）的调试节奏：先在宿主侧完成全部静态验证（CE01 头解析、跳板寄存器契约、反汇编），VM 只做最终确认，减少对脆弱键盘通道的依赖
+- [ot][经验] 内核栈 8KiB 限制下，跳板/argv 区选在探测到的固定安全区（0x0147c500-0x0147c800），避开镜像（0x02000000）与内核栈（esp≈0x0147e658），先算布局再写代码
+- [ot][经验] 镜像预算管理三原则：① bss 不占镜像（static 大缓冲随意用，如 4KB 分配器池/2.5KB 快照缓冲）；② text/rodata 才占镜像，入镜像前先算余量（65536 减当前体积）；③ 余量不足时优先外置 /BIN/*.csc 脚本（自动注册机制已有，calc/wc/time 已验证），或写设计文档延后（L3/⑩ 即此策略）
+- [ot][经验] 键盘失效（#34）时的验证分层：① 静态（构建+bss/镜像体积核验）② 符号（objdump -t 核验新函数入镜像）③ 反汇编行为（objdump -d 核验关键逻辑如递归下降求值器）④ VM 交互（键盘好时才做）；③④ 都可覆盖时如实汇报验证方式，不长时间卡键盘
+- [ot][经验] 复用小机制胜过新机制：swap 直接复用 csc_save_shards（512B 分片写）+ csc_snapb（分片读回重组），仅 +56B 就打破 save 512B/cat 8KB 双限制；改造现有原语而非另写文件 IO
+- [ot][经验] 大 rodata 资产外置省镜像：像素画 banner（~460B）移到 /BIN/BANNER.TXT 由 cmd_banner 读文件渲染（复用 csc_index_lines/csc_fetch_row 逐行输出），缺文件时降级纯文本标题——净省 ~288B 镜像，且用户可编辑 banner；外置边界：启动路径依赖磁盘（缺文件有降级即可）
+- [ot][经验] swap 旧分片残留绕行：CE 无 delete API 无法清旧 .A0x 文件，改为 swapin 按 RAM 页表 g_swap_n 只读主文件+前 N-1 片（起始片 .A00 对应 page1），陈旧分片被边界自然忽略——用状态计数代替文件清理
+- [ot][经验] L3 子程序帧栈放 bss 不占镜像：8 帧 × (10×40B argv + 4B argc + 4B ret) ≈ 3.2KB 全在 bss（静态），实现 func/call/ret 代码仅 ~700B 入镜像；$ret 返回值直接复用变量表（csc_set("ret")）零新增展开逻辑
+- [ot内核v2.5][经验] 大文件读写绕行 FS_DATA_MAX：新增独立 syscall（SYS_FILE_READ/WRITE/DELETE）走 FAT 链簇定位，不经 512B save 上限；offset 读 = offset/簇大小 跳链 + 簇内偏移，写 = mode0 截断/mode1 从链尾续接（fat_append_file）
+- [ot内核v2.5][经验] CE 镜像上限提升套路：CE_MAX_IMAGE/BSS 常量提升 + 移除内核临时大缓冲（ce_bounce）+ spawn 改为"读首簇解析 header + 沿 FAT 链直写已建立页的映射"（避免整镜像进内核缓冲），256KB 镜像成本=页表页数
+- [ot内核v2.5][经验] 管道 EOF 语义：read 读到空但 writer 仍开 → 阻塞；读到数据读空即返回（不因 got<max 死等）；writer 关闭（open_w=0）→ read 空时返 EOF（got=0）——"有数据即返回 + 无数据等" 两态正确实现避免死锁
+- [ot内核v2.5][经验] 内核调试三件套：objdump -t 找崩溃 eip 符号 → objdump -D -b binary 看指令（pop gs=0f a9）→ 比对 cpu.s 源码理解帧布局；QEMU monitor sendkey + screendump + tesseract OCR 全自动回归
+- [node解释器][经验] 微型解释器调试三层递进：token 流 → AST dump → 求值追踪；AST dump 与运行时错误点打印**节点地址+op**，地址对比可直接区分"解析建错节点"vs"运行期节点被污染/链表越界"（本轮 callee-op 2→3 之谜最终是 tok_kw 前缀误判，n_new 垃圾节点是另一族）
+- [node解释器][经验] 解释器 bss 预算：大头 = token 数组(2048×16B) + arena + srcbuf；递归 fib(10) 每调用分配 scope ~144B，两遍调用 ~50KB → arena 按最坏脚本路径留量（96→160KB）；TOK_MAX 4096→2048 省 32KB；CE bss 控制在 256KB 内（当前 0x32180=205KB）
+- [ot内核][经验] FAT 共享介质一致性：#48 根因=整扇区重写抹掉宿主注入表项；修法=脏表项 journal + 脏扇区 RMW（先读盘再补丁）+ 分配前核对磁盘真 0；教训：FAT 表是"多写者共享"资源（宿主工具+内核），任何整块覆写都必须基于磁盘真值而非内存缓存
+- [node解释器][经验] 错误恢复健壮性：递归下降解析器每个循环（p_stmt_list/实参/声明符）都要有 token 前进不变量，否则任何 perr 路径都可能变成无限分配；加 ti0 对比 + 强制推进是通用保险
