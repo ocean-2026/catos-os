@@ -2,7 +2,9 @@
  * be_text.c -- BACK-END A: VGA text mode 03 (80x25, 16 colours).
  *
  * Only this file touches 0xB8000 and the text-mode VGA register set.
- * All framebuffer/pixel-free: it paints one logical cell at a time.
+ * CJK glyphs are NOT supported here: the front-end degrades uncovered
+ * codepoints to '?' when this back-end is active (VGA text cells are
+ * 8x16 and its font plane holds only 256 8x16 glyphs).
  */
 #include "render.h"
 #include "render_be.h"
@@ -10,43 +12,34 @@
 
 static volatile uint16_t *vram = (volatile uint16_t *)0xB8000u;
 
-/* ---- 256-colour -> 16-colour mapping -----------------------------------
- * The graphics palette is 0..15 standard VGA + 16..255 grey ramp.  Text
- * mode has 4 foreground / 3 background bits, so greys collapse onto the
- * nearest of black / dark-grey / light-grey / white. */
-static uint8_t map_color(uint8_t c) {
-    if (c < 16) return (uint8_t)(c & 0x0F);
-    unsigned g = ((unsigned)(c - 16) * 255u) / 239u;
-    if (g < 64)  return 0;
-    if (g < 128) return 8;
-    if (g < 192) return 7;
-    return 15;
+static uint8_t attr_byte(uint32_t fg, uint32_t bg, uint8_t attrs) {
+    if (attrs & CON_ATTR_INVERSE) { uint32_t t = fg; fg = bg; bg = t; }
+    if (attrs & CON_ATTR_HIDDEN)  fg = bg;
+    if (attrs & CON_ATTR_DIM) {
+        fg = CON_RGB(CON_RGB_R(fg) >> 1, CON_RGB_G(fg) >> 1,
+                     CON_RGB_B(fg) >> 1);
+    }
+    uint8_t f4 = render_rgb_to_vga(fg) & 0x0F;
+    uint8_t b4 = render_rgb_to_vga(bg) & 0x07;
+    if (attrs & CON_ATTR_BOLD) f4 |= 8;
+    uint8_t a = (uint8_t)((b4 << 4) | f4);
+    if (attrs & CON_ATTR_BLINK) a |= 0x80;
+    /* ITALIC / UNDERLINE / STRIKE cannot be expressed in VGA text mode. */
+    return a;
 }
 
-static void text_clear(uint8_t bg) {
-    uint8_t b4 = (uint8_t)(map_color(bg) & 0x0F);
-    uint16_t blank = (uint16_t)' ' | ((uint16_t)((b4 << 4) | 7) << 8);
+static void text_clear(uint32_t bg_rgb) {
+    uint8_t a = attr_byte(render_clut(7), bg_rgb, 0);
+    uint16_t blank = (uint16_t)' ' | ((uint16_t)a << 8);
     for (int i = 0; i < 80 * 25; i++) vram[i] = blank;
 }
 
-static void text_draw_cell(int x, int y, unsigned char ch,
-                           uint8_t fg, uint8_t bg, uint8_t attrs) {
-    if (x < 0 || x >= 80 || y < 0 || y >= 25) return;
-    uint8_t f = fg, b = bg;
-    if (attrs & CON_ATTR_INVERSE) { uint8_t t = f; f = b; b = t; }
-    if (attrs & CON_ATTR_HIDDEN) f = b;
-
-    uint8_t f4 = map_color(f);
-    uint8_t b4 = (uint8_t)(map_color(b) & 0x0F);
-    if (attrs & CON_ATTR_BOLD) f4 |= 8;
-    if (attrs & CON_ATTR_DIM)  f4 &= (uint8_t)~8;
-    /* ITALIC / UNDERLINE / STRIKE are not expressible in VGA text mode.
-     * They are simply ignored here (advertised via attr_mask). */
-    uint8_t a = (uint8_t)((b4 << 4) | f4);
-    if (attrs & CON_ATTR_BLINK) a |= 0x80;
-
-    unsigned char c = ch ? ch : ' ';
-    vram[y * 80 + x] = (uint16_t)c | ((uint16_t)a << 8);
+static void text_draw_cell(int gx, int gy, const con_cell_t *c) {
+    if (gx < 0 || gx >= 80 || gy < 0 || gy >= 25) return;
+    if (c->flags == CELL_F_CONT) return;
+    uint8_t a = attr_byte(c->fg, c->bg, c->attrs);
+    unsigned char ch = (c->cp && c->cp <= 0xFF) ? (unsigned char)c->cp : ' ';
+    vram[gy * 80 + gx] = (uint16_t)ch | ((uint16_t)a << 8);
 }
 
 static void text_set_cursor(int x, int y) {
@@ -58,27 +51,27 @@ static void text_set_cursor(int x, int y) {
 }
 
 /* ---- text mode 03 register sequence + font re-seed ---------------------
- * Chain-4 (Mode 13h) writes clobber VGA plane 2 where the text renderer
- * keeps its glyphs.  QEMU maps the text-mode window at 0xB8000 only
+ * Chain-4 (Mode 13h) / VBE writes clobber VGA plane 2 where the text
+ * renderer keeps glyphs.  QEMU maps the text-mode window at 0xB8000 only
  * (GC 0x06 = 0x0E -> memory_map_mode 3); writes to 0xA0000 are silently
  * discarded.  So we go through the B8000 window with latched writes. */
 static void vga_reload_font(void) {
     volatile uint8_t *p = (volatile uint8_t *)0xB8000u;
-    outb(0x3CE, 0x05); outb(0x3CF, 0x00);   /* write mode 0 (latched) */
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00);
     outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
     for (int c = 0; c < 256; c++) {
         const unsigned char *g = render_font_glyph((unsigned char)c);
         for (int r = 0; r < 16; r++) {
-            unsigned char row = g[r >> 1];   /* 8x8 -> 8x16, doubled */
-            outb(0x3C4, 0x02); outb(0x3C5, 0x04);   /* plane 2 */
+            unsigned char row = g[r >> 1];
+            outb(0x3C4, 0x02); outb(0x3C5, 0x04);
             p[32 * c + r] = row;
         }
     }
-    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);   /* all planes */
-    outb(0x3CE, 0x05); outb(0x3CF, 0x10);   /* odd/even text mode */
+    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);
+    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
 }
 
-static void text_enter(void) {
+static int text_enter(void) {
     outb(0x3C2, 0x67);
     outb(0x3C4, 0x00); outb(0x3C5, 0x03);
     outb(0x3C4, 0x01); outb(0x3C5, 0x00);
@@ -144,13 +137,14 @@ static void text_enter(void) {
     outb(0x3C0, 0x20); outb(0x3C0, 0x00);
     (void)inb(0x3DA);
     vga_reload_font();
+    return 0;
 }
 
-static void text_leave(void) { /* nothing to undo; be_gfx::enter overwrites */ }
+static void text_leave(void) { /* the next back-end programs the hardware */ }
+static void text_set_palette(uint8_t idx, uint32_t rgb) {
+    (void)idx; (void)rgb;               /* 16 fixed VGA colours */
+}
 
-/* Diagnostic output deliberately goes back through the front-end so that
- * the dump is visible in whichever back-end is active.  This is the only
- * place a back-end calls upward, and it is not part of the paint path. */
 static void text_diag(void) {
     char buf[8];
     con_write("VGA regs:\n");
@@ -205,19 +199,18 @@ static void text_diag(void) {
 }
 
 render_be_t be_text = {
-    .name      = "vga-text-80x25",
-    .cols      = 80,
-    .rows      = 25,
-    .pixel_w   = 640,
-    .pixel_h   = 400,
-    .colors    = 16,
-    .attr_mask = CON_ATTR_BOLD | CON_ATTR_DIM | CON_ATTR_BLINK |
-                 CON_ATTR_INVERSE | CON_ATTR_HIDDEN,
-    .mode      = CON_MODE_TEXT,
-    .enter     = text_enter,
-    .leave     = text_leave,
-    .clear     = text_clear,
-    .draw_cell = text_draw_cell,
-    .set_cursor= text_set_cursor,
-    .diag      = text_diag
+    .name       = "vga-text-80x25",
+    .cols = 80, .rows = 25, .pixel_w = 640, .pixel_h = 400,
+    .colors = 16, .bpp = 4,
+    .attr_mask  = CON_ATTR_BOLD | CON_ATTR_DIM | CON_ATTR_BLINK |
+                  CON_ATTR_INVERSE | CON_ATTR_HIDDEN,
+    .cjk        = 0,
+    .mode       = CON_MODE_TEXT,
+    .enter      = text_enter,
+    .leave      = text_leave,
+    .clear      = text_clear,
+    .draw_cell  = text_draw_cell,
+    .set_cursor = text_set_cursor,
+    .set_palette= text_set_palette,
+    .diag       = text_diag
 };

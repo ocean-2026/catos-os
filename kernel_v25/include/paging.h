@@ -79,4 +79,12 @@ int    vma_contains(const vma_t *list, uint32_t addr);
 #define USER_STACK_SZ   0x10000u       /* 64 KiB */
 #define USER_ARENA_END  0x2400000u
 
+/* ---- VBE linear framebuffer -------------------------------------------
+ * Map a PCI MMIO framebuffer into the KERNEL page directory (identity,
+ * supervisor-only, 4 KiB pages).  Returns the usable virtual address
+ * (== phys) or 0 on failure.  Ring3 page directories copy only PDEs
+ * 0..15, so a high LFB is never reachable from user mode -- this is what
+ * keeps the "no user drawing API" guarantee in truecolour mode too. */
+void *vbe_lfb_map(uint32_t phys, uint32_t size);
+
 #endif

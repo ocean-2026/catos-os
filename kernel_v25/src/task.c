@@ -468,6 +468,10 @@ enum {
     /* v2.7: display front-end.  Append-only: old binaries keep their
      * slot indices.  NOTE: there is intentionally NO drawing syscall. */
     SYS_DISPLAY_MODE, SYS_DISPLAY_INFO, SYS_SET_STYLE,
+    /* v2.8: truecolour text + user-definable palette.  Append-only.
+     * NOTE: 55 thunks occupy ~1216 bytes, just under VS_EXIT_STUB at
+     * 0x500 (1280).  See the overflow guard in build_vsyscall_page(). */
+    SYS_SET_STYLE_RGB, SYS_SET_PALETTE, SYS_PALETTE,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -530,12 +534,21 @@ static void build_vsyscall_page(uint8_t *page) {
         /*46*/3, /*47*/1,                       /* spawn / wait */
         /*48*/1,                               /* brk */
         /*49*/1, /*50*/1, /*51*/3,             /* display mode/info/style */
+        /*52*/3, /*53*/2, /*54*/1,             /* rgb style / palette set/get */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
     for (uint32_t i = 0; i < SYS_COUNT; i++) {
         taddr[i] = VSYSCALL_BASE + (uint32_t)(e.p - page);
         generic_thunk(&e, i, nargs[i]);
+    }
+    /* Guard the hand-packed page layout: the generic thunks must never
+     * reach the exit stub at +0x500.  Without this check a future syscall
+     * would silently corrupt the trampoline and every `return 0` from a
+     * CE program would jump into thunk code. */
+    if ((uint32_t)(e.p - page) > 0x500u) {
+        con_write("vsyscall: thunk overflow - system halted\n");
+        for (;;) __asm__ volatile("hlt");
     }
 
     /* ls thunk at +0x400: ls(path, cb, ud) via LS_OPEN + LS_NEXT loop */
@@ -1362,6 +1375,17 @@ void isr_syscall(int_frame_t *f) {
     case SYS_SET_STYLE:
         con_set_style((uint8_t)a1, (uint8_t)a2, (uint8_t)a3);
         ret = 0;
+        break;
+    /* ---- v2.8 truecolour text + user palette ------------------------ */
+    case SYS_SET_STYLE_RGB:
+        con_set_style_rgb(a1, a2, (uint8_t)a3);
+        ret = 0;
+        break;
+    case SYS_SET_PALETTE:
+        ret = (uint32_t)con_set_palette((uint8_t)a1, a2);
+        break;
+    case SYS_PALETTE:
+        ret = con_palette((uint8_t)a1);
         break;
     default: ret = (uint32_t)-8; break;
     }

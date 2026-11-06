@@ -3,10 +3,8 @@
  *
  * POLICY: graphics mode is a text mode with more colours and styles.
  * It is NOT a drawing surface.  Every framebuffer primitive below is
- * `static` -- there is no gfx_putpixel / gfx_fillrect / gfx_rect symbol,
- * no syscall, no CE API slot, and no user mapping of 0xA0000 (PDE 0 is
- * supervisor-only in task_space_create()).  The only public operation is
- * draw_cell(x, y, ch, fg, bg, attrs).
+ * `static`.  The DAC palette is driven by the front-end's 256-entry CLUT,
+ * so user programs can redefine any of the 256 colours (6-bit DAC).
  */
 #include "render.h"
 #include "render_be.h"
@@ -32,25 +30,24 @@ static void hline(int x, int y, int w, uint8_t c) {
     for (int i = 0; i < w; i++) px(x + i, y, c);
 }
 
-/* ---- DAC palette: 16 standard colours + 240 greys ---------------------- */
-static void set_palette(void) {
-    static const uint8_t v[16][3] = {
-        {0,0,0},{0,0,170},{0,170,0},{0,170,170},
-        {170,0,0},{170,0,170},{170,85,0},{170,170,170},
-        {85,85,85},{85,85,255},{85,255,85},{85,255,255},
-        {255,85,85},{255,85,255},{255,255,85},{255,255,255}
-    };
+/* ---- 6-bit VGA DAC ------------------------------------------------------ */
+static void dac_write(uint8_t idx, uint32_t rgb) {
+    outb(0x3C8, idx);
+    outb(0x3C9, (uint8_t)(CON_RGB_R(rgb) >> 2));
+    outb(0x3C9, (uint8_t)(CON_RGB_G(rgb) >> 2));
+    outb(0x3C9, (uint8_t)(CON_RGB_B(rgb) >> 2));
+}
+static void dac_load_all(void) {
     outb(0x3C8, 0x00);
-    for (int i = 0; i < 16; i++) {
-        outb(0x3C9, v[i][0]); outb(0x3C9, v[i][1]); outb(0x3C9, v[i][2]);
-    }
-    for (int i = 16; i < 256; i++) {
-        uint8_t g = (uint8_t)((i - 16) * 255 / 239);
-        outb(0x3C9, g); outb(0x3C9, g); outb(0x3C9, g);
+    for (int i = 0; i < 256; i++) {
+        uint32_t c = render_clut((uint8_t)i);
+        outb(0x3C9, (uint8_t)(CON_RGB_R(c) >> 2));
+        outb(0x3C9, (uint8_t)(CON_RGB_G(c) >> 2));
+        outb(0x3C9, (uint8_t)(CON_RGB_B(c) >> 2));
     }
 }
 
-static void gfx_enter(void) {
+static int gfx_enter(void) {
     /* sequencer */
     outb(0x3C4, 0x00); outb(0x3C5, 0x01);
     outb(0x3C4, 0x01); outb(0x3C5, 0x01);
@@ -84,63 +81,95 @@ static void gfx_enter(void) {
     outb(0x3CE, 0x06); outb(0x3CF, 0x05);
     outb(0x3CE, 0x07); outb(0x3CF, 0x0F);
     outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
-    /* attribute controller (input status resets the index/data flipflop) */
+    /* attribute controller */
     (void)inb(0x3DA);
     outb(0x3C0, 0x30); outb(0x3C0, 0x00);
     outb(0x3C0, 0x33); outb(0x3C0, 0x00);
     outb(0x3C0, 0x10); outb(0x3C0, 0x41);
     (void)inb(0x3DA);
     outb(0x3C0, 0x20); outb(0x3C0, 0x00);
-    set_palette();
+    dac_load_all();
+    return 0;
 }
 
 static void gfx_leave(void) { /* be_text::enter does the full restore */ }
+static void gfx_set_palette(uint8_t idx, uint32_t rgb) { dac_write(idx, rgb); }
+static void gfx_clear(uint32_t bg_rgb) {
+    fill_rect(0, 0, GFX_W, GFX_H, render_quantize(bg_rgb));
+}
 
-static void gfx_clear(uint8_t bg) { fill_rect(0, 0, GFX_W, GFX_H, bg); }
-
-static uint8_t dim_color(uint8_t c) {
+static uint8_t dim_index(uint8_t c) {
     if (c < 16) return (uint8_t)(c & (uint8_t)~8);
     return (uint8_t)(16 + (c - 16) / 2);
 }
 
-static void gfx_draw_cell(int x, int y, unsigned char ch,
-                          uint8_t fg, uint8_t bg, uint8_t attrs) {
-    if (x < 0 || x >= GFX_COLS || y < 0 || y >= GFX_ROWS) return;
-    int ox = x * 8, oy = y * 8;
-    uint8_t f = fg, b = bg;
+static void resolve_colors(const con_cell_t *c, uint8_t *f, uint8_t *b) {
+    uint8_t fi = c->fg_idx, bi = c->bg_idx;
+    if (c->attrs & CON_ATTR_INVERSE) { uint8_t t = fi; fi = bi; bi = t; }
+    if (c->attrs & CON_ATTR_HIDDEN)  fi = bi;
+    if (c->attrs & CON_ATTR_DIM)     fi = dim_index(fi);
+    *f = fi; *b = bi;
+}
 
-    if (attrs & CON_ATTR_INVERSE) { uint8_t t = f; f = b; b = t; }
-    if (attrs & CON_ATTR_HIDDEN)  f = b;
-    if (attrs & CON_ATTR_DIM)     f = dim_color(f);
-    /* BLINK needs a timer-driven repaint; accepted but not animated yet. */
-
+/* 8x8 ASCII cell */
+static void draw_narrow(int ox, int oy, const con_cell_t *c,
+                        uint8_t f, uint8_t b) {
     fill_rect(ox, oy, 8, 8, b);
-    if (ch) {
-        const unsigned char *g = render_font_glyph(ch);
+    if (c->cp) {
+        const unsigned char *g = render_font_glyph((unsigned char)c->cp);
         for (int j = 0; j < 8; j++) {
             unsigned row = g[j];
-            int shift = (attrs & CON_ATTR_ITALIC) && j < 5 ? 1 : 0;
+            int shift = (c->attrs & CON_ATTR_ITALIC) && j < 5 ? 1 : 0;
             for (int i = 0; i < 8; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
-                if (dx >= 8) continue;                 /* keep inside the cell */
+                if (dx >= 8) continue;
                 px(ox + dx, oy + j, f);
-                if ((attrs & CON_ATTR_BOLD) && dx + 1 < 8)
+                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 8)
                     px(ox + dx + 1, oy + j, f);
             }
         }
     }
-    if (attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 7, 8, f);
-    if (attrs & CON_ATTR_STRIKE)    hline(ox, oy + 4, 8, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 7, 8, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 4, 8, f);
 }
 
-/* No hardware cursor exists in Mode 13h.  The front-end keeps the logical
- * cursor; this is intentionally a no-op (documented limitation). */
+/* 16x16 CJK cell: exactly 2x2 narrow cells, painted as one atomic block */
+static void draw_wide(int ox, int oy, const con_cell_t *c,
+                      uint8_t f, uint8_t b) {
+    const uint8_t *g = render_font_hz(c->cp);
+    fill_rect(ox, oy, 16, 16, b);
+    if (g) {
+        for (int j = 0; j < 16; j++) {
+            unsigned row = ((unsigned)g[2 * j] << 8) | g[2 * j + 1];
+            for (int i = 0; i < 16; i++) {
+                if (!(row & (1u << (15 - i)))) continue;
+                px(ox + i, oy + j, f);
+                if ((c->attrs & CON_ATTR_BOLD) && i + 1 < 16)
+                    px(ox + i + 1, oy + j, f);
+            }
+        }
+    }
+    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 15, 16, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 8, 16, f);
+}
+
+static void gfx_draw_cell(int gx, int gy, const con_cell_t *c) {
+    if (gx < 0 || gx >= GFX_COLS || gy < 0 || gy >= GFX_ROWS) return;
+    if (c->flags == CELL_F_CONT) return;
+    uint8_t f, b;
+    resolve_colors(c, &f, &b);
+    int ox = gx * 8, oy = gy * 8;
+    /* BLINK is accepted but not animated (needs a timer-driven repaint). */
+    if (c->flags == CELL_F_WIDE_TL) draw_wide(ox, oy, c, f, b);
+    else                            draw_narrow(ox, oy, c, f, b);
+}
+
 static void gfx_set_cursor(int x, int y) { (void)x; (void)y; }
 
 static void gfx_diag(void) {
-    con_write("gfx backend: Mode 13h 320x200x256, 40x25 text cells\n");
-    con_write("framebuffer 0xA0000 is supervisor-only; no user drawing API\n");
+    con_write("gfx backend: Mode 13h 320x200x8bpp, 40x25 text cells\n");
+    con_write("CLUT 256 entries via 6-bit DAC; no user drawing API\n");
     outb(0x3D4, 0x11); outb(0x3D5, 0x0E);
     outb(0x3CE, 0x06);
     unsigned v = inb(0x3CF);
@@ -152,18 +181,18 @@ static void gfx_diag(void) {
 }
 
 render_be_t be_gfx = {
-    .name      = "mode13h-40x25-text",
-    .cols      = GFX_COLS,
-    .rows      = GFX_ROWS,
-    .pixel_w   = GFX_W,
-    .pixel_h   = GFX_H,
-    .colors    = 256,
-    .attr_mask = CON_ATTR_ALL & (uint8_t)~CON_ATTR_BLINK,
-    .mode      = CON_MODE_GFX,
-    .enter     = gfx_enter,
-    .leave     = gfx_leave,
-    .clear     = gfx_clear,
-    .draw_cell = gfx_draw_cell,
-    .set_cursor= gfx_set_cursor,
-    .diag      = gfx_diag
+    .name       = "mode13h-40x25-text",
+    .cols = GFX_COLS, .rows = GFX_ROWS,
+    .pixel_w = GFX_W, .pixel_h = GFX_H,
+    .colors = 256, .bpp = 8,
+    .attr_mask  = CON_ATTR_ALL & (uint8_t)~CON_ATTR_BLINK,
+    .cjk        = 1,
+    .mode       = CON_MODE_GFX,
+    .enter      = gfx_enter,
+    .leave      = gfx_leave,
+    .clear      = gfx_clear,
+    .draw_cell  = gfx_draw_cell,
+    .set_cursor = gfx_set_cursor,
+    .set_palette= gfx_set_palette,
+    .diag       = gfx_diag
 };

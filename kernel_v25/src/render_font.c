@@ -9,6 +9,7 @@
  * No other layer needs glyph data.
  */
 #include "render_be.h"
+#include "font_hz.inc"   /* generated GB2312 16x16 table (committed) */
 
 static const unsigned char font8x8_basic[95][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* 20   */
@@ -115,3 +116,20 @@ const unsigned char *render_font_glyph(unsigned char ch) {
     if (ch < 0x20 || ch > 0x7E) return question;
     return font8x8_basic[ch - 0x20];
 }
+
+/* GB2312 covers U+4E00..U+9FA0.  Table is sorted by codepoint, so a
+ * binary search costs ~13 comparisons and no allocation. */
+const uint8_t *render_font_hz(uint32_t cp) {
+    if (cp < 0x1100 || cp > 0xFFFFu) return 0;
+    unsigned lo = 0, hi = HZ_FONT_COUNT;
+    while (lo < hi) {
+        unsigned m = lo + ((hi - lo) >> 1);
+        if ((uint32_t)hz_font[m].cp < cp) lo = m + 1;
+        else                             hi = m;
+    }
+    if (lo < HZ_FONT_COUNT && (uint32_t)hz_font[lo].cp == cp)
+        return hz_font[lo].bits;
+    return 0;                       /* not covered -> caller draws '?' */
+}
+
+unsigned render_font_hz_count(void) { return (unsigned)HZ_FONT_COUNT; }

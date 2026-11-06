@@ -152,3 +152,34 @@ void *kzalloc_frame(void) {
     for (uint32_t i = 0; i < 4096; i++) p[i] = 0;
     return p;
 }
+
+/* ---- VBE linear framebuffer -------------------------------------------
+ * The low 64 MiB is 16 PSE (4 MiB) pages.  A VBE LFB lives far above it
+ * (typically PCI BAR2 at 0xE0000000 / 0x10000000), so it needs its own
+ * 4 KiB page tables.  We refuse to touch PDEs 0..15: splitting one of
+ * those would expose the framebuffer to every ring3 task, which would
+ * break the "no user drawing API" policy. */
+void *vbe_lfb_map(uint32_t phys, uint32_t size) {
+    if (!phys || !size) return 0;
+    uint32_t pa  = phys & ~0xFFFu;
+    uint32_t end = (phys + size + 0xFFFu) & ~0xFFFu;
+    uint32_t pde0 = pa >> 22, pde1 = (end - 1) >> 22;
+    if (pde0 < 16 || pde1 < 16) return 0;
+
+    for (uint32_t pde = pde0; pde <= pde1; pde++) {
+        if (kdir[pde] & 0x80u) return 0;      /* would split a PSE page */
+        if (!(kdir[pde] & 1u)) {
+            uint32_t pt = frame_alloc();
+            if (!pt) return 0;
+            uint32_t *t = (uint32_t *)pt;
+            for (int i = 0; i < 1024; i++) t[i] = 0;
+            kdir[pde] = pt | 0x003u;         /* P | RW, supervisor-only */
+        }
+    }
+    for (; pa < end; pa += 4096) {
+        uint32_t *t = (uint32_t *)(kdir[pa >> 22] & ~0xFFFu);
+        t[(pa >> 12) & 0x3FFu] = pa | 0x003u;
+    }
+    cpu_cr3_write((uint32_t)kdir);            /* flush TLB */
+    return (void *)phys;
+}

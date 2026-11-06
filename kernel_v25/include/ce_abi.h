@@ -18,12 +18,14 @@
  *   v2.5  slots 39..47   big files / pipes / processes
  *   v2.6  slot   48     brk (dynamic heap break)
  *   v2.7  slots 49..51   display mode / display info / text style
+ *   v2.8  slots 52..54   RGB style / palette set / palette query
  *
- * Total: 52 slots in v2.7 (the v2.6 header had 49).
+ * Total: 55 slots in v2.8 (the v2.7 header had 52).
  *
- * v2.7 deliberately exposes NO drawing API: graphics mode is a styled
- * text mode.  There is no putpixel/fillrect/framebuffer syscall, and
- * 0xA0000 is supervisor-only in every ring3 page directory.
+ * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
+ * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
+ * syscall, and neither 0xA0000 nor the VBE LFB is mapped into any ring3
+ * page directory.
  *
  * Keep in sync with include/ce.h (the kernel-side mirror).  A v2.4 header
  * has only 40 slots and must NOT be used to build v2.5 programs.
@@ -45,7 +47,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 52 slots, v2.7 */
+/* system-call table: 55 slots, v2.8 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -126,6 +128,17 @@ typedef struct catos_api {
     void   (*set_style)(int fg, int bg, int attrs);/* 51
          fg/bg are palette indices 0..255 (text mode maps to 16);
          attrs is a CON_ATTR_* bitmask (see render.h) */
+    /* ---- v2.8: truecolour + user palette (append-only) --------------- */
+    void   (*set_style_rgb)(uint32_t fg, uint32_t bg, int attrs); /* 52
+         fg/bg are literal 0x00RRGGBB.  On 8bpp back-ends they are
+         quantised to the nearest CLUT entry; on VBE 32bpp they are used
+         verbatim -- that is full 16.7M-colour text. */
+    int    (*set_palette)(int idx, uint32_t rgb);   /* 53
+         redefine CLUT[idx] (0..255) as 0x00RRGGBB.  Mode 13h writes the
+         6-bit VGA DAC; VBE keeps it in software for indexed cells.
+         Returns 0. */
+    uint32_t (*palette)(int idx);                   /* 54
+         read back CLUT[idx] as 0x00RRGGBB. */
 } catos_api_t;
 
 extern catos_api_t *__ce_api;

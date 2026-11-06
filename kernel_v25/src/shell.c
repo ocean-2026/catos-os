@@ -76,11 +76,17 @@ static void cmd_help(void) {
         "  mem          show RAM size (multiboot)\n"
         "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
         "  -- display (front-end / back-ends) --\n"
-        "  gfx          switch to graphics mode (styled text, 256 colors)\n"
+        "  gfx          graphics mode (256-color styled text)\n"
+        "  vbe          VBE 800x600x32 truecolour text terminal\n"
         "  text         switch back - needs a physical Y confirmation\n"
         "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
-        "  display      show backend, grid, colors, supported styles\n"
-        "  vdiag        raw VGA register / glyph diagnostic\n"
+        "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
+        "  palette I C  redefine CLUT[I] as RRGGBB\n"
+        "  display      backend, grid, depth, CJK, glyph count\n"
+        "  vdiag        raw VGA/VBE register diagnostic\n"
+        "  -- Chinese (GB2312, display only; no IME) --\n"
+        "  zhdemo       built-in UTF-8 Chinese + truecolour demo\n"
+        "  color NUM    set foreground palette index (0..255)\n"
         "  reboot       warm reboot the machine\n"
         "  hang         halt the CPU (QEMU: close window)\n"
         "  -- processes (ring3 tasks, preemptive) --\n"
@@ -157,12 +163,74 @@ static void cmd_style(const char *arg) {
     vga_write("\n");
 }
 
+static void skip_sp(const char **pp) { while (**pp == ' ') (*pp)++; }
+
+static uint32_t parse_hex(const char **pp) {
+    const char *p = *pp;
+    uint32_t v = 0;
+    while (*p) {
+        int d;
+        if (*p >= '0' && *p <= '9')      d = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
+        else break;
+        v = v * 16 + (uint32_t)d;
+        p++;
+    }
+    *pp = p;
+    return v;
+}
+
+static void cmd_palette(const char *arg) {
+    const char *p = arg;
+    skip_sp(&p);
+    if (!*p) { vga_write("usage: palette IDX RRGGBB\n"); return; }
+    int idx = 0;
+    while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; }
+    skip_sp(&p);
+    uint32_t rgb = parse_hex(&p);
+    if (idx < 0 || idx > 255) { vga_write("palette: index must be 0..255\n"); return; }
+    con_set_palette((uint8_t)idx, rgb);
+    vga_write("palette["); print_int(idx);
+    vga_write("] = "); print_hex(rgb); vga_write("\n");
+}
+
+static void cmd_rgb(const char *arg) {
+    const char *p = arg;
+    skip_sp(&p);
+    uint32_t fg = parse_hex(&p);
+    skip_sp(&p);
+    uint32_t bg = *p ? parse_hex(&p) : 0;
+    con_set_style_rgb(fg, bg, con_get_attrs());
+    vga_write("fg="); print_hex(fg);
+    vga_write(" bg="); print_hex(bg); vga_write("\n");
+}
+
+static void cmd_vbe(void) {
+    int r = con_request_mode(CON_MODE_VBE, CON_ORIGIN_CONSOLE);
+    if (r == CON_ENODEV) {
+        vga_write("vbe: no VBE/Bochs-dispi device found (try QEMU -vga std)\n");
+        return;
+    }
+    if (r != 0) { vga_write("vbe: switch failed\n"); return; }
+    con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
+    vga_write("  CatOS VBE 800x600x32 - truecolour TEXT terminal\n");
+    con_set_style_rgb(0xFFD700, 0x000000, 0);
+    vga_write("  中文显示测试：你好，世界！\n");
+    con_set_style_rgb(0x7CFC00, 0x000000, CON_ATTR_UNDERLINE);
+    vga_write("  16.7M 色，每个字符的颜色都是真正的 RGB\n");
+    con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+    vga_write("  type 'text' + confirm Y to leave\n\n");
+}
+
 static void cmd_gfx(void) {
     int r = con_request_mode(CON_MODE_GFX, CON_ORIGIN_CONSOLE);
     if (r != 0) { vga_write("gfx: switch failed\n"); return; }
     /* Styled-text welcome.  No rectangles, no pixels, no demo drawing. */
     con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
-    vga_write("  CatOS graphics mode - 40x25 TEXT cells, 256 colors\n");
+    vga_write("  CatOS graphics - 40x25 TEXT cells, 256 colors\n");
+    con_set_style_rgb(0xFFD700, 0x000000, CON_ATTR_BOLD);
+    vga_write("  中文显示测试：你好，世界！\n");
     con_set_style(CON_YELLOW, CON_BLACK, CON_ATTR_UNDERLINE);
     vga_write("  underline   ");
     con_set_style(CON_LIGHT_CYAN, CON_BLACK, CON_ATTR_ITALIC);
@@ -176,33 +244,36 @@ static void cmd_gfx(void) {
     con_set_style(200, CON_BLACK, 0);
     vga_write("grey-200\n");
     con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
-    vga_write("  type 'text' + confirm Y to leave; 'style' to decorate\n\n");
+    vga_write("  'text'+Y to leave; 'style', 'rgb', 'palette' to decorate\n\n");
 }
 
 static void cmd_text(void) {
     int r = con_request_mode(CON_MODE_TEXT, CON_ORIGIN_CONSOLE);
-    if (r == CON_EACCES)      vga_write("text: denied - staying in graphics mode\n");
+    if (r == CON_EACCES)      vga_write("text: denied - mode unchanged\n");
+    else if (r == CON_ENODEV) vga_write("text: backend unavailable\n");
     else if (r != 0)          vga_write("text: switch failed\n");
     else {
         con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
-        vga_write("text: back to 80x25 text mode\n");
+        vga_write("text: back to 80x25 text mode (CJK shows as '?')\n");
     }
 }
 
 static void cmd_display(void) {
     vga_write("display backend  : "); vga_write(con_backend_name()); vga_write("\n");
-    vga_write("mode             : ");
-    vga_write(con_get_mode() == CON_MODE_GFX
-              ? "graphics (TEXT ONLY, no user drawing API)\n"
-              : "text\n");
+    vga_write("mode             : "); vga_write(con_mode_name(con_get_mode()));
+    vga_write("\n");
     vga_write("logical grid     : "); print_int(con_cols());
     vga_write(" x "); print_int(con_rows()); vga_write("\n");
     vga_write("physical pixels  : "); print_int(con_info(CON_INFO_PIXEL_W));
     vga_write(" x "); print_int(con_info(CON_INFO_PIXEL_H)); vga_write("\n");
-    vga_write("colours          : "); print_int(con_info(CON_INFO_COLORS)); vga_write("\n");
+    vga_write("colours / depth  : "); print_int(con_info(CON_INFO_COLORS));
+    vga_write(" / "); print_int(con_info(CON_INFO_BPP)); vga_write(" bpp\n");
     vga_write("style bitmask    : "); print_hex((uint32_t)con_info(CON_INFO_ATTRS));
-    vga_write("\nuser drawing API : NONE (framebuffer is supervisor-only)\n");
-    vga_write("switch policy    : text->gfx free; gfx->text needs physical Y\n");
+    vga_write("\nCJK support      : ");
+    vga_write(con_info(CON_INFO_CJK) ? "yes" : "no (degrades to '?')");
+    vga_write("\nGB2312 glyphs    : "); print_int(con_info(CON_INFO_HZ_COUNT));
+    vga_write("\nuser drawing API : NONE (framebuffers are supervisor-only)\n");
+    vga_write("switch policy    : ->gfx/vbe free; ->text needs physical Y\n");
 }
 
 static void cmd_about(void) {
@@ -1208,8 +1279,11 @@ void shell_run(void) {
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
+        else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
+        else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);
+        else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }

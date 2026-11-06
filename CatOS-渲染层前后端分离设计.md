@@ -1,9 +1,12 @@
-# CatOS 渲染层「前后端分离」设计说明
+# CatOS 渲染层「前后端分离」设计说明（v2.7 + v2.8）
 
 **分支**: `feat/render-split`（工作副本 `D:/CatOs-render-split`）
 **基线提交**: `35de6c8`（2026-11-06 从共享工作树做的快照，含另一位工作者未提交的 v2.6 VMA/brk 改动与 2026-11-05 图形成果包）
+**实现提交**: `5e55db1`（v2.7 前后端分离）；`v2.8` 见第九节
 **原目录 `D:/CatOs` 保持不动**，仍是 `master` + 原来的未提交改动。
 **状态**: 内核与 ISO 均编译通过；本机无 QEMU，**未做实机启动验证**。
+第一至八节描述 v2.7；第九节是 v2.8 增量（中文 / 真彩 / 自定义调色板），
+有冲突处以第九节为准。
 
 ---
 
@@ -169,3 +172,148 @@ PATH=/c/msys64/mingw32/bin:$PATH PYTHON=python sh build.sh iso
   合并时优先按「追加式」处理（syscall 枚举/ABI 槽位都在尾部）。
 - 建议顺序：先在 QEMU 验证 → 再把分支 cherry-pick / merge 回 `D:/CatOs` 的
   一个新分支 → 与另一位工作者的 v2.6 VMA 改动联调。
+
+---
+
+## 九、v2.8 增量：中文显示 + 真彩文字 + 自定义调色板 + VBE 后端
+
+用户给了两条路：① 中文支持；② "255×255×255 色或其它多色"。结论是
+**① 是真需求，② 的前提是错的**，但按"全做"的要求，② 被拆成两个
+可交付物一并实现。
+
+### 9.1 为什么 "255×255×255 色" 在 Mode 13h 上不成立
+
+- VGA Mode 13h 是 **8bpp 索引色**：帧缓冲每像素 1 字节，同屏最多
+  **256 色**。这是硬件上限，不是软件偷懒。
+- VGA DAC 每通道 **6 bit（0..63）**。v2.7 的 `be_gfx.c` 往 `0x3C9`
+  写 0..255 会被硬件截断成 0..63 —— 连"255 级/通道"都不存在。
+  v2.8 已改成显式 `rgb >> 2`。
+- 真正的 1677 万色必须换 **24/32bpp 线性帧缓冲**，那是一次底层重写。
+- 更根本的：图形模式被定位成"颜色和样式更多的文本模式"，一次只用
+  前景+背景两色，256 种可选色已经过剩。1600 万色对纯文本收益接近零。
+
+因此 ② 落成两件事：
+1. **务实版**：用户态可自定义 256 项 CLUT（Mode 13h 同步写 6-bit DAC）；
+2. **真彩版**：新增 VBE 32bpp 后端，每个字符用字面 RGB 绘制。
+
+### 9.2 中文显示
+
+| 项 | 实现 |
+|---|---|
+| 字库 | GB2312 全 **6763 字**（U+4E00..U+9FA0），16×16 1bpp，32 字节/字 |
+| 生成 | `tools/gen_hz_font.py`，用本机 `simsun.ttc` 16px + Pillow 渲染；产物 `src/font_hz.inc`（750 KB 源码 / 216 KB 数据）**已提交**，构建不依赖 Pillow 或字体文件 |
+| 查找 | 按 Unicode 码点排序 + 二分查找，`render_font_hz(cp)` |
+| 编码 | `con_write()` 内置 UTF-8 解码状态机；每次 write 结束 `con_flush_utf8()` 把残字节降级为 `?`，杜绝多任务串扰 |
+| 排版 | 汉字占 **2×2** 个 8×8 逻辑格；强制从偶数行起，滚动固定 2 行；`reflow()` 把 2×2 块当原子搬运，切模式不会把汉字切一半 |
+| 覆盖 | 文本模式不支持（`cjk=0`，降级 `?`）；图形 / VBE 完整支持 |
+| 输入 | **没有中文输入法**，键盘仍是 US QWERTY 扫描码。只能显示 |
+
+字库由系统字体渲染生成，本地 / 私有使用没问题；**对外分发内核镜像前
+需确认字体 EULA**。
+
+### 9.3 颜色模型升级
+
+前端 cell 从 `(ch, fg8, bg8, attrs)` 升级为：
+
+```c
+typedef struct {
+    uint32_t cp;                  /* Unicode 码点，0 = 空 */
+    uint32_t fg, bg;              /* 0x00RRGGBB */
+    uint8_t  fg_idx, bg_idx;      /* 量化后的 CLUT 索引 */
+    uint8_t  attrs, flags;        /* 样式 / 宽字符标记 */
+} con_cell_t;                     /* 16 字节 */
+```
+
+- 前端持有 256 项 CLUT；`set_style(int,int,int)` / `set_fg(int)` 保持
+  **索引语义**（旧二进制不变），新增 `set_style_rgb` 走字面 RGB。
+- 三后端各自翻译：`be_text` → 最近 16 色；`be_gfx` → CLUT 索引；
+  `be_vbe` → 直接写 32bpp RGB（真彩）。
+- `set_palette(idx, rgb)` 改 CLUT 并同步 6-bit DAC，然后重画整屏。
+
+### 9.4 第三个后端：VBE 800×600×32
+
+`src/be_vbe.c`，100×75 逻辑格，`colors=16777216`，`bpp=32`。
+
+- 模式设置走 **Bochs/QEMU VBE dispi 端口** `0x1CE/0x1CF`，不需要在
+  保护模式里调 BIOS `int 0x10`。
+- LFB 物理地址来自 VGA PCI BAR2（QEMU std VGA `1234:1111`、QXL、
+  Virtio GPU），老 Bochs 回退 `0xE0000000`。
+- 新增 `vbe_lfb_map()`（`paging.c`）：为高端 PDE 建 4 KiB 页表，
+  **supervisor-only**，且拒绝触碰 PDEs 0..15。ring3 页目录只复制前
+  16 个 PDE，所以真彩模式同样看不到帧缓冲 —— "不开放绘图 API"
+  在 32bpp 下依然成立。
+- 硬件探测失败时 `enter()` 返回负值，`con_request_mode(VBE)` 返回
+  `-19 (ENODEV)` 且**不改变当前模式**。
+
+### 9.5 模式策略更新
+
+`con_request_mode()` 仍是唯一入口：
+
+| 方向 | 规则 |
+|---|---|
+| → GFX / → VBE | 所有来源（含 ring3）直接放行 |
+| 任何非 TEXT → TEXT | **一律**要物理 `Y` 确认，origin 参数被忽略；连 shell `text` 也要按 Y |
+| `con_force_text()` | 内核紧急路径专用，无 syscall 可达 |
+
+`switch_backend()` 顺序改为 **先 `old->leave()` 再 `new->enter()`**：
+VBE 的 dispi 关闭必须先于 Mode 13h / 文本模式的寄存器序列，否则会
+被后续 disable 重置。探测失败会调 `old->enter()` 恢复原模式。
+
+### 9.6 CE ABI v2.8（55 槽，追加式）
+
+| 槽位 | 调用 |
+|---|---|
+| 52 | `void set_style_rgb(uint32_t fg, uint32_t bg, int attrs)` |
+| 53 | `int set_palette(int idx, uint32_t rgb)` |
+| 54 | `uint32_t palette(int idx)` |
+
+`display_mode()` 增加 `2 = VBE`；`display_info()` 增加
+`7=bpp / 8=CJK / 9=字库字数`；`display_mode(0)` 从 VBE / GFX 回文本
+同样要 Y。旧 `.ce` 二进制不受影响。
+
+`vsyscall` 页现在有 **55 个 thunk = 1216 字节**，距 `VS_EXIT_STUB`
+的 `0x500`(1280) 只剩 **64 字节余量（约 2 个 syscall）**。
+已在 `build_vsyscall_page()` 加溢出守卫：一旦越界会打印并停机，
+不再像以前那样静默破坏 `ce_main` 的 return 蹦床。再加 syscall 前
+必须重排 vsyscall 页布局。
+
+### 9.7 构建与验证（v2.8）
+
+- `sh build.sh kernel` / `sh build.sh iso` 均通过，0 error。
+- `kernel.bin` 5.78 MiB（v2.7 是 5.1 MiB，+~670 KB：字库 216 KB、
+  双份 100×75 网格 240 KB、VBE 后端与前端代码）。
+- `nm build/kernel.pe`：三后端 `be_text/be_gfx/be_vbe` 均在，
+  **没有任何绘图符号导出**。
+- 二进制抽查：`zhdemo.ce` 含 `你好，世界！` 的 UTF-8 字节；
+  `kernel.bin` 含「中」的 16×16 点阵。
+- 工具链 `/c/msys64/mingw32/bin`；`D:/Tools/MSY32/...` 缺 DLL 不可用。
+- **未验证**：本机没有 `qemu-system-i386`。VBE dispi 寄存器序列、
+  PCI BAR2 取值、LFB 页表映射、中文 2×2 排版、UTF-8 解码、同意门
+  按键交互**全部没在实机跑过**。合并前必须在 QEMU（建议
+  `-vga std -m 256`）里走：
+  `gfx` → `zhdemo` → `vbe`（看是否报 ENODEV）→ `text`（Y / N 各一次）
+  → 再 `gfx` → `text` 多轮往返，并确认无竖条纹、无汉字错位。
+
+### 9.8 已知限制（v2.8 新增）
+
+1. 文本模式中文降级 `?`；VGA text 的字形区只有 256 个 8×16 槽，
+   要做混合宽度中文需动态改字形寄存器，本期不做。
+2. 汉字强制偶数行 + 滚动 2 行，纯 ASCII 输出滚屏时会一次跳 2 行。
+3. `BLINK` 仍只接受不动画。VBE 无硬件光标。
+4. VBE `redraw_all()` 一次约写 1.9 MB，滚动可能明显慢，后续需要脏矩形。
+5. 编辑器按 80 列写 `vga_putc_at`，在 VBE 模式只占左上 80 列；
+   覆盖汉字格会调用 `break_block()` 清掉整个 2×2 块。
+6. `SYS_WRITE` 单次 512 字节上限未动（约 170 汉字）。
+7. 字体衍生点阵的授权见 9.2。
+
+### 9.9 基线同步记录
+
+另一位工作者 18:39 在主目录加了 `kernel_v25/src/stubs.c`（内含
+`__chkstk_ms`）并把它挂进 `build.sh`。v2.7 分支里的 `src/chkstk.c`
+定义了同一符号，合并会重复定义。本次已：
+
+- 复制 `stubs.c` 到隔离副本、删除 `chkstk.c`、
+  把副本 `build.sh` 的 `chkstk.c/chkstk.o` 换成 `stubs.c/stubs.o`；
+- 核对了两份 P0 报告（VMA / 经验教训），未纳入本分支以免合并重复；
+- 确认 `task.c` / `ce.h` / `ce_abi.h` 与基线一致（他没动），
+  所以他的 v2.6 P0 改动和我的 ABI 追加不冲突。

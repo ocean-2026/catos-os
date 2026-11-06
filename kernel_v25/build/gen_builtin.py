@@ -24,6 +24,7 @@ FILES = [
     ("/bin/perms.ce",    os.path.join(ROOT, "extapp", "bin", "perms.ce")),
     ("/bin/hw.ce",       os.path.join(ROOT, "extapp", "bin", "hw.ce")),
     ("/bin/gfxdemo.ce",  os.path.join(ROOT, "extapp", "bin", "gfxdemo.ce")),
+    ("/bin/zhdemo.ce",   os.path.join(ROOT, "extapp", "bin", "zhdemo.ce")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]

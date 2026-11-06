@@ -310,3 +310,64 @@ Shell side:
 New built-in app: /bin/gfxdemo.ce (source extapp/gfxdemo.c) - switches
 to graphics mode from ring3, paints only styled text, then requests a
 return to text mode so the consent gate can be exercised.
+
+
+=====================================================================
+ CatOS API v2.8 - 中文显示 / 真彩文字 / 自定义调色板
+=====================================================================
+
+三个新槽位（52..54，追加式，旧二进制不变），另有两个后端能力升级。
+
+--- 中文显示 -------------------------------------------------------
+   write(const char *s) 现在按 UTF-8 解码。GB2312 覆盖的 6763 个汉字
+   （U+4E00..U+9FA0）用 16x16 点阵绘制，占用 2x2 个逻辑字符格。
+   * 图形模式 / VBE 模式完整支持；文本模式（VGA text 8x16 字符格）
+     不支持，未覆盖的码点降级为 '?'。
+   * 汉字块在滚动、模式切换重排(reflow)时保持原子，不会被切一半。
+   * 每次 write() 结束时前端会 flush 未完成的 UTF-8 残字节（变成 '?'），
+     所以不同任务的字符串不会互相污染解码状态。
+   * 没有中文输入法：键盘是 US QWERTY 扫描码，只能显示不能输入。
+   * SYS_WRITE 单次上限仍是 512 字节（约 170 个汉字）。
+
+   display_mode() 现在接受：
+       -1 查询当前模式
+        0 文本模式（从任何非文本模式切回都要物理 Y 同意）
+        1 图形模式 Mode 13h 320x200x8bpp 40x25
+        2 VBE 800x600x32bpp 100x75（需要 QEMU -vga std / Bochs VBE）
+     返回切换后的模式，或负错误：-3 参数错、-13 用户拒绝、-19 无此硬件。
+
+   display_info(what) 新增：
+        7 色深 bpp (4 / 8 / 32)
+        8 当前后端是否支持汉字 (0/1)
+        9 内置 GB2312 字库字数 (6763)
+
+--- 真彩文字 -------------------------------------------------------
+   void set_style_rgb(uint32_t fg, uint32_t bg, int attrs)
+       fg/bg 是字面 0x00RRGGBB（传 0xRRGGBB 即可）。8bpp 后端会量化到
+       最近的 CLUT 项；VBE 32bpp 后端直接把 RGB 写进帧缓冲，也就是
+       每个字符都能用 1677 万色中的任意一种。
+   void set_fg(int) / set_style(int,int,int) 保持"调色板索引"语义不变。
+
+--- 自定义调色板 ---------------------------------------------------
+   int set_palette(int idx, uint32_t rgb)
+       把 CLUT[idx]（0..255）重定义为 0x00RRGGBB。Mode 13h 会同步写
+       6-bit VGA DAC（每通道 0..63，硬件自动截断 8-bit 值）；VBE 后端
+       把它保存在软件 CLUT 里供索引色使用。返回 0。
+   uint32_t palette(int idx)
+       读回 CLUT[idx]。
+
+   注意：标准 VGA 同屏仍只有 256 色，DAC 每通道 6-bit。VBE 32bpp 才是
+   真彩。"255*255*255 色"在 Mode 13h 上不存在，别指望靠调色板 API 拿到。
+
+--- 仍然没有的东西 -------------------------------------------------
+   * 没有 putpixel / fillrect / rect / framebuffer 指针等绘图调用。
+     0xA0000 和 VBE LFB 都只映射在内核页表（supervisor-only）；ring3
+     页目录只复制 PDEs 0..15，看不见任何帧缓冲。
+   * 图形模式和 VBE 模式依旧只是"颜色和样式更多的文本模式"。
+
+Shell 新增：
+   vbe          切到 800x600x32 真彩文字终端
+   rgb FG [BG]  直接设置 0xRRGGBB 前景/背景
+   palette I C  重定义 CLUT[I]
+   display      现在会打印 bpp、汉字支持和字库字数
+   zhdemo       内置中文 + 真彩演示程序 (/bin/zhdemo.ce)
