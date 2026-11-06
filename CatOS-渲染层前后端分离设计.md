@@ -317,3 +317,54 @@ VBE 的 dispi 关闭必须先于 Mode 13h / 文本模式的寄存器序列，否
 - 核对了两份 P0 报告（VMA / 经验教训），未纳入本分支以免合并重复；
 - 确认 `task.c` / `ce.h` / `ce_abi.h` 与基线一致（他没动），
   所以他的 v2.6 P0 改动和我的 ABI 追加不冲突。
+
+---
+
+## 十、v2.9 增量：清掉 v2.8 的全部遗留限制（除实机测试）
+
+用户要求"你说的那些没做到的你能不能解决（测试免了）"，本节逐条对应
+v2.8 最终回复里列出的限制。仍然**未做 QEMU 实机验证**（用户明确免除）。
+
+### 10.1 逐条清单
+
+| v2.8 的限制 | v2.9 的解法 |
+|---|---|
+| 字库来自 simsun，对外分发有 EULA 风险 | 全部 6763 个点阵换成 **GNU Unifont 16.0.01**（GPLv2+ 字体嵌入例外 / SIL OFL 1.1 双许可），提交 `tools/unifont-gb2312.hex` + `UNIFONT-LICENSE.txt` + `OFL-1.1.txt`；与旧数据逐字比对仅 52 字有渲染差异，「中」完全一致 |
+| 汉字占 2x2、强制偶数行、滚屏一次跳 2 行 | 单元格统一为 **8x16**，汉字 = **2 列 x 1 行**；滚动一律 1 行，reflow 不再有奇偶规则 |
+| VGA 文本模式中文降级 `?` | 文本模式用 VGA 备用字形槽 **0x80..0xFF** 动态装载 8x16 半形，同屏 64 个不同汉字；图形/VBE 无上限 |
+| VBE 滚动整屏重绘 1.9 MB | 后端新增 `scroll()`：帧缓冲前向搬移，一行 51 KB；`redraw_all()` 跳过已被 clear 覆盖的空白格 |
+| BLINK 只接受不动画 | PIT 100Hz tick 驱动 `con_tick()`，0.5 s 翻相，只重绘闪烁格与光标格；文本模式走硬件闪烁位；IRQ 重入用 `render_busy` 栅栏防撕裂 |
+| 图形/VBE 无光标 | 软件下划线光标 `draw_cursor()`，由前端统一擦/画，`con_status_bar` 与闪烁共享同一条路径 |
+| `SYS_WRITE` 512 字节上限 | 256 字节分块循环，上限 64 KiB；逐页 `validate_uaddr`（含按需映射）；`con_write_n(s,n,final)` 让 UTF-8 残字节跨块存活，块间不清码器，任务间仍不串扰 |
+| 编辑器硬编码 80x25 | `ed_view_rows()/ed_max_cols()` 跟随后端行列；内容行用 `con_write_at_utf8`，能显示文件里的中文 |
+| vsyscall 页只剩 64 字节余量 | 重排：thunk 区扩到 0x000..0x7FF（2048 B，余量 **832 B ≈ 34 个 syscall**），API 表 0x800、ls thunk 0xC00、exit 蹦床移到页尾 0xF00；旧 `.ce` 不直接引用这些地址，内核 spawn 时写入，二进制兼容 |
+| 没有中文输入法 | 新增拼音 IME：F2 开关，字母拼 → 1-9 选项 → 空格首选 → `-`/`=` 翻页；候选按 jieba 词频排序（400 音节 / 6763 字，91 KB 提交表 `src/pinyin.inc`）；候选栏画在底行且**原样保存/恢复该行**，不破坏 shell 输出；shell 行编辑与 `edit` 编辑器都接入 |
+
+### 10.2 关键实现位置
+
+- `render.c`：前端全部重写（`paint/sync_cursor/scroll_one/hz_rebuild_map/
+  reflow/con_write_n/con_tick/con_status_bar*`）。
+- `render_be.h`：`con_cell_t` 增加 `gslot`；`render_be_t` 增加
+  `scroll/draw_cursor/sw_blink`，NULL 一律安全降级。
+- `be_text.c`：`font_begin/font_end/font_put` 抽出，`text_load_hz(cp,slot)`
+  带缓存装载半形；`sw_blink=0`（硬件闪）。
+- `be_gfx.c` / `be_vbe.c`：8x16 绘制 + `scroll` + `draw_cursor`，
+  `sw_blink=1`。
+- `ime.c` + `pinyin.inc`：独立模块，`kb_readline` 与 `cmd_edit` 各接一个
+  `ime_feed` 调用点。
+- `task.c`：SYS_WRITE 分块；vsyscall 布局。
+- `intr.c`：IRQ0 里 `con_tick()`（在 `task_tick_wake` 之前）。
+
+### 10.3 新的已知限制
+
+1. 文本模式同屏 **64 个不同汉字**上限（字形槽只有 128 个），超出降级 `?`；
+   图形 / VBE 无限制。
+2. 候选栏占用底行；IME 激活期间该行内容被暂存，关闭时原样恢复。
+3. IME 是单字输入（无词组联想）；多音字按 jieba 频率排序，冷僻音节可能
+   要翻页。
+4. VBE `scroll` 每次仍要搬 51 KB/行（37 行满屏 ≈ 1.84 MB 的 32 位拷贝），
+   比逐格重绘快约一个数量级，但还没有做 dispi Y_OFFSET 硬件平移。
+5. 编辑器缓冲仍是 64 行 x 99 字节（约 33 个汉字/行）。
+6. `SYS_WRITE` 单次上限 64 KiB（防呆，不是流接口）。
+7. QEMU 实机验证依旧未做（本轮明确免除）：文本模式字形槽装载、VBE 滚动、
+   BLINK 相位、IME 候选栏、SYS_WRITE 分块都只是编译级验证。

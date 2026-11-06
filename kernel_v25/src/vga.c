@@ -19,3 +19,9 @@ void vga_putc_at(uint8_t x, uint8_t y, char c) { con_putc_at(x, y, c); }
 void vga_write_at(uint8_t x, uint8_t y, const char *s) {
     con_write_at(x, y, s);
 }
+void vga_write_n(const char *s, int n, int final) {
+    con_write_n(s, n, final);
+}
+void vga_write_at_utf8(uint8_t x, uint8_t y, const char *s) {
+    con_write_at_utf8(x, y, s);
+}

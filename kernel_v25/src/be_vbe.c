@@ -11,6 +11,10 @@
  * physical address comes from the VGA PCI BAR2, with 0xE0000000 as a
  * fallback for old Bochs builds.
  *
+ * v2.9: 100x37 cells of 8x16; scrolling is a 32-bit framebuffer move
+ * (one row = 51,200 dwords) instead of a full 1.9 MB cell repaint;
+ * software cursor + timer-driven BLINK.
+ *
  * RUNNING STATUS: compiled and linked, NOT verified on QEMU (this host
  * has no qemu-system-i386).  If the hardware probe fails, enter()
  * returns a negative value and con_request_mode(VBE) reports -19
@@ -24,7 +28,8 @@
 #define VBE_W 800
 #define VBE_H 600
 #define VBE_COLS 100
-#define VBE_ROWS 75
+#define VBE_ROWS 37                     /* 37 * 16 = 592 px used */
+#define VBE_USED_H (VBE_ROWS * CON_CELL_H)
 #define VBE_FB_SIZE ((uint32_t)(VBE_W * VBE_H * 4))
 
 #define DISPI_INDEX_PORT 0x01CE
@@ -129,6 +134,20 @@ static void vbe_clear(uint32_t bg_rgb) {
     fill_rect(0, 0, VBE_W, VBE_H, bg_rgb & 0x00FFFFFFu);
 }
 
+/* One row is 16 * 800 = 12,800 dwords = 51,200 bytes.  A plain 32-bit
+ * forward copy is ~40x cheaper than repainting 3700 cells with glyph
+ * loops; overlapping regions are safe because dst < src. */
+static void vbe_scroll(int n, uint32_t bg_rgb) {
+    if (!lfb || n <= 0) return;
+    if (n > VBE_ROWS) n = VBE_ROWS;
+    uint32_t c = bg_rgb & 0x00FFFFFFu;
+    uint32_t shift = (uint32_t)n * CON_CELL_H * VBE_W;
+    uint32_t used  = (uint32_t)VBE_USED_H * VBE_W;
+    uint32_t keep  = used - shift;
+    for (uint32_t i = 0; i < keep; i++) lfb[i] = lfb[i + shift];
+    for (uint32_t i = keep; i < (uint32_t)VBE_W * VBE_H; i++) lfb[i] = c;
+}
+
 static uint32_t dim_rgb(uint32_t c) {
     return CON_RGB(CON_RGB_R(c) >> 1, CON_RGB_G(c) >> 1,
                    CON_RGB_B(c) >> 1);
@@ -144,12 +163,12 @@ static void resolve_colors(const con_cell_t *c, uint32_t *f, uint32_t *b) {
 
 static void draw_narrow(int ox, int oy, const con_cell_t *c,
                         uint32_t f, uint32_t b) {
-    fill_rect(ox, oy, 8, 8, b);
+    fill_rect(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 8; j++) {
-            unsigned row = g[j];
-            int shift = (c->attrs & CON_ATTR_ITALIC) && j < 5 ? 1 : 0;
+        for (int j = 0; j < 16; j++) {
+            unsigned row = g[j >> 1];
+            int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
             for (int i = 0; i < 8; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
@@ -160,8 +179,8 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 7, 8, f);
-    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 4, 8, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 14, 8, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 8, 8, f);
 }
 
 static void draw_wide(int ox, int oy, const con_cell_t *c,
@@ -186,21 +205,24 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
 static void vbe_draw_cell(int gx, int gy, const con_cell_t *c) {
     if (!lfb) return;
     if (gx < 0 || gx >= VBE_COLS || gy < 0 || gy >= VBE_ROWS) return;
-    if (c->flags == CELL_F_CONT) return;
+    if (c->flags == CELL_F_WIDE_R) return;
     uint32_t f, b;
     resolve_colors(c, &f, &b);
-    int ox = gx * 8, oy = gy * 8;
-    if (c->flags == CELL_F_WIDE_TL) draw_wide(ox, oy, c, f, b);
-    else                            draw_narrow(ox, oy, c, f, b);
+    int ox = gx * 8, oy = gy * CON_CELL_H;
+    if (c->flags == CELL_F_WIDE_L) draw_wide(ox, oy, c, f, b);
+    else                           draw_narrow(ox, oy, c, f, b);
 }
 
 static void vbe_set_cursor(int x, int y) { (void)x; (void)y; }
+static void vbe_draw_cursor(int x, int y, uint32_t fg_rgb) {
+    hline(x * 8, y * CON_CELL_H + 15, 8, fg_rgb & 0x00FFFFFFu);
+}
 static void vbe_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;      /* truecolour: no CLUT in hardware */
 }
 
 static void vbe_diag(void) {
-    con_write("vbe backend: 800x600x32bpp LFB, 100x75 text cells\n");
+    con_write("vbe backend: 800x600x32bpp LFB, 100x37 8x16 text cells\n");
     con_write("truecolour RGB per cell; LFB supervisor-only, no draw API\n");
     con_write("dispi id=0x");
     char b[5];
@@ -225,8 +247,9 @@ render_be_t be_vbe = {
     .cols = VBE_COLS, .rows = VBE_ROWS,
     .pixel_w = VBE_W, .pixel_h = VBE_H,
     .colors = 16777216u, .bpp = 32,
-    .attr_mask  = CON_ATTR_ALL & (uint8_t)~CON_ATTR_BLINK,
+    .attr_mask  = CON_ATTR_ALL,
     .cjk        = 1,
+    .sw_blink   = 1,
     .mode       = CON_MODE_VBE,
     .enter      = vbe_enter,
     .leave      = vbe_leave,
@@ -234,5 +257,7 @@ render_be_t be_vbe = {
     .draw_cell  = vbe_draw_cell,
     .set_cursor = vbe_set_cursor,
     .set_palette= vbe_set_palette,
+    .scroll     = vbe_scroll,
+    .draw_cursor= vbe_draw_cursor,
     .diag       = vbe_diag
 };

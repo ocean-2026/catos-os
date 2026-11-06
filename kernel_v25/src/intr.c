@@ -11,6 +11,7 @@
 #include "cpu.h"
 #include "io.h"
 #include "vga.h"
+#include "render.h"
 #include "keyboard.h"
 #include "task.h"
 
@@ -164,6 +165,7 @@ void isr_irq(int_frame_t *f) {
     switch (irq) {
     case 0:
         timer_ticks++;
+        con_tick();                          /* BLINK phase + software cursor */
         task_tick_wake();                    /* wake sleepers, set need_resched */
         break;
     case 1:

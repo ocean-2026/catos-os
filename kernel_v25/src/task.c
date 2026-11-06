@@ -440,12 +440,22 @@ void console_wake_release(int tid) {
  * thunk emission into it and a `return 0` from ce_main jumped into
  * thunk code that never exits). */
 #define VSYSCALL_BASE   USER_VSYSCALL      /* 0x2080000 */
-#define VS_EXIT_STUB    (VSYSCALL_BASE + 0x500)
-#define VS_LS_THUNK     (VSYSCALL_BASE + 0x600)
+/* v2.9 layout: thunks 0x000..0x7FF (2 KiB, ~85 syscalls), API pointer
+ * table 0x800..0xBFF (256 slots), ls thunk 0xC00, ls scratch 0xD00+,
+ * and the ce_main return trampoline at the very END of the page 0xF00.
+ * Old .ce binaries reference NONE of these addresses directly: the
+ * kernel pushes VS_EXIT_STUB and writes VS_TABLE into the image's api
+ * slot at spawn time.  So moving them is binary-compatible. */
+#define VS_EXIT_STUB    (VSYSCALL_BASE + 0xF00)
+#define VS_LS_THUNK     (VSYSCALL_BASE + 0xC00)
 #define VS_TABLE        (VSYSCALL_BASE + 0x800)
-#define VS_LS_H         (VSYSCALL_BASE + 0xC00)
-#define VS_LS_NAME      (VSYSCALL_BASE + 0xC20)
-#define VS_LS_SIZE      (VSYSCALL_BASE + 0xC40)
+#define VS_LS_H         (VSYSCALL_BASE + 0xD00)
+#define VS_LS_NAME      (VSYSCALL_BASE + 0xD20)
+#define VS_LS_SIZE      (VSYSCALL_BASE + 0xD40)
+
+/* SYS_WRITE streaming limits (v2.9): 256-byte stack chunk, 64 KiB cap. */
+#define SYS_WRITE_CHUNK 256
+#define SYS_WRITE_MAX   65536u
 
 enum {
     SYS_WRITE = 0, SYS_PUTC, SYS_CLS, SYS_READLINE, SYS_TIME_STR,
@@ -469,8 +479,9 @@ enum {
      * slot indices.  NOTE: there is intentionally NO drawing syscall. */
     SYS_DISPLAY_MODE, SYS_DISPLAY_INFO, SYS_SET_STYLE,
     /* v2.8: truecolour text + user-definable palette.  Append-only.
-     * NOTE: 55 thunks occupy ~1216 bytes, just under VS_EXIT_STUB at
-     * 0x500 (1280).  See the overflow guard in build_vsyscall_page(). */
+     * NOTE: 55 thunks occupy ~1216 bytes.  v2.9 gave the thunk area the
+     * whole first 2 KiB (up to VS_TABLE at 0x800), i.e. room for ~85
+     * syscalls, by moving the exit trampoline to the page tail. */
     SYS_SET_STYLE_RGB, SYS_SET_PALETTE, SYS_PALETTE,
     SYS_COUNT
 };
@@ -510,9 +521,10 @@ static void generic_thunk(emit_t *e, uint32_t idx, int nargs) {
 static void build_vsyscall_page(uint8_t *page) {
     emit_t e; e.p = page;
 
-    /* exit trampoline at +0x300: a ce_main() that plain `return`s lands
-     * here (the dummy return address pushed at spawn) */
-    e.p = page + 0x500;
+    /* exit trampoline at +0xF00: a ce_main() that plain `return`s lands
+     * here (the dummy return address pushed at spawn).  Moving it to the
+     * tail frees 0x500..0x7FF for future generic thunks. */
+    e.p = page + 0xF00;
     e8(&e,0xB8); e32(&e,SYS_EXIT);       /* mov eax,SYS_EXIT */
     e8(&e,0x31); e8(&e,0xDB);            /* xor ebx,ebx      */
     e8(&e,0xCD); e8(&e,0x80);
@@ -543,16 +555,16 @@ static void build_vsyscall_page(uint8_t *page) {
         generic_thunk(&e, i, nargs[i]);
     }
     /* Guard the hand-packed page layout: the generic thunks must never
-     * reach the exit stub at +0x500.  Without this check a future syscall
-     * would silently corrupt the trampoline and every `return 0` from a
-     * CE program would jump into thunk code. */
-    if ((uint32_t)(e.p - page) > 0x500u) {
+     * reach the API pointer table at +0x800.  Without this check a future
+     * syscall would silently corrupt the table and every api->fn() call
+     * from a CE program would jump into thunk code. */
+    if ((uint32_t)(e.p - page) > 0x800u) {
         con_write("vsyscall: thunk overflow - system halted\n");
         for (;;) __asm__ volatile("hlt");
     }
 
-    /* ls thunk at +0x400: ls(path, cb, ud) via LS_OPEN + LS_NEXT loop */
-    e.p = page + 0x600;
+    /* ls thunk at +0xC00: ls(path, cb, ud) via LS_OPEN + LS_NEXT loop */
+    e.p = page + 0xC00;
     {
         e8(&e,0x53); e8(&e,0x52);                                 /* push ebx; push edx */
         e8(&e,0x8B); e8(&e,0x5C); e8(&e,0x24); e8(&e,0x0C);       /* mov ebx,[esp+0C] */
@@ -898,40 +910,66 @@ void isr_syscall(int_frame_t *f) {
 
     switch (nr) {
     case SYS_WRITE: {
-        static char b[514];
+        /* v2.9: no 512-byte cap any more.  Read the user string in 256 B
+         * chunks (64 KiB total cap), validate each page as we reach it,
+         * and keep the UTF-8 decoder alive between non-final chunks so a
+         * hanzi split across a chunk boundary still renders correctly. */
+        static char b[257];
         const char *s = (const char *)a1;
+        uint32_t total = 0;
+        int done = 0, err = 0;
         if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
-        int i = 0;
-        while (s[i] && i < 512) { b[i] = s[i]; i++; }
-        b[i] = 0;
-        /* v2.5 redirection: pipe target first, then file target, else vga */
-        if (t->out_pipe >= 0) {
-            pipe_t *pp = pipe_by_handle(t->out_pipe);
-            if (!pp) { ret = (uint32_t)-1; break; }
-            int wrote = 0; int perr = 0;
-            while (wrote < i) {
-                if (!pp->open_r) { perr = -1; break; }
-                int free = PIPE_BUF - 1 - pp->len;
-                if (free <= 0) { task_sleep_ticks(1); continue; }
-                int n = i - wrote; if (n > free) n = free;
-                for (int k = 0; k < n; k++) {
-                    pp->buf[pp->tail] = b[wrote + k];
-                    pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+        while (total < SYS_WRITE_MAX && !done) {
+            int i = 0;
+            while (i < SYS_WRITE_CHUNK) {
+                uint32_t a = (uint32_t)s + total + i;
+                /* Validate on chunk start and on every 4 KiB boundary.
+                 * validate_uaddr() also faults in demand-paged VMAs. */
+                if (i == 0 || (a & 0xFFFu) == 0) {
+                    if (validate_uaddr(t, a, 1) != 0) { err = -3; break; }
                 }
-                pp->len = (uint16_t)(pp->len + n);
-                wrote += n;
+                char c = s[total + i];
+                if (!c) { done = 1; break; }
+                b[i++] = c;
             }
-            ret = perr ? (uint32_t)perr : (uint32_t)i;
-            break;
+            if (err || !i) break;
+            /* v2.5 redirection: pipe target first, then file, else console */
+            if (t->out_pipe >= 0) {
+                pipe_t *pp = pipe_by_handle(t->out_pipe);
+                if (!pp) { err = -1; break; }
+                int wrote = 0;
+                while (wrote < i) {
+                    if (!pp->open_r) { err = -1; break; }
+                    int free = PIPE_BUF - 1 - pp->len;
+                    if (free <= 0) { task_sleep_ticks(1); continue; }
+                    int n = i - wrote; if (n > free) n = free;
+                    for (int k = 0; k < n; k++) {
+                        pp->buf[pp->tail] = b[wrote + k];
+                        pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+                    }
+                    pp->len = (uint16_t)(pp->len + n);
+                    wrote += n;
+                }
+                if (err) break;
+            } else if (t->out_file[0]) {
+                if (fs_perm_check(t->out_file, uid, PERM_WRITE) != 0) {
+                    err = -13; break;
+                }
+                /* first chunk honours truncate/append, later ones append */
+                int mode = (t->out_append || total) ? 1 : 0;
+                int r = fs_write_raw_mode(t->out_file, b,
+                                          (uint32_t)i, mode);
+                if (r != 0) { err = r; break; }
+            } else {
+                vga_write_n(b, i, done);
+            }
+            total += (uint32_t)i;
         }
-        if (t->out_file[0]) {
-            /* write to the redirect file (append or truncate-replace) */
-            if (fs_perm_check(t->out_file, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
-            int r = fs_write_raw_mode(t->out_file, b, (uint32_t)i, t->out_append ? 1 : 0);
-            ret = r == 0 ? (uint32_t)i : (uint32_t)r;
-            break;
-        }
-        vga_write(b); ret = (uint32_t)i; break;
+        /* Hit the cap without a NUL: close any dangling UTF-8 sequence
+         * instead of leaking decoder state into the next task's write. */
+        if (!done) vga_write_n(b, 0, 1);
+        ret = err ? (uint32_t)err : (uint32_t)total;
+        break;
     }
     case SYS_PUTC: vga_putc((char)a1); ret = 0; break;
     case SYS_CLS:  vga_clear(); ret = 0; break;

@@ -44,5 +44,9 @@ void vga_move_cursor(void);
 void vga_set_cursor(uint8_t x, uint8_t y);
 void vga_putc_at(uint8_t x, uint8_t y, char c);
 void vga_write_at(uint8_t x, uint8_t y, const char *s);
+/* v2.9: streaming write (UTF-8 state survives non-final chunks) and a
+ * UTF-8 aware positioned write for editors / candidate bars. */
+void vga_write_n(const char *s, int n, int final);
+void vga_write_at_utf8(uint8_t x, uint8_t y, const char *s);
 
 #endif

@@ -371,3 +371,65 @@ Shell 新增：
    palette I C  重定义 CLUT[I]
    display      现在会打印 bpp、汉字支持和字库字数
    zhdemo       内置中文 + 真彩演示程序 (/bin/zhdemo.ce)
+
+
+=====================================================================
+ CatOS API v2.9 - unified 8x16 cells, text-mode CJK, animation, IME
+=====================================================================
+
+No new CE API slots: everything below is a change in behaviour of the
+existing display calls, so old binaries keep working untouched.
+
+--- One unified cell (8x16) ----------------------------------------
+All three back-ends now use the SAME logical cell: 8 x 16 pixels.
+     VGA text   80 x 25   (was already 8x16)
+     Mode 13h   40 x 12   (was 40 x 25 of 8x8)
+     VBE 32bpp  100 x 37  (was 100 x 75 of 8x8)
+A 16x16 hanzi is therefore TWO COLUMNS x ONE ROW everywhere -- the old
+"even row / scroll two rows" rule is gone and ASCII output scrolls one
+line at a time like any other terminal.  display_info(1/2) reports the
+new grid; display_info(10/11) report the cell size.
+
+--- VGA text mode now displays Chinese -----------------------------
+Text mode loads each hanzi as two 8x16 half-glyphs into the spare VGA
+font slots 0x80..0xFF: up to 64 DISTINCT hanzi on screen at once
+(first-appearance order, rebuilt on every full redraw; overflow
+degrades to '?').  Graphics and VBE modes have no such limit.
+
+--- Animated BLINK + software cursor -------------------------------
+CON_ATTR_BLINK now actually blinks on every back-end (0.5 s half
+period, driven by the 100 Hz PIT tick).  VGA text uses the hardware
+attribute bit; Mode 13h / VBE repaint only the affected cells.
+Graphics and VBE modes draw a software cursor bar; the VGA text
+hardware cursor is unchanged.  display_info(12) = 1.
+
+--- Fast scrolling --------------------------------------------------
+scrolling no longer repaints the whole screen: Mode 13h and VBE move
+the framebuffer (one row = 51 KB on VBE instead of a 1.9 MB redraw)
+and repaint only the exposed strip.  display_info(13) = 1.
+
+--- write() length cap removed --------------------------------------
+The 512-byte cap on write() is gone: up to 64 KiB per call, copied in
+256-byte chunks with per-page user-address validation.  UTF-8 state is
+kept across chunks, so a hanzi split mid-sequence still renders; the
+decoder is flushed only at the end of the call, so tasks still cannot
+corrupt each other's strings.  Pipe and file redirection are unchanged.
+
+--- Pinyin IME (input, not just display) ----------------------------
+F2 toggles a per-character pinyin IME in the shell and in `edit`:
+letters build a syllable, 1-9 pick a candidate from a frequency-sorted
+table of all 6763 GB2312 hanzi (jieba word frequencies), Space picks
+the first, -/= pages, Backspace edits, Esc cancels.  The candidate bar
+is drawn on the bottom console row, which is saved and restored
+verbatim, so it never destroys shell output or editor content.
+
+--- Font licensing --------------------------------------------------
+The GB2312 bitmaps are now derived from GNU Unifont 16.0.01, which is
+dual-licensed GPLv2+ with the GNU Font Embedding Exception and SIL OFL
+1.1.  Embedding them in a kernel image is explicitly permitted, also
+for non-free use.  (v2.8 shipped bitmaps rendered from a proprietary
+Windows font - do NOT merge that variant into a public tree.)
+The committed source subset is tools/unifont-gb2312.hex; regeneration
+is offline (tools/gen_hz_font.py) and the build needs nothing but the
+committed .inc.  The pinyin table is tools/gen_pinyin.py (pypinyin +
+jieba, build-time only, MIT).

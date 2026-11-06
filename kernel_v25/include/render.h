@@ -11,13 +11,15 @@
  *   shell / fs / net / intr / keyboard / CE syscalls
  *        |  con_*()  (or the legacy vga_* facade)
  *        v
- *   [front-end] render.c   logical cell grid, cursor, style, UTF-8,
- *                          256-entry CLUT, mode policy, consent gate
+ *   [front-end] render.c   logical 8x16 cell grid, cursor, style, UTF-8,
+ *                          256-entry CLUT, mode policy, consent gate,
+ *                          software cursor + BLINK timer
  *        |  render_be_t
  *        v
- *   [back-ends] be_text.c   VGA text 03, 80x25, 16 colours
- *               be_gfx.c    Mode 13h, 40x25, 8bpp indexed, 256 colours
- *               be_vbe.c    VBE LFB 800x600x32, 100x75, truecolour
+ *   [back-ends] be_text.c   VGA text 03, 80x25, 16 colours, CJK via
+ *                           dynamic 8x16 font slots
+ *               be_gfx.c    Mode 13h, 40x12, 8bpp indexed, 256 colours
+ *               be_vbe.c    VBE LFB 800x600x32, 100x37, truecolour
  *
  * Every back-end paints TEXT CELLS.  None exports a drawing API.
  */
@@ -63,7 +65,11 @@ enum con_info_sel {
     CON_INFO_PIXEL_H,
     CON_INFO_BPP,
     CON_INFO_CJK,
-    CON_INFO_HZ_COUNT
+    CON_INFO_HZ_COUNT,
+    CON_INFO_CELL_W,        /* 10: logical cell width in pixels (8)   */
+    CON_INFO_CELL_H,        /* 11: logical cell height in pixels (16) */
+    CON_INFO_BLINK,         /* 12: animated blink supported (0/1)     */
+    CON_INFO_SCROLL_FAST    /* 13: backend does framebuffer scrolling  */
 };
 
 #define CON_EINVAL  (-3)
@@ -86,7 +92,12 @@ void        con_clear(void);
 void        con_putc(char c);
 void        con_write(const char *s);
 void        con_write_utf8(const char *s);   /* decode UTF-8, then flush */
+/* Streaming write: `final` = 0 keeps an incomplete UTF-8 sequence alive
+ * across chunks, so a long string can be split at ANY byte boundary. */
+void        con_write_n(const char *s, int n, int final);
 void        con_flush_utf8(void);            /* flush a dangling sequence */
+/* Called from the 100 Hz PIT IRQ: animates BLINK and the software cursor. */
+void        con_tick(void);
 
 /* Colour setters.  The uint8_t forms take CLUT indices (0..255); the
  * _rgb forms take a literal 0x00RRGGBB and work at full depth on VBE. */
@@ -107,6 +118,14 @@ void        con_move_cursor(void);
 void        con_set_cursor(uint8_t x, uint8_t y);
 void        con_putc_at(uint8_t x, uint8_t y, char c);
 void        con_write_at(uint8_t x, uint8_t y, const char *s);
+/* UTF-8 aware positioned write (hanzi consume two columns). */
+void        con_write_at_utf8(uint8_t x, uint8_t y, const char *s);
+
+/* Transient status bar on the bottom row (used by the pinyin IME).
+ * The front-end saves that row's cells and restores them verbatim, so a
+ * candidate list never destroys shell output or editor content. */
+void        con_status_bar(const char *s);
+void        con_status_bar_off(void);
 
 /* ---- display policy / introspection ------------------------------------- */
 int         con_get_mode(void);

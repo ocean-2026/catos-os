@@ -5,6 +5,10 @@
  * It is NOT a drawing surface.  Every framebuffer primitive below is
  * `static`.  The DAC palette is driven by the front-end's 256-entry CLUT,
  * so user programs can redefine any of the 256 colours (6-bit DAC).
+ *
+ * v2.9: 40x12 cells of 8x16 (was 40x25 of 8x8); BLINK is animated by
+ * the front-end's PIT tick; scrolling moves the framebuffer instead of
+ * repainting the whole screen; a software underline cursor is drawn.
  */
 #include "render.h"
 #include "render_be.h"
@@ -13,7 +17,7 @@
 #define GFX_W 320
 #define GFX_H 200
 #define GFX_COLS 40
-#define GFX_ROWS 25
+#define GFX_ROWS 12                     /* 12 * 16 = 192 px used */
 
 static volatile uint8_t *fb = (volatile uint8_t *)0xA0000u;
 
@@ -98,6 +102,19 @@ static void gfx_clear(uint32_t bg_rgb) {
     fill_rect(0, 0, GFX_W, GFX_H, render_quantize(bg_rgb));
 }
 
+/* Scroll by moving the framebuffer: a 40x12 repaint is 480 cells, a
+ * 320x192 byte move is a single forward copy.  No libc memmove here. */
+static void gfx_scroll(int n, uint32_t bg_rgb) {
+    if (n <= 0) return;
+    if (n > GFX_ROWS) n = GFX_ROWS;
+    uint8_t c = render_quantize(bg_rgb);
+    uint32_t shift = (uint32_t)n * CON_CELL_H * GFX_W;
+    uint32_t used  = (uint32_t)GFX_ROWS * CON_CELL_H * GFX_W;
+    uint32_t keep  = used - shift;
+    for (uint32_t i = 0; i < keep; i++) fb[i] = fb[i + shift];
+    for (uint32_t i = keep; i < (uint32_t)GFX_W * GFX_H; i++) fb[i] = c;
+}
+
 static uint8_t dim_index(uint8_t c) {
     if (c < 16) return (uint8_t)(c & (uint8_t)~8);
     return (uint8_t)(16 + (c - 16) / 2);
@@ -111,15 +128,15 @@ static void resolve_colors(const con_cell_t *c, uint8_t *f, uint8_t *b) {
     *f = fi; *b = bi;
 }
 
-/* 8x8 ASCII cell */
+/* ASCII: the 8x8 font is stretched to the unified 8x16 cell. */
 static void draw_narrow(int ox, int oy, const con_cell_t *c,
                         uint8_t f, uint8_t b) {
-    fill_rect(ox, oy, 8, 8, b);
+    fill_rect(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 8; j++) {
-            unsigned row = g[j];
-            int shift = (c->attrs & CON_ATTR_ITALIC) && j < 5 ? 1 : 0;
+        for (int j = 0; j < 16; j++) {
+            unsigned row = g[j >> 1];
+            int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
             for (int i = 0; i < 8; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
@@ -130,11 +147,11 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 7, 8, f);
-    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 4, 8, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 14, 8, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 8, 8, f);
 }
 
-/* 16x16 CJK cell: exactly 2x2 narrow cells, painted as one atomic block */
+/* CJK: 16x16 glyph == 2 columns x 1 row of the 8x16 grid. */
 static void draw_wide(int ox, int oy, const con_cell_t *c,
                       uint8_t f, uint8_t b) {
     const uint8_t *g = render_font_hz(c->cp);
@@ -156,19 +173,21 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
 
 static void gfx_draw_cell(int gx, int gy, const con_cell_t *c) {
     if (gx < 0 || gx >= GFX_COLS || gy < 0 || gy >= GFX_ROWS) return;
-    if (c->flags == CELL_F_CONT) return;
+    if (c->flags == CELL_F_WIDE_R) return;
     uint8_t f, b;
     resolve_colors(c, &f, &b);
-    int ox = gx * 8, oy = gy * 8;
-    /* BLINK is accepted but not animated (needs a timer-driven repaint). */
-    if (c->flags == CELL_F_WIDE_TL) draw_wide(ox, oy, c, f, b);
-    else                            draw_narrow(ox, oy, c, f, b);
+    int ox = gx * 8, oy = gy * CON_CELL_H;
+    if (c->flags == CELL_F_WIDE_L) draw_wide(ox, oy, c, f, b);
+    else                           draw_narrow(ox, oy, c, f, b);
 }
 
 static void gfx_set_cursor(int x, int y) { (void)x; (void)y; }
+static void gfx_draw_cursor(int x, int y, uint32_t fg_rgb) {
+    hline(x * 8, y * CON_CELL_H + 15, 8, render_quantize(fg_rgb));
+}
 
 static void gfx_diag(void) {
-    con_write("gfx backend: Mode 13h 320x200x8bpp, 40x25 text cells\n");
+    con_write("gfx backend: Mode 13h 320x200x8bpp, 40x12 8x16 text cells\n");
     con_write("CLUT 256 entries via 6-bit DAC; no user drawing API\n");
     outb(0x3D4, 0x11); outb(0x3D5, 0x0E);
     outb(0x3CE, 0x06);
@@ -181,12 +200,13 @@ static void gfx_diag(void) {
 }
 
 render_be_t be_gfx = {
-    .name       = "mode13h-40x25-text",
+    .name       = "mode13h-40x12-text",
     .cols = GFX_COLS, .rows = GFX_ROWS,
     .pixel_w = GFX_W, .pixel_h = GFX_H,
     .colors = 256, .bpp = 8,
-    .attr_mask  = CON_ATTR_ALL & (uint8_t)~CON_ATTR_BLINK,
+    .attr_mask  = CON_ATTR_ALL,
     .cjk        = 1,
+    .sw_blink   = 1,
     .mode       = CON_MODE_GFX,
     .enter      = gfx_enter,
     .leave      = gfx_leave,
@@ -194,5 +214,7 @@ render_be_t be_gfx = {
     .draw_cell  = gfx_draw_cell,
     .set_cursor = gfx_set_cursor,
     .set_palette= gfx_set_palette,
+    .scroll     = gfx_scroll,
+    .draw_cursor= gfx_draw_cursor,
     .diag       = gfx_diag
 };

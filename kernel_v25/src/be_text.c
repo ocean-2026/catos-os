@@ -1,16 +1,22 @@
 /*
- * be_text.c -- BACK-END A: VGA text mode 03 (80x25, 16 colours).
+ * be_text.c -- BACK-END A: VGA text mode 03 (80x25 cells of 8x16).
  *
  * Only this file touches 0xB8000 and the text-mode VGA register set.
- * CJK glyphs are NOT supported here: the front-end degrades uncovered
- * codepoints to '?' when this back-end is active (VGA text cells are
- * 8x16 and its font plane holds only 256 8x16 glyphs).
+ *
+ * v2.9: text mode CAN display hanzi.  VGA text cells are already 8x16,
+ * exactly half a 16x16 CJK glyph, so a hanzi is two adjacent cells whose
+ * character indices point at two dynamically loaded 8x16 font slots.
+ * Slots 0x80..0xFF give room for 64 distinct hanzi on screen; the
+ * front-end assigns them (con_cell_t::gslot) before every full redraw.
+ * The glyph data comes from render_font_hz(), so no font file is needed
+ * at runtime.  BLINK here is the real hardware attribute bit (0x80).
  */
 #include "render.h"
 #include "render_be.h"
 #include "io.h"
 
 static volatile uint16_t *vram = (volatile uint16_t *)0xB8000u;
+static volatile uint8_t  *fontwin = (volatile uint8_t *)0xB8000u;
 
 static uint8_t attr_byte(uint32_t fg, uint32_t bg, uint8_t attrs) {
     if (attrs & CON_ATTR_INVERSE) { uint32_t t = fg; fg = bg; bg = t; }
@@ -23,9 +29,52 @@ static uint8_t attr_byte(uint32_t fg, uint32_t bg, uint8_t attrs) {
     uint8_t b4 = render_rgb_to_vga(bg) & 0x07;
     if (attrs & CON_ATTR_BOLD) f4 |= 8;
     uint8_t a = (uint8_t)((b4 << 4) | f4);
-    if (attrs & CON_ATTR_BLINK) a |= 0x80;
+    if (attrs & CON_ATTR_BLINK) a |= 0x80;   /* hardware blink */
     /* ITALIC / UNDERLINE / STRIKE cannot be expressed in VGA text mode. */
     return a;
+}
+
+/* ---- plane-2 font RAM access -------------------------------------------
+ * Chain-4 (Mode 13h) / VBE writes clobber VGA plane 2 where the text
+ * renderer keeps glyphs.  QEMU maps the text-mode window at 0xB8000 only
+ * (GC 0x06 = 0x0E -> memory_map_mode 3); writes to 0xA0000 are silently
+ * discarded.  So we go through the B8000 window with latched writes. */
+static void font_begin(void) {
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
+}
+static void font_end(void) {
+    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);
+    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
+}
+static void font_put(int idx, int row, unsigned char byte) {
+    outb(0x3C4, 0x02); outb(0x3C5, 0x04);   /* map mask -> plane 2 */
+    fontwin[32 * idx + row] = byte;
+}
+
+static void vga_reload_font(void) {
+    font_begin();
+    for (int c = 0; c < 256; c++) {
+        const unsigned char *g = render_font_glyph((unsigned char)c);
+        for (int r = 0; r < 16; r++) font_put(c, r, g[r >> 1]);
+    }
+    font_end();
+}
+
+/* Cached so a full redraw does not rewrite the same glyphs 3700 times. */
+static uint32_t loaded_cp[CON_TEXT_HZ_SLOTS];
+
+static void text_load_hz(uint32_t cp, uint8_t slot) {
+    if (slot >= CON_TEXT_HZ_SLOTS || loaded_cp[slot] == cp) return;
+    const uint8_t *g = render_font_hz(cp);
+    int left = 0x80 + 2 * (int)slot;
+    font_begin();
+    for (int r = 0; r < 16; r++) {
+        font_put(left,     r, g ? g[2 * r]     : 0);
+        font_put(left + 1, r, g ? g[2 * r + 1] : 0);
+    }
+    font_end();
+    loaded_cp[slot] = cp;
 }
 
 static void text_clear(uint32_t bg_rgb) {
@@ -36,10 +85,29 @@ static void text_clear(uint32_t bg_rgb) {
 
 static void text_draw_cell(int gx, int gy, const con_cell_t *c) {
     if (gx < 0 || gx >= 80 || gy < 0 || gy >= 25) return;
-    if (c->flags == CELL_F_CONT) return;
+    if (c->flags == CELL_F_WIDE_R) return;
     uint8_t a = attr_byte(c->fg, c->bg, c->attrs);
-    unsigned char ch = (c->cp && c->cp <= 0xFF) ? (unsigned char)c->cp : ' ';
-    vram[gy * 80 + gx] = (uint16_t)ch | ((uint16_t)a << 8);
+    uint16_t word;
+    if (c->flags == CELL_F_WIDE_L) {
+        uint8_t s = c->gslot;
+        if (s >= CON_TEXT_HZ_SLOTS) {         /* no slot -> fallback */
+            word = (uint16_t)'?' | ((uint16_t)a << 8);
+            vram[gy * 80 + gx] = word;
+            if (gx + 1 < 80) vram[gy * 80 + gx + 1] = word;
+            return;
+        }
+        text_load_hz(c->cp, s);
+        vram[gy * 80 + gx] =
+            (uint16_t)(0x80 + 2 * (int)s) | ((uint16_t)a << 8);
+        if (gx + 1 < 80)
+            vram[gy * 80 + gx + 1] =
+                (uint16_t)(0x81 + 2 * (int)s) | ((uint16_t)a << 8);
+        return;
+    }
+    unsigned char ch = (c->cp && c->cp <= 0x7F) ? (unsigned char)c->cp :
+                       (c->cp <= 0xFF ? '?' : ' ');
+    word = (uint16_t)ch | ((uint16_t)a << 8);
+    vram[gy * 80 + gx] = word;
 }
 
 static void text_set_cursor(int x, int y) {
@@ -48,27 +116,6 @@ static void text_set_cursor(int x, int y) {
     uint16_t pos = (uint16_t)(y * 80 + x);
     outb(0x3D4, 14); outb(0x3D5, (uint8_t)(pos >> 8));
     outb(0x3D4, 15); outb(0x3D5, (uint8_t)(pos & 0xFF));
-}
-
-/* ---- text mode 03 register sequence + font re-seed ---------------------
- * Chain-4 (Mode 13h) / VBE writes clobber VGA plane 2 where the text
- * renderer keeps glyphs.  QEMU maps the text-mode window at 0xB8000 only
- * (GC 0x06 = 0x0E -> memory_map_mode 3); writes to 0xA0000 are silently
- * discarded.  So we go through the B8000 window with latched writes. */
-static void vga_reload_font(void) {
-    volatile uint8_t *p = (volatile uint8_t *)0xB8000u;
-    outb(0x3CE, 0x05); outb(0x3CF, 0x00);
-    outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
-    for (int c = 0; c < 256; c++) {
-        const unsigned char *g = render_font_glyph((unsigned char)c);
-        for (int r = 0; r < 16; r++) {
-            unsigned char row = g[r >> 1];
-            outb(0x3C4, 0x02); outb(0x3C5, 0x04);
-            p[32 * c + r] = row;
-        }
-    }
-    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);
-    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
 }
 
 static int text_enter(void) {
@@ -137,6 +184,7 @@ static int text_enter(void) {
     outb(0x3C0, 0x20); outb(0x3C0, 0x00);
     (void)inb(0x3DA);
     vga_reload_font();
+    for (int i = 0; i < CON_TEXT_HZ_SLOTS; i++) loaded_cp[i] = 0;
     return 0;
 }
 
@@ -184,10 +232,9 @@ static void text_diag(void) {
     con_set_cursor(0, 3);
     con_write("glyphA: ");
     outb(0x3CE, 0x05); outb(0x3CF, 0x00);
-    volatile uint8_t *pp = (volatile uint8_t *)0xB8000u;
     for (int i = 0; i < 8; i++) {
         outb(0x3CE, 0x04); outb(0x3CF, 0x02);
-        unsigned v = pp[65 * 32 + i];
+        unsigned v = fontwin[65 * 32 + i];
         buf[0] = "0123456789ABCDEF"[v >> 4];
         buf[1] = "0123456789ABCDEF"[v & 15];
         buf[2] = 0;
@@ -204,7 +251,8 @@ render_be_t be_text = {
     .colors = 16, .bpp = 4,
     .attr_mask  = CON_ATTR_BOLD | CON_ATTR_DIM | CON_ATTR_BLINK |
                   CON_ATTR_INVERSE | CON_ATTR_HIDDEN,
-    .cjk        = 0,
+    .cjk        = 1,
+    .sw_blink   = 0,               /* hardware attribute bit */
     .mode       = CON_MODE_TEXT,
     .enter      = text_enter,
     .leave      = text_leave,
@@ -212,5 +260,7 @@ render_be_t be_text = {
     .draw_cell  = text_draw_cell,
     .set_cursor = text_set_cursor,
     .set_palette= text_set_palette,
+    .scroll     = 0,               /* full redraw rebuilds font slots */
+    .draw_cursor= 0,               /* hardware cursor */
     .diag       = text_diag
 };

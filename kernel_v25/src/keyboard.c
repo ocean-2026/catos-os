@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "io.h"
 #include "vga.h"
+#include "ime.h"
 #include "task.h"
 
 /* US QWERTY scancode set 1 (make codes, unshifted / shifted) */
@@ -213,6 +214,22 @@ int kb_readline(char *buf, int len) {
     while (1) {
         int k = kb_getkey();
 
+        /* v2.9 pinyin IME: F2 toggles; letters/digits may be intercepted.
+         * A committed candidate is a 3-byte UTF-8 hanzi. */
+        {
+            char han[5];
+            int r = ime_feed(k, han);
+            if (r == IME_CONSUME) continue;
+            if (r == IME_COMMIT) {
+                for (int i = 0; han[i]; i++) {
+                    if (line_pos >= KB_BUF - 1 || line_pos >= len - 1) break;
+                    line[line_pos++] = han[i];
+                }
+                vga_write(han);
+                continue;
+            }
+        }
+
         if (k == '\n') {                        /* Enter */
             int n = line_pos;
             if (n >= len) n = len - 1;
@@ -223,17 +240,16 @@ int kb_readline(char *buf, int len) {
             line[0] = 0;
             return 1;
         }
-        if (k == '\b') {                        /* Backspace */
+        if (k == '\b' || k == KB_DEL) {         /* erase one character */
             if (line_pos > 0) {
-                line_pos--;
+                /* UTF-8 aware: drop the whole sequence, erase once --
+                 * a hanzi occupies two cells and one '\b' clears both. */
+                int nb = 1;
+                while (nb < 4 && line_pos - nb > 0 &&
+                       ((unsigned char)line[line_pos - nb] & 0xC0) == 0x80)
+                    nb++;
+                line_pos -= nb;
                 vga_putc('\b');
-            }
-            continue;
-        }
-        if (k == KB_DEL) {                      /* Delete: same as backspace here */
-            if (line_pos > 0) {
-                line_pos--;
-                vga_putc(' '); vga_putc('\b');
             }
             continue;
         }
