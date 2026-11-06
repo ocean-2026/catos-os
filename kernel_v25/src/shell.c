@@ -1,5 +1,6 @@
 #include "shell.h"
 #include "vga.h"
+#include "render.h"      /* display front-end: mode policy + text styles */
 #include "keyboard.h"
 #include "rtc.h"
 #include "io.h"
@@ -73,7 +74,13 @@ static void cmd_help(void) {
         "  uname        print OS name\n"
         "  date         show RTC date/time\n"
         "  mem          show RAM size (multiboot)\n"
-        "  color NUM    set foreground color (0-15)\n"
+        "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
+        "  -- display (front-end / back-ends) --\n"
+        "  gfx          switch to graphics mode (styled text, 256 colors)\n"
+        "  text         switch back - needs a physical Y confirmation\n"
+        "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
+        "  display      show backend, grid, colors, supported styles\n"
+        "  vdiag        raw VGA register / glyph diagnostic\n"
         "  reboot       warm reboot the machine\n"
         "  hang         halt the CPU (QEMU: close window)\n"
         "  -- processes (ring3 tasks, preemptive) --\n"
@@ -102,6 +109,102 @@ static void cmd_help(void) {
     );
 }
 
+/* ---------- display front-end commands ---------------------------------
+ * These commands only talk to render.h.  They never touch a VGA register
+ * or a framebuffer, and there is deliberately no pixel-drawing command:
+ * graphics mode is a TEXT mode with more colours and styles. */
+static int style_name_eq(const char *p, int n, const char *name) {
+    int i = 0;
+    while (i < n && name[i] && p[i] == name[i]) i++;
+    return i == n && name[i] == 0;
+}
+
+static void cmd_style(const char *arg) {
+    if (!*arg) {
+        vga_write("usage: style SPEC   SPEC = decimal mask, 'off', or names\n"
+                  "       bold dim italic underline inverse strike hidden\n"
+                  "       joined with '+' e.g. style bold+underline\n");
+        return;
+    }
+    uint8_t a = 0;
+    const char *p = arg;
+    if (*p >= '0' && *p <= '9') {
+        while (*p >= '0' && *p <= '9') { a = (uint8_t)(a * 10 + (*p - '0')); p++; }
+    } else {
+        while (*p) {
+            if (*p == '+' || *p == ' ') { p++; continue; }
+            const char *s = p;
+            while (*p && *p != '+' && *p != ' ') p++;
+            int n = (int)(p - s);
+            if      (style_name_eq(s, n, "off"))      a = 0;
+            else if (style_name_eq(s, n, "none"))     a = 0;
+            else if (style_name_eq(s, n, "bold"))     a |= CON_ATTR_BOLD;
+            else if (style_name_eq(s, n, "dim"))      a |= CON_ATTR_DIM;
+            else if (style_name_eq(s, n, "italic"))   a |= CON_ATTR_ITALIC;
+            else if (style_name_eq(s, n, "underline"))a |= CON_ATTR_UNDERLINE;
+            else if (style_name_eq(s, n, "inverse"))  a |= CON_ATTR_INVERSE;
+            else if (style_name_eq(s, n, "strike"))   a |= CON_ATTR_STRIKE;
+            else if (style_name_eq(s, n, "hidden"))   a |= CON_ATTR_HIDDEN;
+            else {
+                vga_write("style: unknown token (see 'help')\n");
+                return;
+            }
+        }
+    }
+    con_set_attrs(a);
+    vga_write("style mask = 0x");
+    print_hex((uint32_t)a);
+    vga_write("\n");
+}
+
+static void cmd_gfx(void) {
+    int r = con_request_mode(CON_MODE_GFX, CON_ORIGIN_CONSOLE);
+    if (r != 0) { vga_write("gfx: switch failed\n"); return; }
+    /* Styled-text welcome.  No rectangles, no pixels, no demo drawing. */
+    con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
+    vga_write("  CatOS graphics mode - 40x25 TEXT cells, 256 colors\n");
+    con_set_style(CON_YELLOW, CON_BLACK, CON_ATTR_UNDERLINE);
+    vga_write("  underline   ");
+    con_set_style(CON_LIGHT_CYAN, CON_BLACK, CON_ATTR_ITALIC);
+    vga_write("italic   ");
+    con_set_style(CON_LIGHT_GREEN, CON_BLACK, CON_ATTR_BOLD);
+    vga_write("bold\n");
+    con_set_style(CON_WHITE, CON_RED, CON_ATTR_INVERSE);
+    vga_write("  inverse  ");
+    con_set_style(CON_WHITE, CON_BLACK, CON_ATTR_STRIKE);
+    vga_write("strike  ");
+    con_set_style(200, CON_BLACK, 0);
+    vga_write("grey-200\n");
+    con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+    vga_write("  type 'text' + confirm Y to leave; 'style' to decorate\n\n");
+}
+
+static void cmd_text(void) {
+    int r = con_request_mode(CON_MODE_TEXT, CON_ORIGIN_CONSOLE);
+    if (r == CON_EACCES)      vga_write("text: denied - staying in graphics mode\n");
+    else if (r != 0)          vga_write("text: switch failed\n");
+    else {
+        con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+        vga_write("text: back to 80x25 text mode\n");
+    }
+}
+
+static void cmd_display(void) {
+    vga_write("display backend  : "); vga_write(con_backend_name()); vga_write("\n");
+    vga_write("mode             : ");
+    vga_write(con_get_mode() == CON_MODE_GFX
+              ? "graphics (TEXT ONLY, no user drawing API)\n"
+              : "text\n");
+    vga_write("logical grid     : "); print_int(con_cols());
+    vga_write(" x "); print_int(con_rows()); vga_write("\n");
+    vga_write("physical pixels  : "); print_int(con_info(CON_INFO_PIXEL_W));
+    vga_write(" x "); print_int(con_info(CON_INFO_PIXEL_H)); vga_write("\n");
+    vga_write("colours          : "); print_int(con_info(CON_INFO_COLORS)); vga_write("\n");
+    vga_write("style bitmask    : "); print_hex((uint32_t)con_info(CON_INFO_ATTRS));
+    vga_write("\nuser drawing API : NONE (framebuffer is supervisor-only)\n");
+    vga_write("switch policy    : text->gfx free; gfx->text needs physical Y\n");
+}
+
 static void cmd_about(void) {
     vga_set_fg(VGA_LIGHT_CYAN);
     vga_write(
@@ -118,7 +221,7 @@ static void cmd_about(void) {
     vga_write("  Bootloader   : GRUB 2 (ISO9660 / El Torito)\n");
     vga_write("  Kernel       : interrupts + paging + tasks\n");
     vga_write("                 ring3 CE apps via int 0x80, uid perms\n");
-    vga_write("  Display      : VGA text mode 80x25\n");
+    vga_write("  Display      : front-end + text/gfx back-ends ('display')\n");
     vga_write("  Input        : PS/2 keyboard (IRQ-driven)\n");
     vga_write("  Filesystem   : FAT32 on IDE (persistent)\n");
     vga_write("  Runs on      : QEMU / VMware / Bochs / real PC\n");
@@ -1104,6 +1207,11 @@ void shell_run(void) {
 
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "clear"))      vga_clear();
+        else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
+        else if (!strcmp_(cmd, "text"))       cmd_text();
+        else if (!strcmp_(cmd, "style"))      cmd_style(arg);
+        else if (!strcmp_(cmd, "display"))    cmd_display();
+        else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
@@ -1165,12 +1273,12 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "color")) {
             if (!*arg) {
-                vga_write("usage: color 0..15  (note: 0 is black on black)\n");
+                vga_write("usage: color 0..255  (text mode maps to 16 colors)\n");
             } else {
                 int c = 0;
                 while (*arg >= '0' && *arg <= '9') { c = c * 10 + (*arg - '0'); arg++; }
-                if (c >= 0 && c <= 15) vga_set_fg(c);
-                else vga_write("usage: color 0..15\n");
+                if (c >= 0 && c <= 255) con_set_fg((uint8_t)c);
+                else vga_write("usage: color 0..255\n");
             }
         }
         else {

@@ -23,6 +23,7 @@ FILES = [
     ("/bin/crash.ce",    os.path.join(ROOT, "extapp", "bin", "crash.ce")),
     ("/bin/perms.ce",    os.path.join(ROOT, "extapp", "bin", "perms.ce")),
     ("/bin/hw.ce",       os.path.join(ROOT, "extapp", "bin", "hw.ce")),
+    ("/bin/gfxdemo.ce",  os.path.join(ROOT, "extapp", "bin", "gfxdemo.ce")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]
@@ -77,7 +78,7 @@ def main():
             n = len(fh.read())
         lines.append('    {"%s", %s, %d},' % (path, ident, n))
     lines.append("};")
-    with open(OUT, "w") as fh:
+    with open(OUT, "w", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
     total = sum(os.path.getsize(s) for _, s in selected)
     print("OK -> src/builtin_apps.inc (%d files, %d bytes)" % (len(selected), total))

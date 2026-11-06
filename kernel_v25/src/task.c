@@ -14,6 +14,7 @@
 #include "task.h"
 #include "io.h"
 #include "vga.h"
+#include "render.h"      /* v2.7 display front-end (mode policy + styles) */
 #include "keyboard.h"
 #include "fs.h"
 #include "fat.h"
@@ -464,6 +465,9 @@ enum {
     SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ, SYS_PIPE_CLOSE,
     SYS_SPAWN, SYS_WAIT,
     SYS_BRK,
+    /* v2.7: display front-end.  Append-only: old binaries keep their
+     * slot indices.  NOTE: there is intentionally NO drawing syscall. */
+    SYS_DISPLAY_MODE, SYS_DISPLAY_INFO, SYS_SET_STYLE,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -525,6 +529,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*42*/0, /*43*/3, /*44*/3, /*45*/1,     /* pipe create/write/read/close */
         /*46*/3, /*47*/1,                       /* spawn / wait */
         /*48*/1,                               /* brk */
+        /*49*/1, /*50*/1, /*51*/3,             /* display mode/info/style */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -991,7 +996,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_EXIT:  task_exit_current((int)a1);
     case SYS_PRINT_INT: wdec((int)a1); ret = 0; break;
     case SYS_PRINT_HEX: whex(a1); ret = 0; break;
-    case SYS_SET_FG: { int c = (int)a1; if (c < 0) c = 0; if (c > 15) c = 15; vga_set_fg(c); ret = 0; break; }
+    case SYS_SET_FG: con_set_fg((uint8_t)a1); ret = 0; break;
     case SYS_DELAY: task_sleep_ticks(a1 / 10 + 1); ret = 0; break;
     case SYS_ATOI: {
         const char *s = (const char *)a1;
@@ -1340,6 +1345,24 @@ void isr_syscall(int_frame_t *f) {
         }
         break;
     }
+    /* ---- v2.7 display front-end -------------------------------------
+     * The ONLY user-visible display surface is styled text.  No drawing
+     * syscall exists here and the framebuffer is never mapped into a
+     * ring3 page directory (PDE 0 is supervisor-only). */
+    case SYS_DISPLAY_MODE: {
+        int mode = (int)a1;
+        if (mode == CON_MODE_QUERY) { ret = (uint32_t)con_get_mode(); break; }
+        int r = con_request_mode(mode, CON_ORIGIN_TASK);
+        ret = (r == 0) ? (uint32_t)con_get_mode() : (uint32_t)r;
+        break;
+    }
+    case SYS_DISPLAY_INFO:
+        ret = (uint32_t)con_info((int)a1);
+        break;
+    case SYS_SET_STYLE:
+        con_set_style((uint8_t)a1, (uint8_t)a2, (uint8_t)a3);
+        ret = 0;
+        break;
     default: ret = (uint32_t)-8; break;
     }
 

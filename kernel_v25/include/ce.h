@@ -137,6 +137,13 @@ typedef struct catos_api {
     int    (*wait)(int tid);                  /* wait child exit; exit code */
     /* ---- v2.6: memory management -------------------------------------- */
     void * (*brk)(void *addr);                /* set/get program break (0=query) */
+    /* ---- v2.7: display front-end (append-only) ------------------------
+     * Styled text and mode switching ONLY -- no drawing API is exported
+     * to ring3, in any display mode. */
+    int    (*display_mode)(int mode);         /* -1 query, 0 text, 1 gfx;
+                                                 gfx->text needs human consent */
+    int    (*display_info)(int what);         /* see CON_INFO_* in render.h */
+    void   (*set_style)(int fg, int bg, int attrs);
 } catos_api_t;
 
 /* install the API (called once at boot) */

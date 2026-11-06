@@ -250,3 +250,63 @@ task on the CPU) and per-task memory (page-table walk).
 
 New built-in app: /bin/hw.ce (source extapp/hw.c) - the listing above
 is exactly what it prints from ring3.
+
+
+=====================================================================
+ CatOS API v2.7 - display front-end (mode / info / text style)
+=====================================================================
+
+Rendering is now split into a mode-independent FRONT-END (render.c) and
+pluggable BACK-ENDS (VGA text 80x25 / Mode 13h 40x25).  Ring3 sees only
+styled text.  There is NO drawing API: no putpixel, no fillrect, no
+framebuffer pointer.  0xA0000 is supervisor-only in every user page
+directory, so a program cannot draw even by writing memory directly.
+
+Three new slots (49..51, append-only, old binaries keep working):
+
+   int display_mode(int mode)
+       -1  query: return current mode (0 = text, 1 = graphics)
+        0  request TEXT mode
+        1  request GRAPHICS mode
+       TEXT -> GFX is open to every ring3 program.
+       GFX  -> TEXT ALWAYS asks the human at the console for a physical
+       'Y' keypress.  There is no parameter, token or syscall that can
+       supply consent; a program can only REQUEST, never force.
+       Returns the resulting mode (>=0), or -13 (EACCES) on denial,
+       -3 (EINVAL) for an unknown mode.
+
+   int display_info(int what)
+        0  mode            4  supported style bitmask
+        1  columns         5  physical pixel width
+        2  rows            6  physical pixel height
+        3  colours (16/256)
+       Unknown selector -> -8 (ENOSYS).
+
+   void set_style(int fg, int bg, int attrs)
+       fg / bg are palette indices 0..255.  In text mode values >= 16
+       are mapped onto the nearest of black/dark-grey/light-grey/white.
+       attrs is a bitmask:
+          0x01 BOLD       0x02 DIM        0x04 ITALIC
+          0x08 UNDERLINE  0x10 BLINK*     0x20 INVERSE
+          0x40 STRIKE     0x80 HIDDEN
+       Text mode supports BOLD/DIM/BLINK/INVERSE/HIDDEN; the software
+       graphics back-end supports the rest.  BLINK is accepted but not
+       animated yet (needs a timer-driven repaint).
+       The existing set_fg(int) call now accepts 0..255 (was 0..15).
+
+   Graphics mode is a TEXT mode with more colours and styles, not a
+   drawing surface.  The 40x25 cell grid is a logical terminal; on a
+   mode switch the front-end re-wraps the screen contents, so text is
+   not lost.  No hardware cursor exists in graphics mode.
+
+Shell side:
+   gfx          switch to graphics mode (styled-text welcome)
+   text         switch back - physical Y confirmation required
+   style SPEC   bold+underline+inverse ... / off / decimal mask
+   display      backend, grid, colours, style bits, policy
+   color 0..255 set foreground palette index
+   vdiag        raw VGA register / glyph diagnostic
+
+New built-in app: /bin/gfxdemo.ce (source extapp/gfxdemo.c) - switches
+to graphics mode from ring3, paints only styled text, then requests a
+return to text mode so the consent gate can be exercised.

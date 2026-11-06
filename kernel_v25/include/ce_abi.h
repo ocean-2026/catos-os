@@ -17,8 +17,13 @@
  *   v2.4  slots 37..38   hw_num / hw_str
  *   v2.5  slots 39..47   big files / pipes / processes
  *   v2.6  slot   48     brk (dynamic heap break)
+ *   v2.7  slots 49..51   display mode / display info / text style
  *
- * Total: 49 slots in v2.6 (the v2.5 header had 48).
+ * Total: 52 slots in v2.7 (the v2.6 header had 49).
+ *
+ * v2.7 deliberately exposes NO drawing API: graphics mode is a styled
+ * text mode.  There is no putpixel/fillrect/framebuffer syscall, and
+ * 0xA0000 is supervisor-only in every ring3 page directory.
  *
  * Keep in sync with include/ce.h (the kernel-side mirror).  A v2.4 header
  * has only 40 slots and must NOT be used to build v2.5 programs.
@@ -40,7 +45,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 49 slots, v2.6 */
+/* system-call table: 52 slots, v2.7 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -107,6 +112,20 @@ typedef struct catos_api {
     int    (*wait)(int tid);                        /* 47 child exit code */
     /* ---- v2.6: memory management (append-only; old binaries see NULL) -- */
     void * (*brk)(void *addr);                      /* 48 set/get program break (0=query) */
+    /* ---- v2.7: display front-end ------------------------------------
+     * Mode switching + styled text ONLY.  No pixel/rect/framebuffer call
+     * exists, by design.  Old binaries see NULL for these slots. */
+    int    (*display_mode)(int mode);               /* 49
+         mode: -1 query, 0 text, 1 graphics.
+         TEXT->GFX: allowed.  GFX->TEXT: the kernel asks the human at the
+         console for a physical 'Y'; a program cannot supply consent.
+         returns current mode (>=0) or negative error (-13 = denied). */
+    int    (*display_info)(int what);               /* 50
+         0 mode, 1 cols, 2 rows, 3 colours, 4 style bitmask,
+         5 pixel width, 6 pixel height; unknown -> -8 */
+    void   (*set_style)(int fg, int bg, int attrs);/* 51
+         fg/bg are palette indices 0..255 (text mode maps to 16);
+         attrs is a CON_ATTR_* bitmask (see render.h) */
 } catos_api_t;
 
 extern catos_api_t *__ce_api;

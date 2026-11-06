@@ -1,15 +1,35 @@
 #ifndef VGA_H
 #define VGA_H
 
+/*
+ * vga.h -- LEGACY compatibility facade.  DEPRECATED.
+ *
+ * Kept so that the ~150 existing vga_* call sites keep compiling unchanged
+ * while the actual rendering moves into render.c + the back-ends.  New code
+ * must include render.h and call con_*() directly.
+ *
+ * vga_* no longer means "write to the VGA text buffer" -- it means "write
+ * to the active display front-end", which may be the graphics back-end.
+ */
 #include <stdint.h>
+#include "render.h"
 
-enum vga_color {
-    VGA_BLACK = 0, VGA_BLUE = 1, VGA_GREEN = 2, VGA_CYAN = 3,
-    VGA_RED = 4, VGA_MAGENTA = 5, VGA_BROWN = 6, VGA_LIGHT_GREY = 7,
-    VGA_DARK_GREY = 8, VGA_LIGHT_BLUE = 9, VGA_LIGHT_GREEN = 10,
-    VGA_LIGHT_CYAN = 11, VGA_LIGHT_RED = 12, VGA_LIGHT_MAGENTA = 13,
-    VGA_YELLOW = 14, VGA_WHITE = 15
-};
+#define VGA_BLACK         CON_BLACK
+#define VGA_BLUE          CON_BLUE
+#define VGA_GREEN         CON_GREEN
+#define VGA_CYAN          CON_CYAN
+#define VGA_RED           CON_RED
+#define VGA_MAGENTA       CON_MAGENTA
+#define VGA_BROWN         CON_BROWN
+#define VGA_LIGHT_GREY    CON_LIGHT_GREY
+#define VGA_DARK_GREY     CON_DARK_GREY
+#define VGA_LIGHT_BLUE    CON_LIGHT_BLUE
+#define VGA_LIGHT_GREEN   CON_LIGHT_GREEN
+#define VGA_LIGHT_CYAN    CON_LIGHT_CYAN
+#define VGA_LIGHT_RED     CON_LIGHT_RED
+#define VGA_LIGHT_MAGENTA CON_LIGHT_MAGENTA
+#define VGA_YELLOW        CON_YELLOW
+#define VGA_WHITE         CON_WHITE
 
 void vga_init(void);
 void vga_clear(void);
