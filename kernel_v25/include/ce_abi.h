@@ -15,9 +15,10 @@
  *   v1.x  slots  0..32   console / fs / mem / strings / network
  *   v2.3  slots 33..36   getuid / gettid / kill / yield
  *   v2.4  slots 37..38   hw_num / hw_str
- *   v2.5  slots 39..47   big files / pipes / processes  <-- this file
+ *   v2.5  slots 39..47   big files / pipes / processes
+ *   v2.6  slot   48     brk (dynamic heap break)
  *
- * Total: 48 slots in v2.5 (the v2.4 header had 40).
+ * Total: 49 slots in v2.6 (the v2.5 header had 48).
  *
  * Keep in sync with include/ce.h (the kernel-side mirror).  A v2.4 header
  * has only 40 slots and must NOT be used to build v2.5 programs.
@@ -39,7 +40,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 48 slots, v2.5 */
+/* system-call table: 49 slots, v2.6 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -104,6 +105,8 @@ typedef struct catos_api {
     int    (*pipe_close)(int h);                    /* 45 */
     int    (*spawn)(const char *path, int argc, char **argv); /* 46 tid > 0, -err */
     int    (*wait)(int tid);                        /* 47 child exit code */
+    /* ---- v2.6: memory management (append-only; old binaries see NULL) -- */
+    void * (*brk)(void *addr);                      /* 48 set/get program break (0=query) */
 } catos_api_t;
 
 extern catos_api_t *__ce_api;

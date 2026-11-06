@@ -20,6 +20,7 @@
 #include "net.h"
 #include "ce.h"
 #include "hw.h"
+#include "paging.h"     /* for vma_t */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -111,6 +112,7 @@ void tasks_init(void) {
     tasks[0].parent = 0;
     tasks[0].space.pt = 0;
     tasks[0].space.dir = 0;
+    tasks[0].vm = 0;                           /* ring0: no user VMA list */
     tasks[0].name[0] = 's'; tasks[0].name[1] = 'h'; tasks[0].name[2] = 'e';
     tasks[0].name[3] = 'l'; tasks[0].name[4] = 'l'; tasks[0].name[5] = 0;
     cur_task = &tasks[0];
@@ -131,6 +133,7 @@ void tasks_init(void) {
     idle_task_v.ksp = idle_task_v.kstack_top - 20;
     idle_task_v.space.pt = 0;
     idle_task_v.space.dir = 0;
+    idle_task_v.vm = 0;                           /* ring0: no user VMA list */
     idle_task_v.name[0] = 'i'; idle_task_v.name[1] = 'd'; idle_task_v.name[2] = 'l';
     idle_task_v.name[3] = 'e'; idle_task_v.name[4] = 0;
 
@@ -288,6 +291,14 @@ uint32_t sched_timer_tick(int_frame_t *f) {
 /* ---- fault / exit ------------------------------------------------------- */
 
 static void pipe_task_cleanup(task_t *t);   /* v2.5 (defined later) */
+
+/* ---- vma helpers (declared in vma.c) ---------------------------------- */
+extern vma_t *vma_new(uint32_t start, uint32_t end, uint8_t kind, uint8_t writable);
+extern void   vma_free(vma_t *v);
+extern int    uaddr_in_vma(task_t *t, uint32_t addr);
+extern int    validate_uaddr(task_t *t, uint32_t addr, uint32_t len);
+extern int    copy_to_user(task_t *t, void *dst, const void *src, uint32_t len);
+extern int    copy_from_user(task_t *t, void *dst, const void *src, uint32_t len);
 static void task_cleanup(task_t *t) {
     /* free the user address space (safe: t never runs again).  We may be
      * running on the dying task's kernel stack - only its USER frames are
@@ -296,6 +307,9 @@ static void task_cleanup(task_t *t) {
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
+    /* Free the VMA list nodes (each node is a kzalloc_frame'd block;
+     * the actual pages mapped inside them are freed via task_space_destroy). */
+    while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
     if (console_owner_tid() == t->tid) console_wake_release(t->tid);
 }
@@ -449,6 +463,7 @@ enum {
     SYS_FILE_READ, SYS_FILE_WRITE, SYS_FILE_DELETE,
     SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ, SYS_PIPE_CLOSE,
     SYS_SPAWN, SYS_WAIT,
+    SYS_BRK,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -509,6 +524,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*39*/4, /*40*/4, /*41*/1,             /* file read/write/delete */
         /*42*/0, /*43*/3, /*44*/3, /*45*/1,     /* pipe create/write/read/close */
         /*46*/3, /*47*/1,                       /* spawn / wait */
+        /*48*/1,                               /* brk */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -616,11 +632,11 @@ void fs_perm_seed(void) {
 /* ---- user memory helpers ------------------------------------------------ */
 
 static int u2k_str(char *dst, const char *us, int max) {
-    if ((uint32_t)us < USER_IMAGE_BASE || (uint32_t)us >= USER_ARENA_END) return -1;
+    task_t *t = cur_task;
+    if (validate_uaddr(t, (uint32_t)us, max) != 0) return -1;
     for (int i = 0; i < max - 1; i++) {
         dst[i] = us[i];
         if (!us[i]) return 0;
-        if ((uint32_t)&us[i] + 1 >= USER_ARENA_END) return -1;
     }
     dst[max - 1] = 0;
     return 0;
@@ -644,11 +660,19 @@ static void k2u_copy(task_space_t *s, uint32_t dst, const void *src, uint32_t le
 }
 
 /* ---- per-task heap (SYS_ALLOC / SYS_FREE) -------------------------------- */
-
+/*
+ * v2.6: the heap VMA is created lazily on the first SYS_ALLOC call via
+ * heap_vma_init().  Before that, t->heap_end points past the image/bss
+ * and must not be used without initialization.  The hard cap
+ * USER_HEAP_MAX remains as a safety net; a brk() syscall (P1) will
+ * replace it with a quota-based RLIMIT_AS check.
+ */
 typedef struct heap_hdr { uint32_t size; uint32_t next; } heap_hdr_t;
 
 static int heap_ensure(task_t *t, uint32_t vaddr) {
-    if (vaddr < USER_HEAP_BASE || vaddr >= USER_HEAP_BASE + USER_HEAP_MAX) return -1;
+    /* vaddr must lie inside the task's heap VMA (which covers
+     * USER_HEAP_BASE .. USER_HEAP_BASE+USER_HEAP_MAX). */
+    if (!vma_contains(t->vm, vaddr)) return -1;
     if (task_virt_to_phys(&t->space, vaddr & ~0xFFFu)) return 0;
     uint32_t f = (uint32_t)kzalloc_frame();
     if (!f) return -1;
@@ -659,9 +683,18 @@ static int heap_ensure(task_t *t, uint32_t vaddr) {
  * static table indexed by tid) */
 static uint32_t heap_free_root[MAX_TASKS];
 
+/* called once on the first SYS_ALLOC to carve out the heap VMA. */
+static int heap_vma_init(task_t *t) {
+    if (t->vm) return 0;   /* already initialized */
+    t->vm = vma_new(USER_HEAP_BASE, USER_HEAP_BASE + USER_HEAP_MAX,
+                    VMA_ANON, 1);
+    return t->vm ? 0 : -1;
+}
+
 static void *sys_alloc(task_t *t, uint32_t size) {
     if (size == 0) size = 1;
     size = (size + 7u) & ~7u;
+    if (heap_vma_init(t) != 0) return 0;
     if (heap_ensure(t, t->heap_end + sizeof(heap_hdr_t) + 8) != 0) return 0;
     heap_hdr_t *base = (heap_hdr_t *)t->heap_end;
     if (base->size == 0) {               /* first alloc: claim whole arena */
@@ -692,9 +725,9 @@ static void *sys_alloc(task_t *t, uint32_t size) {
 }
 
 static void sys_free(task_t *t, void *p) {
+    if (!vma_contains(t->vm, (uint32_t)p)) return;
     uint32_t a = (uint32_t)p;
-    if (a < USER_HEAP_BASE + sizeof(heap_hdr_t) ||
-        a >= USER_HEAP_BASE + USER_HEAP_MAX) return;
+    if (a < USER_HEAP_BASE + sizeof(heap_hdr_t)) return;
     heap_hdr_t *h = (heap_hdr_t *)(a - sizeof(heap_hdr_t));
     h->next = heap_free_root[t->tid];
     heap_free_root[t->tid] = (uint32_t)h;
@@ -801,7 +834,7 @@ static int sys_save_uid(const char *upath, const char *udata, uint32_t size, int
     static char buf[FS_DATA_MAX];
     if (size > FS_DATA_MAX) return -7;
     if (u2k_str(p, upath, sizeof(p)) != 0) return -3;
-    if ((uint32_t)udata < USER_IMAGE_BASE || (uint32_t)udata + size > USER_ARENA_END) return -3;
+    if (validate_uaddr(task_current(), (uint32_t)udata, size) != 0) return -3;
     if (fs_perm_check(p, uid, PERM_WRITE) != 0) return -13;
     for (uint32_t i = 0; i < size; i++) buf[i] = udata[i];
     uint32_t c, s;
@@ -849,7 +882,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_WRITE: {
         static char b[514];
         const char *s = (const char *)a1;
-        if ((uint32_t)s < USER_IMAGE_BASE || (uint32_t)s >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
         int i = 0;
         while (s[i] && i < 512) { b[i] = s[i]; i++; }
         b[i] = 0;
@@ -887,7 +920,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_READLINE: {
         static char b[256];
         char *ub = (char *)a1; int max = (int)a2;
-        if ((uint32_t)ub < USER_IMAGE_BASE || (uint32_t)ub >= USER_ARENA_END || max <= 0) { ret = (uint32_t)-3; break; }
+        if (max <= 0) { ret = (uint32_t)-3; break; } if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (max > 255) max = 255;
         if (t->in_pipe >= 0) {
             /* v2.5: read one line from the pipe instead of the keyboard */
@@ -920,7 +953,7 @@ void isr_syscall(int_frame_t *f) {
     }
     case SYS_TIME_STR: {
         char *ub = (char *)a1;
-        if ((uint32_t)ub < USER_IMAGE_BASE || (uint32_t)ub + 20 >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)ub, 20) != 0) { ret = (uint32_t)-3; break; }
         ce_time_str_fill(ub);
         ret = 0; break;
     }
@@ -943,7 +976,7 @@ void isr_syscall(int_frame_t *f) {
         char p[FS_PATH_MAX];
         static char b[4096];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if ((uint32_t)a2 < USER_IMAGE_BASE || (uint32_t)a2 >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 4096) max = 4096;
         if (max <= 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
@@ -962,7 +995,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_DELAY: task_sleep_ticks(a1 / 10 + 1); ret = 0; break;
     case SYS_ATOI: {
         const char *s = (const char *)a1;
-        if ((uint32_t)s < USER_IMAGE_BASE || (uint32_t)s >= USER_ARENA_END) { ret = 0; break; }
+        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = 0; break; }
         int v = 0, neg = 0, i = 0;
         while (s[i] == ' ' || s[i] == '\t') i++;
         if (s[i] == '-') { neg = 1; i++; } else if (s[i] == '+') i++;
@@ -972,14 +1005,13 @@ void isr_syscall(int_frame_t *f) {
     }
     case SYS_STRLEN: {
         const char *s = (const char *)a1;
-        if ((uint32_t)s < USER_IMAGE_BASE || (uint32_t)s >= USER_ARENA_END) { ret = 0; break; }
+        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = 0; break; }
         uint32_t n = 0; while (s[n] && n < 4096) n++;
         ret = n; break;
     }
     case SYS_STRCMP: {
         const char *a = (const char *)a1, *b = (const char *)a2;
-        if ((uint32_t)a < USER_IMAGE_BASE || (uint32_t)b < USER_IMAGE_BASE ||
-            (uint32_t)a >= USER_ARENA_END || (uint32_t)b >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)a, 1) != 0 || validate_uaddr(t, (uint32_t)b, 1) != 0) { ret = (uint32_t)-3; break; }
         uint32_t i = 0;
         while (a[i] && a[i] == b[i] && i < 4096) i++;
         ret = (uint32_t)((unsigned char)a[i] - (unsigned char)b[i]);
@@ -987,8 +1019,7 @@ void isr_syscall(int_frame_t *f) {
     }
     case SYS_STRCPY: {
         char *d = (char *)a1; const char *s = (const char *)a2;
-        if ((uint32_t)d < USER_IMAGE_BASE || (uint32_t)s < USER_IMAGE_BASE ||
-            (uint32_t)d >= USER_ARENA_END || (uint32_t)s >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)d, 1) != 0 || validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
         uint32_t i = 0;
         for (; s[i] && i < 256; i++) d[i] = s[i];
         d[i] = 0;
@@ -1029,7 +1060,7 @@ void isr_syscall(int_frame_t *f) {
         char url[160];
         static char b[8192];
         if (u2k_str(url, (const char *)a1, sizeof(url)) != 0) { ret = (uint32_t)-1; break; }
-        if ((uint32_t)a2 < USER_IMAGE_BASE || (uint32_t)a2 >= USER_ARENA_END) { ret = (uint32_t)-1; break; }
+        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-1; break; }
         int max = (int)a3; if (max > 8192) max = 8192;
         if (max <= 0) { ret = (uint32_t)-1; break; }
         int n = net_http_get(url, b, max);
@@ -1040,7 +1071,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_NET_DNS: {
         char host[128];
         if (u2k_str(host, (const char *)a1, sizeof(host)) != 0) { ret = (uint32_t)-1; break; }
-        if ((uint32_t)a2 < USER_IMAGE_BASE || (uint32_t)a2 + 16 >= USER_ARENA_END) { ret = (uint32_t)-1; break; }
+        if (validate_uaddr(t, (uint32_t)a2, 16) != 0) { ret = (uint32_t)-1; break; }
         uint8_t ip[4];
         if (net_dns_lookup(host, ip) != 0) { ret = (uint32_t)-1; break; }
         char *o = (char *)a2; int oi = 0;
@@ -1059,7 +1090,7 @@ void isr_syscall(int_frame_t *f) {
         char ip[128];
         static char b[1400];
         if (u2k_str(ip, (const char *)a1, sizeof(ip)) != 0) { ret = (uint32_t)-1; break; }
-        if ((uint32_t)a3 < USER_IMAGE_BASE || (uint32_t)a3 >= USER_ARENA_END ||
+        if (validate_uaddr(t, (uint32_t)a3, 1) != 0 ||
             (int)a4 <= 0 || (int)a4 > 1400) { ret = (uint32_t)-1; break; }
         for (int i = 0; i < (int)a4; i++) b[i] = ((const char *)a3)[i];
         ret = (uint32_t)net_udp_send(ip, (uint16_t)a2, (const uint8_t *)b, (uint32_t)a4);
@@ -1070,7 +1101,7 @@ void isr_syscall(int_frame_t *f) {
          * (also fixes the old "udp: no reply" bug - the RX path never
          * polled the card) */
         static char ipb[24]; static char b[2048];
-        if ((uint32_t)a3 < USER_IMAGE_BASE || (uint32_t)a3 >= USER_ARENA_END) { ret = (uint32_t)-1; break; }
+        if (validate_uaddr(t, (uint32_t)a3, 1) != 0) { ret = (uint32_t)-1; break; }
         int max = (int)a4; if (max > 2048) max = 2048; if (max <= 0) { ret = (uint32_t)-1; break; }
         int port = 0;
         uint32_t deadline = timer_ticks + 200;
@@ -1079,12 +1110,12 @@ void isr_syscall(int_frame_t *f) {
             int n = net_udp_recv(ipb, &port, (uint8_t *)b, max);
             if (n > 0) {
                 for (int i = 0; i < n; i++) ((char *)a3)[i] = b[i];
-                if ((uint32_t)a1 >= USER_IMAGE_BASE && (uint32_t)a1 + 24 < USER_ARENA_END) {
+                if (validate_uaddr(t, (uint32_t)a1, 24) == 0) {
                     int i;
                     for (i = 0; i < 23 && ipb[i]; i++) ((char *)a1)[i] = ipb[i];
                     ((char *)a1)[i] = 0;
                 }
-                if ((uint32_t)a2 >= USER_IMAGE_BASE && (uint32_t)a2 + 4 < USER_ARENA_END)
+                if (validate_uaddr(t, (uint32_t)a2, 4) == 0)
                     *(int *)a2 = port;
                 ret = (uint32_t)n;
                 break;
@@ -1102,7 +1133,7 @@ void isr_syscall(int_frame_t *f) {
     }
     case SYS_NET_IP: {
         char *o = (char *)a1;
-        if ((uint32_t)o < USER_IMAGE_BASE || (uint32_t)o + 16 >= USER_ARENA_END) { ret = 0; break; }
+        if (validate_uaddr(t, (uint32_t)o, 16) != 0) { ret = 0; break; }
         int oi = 0;
         for (int i = 0; i < 4; i++) {
             int d = net_our_ip[i]; char tb[4]; int ti = 0;
@@ -1125,7 +1156,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_HW_STR: {
         char *ub = (char *)a2;
         int max = (int)a3;
-        if ((uint32_t)ub < USER_IMAGE_BASE || (uint32_t)ub >= USER_ARENA_END ||
+        if (validate_uaddr(t, (uint32_t)ub, 1) != 0 ||
             max <= 0) { ret = (uint32_t)-1; break; }
         if (max > 4096) max = 4096;
         ret = (uint32_t)hw_str((int)a1, ub, max);
@@ -1149,7 +1180,7 @@ void isr_syscall(int_frame_t *f) {
         char p[FS_PATH_MAX];
         static char fbuf[16384];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if ((uint32_t)a2 < USER_IMAGE_BASE || (uint32_t)a2 >= USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
         if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
@@ -1165,7 +1196,7 @@ void isr_syscall(int_frame_t *f) {
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         if (size < 0 || size > 16384) { ret = (uint32_t)-3; break; }
         if (mode != 0 && mode != 1) { ret = (uint32_t)-3; break; }
-        if (size > 0 && ((uint32_t)a2 < USER_IMAGE_BASE || (uint32_t)a2 + size > USER_ARENA_END)) { ret = (uint32_t)-3; break; }
+        if (size > 0 && validate_uaddr(t, (uint32_t)a2, size) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
         int r = fs_write_raw_mode(p, (const char *)a2, (uint32_t)size, mode);
         ret = r == 0 ? 0 : (uint32_t)r;
@@ -1196,7 +1227,7 @@ void isr_syscall(int_frame_t *f) {
         if (!pp || len < 0 || len > PIPE_BUF) { ret = (uint32_t)-1; break; }
         if (len == 0) { ret = 0; break; }
         const char *ud = (const char *)a2;
-        if ((uint32_t)ud < USER_IMAGE_BASE || (uint32_t)ud + len > USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)ud, len) != 0) { ret = (uint32_t)-3; break; }
         int wrote = 0, perr = 0;
         while (wrote < len) {
             if (!pp->open_r) { perr = -1; break; }       /* reader gone */
@@ -1218,7 +1249,7 @@ void isr_syscall(int_frame_t *f) {
         int max = (int)a3;
         if (!pp || max < 0 || max > PIPE_BUF) { ret = (uint32_t)-1; break; }
         char *ub = (char *)a2;
-        if ((uint32_t)ub < USER_IMAGE_BASE || (uint32_t)ub + max > USER_ARENA_END) { ret = (uint32_t)-3; break; }
+        if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (max == 0) { ret = 0; break; }
         int got = 0;
         for (;;) {
@@ -1258,7 +1289,7 @@ void isr_syscall(int_frame_t *f) {
         for (int i = 0; i < argc; i++) {
             if (argv_u + (i + 1) * 4 > USER_ARENA_END) { bad = 1; break; }
             uint32_t aup = *(uint32_t *)(argv_u + i * 4);
-            if (aup < USER_IMAGE_BASE || aup >= USER_ARENA_END) { bad = 1; break; }
+            if (!uaddr_in_vma(t, aup)) { bad = 1; break; }
             if (u2k_str(kargv_buf[i], (const char *)aup, 64) != 0) { bad = 1; break; }
             kargv[i] = kargv_buf[i];
         }
@@ -1272,6 +1303,41 @@ void isr_syscall(int_frame_t *f) {
         if (!ch || ch->state == T_UNUSED) { ret = (uint32_t)-1; break; }
         task_wait_child(ch);
         ret = (uint32_t)ch->exit_code;
+        break;
+    }
+    case SYS_BRK: {
+        /* brk(new_brk): set the heap break.
+         * arg1 = new brk address (0 = query current).
+         * Returns old brk on success, (uint32_t)-14 EFAULT on failure.
+         * If the new brk is beyond USER_HEAP_BASE+USER_HEAP_MAX,
+         * clamps to the cap (old brk returned unchanged). */
+        {
+            uint32_t old_brk = t->heap_end;
+            uint32_t new_brk = a1;
+            uint32_t limit = USER_HEAP_BASE + USER_HEAP_MAX;
+            if (new_brk == 0) { ret = (uint32_t)old_brk; break; }
+            if (new_brk < USER_HEAP_BASE) { ret = (uint32_t)old_brk; break; }
+            if (new_brk > limit) new_brk = limit;   /* clamp to hard cap */
+            if (new_brk == old_brk) { ret = (uint32_t)old_brk; break; }
+            /* Ensure pages are mapped for the expanded region */
+            if (new_brk > old_brk) {
+                uint32_t p = (old_brk + 0xFFF) & ~0xFFFu;
+                while (p < new_brk) {
+                    if (!task_virt_to_phys(&t->space, p)) {
+                        uint32_t f = (uint32_t)kzalloc_frame();
+                        if (!f) { ret = (uint32_t)-12; break; }   /* ENOMEM */
+                        if (task_map_page(&t->space, p, f, 1) != 0) {
+                            frame_free(f);
+                            ret = (uint32_t)-12; break;
+                        }
+                    }
+                    p += 4096;
+                }
+                if (ret != (uint32_t)old_brk) break;
+            }
+            t->heap_end = new_brk;
+            ret = (uint32_t)old_brk;
+        }
         break;
     }
     default: ret = (uint32_t)-8; break;
@@ -1290,10 +1356,15 @@ void isr_syscall(int_frame_t *f) {
 
 static uint32_t task_pages_of(task_t *t) {
     if (!t->space.pt) return 0;
+    /* Count pages by walking the VMA list: each VMA covers a range of
+     * pages; count the total span.  This is an approximation but cheap.
+     * The old approach scanned the raw PT and was wrong for tasks whose
+     * page table was switched away. */
     uint32_t n = 0;
-    uint32_t *pt = (uint32_t *)t->space.pt;   /* kernel identity alias */
-    for (uint32_t i = 0; i < 1024; i++)
-        if (pt[i] & 1) n++;
+    for (const vma_t *v = t->vm; v; v = v->next) {
+        if (v->kind == VMA_VSYSCALL) continue;  /* syscall page not counted */
+        n += (v->end - v->start) >> 12;
+    }
     return n;
 }
 
@@ -1407,6 +1478,23 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         uint32_t f = (uint32_t)kzalloc_frame();
         if (!f) goto fail_space6;
         task_map_page(&t->space, va, f, 1);
+    }
+
+    /* Build the VMA list for this task (CE layout matches legacy offsets).
+     * Image+bss: read-only (code+data), vsyscall: read-only,
+     * stack: writable (but we map it fully at spawn, so no lazy fault).
+     * Heap VMA is created lazily on first SYS_ALLOC. */
+    {
+        uint32_t span = (img + bss + 0xFFF) & ~0xFFFu;
+        t->vm = vma_new(USER_IMAGE_BASE, USER_IMAGE_BASE + span, VMA_IMAGE, 0);
+        if (!t->vm) goto fail_space6;
+        vma_t *vs = vma_new(USER_VSYSCALL, USER_VSYSCALL + 4096, VMA_VSYSCALL, 0);
+        if (!vs) goto fail_space6;
+        t->vm = vma_insert(t->vm, vs);
+        vma_t *st = vma_new(USER_STACK_TOP - USER_STACK_SZ,
+                            USER_STACK_TOP, VMA_ANON, 1);
+        if (!st) goto fail_space6;
+        t->vm = vma_insert(t->vm, st);
     }
 
     /* argv strings + array near the stack top; entry frame below a dummy
