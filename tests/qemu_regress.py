@@ -146,14 +146,17 @@ def png_size_and_nonblack(path):
         data = f.read()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         return None
-    w = h = 0
+    w = h = bpp = ctype = 0
     idat = b""
     pos = 8
     while pos + 8 <= len(data):
         ln, typ = struct.unpack_from(">I4s", data, pos)
         chunk = data[pos + 8: pos + 8 + ln]
         if typ == b"IHDR":
-            w, h = struct.unpack_from(">II", chunk, 0)
+            w, h, depth, ctype = struct.unpack_from(">IIBB", chunk, 0)
+            if depth != 8 or ctype not in (2, 6):
+                return (w, h, 0.0)      # palette/greyscale: can't judge
+            bpp = 3 if ctype == 2 else 4
         elif typ == b"IDAT":
             idat += chunk
         pos += 12 + ln
@@ -161,12 +164,13 @@ def png_size_and_nonblack(path):
         raw = zlib.decompress(idat)
     except zlib.error:
         return (w, h, 0.0)
-    stride = w * 3 + 1            # assume 24bpp RGB after screendump filter
+    stride = w * bpp + 1            # +1 filter byte per scanline
     bright = 0
     total = 0
+    step = max(3 * 16, 1)
     for row in range(0, len(raw) - 1, max(stride, 1)):
         line = raw[row + 1: row + stride]
-        for px in range(0, len(line) - 2, 3 * 16):   # sample every 16th px
+        for px in range(0, len(line) - (bpp - 1), step):
             v = line[px] + line[px + 1] + line[px + 2]
             total += 1
             if v > 24:
