@@ -92,9 +92,52 @@ def type_text(s, text, wait=0.12):
 
 KEYMAP_RETRY = {"y": "y", "n": "n"}
 
+def ppm_to_png(ppm, png):
+    """HMP screendump emits PPM (P6) regardless of the file extension;
+    convert to a minimal PNG so the existing PNG checks (and human
+    viewers) keep working.  Zero dependencies: hand-built PNG chunks."""
+    with open(ppm, "rb") as f:
+        data = f.read()
+    if data[:2] != b"P6":
+        raise ValueError("screendump did not produce a PPM (got %r)" % data[:2])
+    parts, pos = [], 2
+    while len(parts) < 3:
+        while pos < len(data) and data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b"#":          # comment line
+            while pos < len(data) and data[pos] not in (10, 13):
+                pos += 1
+            continue
+        start = pos
+        while pos < len(data) and not data[pos:pos + 1].isspace():
+            pos += 1
+        parts.append(int(data[start:pos]))
+    pos += 1                                    # single ws after maxval
+    w, h, _ = parts
+    raw = data[pos:pos + w * h * 3]
+    if len(raw) < w * h * 3:
+        raise ValueError("PPM pixel data truncated")
+
+    def chunk(typ, payload):
+        c = struct.pack(">I", len(payload)) + typ + payload
+        return c + struct.pack(">I", zlib.crc32(typ + payload) & 0xffffffff)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)   # 8-bit RGB
+    stride = w * 3
+    scan = b"".join(b"\x00" + raw[y * stride:(y + 1) * stride]
+                    for y in range(h))
+    with open(png, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", ihdr))
+        f.write(chunk(b"IDAT", zlib.compress(scan, 6)))
+        f.write(chunk(b"IEND", b""))
+    os.remove(ppm)
+
 def shot(s, name):
     png = os.path.join(SHOTS, name + ".png")
-    cmd(s, "screendump %s" % png.replace("\\", "/"), 1.2)
+    ppm = os.path.join(SHOTS, name + ".ppm")
+    cmd(s, "screendump %s" % ppm.replace("\\", "/"), 1.2)
+    ppm_to_png(ppm, png)
     return png
 
 def png_size_and_nonblack(path):
@@ -133,7 +176,12 @@ def png_size_and_nonblack(path):
 def main():
     iso = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(ROOT_DIR()), "kernel_v25", "catos.iso")
-    qemu = find_qemu()
+    qemu = None
+    if "--qemu" in sys.argv:
+        i = sys.argv.index("--qemu")
+        if i + 1 < len(sys.argv):
+            qemu = sys.argv[i + 1]
+    qemu = find_qemu(qemu)
     if not qemu:
         print("qemu-system-i386 not found; install QEMU first "
               "(winget install SoftwareFreedomConservancy.QEMU)")
@@ -144,7 +192,7 @@ def main():
 
     s = boot(iso, qemu)
     print("monitor connected")
-    time.sleep(6)                      # boot to shell
+    time.sleep(25)                     # boot to shell (TCG is slow; GRUB alone takes ~10s)
     results = []
 
     def step(name, fn):
