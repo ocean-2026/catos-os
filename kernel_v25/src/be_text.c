@@ -54,11 +54,30 @@ static void font_begin(void) {
      * sequential addressing (0x02 = odd/even splits bytes between
      * planes 0 and 1). */
     outb(0x3C4, 0x04); outb(0x3C5, 0x06);   /* seq: sequential + ext mem */
+    outb(0x3C4, 0x02); outb(0x3C5, 0x04);   /* map mask: PLANE 2 ONLY */
     outb(0x3CE, 0x05); outb(0x3CF, 0x00);   /* gfx mode: no shift        */
-    outb(0x3CE, 0x06); outb(0x3CF, 0x00);   /* gfx misc: A0000 window    */
+    outb(0x3CE, 0x06); outb(0x3CF, 0x04);   /* gfx misc: GRAPHICS MODE
+         * (bit0 MUST be 1) + A0000 64K window.  With bit0=0 the A0000
+         * window is character mode: every access goes to the TEXT
+         * BUFFER via odd/even, plane 2 is unreachable, and the "font"
+         * was being sprayed over screen memory -- boot only looked fine
+         * because GRUB's BIOS font was still in plane 2, and after a
+         * Mode 13h excursion plane 2 held framebuffer garbage which the
+         * scanout rendered as the post-gfx stripes. */
 }
 static void font_end(void) {
-    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);   /* map mask: all planes      */
+    /* Text mode needs planes 0+1 ONLY (0x03).  Leaving the all-planes
+     * mask (0x0F) here was the STRIPE BUG: QEMU routes text-mode writes
+     * (Seq04 odd/even, non-sequential) as mask &= (addr&1)?0x0a:0x05,
+     * so every character byte written to B8000 with mask 0x0F ALSO
+     * landed in plane 2 (0x0F & 0x05 = 0x05 = planes 0+2) and every
+     * attribute byte in plane 3.  Cell j's char overwrites plane2[j] --
+     * font RAM slots 0x00..0x3E (plane2 bytes 0..1999) get smeared with
+     * screen text, e.g. the space glyph (slot 0x20 = plane2[1024..1055])
+     * became 0x20 on every row -> a 1px vertical line at column 2 of
+     * every blank cell: the post-gfx "stripes".  ASCII letters survived
+     * because slot 0x41 starts at plane2[2080], beyond the 2000 cells. */
+    outb(0x3C4, 0x02); outb(0x3C5, 0x03);   /* map mask: planes 0,1      */
     outb(0x3C4, 0x04); outb(0x3C5, 0x02);   /* seq: odd/even + ext mem   */
     outb(0x3CE, 0x05); outb(0x3CF, 0x10);   /* gfx mode back             */
     outb(0x3CE, 0x06); outb(0x3CF, 0x0E);   /* gfx misc back: text map   */
@@ -139,7 +158,12 @@ static void text_dac_reset(void);
 static int text_enter(void) {
     outb(0x3C2, 0x67);
     outb(0x3C4, 0x00); outb(0x3C5, 0x03);
-    outb(0x3C4, 0x01); outb(0x3C5, 0x00);
+    outb(0x3C4, 0x01); outb(0x3C5, 0x01);   /* 8-dot characters (bit0=1).
+         * With 9-dot chars QEMU's vga_draw_glyph9 leaves the 9th column
+         * of every cell UNWRITTEN when dup9=0, so after a graphics
+         * excursion the recycled surface shows stale gfx pixels as a
+         * 1px stripe on every cell.  8-dot cells cover the surface
+         * completely. */
     outb(0x3C4, 0x02); outb(0x3C5, 0x03);
     outb(0x3C4, 0x03); outb(0x3C5, 0x00);
     outb(0x3C4, 0x04); outb(0x3C5, 0x02);
@@ -218,7 +242,9 @@ static int text_enter(void) {
         outb(0x3C4, 0x02); outb(0x3C5, 0x0B);   /* map mask: planes 0,1,3 */
         volatile uint8_t *v = (volatile uint8_t *)0xA0000u;
         for (uint32_t i = 0; i < 0x8000u; i++) v[i] = 0;
-        outb(0x3C4, 0x02); outb(0x3C5, 0x0F);   /* all planes back on    */
+        outb(0x3C4, 0x02); outb(0x3C5, 0x03);   /* text mask: planes 0,1
+             * MUST be restored here too -- 0x0F would mirror every cell
+             * char into plane 2 (font RAM) during the following redraw */
         outb(0x3CE, 0x06); outb(0x3CF, 0x0E);   /* B8000 text window     */
     }
     /* Sequencer reset pulse: forces the VGA (and QEMU's internal surface
@@ -234,6 +260,17 @@ static int text_enter(void) {
     outb(0x3C0, 0x00);                          /* video off (index 0) */
     (void)inb(0x3DA);
     outb(0x3C0, 0x20);                          /* video on, index 0 */
+    /* Cache-buster: QEMU's vga_draw_text keeps a per-cell (char,attr)
+     * cache and SKIPS cells whose content is unchanged since the last
+     * text frame.  Blank cells (0x20,0x07) are identical before and
+     * after a graphics excursion, so their surface pixels keep the
+     * stale graphics-era garbage -- the "stripes".  Pre-fill with
+     * (0x00,0x00) -- black on black, invisible -- so every real cell
+     * written by redraw_all differs from the cache and gets repainted. */
+    {
+        volatile uint16_t *tv = (volatile uint16_t *)0xB8000u;
+        for (int i = 0; i < 80 * 25; i++) tv[i] = 0x0000;
+    }
     return 0;
 }
 
@@ -266,7 +303,7 @@ static void text_dac_reset(void) {
  *   [5..30]  CRTC 0x00..0x19 (26 regs, 0x11 written as read: skip)
  *   [31] AC10 [32] AC11 [33] AC12 [34] AC13 [35] AC14
  *   [36] total length */
-volatile uint8_t vga_reg_dump[40];
+volatile uint8_t vga_reg_dump[128];
 
 static void text_diag(void) {
     char buf[8];
@@ -290,6 +327,31 @@ static void text_diag(void) {
     (void)inb(0x3DA);
     outb(0x3C0, 0x20);                    /* re-enable video, index 0 */
     vga_reg_dump[36] = 37;
+    /* plane-2 font readback with the CORRECT window sequence: sequential
+     * addressing + A0000 graphics map + read map 2.  Dumps glyph 0x00,
+     * 0x20, 0x41 and 0xFF (16 bytes each) so the monitor can verify the
+     * font RAM actually holds our reloaded glyphs. */
+    {
+        volatile const uint8_t *fr;
+        outb(0x3C4, 0x04); outb(0x3C5, 0x06);   /* sequential */
+        outb(0x3C4, 0x02); outb(0x3C5, 0x04);   /* (read: GC04 map 2) */
+        outb(0x3CE, 0x05); outb(0x3CF, 0x00);   /* gfx mode: no shift */
+        outb(0x3CE, 0x06); outb(0x3CF, 0x04);   /* A0000, GRAPHICS on */
+        outb(0x3CE, 0x04); outb(0x3CF, 0x02);   /* read map 2: QEMU uses gr[4]&3 as the plane index */
+        fr = (volatile const uint8_t *)0xA0000u;
+        for (int i = 0; i < 16; i++) vga_reg_dump[40 + i] = fr[i];
+        for (int i = 0; i < 16; i++) vga_reg_dump[56 + i] = fr[0x20 * 32 + i];
+        for (int i = 0; i < 16; i++) vga_reg_dump[72 + i] = fr[0x41 * 32 + i];
+        for (int i = 0; i < 16; i++) vga_reg_dump[88 + i] = fr[0xFF * 32 + i];
+        outb(0x3CE, 0x04); outb(0x3CF, 0x00);
+        outb(0x3CE, 0x05); outb(0x3CF, 0x10);
+        outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
+        outb(0x3C4, 0x04); outb(0x3C5, 0x02);
+        outb(0x3C4, 0x02); outb(0x3C5, 0x03);   /* restore text map mask:
+             * the 0x04 (plane 2 only) set above would make every later
+             * cell write land in FONT RAM and drop the attribute byte */
+    }
+    vga_reg_dump[104] = 0x5A;             /* magic: dump v2 present */
     for (int i = 0; i < 6; i++) {
         unsigned v = 0;
         if (i == 0) { outb(0x3C4, 0x01); v = inb(0x3C5); }

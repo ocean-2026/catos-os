@@ -30,6 +30,7 @@ SHOTS   = os.path.join(HERE, "qemu_shots")
 MONITOR = ("127.0.0.1", 4444)
 
 DEFAULT_QEMU_CANDIDATES = [
+    r"C:\qemu-portable\qemu-system-i386.exe",
     r"C:\Program Files\qemu\qemu-system-i386.exe",
     r"C:\Program Files\QEMU\qemu-system-i386.exe",
     "qemu-system-i386",
@@ -181,7 +182,7 @@ def png_size_and_nonblack(path):
 
 def main():
     iso = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(ROOT_DIR()), "kernel_v25", "catos.iso")
+        ROOT_DIR(), "kernel_v25", "catos.iso")
     qemu = None
     if "--qemu" in sys.argv:
         i = sys.argv.index("--qemu")
