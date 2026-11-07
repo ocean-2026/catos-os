@@ -16,7 +16,6 @@
 #include "io.h"
 
 static volatile uint16_t *vram = (volatile uint16_t *)0xB8000u;
-static volatile uint8_t  *fontwin = (volatile uint8_t *)0xB8000u;
 
 static uint8_t attr_byte(uint32_t fg, uint32_t bg, uint8_t attrs) {
     if (attrs & CON_ATTR_INVERSE) { uint32_t t = fg; fg = bg; bg = t; }
@@ -35,17 +34,34 @@ static uint8_t attr_byte(uint32_t fg, uint32_t bg, uint8_t attrs) {
 }
 
 /* ---- plane-2 font RAM access -------------------------------------------
- * Chain-4 (Mode 13h) / VBE writes clobber VGA plane 2 where the text
- * renderer keeps glyphs.  QEMU maps the text-mode window at 0xB8000 only
- * (GC 0x06 = 0x0E -> memory_map_mode 3); writes to 0xA0000 are silently
- * discarded.  So we go through the B8000 window with latched writes. */
+ * The glyphs live in VGA plane 2.  To touch it the sequencer must switch
+ * to sequential addressing (odd/even splits bytes between planes 0/1) and
+ * the Graphics Misc register must map the CPU window at A0000 -- with the
+ * text-mode value (0x06 = 0x0E, memory_map 3) BOTH 0xA0000 and 0xB8000
+ * alias the text buffer, which is what v2.9 accidentally relied on: the
+ * "font reload" sprayed glyph bytes into the text buffer (boot only
+ * survived because redraw_all() overwrote the first 4 KiB again) and the
+ * real font RAM kept whatever Mode 13h left there. */
+static volatile uint8_t *fontwin = (volatile uint8_t *)0xA0000u;
 static void font_begin(void) {
-    outb(0x3CE, 0x05); outb(0x3CF, 0x00);
-    outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
+    /* Standard "load font in text mode" sequence.  The old code kept
+     * Graphics Misc (0x06) at 0x0E, whose memory-map bits (11) alias the
+     * CPU window to B8000 -- the glyph bytes were written into the TEXT
+     * BUFFER, the font RAM stayed whatever Mode 13h left there, and the
+     * boot path only survived because redraw_all() immediately overwrote
+     * the trashed first 4 KiB of text VRAM.  0x00 = A0000 window,
+     * graphics off, odd/even off.  Seq 0x04 must also switch to
+     * sequential addressing (0x02 = odd/even splits bytes between
+     * planes 0 and 1). */
+    outb(0x3C4, 0x04); outb(0x3C5, 0x06);   /* seq: sequential + ext mem */
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00);   /* gfx mode: no shift        */
+    outb(0x3CE, 0x06); outb(0x3CF, 0x00);   /* gfx misc: A0000 window    */
 }
 static void font_end(void) {
-    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);
-    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
+    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);   /* map mask: all planes      */
+    outb(0x3C4, 0x04); outb(0x3C5, 0x02);   /* seq: odd/even + ext mem   */
+    outb(0x3CE, 0x05); outb(0x3CF, 0x10);   /* gfx mode back             */
+    outb(0x3CE, 0x06); outb(0x3CF, 0x0E);   /* gfx misc back: text map   */
 }
 static void font_put(int idx, int row, unsigned char byte) {
     outb(0x3C4, 0x02); outb(0x3C5, 0x04);   /* map mask -> plane 2 */
