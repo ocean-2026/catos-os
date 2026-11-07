@@ -15,6 +15,8 @@
 *.o
 *.obj
 *.elf
+# but the hand-built ELF test image is a tracked build input (see gen_builtin.py)
+!kernel_v25/extapp/bin/*.elf
 *.pe
 *.map
 kernel_v25/build/*.bin
