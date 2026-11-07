@@ -516,3 +516,49 @@ v2.9.1 的 [MTRR/pan UNTESTED] 标记继续保留。
 3. 扩展区共 4 MiB（单页表上限）；ELF 与 mmap 共享，ELF 最多 2 MiB。
 4. `fat_pread` 与 spawn 共用 static 簇缓冲（ring0 非重入，安全）。
 5. cc.ce 尚无 `void*` 指针运算的全部语义，mmaptest 只能用 gcc 构建。
+
+### 11.7 QEMU 实机测试结果（2026-11-07，QEMU 11.1.0 @ C:/qemu-portable）
+
+QEMU 经由官方安装器 7z 解包为便携版安装成功。`tests/qemu_regress.py`
+端到端跑通：**12 步 12 PASS**（boot/format/help/display/gfx/同意门
+N+Y/ls/mmaptest/hello.elf/vdiag/final-frame），截图在
+`tests/qemu_shots/`。实机验证确认并修复了 **5 个只有真机才暴露的 bug**：
+
+1. **字形重载写错了地方（v2.9 的原始 bug）**：`fontwin` 停在 0xB8000
+   且从不切窗 —— GC 0x06=0x0E 时 0xA0000/B8000 都别名到文本缓冲，
+   "字形装载"实际是把 8KB 字形喷进文本缓冲，字形 RAM 从未被装载。
+   修正为标准序列（Seq 04=06 sequential + GC 06=00 A0000 窗 + 写后恢复）。
+2. **CRTC 写保护吞掉恢复写**：gfx_enter 写 `CRTC11=0x8E`（bit7=保护）
+   后，text_enter 对 0x00-0x07 的恢复写**全部被硬件静默丢弃**，
+   gfx 的垃圾垂直时序（06=0x0B：垂直总数 11 行！）残留 → 往返后花屏。
+   text_enter 现在先 `0x11=0x0E` 解锁再恢复。
+3. **gfx_enter 的 Mode 13h 垂直时序表本身是错的**（BIOS 标准表
+   04=55 05=81 06=BF 07=1F 09=41），已改为标准值 —— 修复后 gfx 模式
+   在 QEMU 里完整渲染：**中文 + 8 种样式全部正确显示**。
+4. **vdiag 一跑屏幕永久黑**：text_diag 读 Attribute Controller 时
+   索引写不带 0x20（Video Enable）位 —— VGA 协议里这会关掉视频输出
+   且不恢复。已修（所有 AC 索引写 OR 0x20，收尾 0x20 恢复）。
+5. **mkelf.py 的 e_entry 用了文件偏移**（0x1000，而段 vaddr=0），
+   加载器入口校验拒绝 → -5。改为 0，并在自检里加了入口范围断言；
+   随后发现手编机器码把 msg 指针编成绝对地址，PIE 滑动后指向页 0
+   被 validate_uaddr 拒绝（exit 走得通、write 静默失败）—— 改为
+   EIP 相对取址（call $+5 / pop）。最终 QEMU 实机输出：
+   `hello from ELF` + `[task 1 'hello' exit(0)]` —— **ELF32 PIE+ASLR
+   加载链路真机全通**。mmaptest 同样真机全绿（mmap/懒映射/munmap/
+   空洞复用/非法拒绝，`MMAPTEST PASS`）。
+
+配套修复：shell `run_from_path` 对带扩展名的命令不再强拼 `.ce`
+（`hello.elf` 之前被拼成 `hello.elf.ce`）；format 确认是整行读取
+（回归脚本补回车）；回归脚本 PNG 解析支持 32bpp screendump。
+
+**已知遗留（纯外观）**：gfx→text 往返后文本屏有对角 RGB 细条纹。
+排查结论：CRTC/Seq/GC/AC/DAC 寄存器经物理内存 dump 证明与干净 boot
+逐字节一致、内容无关（clear 后仍在）、-vga cirrus 与 std 输出相同、
+Seq 复位脉冲/AC 开关/平面清零均无效 —— 判定为 QEMU std-VGA 内部
+surface 状态问题，真机硬件无 surface 缓存，预期不复现；后续可从
+QEMU vga.c 源码级追查。诊断基建保留：`vga_reg_dump[]` 全局数组 +
+monitor `xp` 直读物理内存，可随时对比任意两个时刻的完整 VGA 寄存器组。
+
+摘标结论：v2.9.1 的 `[MTRR/pan UNTESTED]` 中，VBE 模式进入/退出、
+text 同意门、闪烁光标、mmap、ELF 均已实机验证；MTRR WC 与
+HW-pan 滚动本身仍需在 `vbe` 模式下跑 `vdiag` 确认（本轮未跑 VBE 路径）。

@@ -51,13 +51,15 @@ def kill_qemu():
     subprocess.run(["taskkill", "/F", "/IM", "qemu-system-i386.exe"],
                    capture_output=True)
 
-def boot(iso, qemu):
+def boot(iso, qemu, disk=None):
     kill_qemu()
     time.sleep(1)
     cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
            "-cdrom", iso, "-boot", "order=d",
            "-display", "none",
            "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
+    if disk:
+        cmd += ["-drive", "file=%s,format=raw,if=ide" % disk]
     print("boot:", " ".join(cmd))
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):
@@ -194,7 +196,11 @@ def main():
     for old in glob.glob(os.path.join(SHOTS, "*.png")):
         os.remove(old)
 
-    s = boot(iso, qemu)
+    disk = os.path.abspath(os.path.join(SHOTS, "..", "qemu_disk.img"))
+    if not os.path.exists(disk):
+        with open(disk, "wb") as f:
+            f.truncate(64 * 1024 * 1024)      # sparse 64 MiB IDE disk
+    s = boot(iso, qemu, disk)
     print("monitor connected")
     time.sleep(25)                     # boot to shell (TCG is slow; GRUB alone takes ~10s)
     results = []
@@ -228,10 +234,30 @@ def main():
         prev[0] = blob
         return changed, "size=%d" % len(blob)
 
-    step("boot-shell", lambda: snap_and_check("00_boot"))
+    def boot_seed():
+        ok, note = snap_and_check("00_boot")
+        with open(os.path.join(SHOTS, "00_boot.png"), "rb") as f:
+            prev[0] = f.read()          # seed: format is the first diff vs boot
+        return ok, note
+    step("boot-shell", boot_seed)
+
+    # blank disk -> format the FAT32 volume so /bin has the built-ins
+    # (the boot banner warns "No FAT32 volume on IDE drive" otherwise).
+    # The kernel's confirm reads a full LINE (kb_readline), so the 'y'
+    # MUST be followed by Enter -- a bare y would swallow the next
+    # command's characters into the confirmation line.
+    def do_type(cmdline):
+        type_text(s, cmdline)
+        sendkey(s, "ret", 1.2)
     def do(cmdline):
         type_text(s, cmdline)
         sendkey(s, "ret", 1.2)
+    def do_format():
+        do_type("format")
+        sendkey(s, "y", 0.4)
+        sendkey(s, "ret", 8.0)        # fs_format(64 MiB) + builtin install
+        return frame_changed("00b_format")
+    step("format", do_format)
     step("help", lambda: (do("help"), frame_changed("01_help"))[1])
     step("display", lambda: (do("display"), frame_changed("02_display"))[1])
     step("gfx", lambda: (do("gfx"), frame_changed("03_gfx"))[1])
@@ -239,6 +265,7 @@ def main():
                                    frame_changed("04_text_n"))[2])
     step("text-accept-Y", lambda: (do("text"), sendkey(s, "y", 1.0),
                                    frame_changed("05_text_y"))[2])
+    step("ls-bin", lambda: (do("ls /bin"), frame_changed("05b_lsbin"))[1])
     step("mmaptest", lambda: (do("mmaptest"), frame_changed("06_mmaptest"))[1])
     step("hello-elf", lambda: (do("hello.elf"), frame_changed("07_hello_elf"))[1])
     step("vdiag", lambda: (do("vdiag"), frame_changed("08_vdiag"))[1])

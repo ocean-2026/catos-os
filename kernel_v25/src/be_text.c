@@ -134,6 +134,8 @@ static void text_set_cursor(int x, int y) {
     outb(0x3D4, 15); outb(0x3D5, (uint8_t)(pos & 0xFF));
 }
 
+static void text_dac_reset(void);
+
 static int text_enter(void) {
     outb(0x3C2, 0x67);
     outb(0x3C4, 0x00); outb(0x3C5, 0x03);
@@ -141,6 +143,11 @@ static int text_enter(void) {
     outb(0x3C4, 0x02); outb(0x3C5, 0x03);
     outb(0x3C4, 0x03); outb(0x3C5, 0x00);
     outb(0x3C4, 0x04); outb(0x3C5, 0x02);
+    /* CRTC.  MUST unlock first: gfx_enter re-armed the write protect
+     * bit (CRTC11 bit7), and with it set, writes to 0x00..0x07 are
+     * silently dropped -- which is exactly what left gfx's vertical
+     * timing in place after a gfx->text roundtrip (vertical stripes). */
+    outb(0x3D4, 0x11); outb(0x3D5, 0x0E);       /* unlock CRTC 0-7 */
     outb(0x3D4, 0x00); outb(0x3D5, 0x5F);
     outb(0x3D4, 0x01); outb(0x3D5, 0x4F);
     outb(0x3D4, 0x02); outb(0x3D5, 0x50);
@@ -200,7 +207,33 @@ static int text_enter(void) {
     outb(0x3C0, 0x20); outb(0x3C0, 0x00);
     (void)inb(0x3DA);
     vga_reload_font();
+    text_dac_reset();
     for (int i = 0; i < CON_TEXT_HZ_SLOTS; i++) loaded_cp[i] = 0;
+    {   /* Wipe planes 0/1/3: Mode 13h chain4 splatters all four planes,
+         * and stale chain4 bytes there render as diagonal RGB stripes
+         * over the restored text screen (QEMU std-VGA surface cache).
+         * A0000 graphics window (GC06=04), map mask 0x0B -> planes
+         * 0,1,3; plane 2 (font RAM) was just reloaded and survives. */
+        outb(0x3CE, 0x06); outb(0x3CF, 0x04);   /* A0000 window, graphics */
+        outb(0x3C4, 0x02); outb(0x3C5, 0x0B);   /* map mask: planes 0,1,3 */
+        volatile uint8_t *v = (volatile uint8_t *)0xA0000u;
+        for (uint32_t i = 0; i < 0x8000u; i++) v[i] = 0;
+        outb(0x3C4, 0x02); outb(0x3C5, 0x0F);   /* all planes back on    */
+        outb(0x3CE, 0x06); outb(0x3CF, 0x0E);   /* B8000 text window     */
+    }
+    /* Sequencer reset pulse: forces the VGA (and QEMU's internal surface
+     * state) to resynchronise.  Without it QEMU keeps a stale surface
+     * after a Mode 13h excursion and scans out diagonal RGB garbage over
+     * the restored text screen. */
+    outb(0x3C4, 0x00); outb(0x3C5, 0x01);       /* async reset */
+    outb(0x3C4, 0x00); outb(0x3C5, 0x03);       /* running */
+    /* AC video-off/on toggle: the other half of the standard BIOS
+     * mode-set epilogue; QEMU needs the display-state transition to
+     * rebuild its internal surface format. */
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x00);                          /* video off (index 0) */
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x20);                          /* video on, index 0 */
     return 0;
 }
 
@@ -209,10 +242,54 @@ static void text_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;               /* 16 fixed VGA colours */
 }
 
+/* Restore the standard 16-colour text DAC.  gfx_enter reloads all 256
+ * DAC entries with the graphics CLUT; without this, text mode keeps
+ * rendering through those leftovers after a roundtrip. */
+static void text_dac_reset(void) {
+    static const uint8_t pal[16][3] = {
+        {0x00,0x00,0x00},{0x00,0x00,0xAA},{0x00,0xAA,0x00},{0x00,0xAA,0xAA},
+        {0xAA,0x00,0x00},{0xAA,0x00,0xAA},{0xAA,0x55,0x00},{0xAA,0xAA,0xAA},
+        {0x55,0x55,0x55},{0x55,0x55,0xFF},{0x55,0xFF,0x55},{0x55,0xFF,0xFF},
+        {0xFF,0x55,0x55},{0xFF,0x55,0xFF},{0xFF,0xFF,0x55},{0xFF,0xFF,0xFF},
+    };
+    outb(0x3C8, 0x00);
+    for (int i = 0; i < 16; i++) {
+        outb(0x3C9, pal[i][0] >> 2);
+        outb(0x3C9, pal[i][1] >> 2);
+        outb(0x3C9, pal[i][2] >> 2);
+    }
+}
+
+/* Raw register dump readable from the QEMU monitor via `xp` (physical
+ * memory) -- immune to on-screen artifacts.  Layout:
+ *   [0] Seq01 [1] Seq03 [2] Seq04 [3] GC05 [4] GC06
+ *   [5..30]  CRTC 0x00..0x19 (26 regs, 0x11 written as read: skip)
+ *   [31] AC10 [32] AC11 [33] AC12 [34] AC13 [35] AC14
+ *   [36] total length */
+volatile uint8_t vga_reg_dump[40];
+
 static void text_diag(void) {
     char buf[8];
     con_write("VGA regs:\n");
     outb(0x3D4, 0x11); outb(0x3D5, 0x0E);
+    outb(0x3C4, 0x01); vga_reg_dump[0] = inb(0x3C5);
+    outb(0x3C4, 0x03); vga_reg_dump[1] = inb(0x3C5);
+    outb(0x3C4, 0x04); vga_reg_dump[2] = inb(0x3C5);
+    outb(0x3CE, 0x05); vga_reg_dump[3] = inb(0x3CF);
+    outb(0x3CE, 0x06); vga_reg_dump[4] = inb(0x3CF);
+    for (int r = 0; r <= 0x19; r++) {
+        if (r == 0x11) { vga_reg_dump[5 + r] = 0xEE; continue; }
+        outb(0x3D4, (uint8_t)r); vga_reg_dump[5 + r] = inb(0x3D5);
+    }
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x10 | 0x20); vga_reg_dump[31] = inb(0x3C1);
+    outb(0x3C0, 0x11 | 0x20); vga_reg_dump[32] = inb(0x3C1);
+    outb(0x3C0, 0x12 | 0x20); vga_reg_dump[33] = inb(0x3C1);
+    outb(0x3C0, 0x13 | 0x20); vga_reg_dump[34] = inb(0x3C1);
+    outb(0x3C0, 0x14 | 0x20); vga_reg_dump[35] = inb(0x3C1);
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x20);                    /* re-enable video, index 0 */
+    vga_reg_dump[36] = 37;
     for (int i = 0; i < 6; i++) {
         unsigned v = 0;
         if (i == 0) { outb(0x3C4, 0x01); v = inb(0x3C5); }
@@ -220,7 +297,7 @@ static void text_diag(void) {
         else if (i == 2) { outb(0x3CE, 0x06); v = inb(0x3CF); }
         else if (i == 3) { outb(0x3D4, 0x09); v = inb(0x3D5); }
         else if (i == 4) { outb(0x3D4, 0x13); v = inb(0x3D5); }
-        else { (void)inb(0x3DA); outb(0x3C0, 0x10); v = inb(0x3C1); }
+        else { (void)inb(0x3DA); outb(0x3C0, 0x10 | 0x20); v = inb(0x3C1); }
         buf[0] = "0123456789ABCDEF"[v >> 4];
         buf[1] = "0123456789ABCDEF"[v & 15];
         buf[2] = ' '; buf[3] = 0;
@@ -229,13 +306,15 @@ static void text_diag(void) {
     con_write("\nattrpal:");
     (void)inb(0x3DA);
     for (int i = 0; i < 8; i++) {
-        outb(0x3C0, (uint8_t)i); con_write(" ");
+        outb(0x3C0, (uint8_t)(i | 0x20)); con_write(" ");
         unsigned v = inb(0x3C1);
         buf[0] = "0123456789ABCDEF"[v >> 4];
         buf[1] = "0123456789ABCDEF"[v & 15];
         buf[2] = 0;
         con_write(buf);
     }
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x20);                    /* re-enable video, index 0 */
     con_write("\ndac0-2:");
     outb(0x3C7, 0);
     for (int i = 0; i < 3; i++) {

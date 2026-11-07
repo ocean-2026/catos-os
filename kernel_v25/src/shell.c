@@ -407,7 +407,21 @@ static int strcat_b(char *d, int size, const char *s) {
 }
 
 /* run "cmd" as a CE program: current directory first, then /bin (PATH).
- * Returns 0 when a program was found (spawn attempted), -1 if not found. */
+ * Returns 0 when a program was found (spawn attempted), -1 if not found.
+ * A command that already carries an extension (e.g. "hello.elf") is tried
+ * verbatim -- ".ce" is appended only when the last path component has no
+ * dot. */
+static int cmd_has_ext(const char *cmd) {
+    const char *p = cmd, *base = cmd;
+    while (*p) {
+        if (*p == '/') base = p + 1;
+        else if (*p == '.') return 1;
+        p++;
+    }
+    (void)base;
+    return 0;
+}
+
 static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid) {
     if (!cmd || !*cmd) return -1;
     if (!fs_fs_ready()) return -1;
@@ -415,6 +429,7 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
     char pwd[FS_PATH_MAX];
     fs_pwd(pwd, sizeof(pwd));
     uint32_t c = 0, s = 0;
+    const char *ext = cmd_has_ext(cmd) ? "" : ".ce";
 
     /* 1) current directory (bounded: never overflow like the old code) */
     p[0] = 0;
@@ -425,7 +440,7 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
         strcat_b(p, sizeof(p), "/");
     }
     if (strcat_b(p, sizeof(p), cmd) != 0) return -1;
-    if (strcat_b(p, sizeof(p), ".ce") != 0) return -1;
+    if (strcat_b(p, sizeof(p), ext) != 0) return -1;
     if (fs_resolve_file(p, &c, &s) == 0) {
         spawn_and_maybe_wait(p, argc, argv, bg, uid);
         return 0;
@@ -434,7 +449,7 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
     p[0] = 0;
     if (strcat_b(p, sizeof(p), "/bin/") != 0) return -1;
     if (strcat_b(p, sizeof(p), cmd) != 0) return -1;
-    if (strcat_b(p, sizeof(p), ".ce") != 0) return -1;
+    if (strcat_b(p, sizeof(p), ext) != 0) return -1;
     if (fs_resolve_file(p, &c, &s) == 0) {
         spawn_and_maybe_wait(p, argc, argv, bg, uid);
         return 0;
@@ -1449,12 +1464,12 @@ void shell_run(void) {
                     if (strcat_b(p, sizeof(p), pwd) == 0) strcat_b(p, sizeof(p), "/");
                 } else strcat_b(p, sizeof(p), "/");
                 if (p[0]) strcat_b(p, sizeof(p), cmd);
-                if (p[0]) strcat_b(p, sizeof(p), ".ce");
+                if (p[0]) strcat_b(p, sizeof(p), cmd_has_ext(cmd) ? "" : ".ce");
                 if (p[0] && fs_resolve_file(p, &c, &s) != 0) {
                     p[0] = 0;
                     if (strcat_b(p, sizeof(p), "/bin/") == 0 &&
                         strcat_b(p, sizeof(p), cmd) == 0 &&
-                        strcat_b(p, sizeof(p), ".ce") == 0 &&
+                        strcat_b(p, sizeof(p), cmd_has_ext(cmd) ? "" : ".ce") == 0 &&
                         fs_resolve_file(p, &c, &s) != 0) p[0] = 0;
                 }
                 if (!p[0]) {

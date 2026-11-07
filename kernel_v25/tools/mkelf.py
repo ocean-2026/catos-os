@@ -27,19 +27,38 @@ SEG_OFF    = 0x1000          # file offset of the PT_LOAD data
 ALIGN      = 0x1000
 
 def enc_calls():
+    # Position-independent: the msg pointer must survive the kernel's ASLR
+    # slide, so it is computed EIP-relatively (call $+5 / pop) instead of
+    # baked in as an absolute address.
+    #
+    #   0:  e8 00000000      call next          ; push EIP
+    #   5:  58               pop  eax           ; eax = 5 (actual vaddr)
+    #   6:  05 imm32         add  eax, delta    ; eax = &msg
+    #  11:  50               push eax
+    #  12:  ff 15 imm32      call [VS_TABLE+0]  ; write(1, msg, 14)
+    #  18:  83 c4 04         add  esp, 4
+    #  21:  6a 00           push 0
+    #  23:  ff 15 imm32      call [VS_TABLE+13] ; exit(0)
+    #  29:  eb fe            jmp $
+    #  32:  msg
+    MSG_AT = 0x20
+    next_va = 5
+    delta = MSG_AT - next_va
     code = b""
-    # push msg (vaddr 0x30 inside the segment, i.e. base-relative 0x30)
-    code += struct.pack("<BI", 0x68, 0x30)
-    # call dword [VS_TABLE + 4*SYS_WRITE]
+    code += b"\xe8\x00\x00\x00\x00"              # call next
+    code += b"\x58"                              # pop eax
+    code += b"\x05" + struct.pack("<i", delta)   # add eax, &msg - next
+    code += b"\x50"                              # push eax
     code += b"\xff\x15" + struct.pack("<I", VS_TABLE + 4 * SYS_WRITE)
     code += b"\x83\xc4\x04"                      # add esp,4
     code += b"\x6a\x00"                          # push 0
-    # call dword [VS_TABLE + 4*SYS_EXIT]
     code += b"\xff\x15" + struct.pack("<I", VS_TABLE + 4 * SYS_EXIT)
     code += b"\xeb\xfe"                          # jmp $ (unreachable)
+    assert len(code) <= MSG_AT, len(code)
+    code += b"\x90" * (MSG_AT - len(code))
     msg = b"hello from ELF\n\x00"
     assert len(code) <= 0x30
-    code += b"\x90" * (0x30 - len(code)) + msg
+    code += msg
     return code
 
 def main(out):
@@ -56,7 +75,11 @@ def main(out):
                       3,            # e_type   = ET_DYN (PIE)
                       3,            # e_machine= EM_386
                       1,            # e_version
-                      SEG_OFF,      # e_entry  = segment-relative code start
+                      0,            # e_entry  = VADDR of code start (the
+                                    #   segment is mapped at base+0, so the
+                                    #   entry is 0 -- NOT the file offset;
+                                    #   the loader validates the entry lands
+                                    #   inside a mapped PT_LOAD range)
                       phoff,
                       0,            # e_shoff  (none)
                       0,            # e_flags
@@ -88,6 +111,9 @@ def main(out):
     assert img[:4] == b"\x7fELF" and img[4] == 1 and img[5] == 1
     e = struct.unpack_from("<HHIIIIIHHHHHH", img, 16)
     assert e[0] == 3 and e[1] == 3
+    p = struct.unpack_from("<8I", img, e[4])
+    assert p[0] == 1 and p[5] >= p[4] and p[2] <= e[3] < p[2] + p[5], \
+        "entry must fall inside the PT_LOAD vaddr range (loader -5s otherwise)"
     p = struct.unpack_from("<IIIIIIII", img, e[4])
     assert p[0] == 1 and p[5] >= p[4] and p[7] == ALIGN
     assert (p[1] % ALIGN) == (p[2] % ALIGN)      # congruence for lazy mapping
