@@ -423,3 +423,96 @@ v2.8 最终回复里列出的限制。仍然**未做 QEMU 实机验证**（用�
 4. BLINK 动画与软件光标叠加正常；
 5. `text` 同意门照常（按 Y/N 各一次）；
 6. （可选）VMware 里确认 `vbe` 返回 -19 且 text/gfx 照常。
+
+---
+
+## 十一、v2.10 增量：TD-01 修复、mmap、ELF 加载器、CE 回归套件
+
+本轮完成 P1 待办四项（QEMU 实机测试见 11.5）。P2（fork/COW、信号、
+musl、VFS、设备文件）不在本轮范围。
+
+### 11.1 TD-01：page fault 致命路径（真 bug，比待办描述的更糟）
+
+`vma.c: task_page_fault()` 致命路径打印 kill 横幅后直接
+`__builtin_unreachable()` —— **没有 return -14**。intr.c 的
+`isr_exception` 兜底（-14 → task_die_fault → task_cleanup + zombie +
+reschedule）永远走不到，控制流落入未定义行为。
+
+修复：vma.c 删除打印与 unreachable，直接 `return -14`，复用 intr.c
+现成的 `task_die_fault()` 兜底。注释里所谓"环形依赖无法调用 task.c"
+不成立（task.c 是调用方）。顺手删除 vma.c 三个无人调用的打印助手。
+
+### 11.2 mmap / munmap（CE ABI v2.10，槽位 55/56）
+
+**地址空间扩容**（前提）：原内核用户空间只有一张用户页表（PDE 8，
+32-36 MiB），CE 全家桶占了大半。新增第二个用户 PDE（9 号，36-40 MiB）：
+- `task_space_t` 增加 `pt2`；`task_space_create` 挂两张用户页表，
+  失败路径不再泄漏帧（原代码部分失败会漏）。
+- `task_map_page / task_virt_to_phys / 新增 task_unmap_page` 按 PDE
+  分派；`task_space_destroy` 释放两张页表的全部帧。
+
+**语义**：
+- `mmap(addr, len, prot, flags)`：addr 必须 0；匿名映射，first-fit
+  分配在扩展区；每映射前面带 8 KiB guard 页（返回地址在 guard 之后，
+  越界下写直接 page fault 杀任务而不是踩邻居）；页面 lazy 映射
+  （复用 page fault 路径）；返回用户地址或 -22/-12。
+- `munmap(addr, len)`：解除映射、释放帧、归还空洞；部分解除缩小 VMA，
+  全解除删除 VMA。只接受本任务 mmap 出来的区间（-22 拒绝其它）。
+
+### 11.3 ELF32 加载器（PIE + ASLR，双轨制第三轨）
+
+`task_spawn_ce` 现按 magic 分派：`CE01` 走旧路径（PDE 8 固定偏移），
+`\x7fELF` 走 ELF 路径（PDE 9 扩展区）。
+
+- 校验 ELF32 / LE / i386 / ET_DYN / PT_LOAD 数 ≤16 / 文件 ≤2 MiB。
+- **ASLR**：PIE 基址 = USER_EXT_BASE + (tick 哈希 mod 16) 页，每次
+  spawn 滑动 0-64 KiB。
+- 段加载：PT_LOAD 页区间排序合并（经典 RO 尾页 / RW 首页共享页），
+  逐合并区间 kzalloc + map + 建 VMA；再按段从 FAT 直接读文件字节进
+  用户页（`fat_pread` 支持任意文件偏移跨簇读）；bss 由零页天然覆盖。
+- 入口 = base + e_entry，校验落在已映射区间。
+- **syscall 约定**：ELF 没有 __ce_api 槽，直接调固定 vsyscall 表
+  `CATOS_VS_TABLE`（0x2080800，ce_abi.h 新宏）：
+  `call dword [CATOS_VS_TABLE + 4*slot]`。
+- ET_EXEC 也按 PIE 处理（文档明说：仅支持位置无关代码）。
+
+**工具链现实**：本机 MinGW 无 elf_i386 输出能力（连 MSYS2 usr/bin 的
+ld 都只支持 pe）。`tools/mkelf.py` 手工构造最小但真实的 ELF32
+（一段 RW PT_LOAD，机器码调 vsyscall write+exit），产物
+`extapp/bin/hello.elf` 已编入内核内置表，QEMU 里 `hello.elf` 即可
+验证 ELF 路径。**没有真实 C→ELF 编译链**——这是后续待办（binutils
+elf 目标或 lld）。
+
+### 11.4 CE 回归套件（tests/ce_regress.py，宿主零依赖）
+
+- 跑 extapp/bin/*.ce 全部 18 个镜像过 `tests/ce_sim.py`。
+- PASS=5 / SKIP=13 / FAIL=0。SKIP 全部有因：交互 API（readline/getch）
+  ce_sim 不建模、历史未建模指令（test_ab 的 group3/mul）。
+- **回归抓出两个真问题**（这正是建套件的意义）：
+  1. `ce_sim.py` API 表停在 v2.5（48 槽），thunk 识别窗口硬编码
+     64 字节 —— 已扩到 v2.10（57 槽）+ 修窗口 + 宿主侧实现
+     mmap/munmap（first-fit 与内核语义对齐）。
+  2. `cc.c / cc_self.c`（cc.ce 编译器）API 表同样停在 48 槽，
+     `api->mmap` 会编出错误索引 —— 已补齐 57 槽（cc.c 数组 +
+     cc_self.c 的 g_apin[57]）。调用点的 `slot < 0` 防呆原本就有，
+     旧状态会报 "unknown api function" 而不是静默错。
+- `tests/qemu_regress.py`：QEMU monitor（TCP 4444）+ sendkey +
+  screendump 驱动端到端冒烟：boot/help/display/gfx/text 同意门
+  （Y 拒绝与接受各一次）/mmaptest/hello.elf/vdiag，截图到
+  tests/qemu_shots/，自动断言帧非黑与帧变化，文本级人工看图。
+
+### 11.5 QEMU 实机测试：未完成（网络）
+
+本机无 QEMU。winget 源状态损坏（卸载后仍报"已安装"）；官方
+qemu-w64-setup-20260811.exe（160 MB）直连下载 ~25 KB/s，多轮断点
+续传仍未完成。**qemu_regress.py 已就绪，装好后一条命令可跑**。
+v2.9.1 的 [MTRR/pan UNTESTED] 标记继续保留。
+
+### 11.6 已知限制
+
+1. ELF 仅支持位置无关代码；没有动态链接、没有 symbol relocation。
+2. munmap 空洞归还后，mmap first-fit 会复用地址（测试利用了这点）；
+   无 ASLR 重随机。
+3. 扩展区共 4 MiB（单页表上限）；ELF 与 mmap 共享，ELF 最多 2 MiB。
+4. `fat_pread` 与 spawn 共用 static 簇缓冲（ring0 非重入，安全）。
+5. cc.ce 尚无 `void*` 指针运算的全部语义，mmaptest 只能用 gcc 构建。

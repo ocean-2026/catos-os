@@ -148,6 +148,9 @@ typedef struct catos_api {
     void     (*set_style_rgb)(uint32_t fg, uint32_t bg, int attrs);
     int      (*set_palette)(int idx, uint32_t rgb);
     uint32_t (*palette)(int idx);
+    /* ---- v2.10: anonymous mmap in the extension arena (append-only) -- */
+    void    *(*mmap)(void *addr, uint32_t len, int prot, int flags);
+    int      (*munmap)(void *addr, uint32_t len);
 } catos_api_t;
 
 /* install the API (called once at boot) */

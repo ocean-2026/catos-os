@@ -20,9 +20,10 @@ import struct
 import sys
 
 LOAD_BASE = 0x02000000
-MEM_SIZE = 0x300000            # 3 MiB user memory (image + bss + heap)
+MEM_SIZE = 0x1000000           # 16 MiB user memory (image+bss+heap+mmap arena)
 STACK_TOP = LOAD_BASE + 0x280000
 ARGV_AREA = LOAD_BASE + 0x240000
+MMAP_ARENA = 0x2400000 - LOAD_BASE   # host-side stand-in for the kernel's PDE 9 arena
 THUNK_BASE = 0x7F000000      # api thunk markers: never a real code address
 
 API_NAMES = [
@@ -34,6 +35,12 @@ API_NAMES = [
     "net_ping", "net_ip", "getuid", "gettid", "kill", "yield",
     "hw_num", "hw_str", "file_read", "file_write", "file_delete",
     "pipe_create", "pipe_write", "pipe_read", "pipe_close", "spawn", "wait",
+    "brk",                        # slot 48 (v2.6, not modelled)
+    # v2.7..v2.10 (slots 49..56, append-only).  Only mmap/munmap are
+    # modelled; the display/palette slots raise "not modelled".
+    "display_mode", "display_info", "set_style",
+    "set_style_rgb", "set_palette", "palette",
+    "mmap", "munmap",
 ]
 
 REG32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
@@ -63,6 +70,8 @@ class Machine:
         self.files = files if files is not None else {}
         self.out = []
         self.heap = (len(image) + bss + 15) & ~15
+        # v2.10 anonymous-mmap model: first-fit over free holes in the arena
+        self.mmap_holes = [(MMAP_ARENA, MEM_SIZE - MMAP_ARENA)]  # list of (off, size)
         self.regs = dict.fromkeys(REG32, 0)
         self.last_cmp = (0, 0)
         self.cf = 0
@@ -189,6 +198,39 @@ class Machine:
             return p
         if name == "free":
             return 0
+        if name == "mmap":
+            # mmap(addr, len, prot, flags): anonymous, first-fit, 4k granular
+            if args[0] != 0:
+                raise CeError("mmap: only addr=NULL is modelled")
+            ln = (sx32(args[1]) + 0xFFF) & ~0xFFF
+            for i, (off, size) in enumerate(self.mmap_holes):
+                if size >= ln:
+                    self.mmap_holes[i] = (off + ln, size - ln)
+                    if self.mmap_holes[i][1] == 0:
+                        del self.mmap_holes[i]
+                    self.mmap_taken = getattr(self, "mmap_taken", []) + [(off, ln)]
+                    return LOAD_BASE + off
+            raise CeError("mmap: arena exhausted")
+        if name == "munmap":
+            off = sx32(args[0]) - LOAD_BASE
+            ln = (sx32(args[1]) + 0xFFF) & ~0xFFF
+            taken = getattr(self, "mmap_taken", [])
+            for i, (o, l) in enumerate(taken):
+                if o == off and l == ln:
+                    del taken[i]
+                    self.mem[off:off + ln] = b"\x00" * ln
+                    self.mmap_holes.append((off, ln))
+                    self.mmap_holes.sort()
+                    # coalesce adjacent holes
+                    j = 0
+                    while j + 1 < len(self.mmap_holes):
+                        (o1, s1), (o2, s2) = self.mmap_holes[j], self.mmap_holes[j + 1]
+                        if o1 + s1 == o2:
+                            self.mmap_holes[j] = (o1, s1 + s2); del self.mmap_holes[j + 1]
+                        else:
+                            j += 1
+                    return 0
+            return -22
         raise CeError("api '%s' is not modelled by ce_sim" % name)
 
     # ---- run ----
@@ -733,7 +775,7 @@ class Machine:
         if mod == 3:
             target = self.get_reg(rm)
             ret_addr = npc
-            if THUNK_BASE <= target < THUNK_BASE + 64:
+            if THUNK_BASE <= target < THUNK_BASE + 4 * len(API_NAMES):
                 slot = target - THUNK_BASE
                 self.push(ret_addr)
                 ret = self.call_api(slot)
@@ -749,7 +791,7 @@ class Machine:
         target = self.rw(ea)
         ret_addr = npc                       # next instruction after the call
         esp0 = self.regs["esp"]
-        if THUNK_BASE <= target < THUNK_BASE + 64:
+        if THUNK_BASE <= target < THUNK_BASE + 4 * len(API_NAMES):
             slot = target - THUNK_BASE
             self.push(ret_addr)
             ret = self.call_api(slot)

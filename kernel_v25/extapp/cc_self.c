@@ -50,7 +50,7 @@ enum {
 
 /* ---- runtime-initialised tables (brace init cannot take strings) ---- */
 static char *g_punct[46];
-static char *g_apin[48];
+static char *g_apin[57];
 
 static void init_tables(void) {
     g_punct[0] = "<<=";  g_punct[1] = ">>=";  g_punct[2] = "==";
@@ -87,6 +87,12 @@ static void init_tables(void) {
     g_apin[41] = "file_delete"; g_apin[42] = "pipe_create";
     g_apin[43] = "pipe_write"; g_apin[44] = "pipe_read";
     g_apin[45] = "pipe_close"; g_apin[46] = "spawn";    g_apin[47] = "wait";
+    /* v2.7..v2.10 (slots 49..56; slot 48 = brk stays unnamed here) */
+    g_apin[48] = "brk";
+    g_apin[49] = "display_mode"; g_apin[50] = "display_info";
+    g_apin[51] = "set_style";  g_apin[52] = "set_style_rgb";
+    g_apin[53] = "set_palette"; g_apin[54] = "palette";
+    g_apin[55] = "mmap";       g_apin[56] = "munmap";
 }
 
 /* zero n bytes through a char* (replaces ((unsigned char*)p)[i] = 0) */

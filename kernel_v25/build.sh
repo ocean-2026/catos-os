@@ -40,7 +40,7 @@ fi
 mkdir -p build
 
 echo "== building CE apps (extapp) =="
-for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo; do
+for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest; do
     sh extapp/build_ce.sh $app.c
 done
 

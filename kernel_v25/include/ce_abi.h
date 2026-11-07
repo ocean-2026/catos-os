@@ -47,7 +47,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 55 slots, v2.8 */
+/* system-call table: 57 slots, v2.10 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -139,9 +139,23 @@ typedef struct catos_api {
          Returns 0. */
     uint32_t (*palette)(int idx);                   /* 54
          read back CLUT[idx] as 0x00RRGGBB. */
+
+    /* ---- v2.10: anonymous mmap (append-only) -------------------------- */
+    void   *(*mmap)(void *addr, uint32_t len, int prot, int flags); /* 55
+         addr must be NULL (the kernel picks); prot bit0 = writable;
+         flags reserved.  Returns the user address after an 8 KiB guard
+         page, or NULL (-22 EINVAL / -12 ENOMEM as (void*)-err).  Pages
+         appear lazily on first touch. */
+    int     (*munmap)(void *addr, uint32_t len);    /* 56
+         unmap + free pages of a previous mmap.  0 or negative errno. */
 } catos_api_t;
 
 extern catos_api_t *__ce_api;
+
+/* Fixed address of the vsyscall table (VS_TABLE).  CE binaries get the
+ * pointer injected into their __ce_api slot; ELF binaries (no such slot)
+ * call through this constant address:  call dword [CATOS_VS_TABLE + 4*slot] */
+#define CATOS_VS_TABLE 0x2080800u
 
 /* Call the system-call table from user code.  Declaring the slot in the
  * ".ce_api" section tells the linker where to reserve the 4-byte cell
