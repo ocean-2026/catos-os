@@ -62,6 +62,8 @@ typedef struct render_be {
     uint8_t     attr_mask;      /* supported CON_ATTR_* bits          */
     uint8_t     cjk;            /* can paint 16x16 CJK glyphs         */
     uint8_t     sw_blink;       /* BLINK needs a software timer        */
+    uint8_t     wc_mode;        /* framebuffer is Write-Combining      */
+    uint8_t     hw_scroll;      /* scroll() moves the viewport only    */
     int         mode;           /* CON_MODE_TEXT / GFX / VBE          */
 
     /* Program the hardware.  Returns 0, or negative when the hardware is
@@ -75,10 +77,14 @@ typedef struct render_be {
     void (*set_palette)(uint8_t idx, uint32_t rgb);
 
     /* v2.9 optional hooks.  NULL is always safe: the front-end falls
-     * back to a full redraw.  scroll() moves the framebuffer up by n
-     * cell rows and fills the exposed strip with bg_rgb; draw_cursor()
-     * overlays a software cursor on an already-painted cell. */
-    void (*scroll)(int n, uint32_t bg_rgb);
+     * back to a full redraw.  draw_cursor() overlays a software cursor
+     * on an already-painted cell.  scroll(n, bg) scrolls n cell rows and
+     * returns 0 when it handled the pixels itself (e.g. VBE hardware
+     * panning via DISPI_Y_OFFSET -- zero pixel copies, no VRAM reads);
+     * a nonzero return asks the front-end for a full re-render from the
+     * cell grid (write-only), which is the correct fallback because a
+     * read-modify-write of VRAM is poison under Write-Combining. */
+    int  (*scroll)(int n, uint32_t bg_rgb);
     void (*draw_cursor)(int x, int y, uint32_t fg_rgb);
     void (*diag)(void);
 } render_be_t;

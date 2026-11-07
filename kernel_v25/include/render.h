@@ -69,7 +69,9 @@ enum con_info_sel {
     CON_INFO_CELL_W,        /* 10: logical cell width in pixels (8)   */
     CON_INFO_CELL_H,        /* 11: logical cell height in pixels (16) */
     CON_INFO_BLINK,         /* 12: animated blink supported (0/1)     */
-    CON_INFO_SCROLL_FAST    /* 13: backend does framebuffer scrolling  */
+    CON_INFO_SCROLL_FAST,   /* 13: backend does framebuffer scrolling  */
+    CON_INFO_WC,            /* 14: framebuffer mapped Write-Combining  */
+    CON_INFO_HW_SCROLL      /* 15: scroll = viewport move, no copies   */
 };
 
 #define CON_EINVAL  (-3)

@@ -221,13 +221,14 @@ static void scroll_one(void) {
         for (int x = 0; x < cols; x++) cells[y - 1][x] = cells[y][x];
     for (int x = 0; x < cols; x++) cell_blank(&cells[rows - 1][x]);
     cur_y--; if (cur_y < 0) cur_y = 0;
-    if (be->scroll) {
-        be->scroll(1, s_bg_rgb);       /* framebuffer move, not repaint */
+    if (be->scroll && be->scroll(1, s_bg_rgb) == 0) {
+        /* Backend moved the pixels itself (VBE hardware panning). */
         clear_bg = s_bg_rgb;
-        for (int x = 0; x < cols; x++) paint(x, rows - 1);
         sync_cursor(1);
     } else {
-        redraw_all();                  /* text mode: rebuild font slots */
+        /* Full re-render from the grid: write-only, never reads VRAM
+         * (text mode also rebuilds its dynamic font-slot map here). */
+        redraw_all();
     }
 }
 
@@ -625,6 +626,8 @@ int con_info(int what) {
     case CON_INFO_CELL_H:      return CON_CELL_H;
     case CON_INFO_BLINK:       return 1;
     case CON_INFO_SCROLL_FAST: return be->scroll ? 1 : 0;
+    case CON_INFO_WC:          return be->wc_mode;
+    case CON_INFO_HW_SCROLL:   return be->hw_scroll;
     default:                   return CON_ENOSYS;
     }
 }

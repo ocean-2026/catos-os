@@ -103,9 +103,12 @@ static void gfx_clear(uint32_t bg_rgb) {
 }
 
 /* Scroll by moving the framebuffer: a 40x12 repaint is 480 cells, a
- * 320x192 byte move is a single forward copy.  No libc memmove here. */
-static void gfx_scroll(int n, uint32_t bg_rgb) {
-    if (n <= 0) return;
+ * 320x192 byte move is a single forward copy.  No libc memmove here.
+ * VGA memory in the first MiB is not WC-mapped and QEMU emulates it as
+ * fast RAM, so a read-modify-write here is acceptable.  Returns 0 =
+ * handled. */
+static int gfx_scroll(int n, uint32_t bg_rgb) {
+    if (n <= 0) return 0;
     if (n > GFX_ROWS) n = GFX_ROWS;
     uint8_t c = render_quantize(bg_rgb);
     uint32_t shift = (uint32_t)n * CON_CELL_H * GFX_W;
@@ -113,6 +116,7 @@ static void gfx_scroll(int n, uint32_t bg_rgb) {
     uint32_t keep  = used - shift;
     for (uint32_t i = 0; i < keep; i++) fb[i] = fb[i + shift];
     for (uint32_t i = keep; i < (uint32_t)GFX_W * GFX_H; i++) fb[i] = c;
+    return 0;
 }
 
 static uint8_t dim_index(uint8_t c) {

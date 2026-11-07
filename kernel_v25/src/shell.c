@@ -281,6 +281,14 @@ static void cmd_display(void) {
     vga_write(con_info(CON_INFO_BLINK) ? "yes (0.5 s, PIT-driven)" : "no");
     vga_write("\nfast scrolling    : ");
     vga_write(con_info(CON_INFO_SCROLL_FAST) ? "framebuffer move" : "full repaint");
+    vga_write("\nvbe accel         : ");
+    if (con_get_mode() == CON_MODE_VBE) {
+        vga_write(con_info(CON_INFO_WC) ? "MTRR-WC" : "UC(fallback)");
+        vga_write(" + ");
+        vga_write(con_info(CON_INFO_HW_SCROLL) ? "HW-pan" : "re-render");
+    } else {
+        vga_write("n/a (only in VBE mode)");
+    }
     vga_write("\nIME               : F2 toggles pinyin (shell + edit)");
     vga_write("\nuser drawing API : NONE (framebuffers are supervisor-only)\n");
     vga_write("switch policy    : ->gfx/vbe free; ->text needs physical Y\n");
