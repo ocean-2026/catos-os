@@ -53,6 +53,7 @@ typedef struct task {
     int         exit_code;
     struct task *parent;
     uint32_t    heap_end;       /* user heap break                     */
+    vma_t      *vm;             /* VMA list for this task (NULL if ring0)*/
     /* ls syscall snapshot (one listing at a time per task) */
     int         ls_count;       /* entries in the snapshot  */
     int         ls_step;        /* next index for LS_NEXT   */
@@ -91,10 +92,28 @@ void     task_ps_print(void);
 task_t  *task_by_tid(int tid);
 uint32_t task_uptime_ms(void);
 
+/* ---- misc ------------------------------------------------------------ */
+int      task_count(void);
+void     task_ps_print(void);
+task_t  *task_by_tid(int tid);
+uint32_t task_uptime_ms(void);
+
 /* ---- per-task stats for `top` (kernel side) --------------------------- */
 int      task_stat(int slot, int *tid, uint32_t *cpu_ticks, uint32_t *pages,
                    int *state, int *uid, int *ring, char *name, int namelen);
 uint32_t task_idle_ticks(void);
+
+/* ---- VMA-backed user-pointer helpers (declared in vma.c) ------------- */
+/* Check a single pointer is inside the task's VMA list (any page). */
+int      uaddr_in_vma(task_t *t, uint32_t addr);
+/* Validate [addr, addr+len) is within the task's VMA list.
+ * Maps any unmapped pages on demand (anonymous zero-fill).
+ * Returns 0 ok, -14 EFAULT. */
+int      validate_uaddr(task_t *t, uint32_t addr, uint32_t len);
+/* Safe copy: kernel->user or user->kernel with VMA-backed validation.
+ * Returns 0 ok, -14 EFAULT. */
+int      copy_to_user(task_t *t, void *dst, const void *src, uint32_t len);
+int      copy_from_user(task_t *t, void *dst, const void *src, uint32_t len);
 
 /* ---- file permissions (implemented in task.c) ------------------------- */
 #define PERM_READ  0x1
@@ -113,6 +132,8 @@ void     console_wake_release(int tid);
 
 /* ---- syscall entry (cpu.s -> here) ------------------------------------ */
 void     isr_syscall(int_frame_t *f);
+/* page-fault handler: returns 0=retry (fault handled), -14=kill task */
+int      task_page_fault(int_frame_t *f);
 
 /* ---- v2.5 pipes: ring0 helpers for the shell -------------------------- */
 int      kpipe_create(void);        /* handle >= 0, -1 if no slots */

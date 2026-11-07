@@ -20,7 +20,7 @@ NM=nm
 # -fleading-underscore: the asm files (cpu.s/boot.s) export/import symbols
 # with a leading '_' (MinGW convention); on GNU/Linux gcc does not add it
 # by default, so we ask gcc to match the asm exactly.
-CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fleading-underscore -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-80387 -Wall -O2 -std=c99 -Iinclude"
+CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check -fleading-underscore -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-80387 -Wall -O2 -std=c99 -Iinclude"
 
 # find a working python (needed for the built-in ISO generator and for
 # embedding the CE apps into the kernel image)
@@ -57,7 +57,7 @@ $CC -m32 -c boot/boot.s -o build/boot.o
 echo "== compiling cpu.s =="
 $CC -m32 -c src/cpu.s -o build/cpu.o
 
-for src in src/kernel.c src/vga.c src/keyboard.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/task.c src/hw.c; do
+for src in src/kernel.c src/vga.c src/keyboard.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/stubs.c; do
     obj="build/$(basename $src .c).o"
     echo "== compiling $src =="
     $CC $CFLAGS -c $src -o $obj
@@ -70,7 +70,7 @@ echo "== linking (PE/COFF) =="
 # Do NOT add --image-base 0x100000: it makes objcopy emit a 1 MB zero
 # gap at the start of kernel.bin, which breaks the multiboot image.
 $LD -m i386pe -T pe.ld -o build/kernel.pe \
-    build/boot.o build/cpu.o build/kernel.o build/vga.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/task.o build/hw.o
+    build/boot.o build/cpu.o build/kernel.o build/vga.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o
 
 echo "== extracting flat binary =="
 $OBJCOPY -O binary build/kernel.pe build/kernel.bin

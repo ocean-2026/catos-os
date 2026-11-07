@@ -446,9 +446,10 @@ static int push_args(void) {
 
 /* the size of the element an [index] expression yields */
 static int elem_sz(sym_t *s) {
-    /* a pointer occupies 4 bytes; an array element occupies sizeof(*p) */
-    if (s->is_ptr) return 4;
-    if (s->is_arr) return s->sz;
+    /* T*[] and T** index pointers (4); T* indexes sizeof(T) */
+    if (s->is_arr) return s->is_ptr ? 4 : s->sz;
+    if (s->is_ptr >= 2) return 4;
+    if (s->is_ptr) return s->sz;
     return s->sz;
 }
 
@@ -512,7 +513,8 @@ static void gen_postfix(void) {
         int n = push_args();
         ob8(0xA1); ob32(0);                    /* mov eax,[api_slot] */
         if (g_napiref < APIREF_MAX) g_apiref[g_napiref++] = (int)ob_at() - 4;
-        ob8(0xFF); ob8(0x50); ob8((uint32_t)(slot * 4));
+        if (slot * 4 > 127) { ob8(0xFF); ob8(0x90); ob32((uint32_t)(slot * 4)); }
+        else { ob8(0xFF); ob8(0x50); ob8((uint32_t)(slot * 4)); }
         e_add_esp(n * 4);
         return;
     }
@@ -655,7 +657,6 @@ static void gen_assign_expr(void) {
                 if (s && s->kind != SY_FUNC) {
                     /* consume the NAME (the operator is consumed below) */
                     g_ti++;
-                    int es = elem_sz(s);
                     int indexed = 0;
                     if (at_op(OP_LSB)) {
                         indexed = 1;
@@ -665,6 +666,9 @@ static void gen_assign_expr(void) {
                     } else {
                         gen_load(s, 1);
                     }
+                    /* store width: a pointer variable holds a 4-byte value;
+                     * indexed elements use the element size */
+                    int es = indexed ? elem_sz(s) : (s->is_ptr ? 4 : s->sz);
                     e_push_eax();                    /* keep lvalue address */
                     if (o == OP_ASG) {
                         g_ti++;
@@ -738,10 +742,16 @@ static int parse_type(int *sz, int *is_ptr) {
     *sz = 4; *is_ptr = 0;
     if (accept_kw("char")) *sz = 1;
     else if (accept_kw("int")) *sz = 4;
-    else if (accept_kw("unsigned")) { *sz = 4; accept_kw("int"); }
+    else if (accept_kw("unsigned")) { *sz = 4; accept_kw("int");
+        if (accept_kw("char")) *sz = 1; }
     else if (accept_kw("void")) *sz = 4;
     else return 0;
-    while (accept_op(OP_STAR)) *is_ptr = 1;
+    for (;;) {
+        if (!accept_op(OP_STAR)) break;
+        int d = *is_ptr;
+        d = d + 1;
+        *is_ptr = d;
+    }
     return 1;
 }
 
@@ -851,10 +861,15 @@ static void gen_stmt(void) {
         if (!accept_op(OP_RP)) { err_set("expected )"); return; }
         if (jbody >= 0) e_patch_here(jbody);    /* body starts here */
         gen_stmt();                             /* body */
-        e_jmp_back(step_pos);                   /* body -> step */
+        /* continue + body end → step, or the condition if there is no step */
+        int cont_tgt = has_step ? step_pos : top;
+        e_jmp_back(cont_tgt);
         if (jz >= 0) e_patch_here(jz);
         for (int i = bb; i < g_nbrk; i++) e_patch_here(g_brk[i]);
         g_nbrk = bb;
+        for (int i = cb; i < g_ncont; i++) {
+            ob_patch((uint32_t)g_cont[i], (uint32_t)(cont_tgt - g_cont[i] - 4));
+        }
         g_ncont = cb;
         return;
     }

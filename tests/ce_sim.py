@@ -48,6 +48,12 @@ def sx32(v):
     return v - 0x100000000 if v & 0x80000000 else v
 
 
+def setzsf(m, res):
+    """Latch ZF/SF the way x86 arithmetic does: on the written result."""
+    m.zf = 1 if (res & 0xFFFFFFFF) == 0 else 0
+    m.sf = 1 if res & 0x80000000 else 0
+
+
 class Machine:
     def __init__(self, image, bss, api_off, files=None, max_steps=3_000_000):
         if len(image) + bss > MEM_SIZE - 0x40000:
@@ -235,9 +241,19 @@ class Machine:
         self.pc = pc
         op = self.rb(pc)
         r = self.regs
+        if op in (0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF2, 0xF3):
+            return self.step(pc + 1)                 # segment/rep prefixes: no-op
         # mov r32, imm32
         if 0xB8 <= op <= 0xBF:
             self.set_reg(op - 0xB8, self.rw(pc + 1)); return pc + 5
+        if 0x40 <= op <= 0x47:                           # inc r32
+            v = (self.get_reg(op - 0x40) + 1) & 0xFFFFFFFF
+            self.set_reg(op - 0x40, v); setzsf(self, v)
+            return pc + 1
+        if 0x48 <= op <= 0x4F:                           # dec r32
+            v = (self.get_reg(op - 0x48) - 1) & 0xFFFFFFFF
+            self.set_reg(op - 0x48, v); setzsf(self, v)
+            return pc + 1
         # push/pop r32
         if 0x50 <= op <= 0x57:
             self.push(self.get_reg(op - 0x50)); return pc + 1
@@ -266,9 +282,16 @@ class Machine:
             return npc
         if op == 0xA1:                                   # mov eax,[disp32]
             r["eax"] = self.rw(self.rw(pc + 1)); return pc + 5
+        if op == 0xA0:                                   # mov al,[disp32]
+            r["eax"] = (r["eax"] & ~0xFF) | (self.rb(self.rw(pc + 1)) & 0xFF)
+            return pc + 5
+        if op == 0xA2:                                   # mov [disp32],al
+            self.wb(self.rw(pc + 1), r["eax"] & 0xFF); return pc + 5
         if op == 0xA3:
             self.ww(self.rw(pc + 1), r["eax"]); return pc + 5
-        if op in (0x01, 0x29, 0x31, 0x21, 0x09, 0x39, 0x85, 0x89, 0x8B, 0x8D):
+        if op in (0x01, 0x03, 0x09, 0x0B, 0x21, 0x23, 0x29, 0x2B, 0x31,
+                  0x33, 0x38, 0x39, 0x3A, 0x3B, 0x84, 0x85, 0x88, 0x89, 0x8A,
+                  0x8B, 0x8D):
             return self.op_modrm(op, pc)
         if op == 0xC7:                                   # mov r/m32, imm32
             mod, reg, rm, npc, ea = self.modrm(pc + 1)
@@ -295,10 +318,32 @@ class Machine:
             return self.op_group3(pc)
         if op == 0xD3:
             return self.op_group2(pc)
+        if op in (0xD0, 0xD1):                 # group2, count == 1
+            b = self.rb(pc + 1)
+            sub = (b >> 3) & 7
+            mod, reg, rm, npc, ea = self.modrm(pc + 1)
+            v = (self.get_reg(rm) & 0xFF) if op == 0xD0 else self.get_reg(rm)
+            if sub == 4:
+                res = v << 1
+            elif sub == 5:
+                res = (v & 0xFFFFFFFF) >> 1
+            elif sub == 7:
+                res = sx32(v) >> 1
+            else:
+                raise CeError("group2 /%d count=1" % sub)
+            if op == 0xD0:
+                self.set_reg(rm, (self.get_reg(rm) & ~0xFF) | (res & 0xFF))
+            else:
+                self.set_reg(rm, res)
+            return npc
+        if op in (0xC0, 0xC1):                 # group2, imm8 count
+            return self.op_group2(pc, imm8=True)
         if op == 0xFF:
             return self.op_call_indirect(pc)
         if op == 0x69:
             return self.op_imul_imm(pc)
+        if op == 0x6B:                                   # imul r32, r/m32, imm8
+            return self.op_imul_imm(pc, imm8=True)
         if op == 0xE8 or op == 0xE9:
             rel = sx32(self.rw(pc + 1))
             if op == 0xE8:
@@ -325,12 +370,20 @@ class Machine:
                 return (pc + 2 + rel) & 0xFFFFFFFF
             return pc + 2
         if op == 0xA8:                                   # test al, imm8
-            self.regs["eax"] &= 0xFFFF00FF
+            al = self.regs["eax"] & 0xFF
+            res = al & self.rb(pc + 1)
+            self.last_cmp = (res, 0)
+            self.zf = 1 if res == 0 else 0
+            self.sf = 1 if res & 0x80 else 0
             return pc + 2
         if op == 0x04:                                   # add al, imm8
             al = (self.regs["eax"] & 0xFF)
             imm = self.rb(pc + 1)
-            self.regs["eax"] = (self.regs["eax"] & ~0xFF) | ((al + imm) & 0xFF)
+            self.cf = 1 if (al + imm) > 0xFF else 0
+            res = (al + imm) & 0xFF
+            self.regs["eax"] = (self.regs["eax"] & ~0xFF) | res
+            self.zf = 1 if res == 0 else 0
+            self.sf = 1 if res & 0x80 else 0
             return pc + 2
         if op in (0x0C, 0x24, 0x2C, 0x34):               # al, imm8 ops
             al = self.regs["eax"] & 0xFF
@@ -340,35 +393,61 @@ class Machine:
             elif op == 0x24:
                 al &= imm
             elif op == 0x2C:
+                self.cf = 1 if al < (imm & 0xFF) else 0
                 al = (al - imm) & 0xFF
             else:
                 al ^= imm
             self.regs["eax"] = (self.regs["eax"] & ~0xFF) | al
+            self.zf = 1 if al == 0 else 0
+            self.sf = 1 if al & 0x80 else 0
             return pc + 2
         if op == 0x3C:                                   # cmp al, imm8
-            self.last_cmp = (self.regs["eax"] & 0xFF, self.rb(pc + 1))
+            al = self.regs["eax"] & 0xFF
+            imm = self.rb(pc + 1)
+            res = (al - imm) & 0xFF
+            self.last_cmp = (al - 0x100 if al & 0x80 else al,
+                             imm - 0x100 if imm & 0x80 else imm)
+            self.zf = 1 if res == 0 else 0
+            self.sf = 1 if res & 0x80 else 0
+            self.last_op_bt = False
             return pc + 2
         if op == 0xA9:                                   # test eax, imm32
-            self.regs["eax"] &= 0  # flags only; zero the compare
-            self.last_test = (self.regs["eax"], 0)
+            res = self.regs["eax"] & self.rw(pc + 1)
+            self.last_cmp = (res, 0)
+            self.last_test = (res, 0)
+            self.zf = 1 if res == 0 else 0
+            self.sf = 1 if res & 0x80000000 else 0
             return pc + 5
         if op == 0x05:                                   # add eax, imm32
-            self.regs["eax"] = (self.regs["eax"] + self.rw(pc + 1)) & 0xFFFFFFFF
+            a = self.regs["eax"]; b = self.rw(pc + 1)
+            self.regs["eax"] = (a + b) & 0xFFFFFFFF
+            setzsf(self, self.regs["eax"])
+            self.cf = 1 if (a + b) > 0xFFFFFFFF else 0
             return pc + 5
         if op == 0x2D:                                   # sub eax, imm32
-            self.regs["eax"] = (self.regs["eax"] - self.rw(pc + 1)) & 0xFFFFFFFF
+            a = self.regs["eax"]; b = self.rw(pc + 1)
+            self.regs["eax"] = (a - b) & 0xFFFFFFFF
+            setzsf(self, self.regs["eax"])
+            self.cf = 1 if (a & 0xFFFFFFFF) < (b & 0xFFFFFFFF) else 0
             return pc + 5
         if op == 0x3D:                                   # cmp eax, imm32
-            self.last_cmp = (self.regs["eax"], self.rw(pc + 1))
+            a = self.regs["eax"]; b = self.rw(pc + 1)
+            self.last_cmp = (a, b)
+            self.last_op_bt = False
+            setzsf(self, a - b)
+            self.cf = 1 if (a & 0xFFFFFFFF) < (b & 0xFFFFFFFF) else 0
             return pc + 5
         if op == 0x0D:                                   # or eax, imm32
             self.regs["eax"] |= self.rw(pc + 1)
+            setzsf(self, self.regs["eax"])
             return pc + 5
         if op == 0x25:                                   # and eax, imm32
             self.regs["eax"] &= self.rw(pc + 1)
+            setzsf(self, self.regs["eax"])
             return pc + 5
         if op == 0x35:                                   # xor eax, imm32
             self.regs["eax"] ^= self.rw(pc + 1)
+            setzsf(self, self.regs["eax"])
             return pc + 5
         if 0x40 <= op <= 0x47:                           # inc r32
             self.set_reg(op - 0x40, self.get_reg(op - 0x40) + 1); return pc + 1
@@ -392,7 +471,10 @@ class Machine:
         if rm == 4:                                    # SIB
             sib = self.rb(pc); pc += 1
             base, index, scale = sib & 7, (sib >> 3) & 7, sib >> 6
-            ea = self.get_reg(base)
+            if base == 5 and mod == 0:                 # disp32, no base reg
+                ea = self.rw(pc); pc += 4
+            else:
+                ea = self.get_reg(base)
             if index != 4:
                 ea += self.get_reg(index) << scale
         elif rm == 5 and mod == 0:
@@ -436,26 +518,90 @@ class Machine:
             return npc
             return npc
         if op == 0x39:                       # cmp r/m32, r32
-            self.last_cmp = (rmv, regv)
+            self.last_cmp = (rmv, regv); setzsf(self, rmv - regv)
+            self.cf = 1 if (rmv & 0xFFFFFFFF) < (regv & 0xFFFFFFFF) else 0
+            self.last_op_bt = False
             return npc
         if op == 0x85:                       # test r/m32, r32
-            # test only sets ZF (of a AND b); model it as cmp against 0
-            self.last_cmp = (rmv & regv, 0)
+            self.last_cmp = (rmv & regv, 0); setzsf(self, rmv & regv)
+            self.last_op_bt = False
+            return npc
+        if op == 0x84:                       # test r/m8, r8
+            a = (self.get_reg(rm) & 0xFF) if mod == 3 else self.rb(ea)
+            self.last_cmp = (a & (regv & 0xFF), 0); setzsf(self, a & (regv & 0xFF))
+            self.last_op_bt = False
+            return npc
+        if op == 0x38:                       # cmp r/m8, r8
+            a = (self.get_reg(rm) & 0xFF) if mod == 3 else self.rb(ea)
+            self.last_cmp = (a, regv & 0xFF); setzsf(self, a - (regv & 0xFF))
+            self.cf = 1 if a < (regv & 0xFF) else 0
+            self.last_op_bt = False
+            return npc
+        if op == 0x3A:                       # cmp r8, r/m8
+            a = (self.get_reg(rm) & 0xFF) if mod == 3 else self.rb(ea)
+            b = regv & 0xFF
+            self.last_cmp = (a, b); setzsf(self, a - b)
+            self.cf = 1 if a < b else 0
+            self.last_op_bt = False
+            return npc
+        if op == 0x88:                       # mov r/m8, r8
+            if mod == 3:
+                self.set_reg(rm, (self.get_reg(rm) & ~0xFF) | (regv & 0xFF))
+            else:
+                self.wb(ea, regv & 0xFF)
+            return npc
+        if op == 0x8A:                       # mov r8, r/m8
+            v = (self.get_reg(rm) & 0xFF) if mod == 3 else self.rb(ea)
+            self.set_reg(reg, (self.get_reg(reg) & ~0xFF) | v)
             return npc
         if op == 0x01:                       # add r/m32, r32
-            write_rm(rmv + regv)
+            write_rm(rmv + regv); setzsf(self, rmv + regv)
+            self.cf = 1 if (rmv + regv) > 0xFFFFFFFF else 0
             return npc
         if op == 0x29:                       # sub r/m32, r32
-            write_rm(rmv - regv)
+            write_rm(rmv - regv); setzsf(self, rmv - regv)
+            self.cf = 1 if (rmv & 0xFFFFFFFF) < (regv & 0xFFFFFFFF) else 0
             return npc
         if op == 0x31:                       # xor r/m32, r32
-            write_rm(rmv ^ regv)
+            write_rm(rmv ^ regv); setzsf(self, 0)
+            self.cf = 0
             return npc
         if op == 0x21:                       # and r/m32, r32
-            write_rm(rmv & regv)
+            write_rm(rmv & regv); setzsf(self, rmv & regv)
+            self.cf = 0
             return npc
         if op == 0x09:                       # or r/m32, r32
-            write_rm(rmv | regv)
+            write_rm(rmv | regv); setzsf(self, rmv | regv)
+            self.cf = 0
+            return npc
+        if op == 0x03:                       # add r32, r/m32
+            self.set_reg(reg, regv + rmv); setzsf(self, regv + rmv)
+            self.cf = 1 if (regv + rmv) > 0xFFFFFFFF else 0
+            return npc
+        if op == 0x2B:                       # sub r32, r/m32
+            self.set_reg(reg, regv - rmv); setzsf(self, regv - rmv)
+            self.cf = 1 if (regv & 0xFFFFFFFF) < (rmv & 0xFFFFFFFF) else 0
+            return npc
+        if op == 0x33:                       # xor r32, r/m32
+            self.set_reg(reg, regv ^ rmv); setzsf(self, 0)
+            self.cf = 0
+            return npc
+        if op == 0x23:                       # and r32, r/m32
+            self.set_reg(reg, regv & rmv); setzsf(self, regv & rmv)
+            self.cf = 0
+            return npc
+        if op == 0x0B:                       # or r32, r/m32
+            self.set_reg(reg, regv | rmv); setzsf(self, regv | rmv)
+            self.cf = 0
+            return npc
+        if op == 0x3B:                       # cmp r32, r/m32
+            self.last_cmp = (regv, rmv); setzsf(self, regv - rmv)
+            self.cf = 1 if (regv & 0xFFFFFFFF) < (rmv & 0xFFFFFFFF) else 0
+            self.last_op_bt = False
+            return npc
+        if op == 0x87:                       # xchg r/m32, r32
+            write_rm(regv)
+            self.set_reg(reg, rmv)
             return npc
         raise CeError("modrm opcode 0x%02x at 0x%08x" % (op, pc))
 
@@ -470,25 +616,53 @@ class Machine:
         b = self.rb(pc + 1)
         sub = (b >> 3) & 7
         mod, reg, rm, npc, ea = self.modrm(pc + 1)
+        byte_op = (op == 0x80)               # 0x80: BYTE r/m, imm8
         if op == 0x81:
             imm = self.rw(npc); npc += 4
         else:
             imm = self.rb(npc); npc += 1
             if imm & 0x80:
                 imm -= 0x100
+        if byte_op:
+            cur = (self.get_reg(rm) & 0xFF) if mod == 3 else self.rb(ea)
+            if cur & 0x80:
+                cur -= 0x100                 # signed byte compare domain
+        else:
+            cur = self.get_reg(rm) if mod == 3 else self.rw(ea)
             imm &= 0xFFFFFFFF
-        cur = self.get_reg(rm) if mod == 3 else self.rw(ea)
+        mask = 0xFF if byte_op else 0xFFFFFFFF
         if sub == 0:
             res = cur + imm
+            self.cf = 1 if res > mask else 0
+        elif sub == 1:
+            res = cur | imm
+            self.cf = 0
+        elif sub == 2:
+            res = cur ^ imm                # xor (adc not emitted by cc)
+            self.cf = 0
+        elif sub == 4:
+            res = cur & imm
+            self.cf = 0
         elif sub == 5:
             res = cur - imm
+            self.cf = 1 if (cur & mask) < (imm & mask) else 0
+        elif sub == 6:
+            res = cur ^ imm
+            self.cf = 0
         elif sub == 7:
             self.last_cmp = (cur, imm)
             self.last_test = (cur, imm)
+            self.last_op_bt = False
+            setzsf(self, cur - imm)
+            self.cf = 1 if (cur & mask) < (imm & mask) else 0
             return npc
-        else:
-            raise CeError("group1 /%d" % sub)
-        if mod == 3:
+        setzsf(self, res)
+        if byte_op:
+            if mod == 3:
+                self.set_reg(rm, (self.get_reg(rm) & ~0xFF) | (res & 0xFF))
+            else:
+                self.wb(ea, res & 0xFF)
+        elif mod == 3:
             self.set_reg(rm, res)
         else:
             self.ww(ea, res)
@@ -519,20 +693,24 @@ class Machine:
             return npc
         raise CeError("group3 /%d" % sub)
 
-    def op_group2(self, pc):
+    def op_group2(self, pc, imm8=False):
         b = self.rb(pc + 1)
         sub = (b >> 3) & 7
         mod, reg, rm, npc, ea = self.modrm(pc + 1)
-        if mod != 3:
-            raise CeError("group2 memory operand not emitted")
-        cnt = self.regs["ecx"] & 0x1F
+        if imm8:
+            cnt = self.rb(npc) & 0x1F; npc += 1
+        else:
+            cnt = self.regs["ecx"] & 0x1F
         v = self.get_reg(rm)
         if sub == 4:
-            self.set_reg(rm, v << cnt)
+            res = v << cnt
+        elif sub == 5:
+            res = (v & 0xFFFFFFFF) >> cnt          # shr (logical)
         elif sub == 7:
-            self.set_reg(rm, sx32(v) >> cnt)
+            res = sx32(v) >> cnt
         else:
             raise CeError("group2 /%d" % sub)
+        self.set_reg(rm, res)
         return npc
 
     def op_call_indirect(self, pc):
@@ -546,6 +724,10 @@ class Machine:
         b = self.rb(pc + 1)
         sub = (b >> 3) & 7
         mod, reg, rm, npc, ea = self.modrm(pc + 1)
+        if sub == 4:                                     # jmp r/m32 (no push)
+            if mod == 3:
+                return self.get_reg(rm)
+            return self.rw(ea)
         if sub != 2:
             raise CeError("ff /%d not emitted" % sub)
         if mod == 3:
@@ -556,39 +738,57 @@ class Machine:
                 self.push(ret_addr)
                 ret = self.call_api(slot)
                 self.regs["eax"] = ret & 0xFFFFFFFF
-                assert self.pop() == ret_addr
+                got = self.pop()
+                if got != ret_addr:
+                    raise CeError("thunk stack mismatch: api=%s esp-delta=%d"
+                                  % (API_NAMES[slot] if slot < len(API_NAMES) else "?",
+                                     (got - ret_addr) & 0xFFFFFFFF))
                 return ret_addr
             self.push(ret_addr)
             return target
         target = self.rw(ea)
         ret_addr = npc                       # next instruction after the call
+        esp0 = self.regs["esp"]
         if THUNK_BASE <= target < THUNK_BASE + 64:
             slot = target - THUNK_BASE
             self.push(ret_addr)
             ret = self.call_api(slot)
             self.regs["eax"] = ret & 0xFFFFFFFF
-            assert self.pop() == ret_addr
+            got = self.pop()
+            if got != ret_addr:
+                args = [self.rw((esp0 + 4 + i*4) & 0xFFFFFFFF) for i in range(4)]
+                raise CeError("thunk stack mismatch: api=%s esp-delta=%d args=%s"
+                              % (API_NAMES[slot] if slot < len(API_NAMES) else "?",
+                                 (got - ret_addr) & 0xFFFFFFFF,
+                                 [hex(x) for x in args]))
             return ret_addr
         self.push(ret_addr)
         return target
 
-    def op_imul_imm(self, pc):
+    def op_imul_imm(self, pc, imm8=False):
         mod, reg, rm, npc, ea = self.modrm(pc + 1)
-        imm = self.rw(npc); npc += 4
+        if imm8:
+            imm = self.rb(npc); npc += 1
+            if imm & 0x80:
+                imm -= 0x100
+        else:
+            imm = self.rw(npc); npc += 4
         a = self.get_reg(rm) if mod == 3 else self.rw(ea)
         self.set_reg(reg, sx32(a) * sx32(imm))
         return npc
 
     def op_0f(self, pc):
         op2 = self.rb(pc + 1)
-        if 0x90 <= op2 <= 0x9F:                          # setcc al
+        if 0x90 <= op2 <= 0x9F:                          # setcc r/m8
             cc = op2 - 0x90
-            b = self.rb(pc + 2)
-            if b != 0xC0:
-                raise CeError("setcc non-al")
-            self.regs["eax"] = (self.regs["eax"] & ~0xFF) | (self.cond(cc) & 0xFF)
+            mod, reg, rm, npc, ea = self.modrm(pc + 2)
+            v = self.cond(cc) & 0xFF
+            if mod == 3:
+                self.set_reg(rm, (self.get_reg(rm) & ~0xFF) | v)
+            else:
+                self.wb(ea, v)
             self.cc_src = cc
-            return pc + 3
+            return npc
         if op2 == 0xB6:                                  # movzx eax, al
             mod, reg, rm, npc, ea = self.modrm(pc + 2)
             if mod == 3 and rm == 0 and reg == 0:
@@ -624,6 +824,12 @@ class Machine:
             v = self.get_reg(rm) if mod == 3 else self.rw(ea)
             bit = self.get_reg(reg) & 31
             self.cf = (v >> bit) & 1
+            self.last_op_bt = True
+            return npc
+        if 0x40 <= op2 <= 0x4F:                          # cmovcc r32, r/m32
+            mod, reg, rm, npc, ea = self.modrm(pc + 2)
+            if self.cond(op2 - 0x40):
+                self.set_reg(reg, self.get_reg(rm) if mod == 3 else self.rw(ea))
             return npc
         raise CeError("0F opcode 0x%02x" % op2)
 
@@ -634,33 +840,30 @@ class Machine:
         setl/setle/setge/setg also come from the same signed compare,
         which is exact here because cc only compares right after a cmp.
         """
-        # jz/jnz (0x84/0x85) test the value in EAX via `test eax,eax`;
-        # model that as a compare against zero so one table serves both.
-        if cc in (0x84, 0x85):
-            self.last_cmp = (self.regs["eax"], 0)
         a, b = self.last_cmp
         sa, sb = sx32(a), sx32(b)
         # setcc opcodes (0x4..0xF) and jcc opcodes (0x84..0x8F) name the
         # same conditions in different encodings; normalise both.
+        zf = getattr(self, "zf", 0)
+        sf = getattr(self, "sf", 0)
         cond = {
-            0x4: a == b, 0x5: a != b,                  # set e/ne
+            0x4: zf, 0x5: not zf,                       # set e/ne
             0xC: sa < sb, 0xE: sa <= sb,                # set l/le
             0xD: sa >= sb, 0xF: sa > sb,                # set ge/g
-            0x84: a == b, 0x85: a != b,                 # jz/jnz (after test)
+            0x84: zf, 0x85: not zf,                     # jz/jnz (ZF latch)
             0x8C: sa < sb, 0x8E: sa <= sb,              # jl/jle
             0x8D: sa >= sb, 0x8F: sa > sb,              # jge/jg
-            # rel8 jcc: js/jns test the sign of (a-b), i.e. the last cmp/sub
-            0x8: sa < sb, 0x9: sa >= sb,                # js/jns
+            0x8: sf, 0x9: not sf,                       # js/jns (SF latch)
         }
-        # unsigned / carry-flag conditions (after `bt`: CF)
+        # unsigned / carry-flag conditions read the CF latch, which
+        # arithmetic (add/sub/cmp) and `bt` both maintain.
         if cc in (0x2, 0x3, 0x6, 0x7):          # jb/jae/jbe/ja
             cf = 1 if getattr(self, "cf", 0) else 0
-            zf = 1 if a == b else 0
+            zf = getattr(self, "zf", 0)
             if cc == 0x2: return 1 if cf else 0
             if cc == 0x3: return 0 if cf else 1
             if cc == 0x6: return 1 if (cf or zf) else 0
             return 1 if (not cf and not zf) else 0
-            raise CeError("cc 0x%02x not modelled" % cc)
         return 1 if cond[cc] else 0
 
 

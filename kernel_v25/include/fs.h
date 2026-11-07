@@ -10,7 +10,7 @@
  */
 
 #define FS_NAME_MAX     24      /* max path component incl. NUL */
-#define FS_DATA_MAX     512     /* max file size supported by the editor */
+#define FS_DATA_MAX     4096    /* max file size supported by the editor */
 #define FS_PATH_MAX     160     /* max absolute path length */
 
 #define FS_DIR  0

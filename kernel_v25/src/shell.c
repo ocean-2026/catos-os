@@ -953,12 +953,12 @@ static void ed_del_line(void) {
 
 static void cmd_edit(const char *arg) {
     if (!*arg) { vga_write("usage: edit FILE\n"); return; }
-    /* refuse files the 512-byte editor buffer cannot hold: loading used
+    /* refuse files exceeding the editor buffer: loading used
      * to silently truncate them and ^O then overwrote the file */
     {
         uint32_t cl = 0, sz = 0;
         if (fs_resolve_file(arg, &cl, &sz) == 0 && sz >= FS_DATA_MAX) {
-            vga_write("edit: file too large for the 512-byte editor;");
+            vga_write("edit: file too large for the editor;");
             vga_write(" refusing (a save would truncate it)\n");
             return;
         }
@@ -999,7 +999,7 @@ static void cmd_edit(const char *arg) {
         }
         if (k == 0x0F || k == 0x13) {       /* ^O / ^S save */
             if (ed_save(f) != 0)
-                ed_status_msg("SAVE FAILED: exceeds 512-byte file limit");
+                ed_status_msg("SAVE FAILED: exceeds editor buffer limit");
             else
                 ed_status_msg("Saved.");
             continue;

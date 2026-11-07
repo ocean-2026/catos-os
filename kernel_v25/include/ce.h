@@ -135,6 +135,8 @@ typedef struct catos_api {
     int    (*spawn)(const char *path, int argc, char **argv);
     /*   spawn a CE as a child (inherits caller's uid); tid > 0, -err */
     int    (*wait)(int tid);                  /* wait child exit; exit code */
+    /* ---- v2.6: memory management -------------------------------------- */
+    void * (*brk)(void *addr);                /* set/get program break (0=query) */
 } catos_api_t;
 
 /* install the API (called once at boot) */

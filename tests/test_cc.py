@@ -47,6 +47,14 @@ CASES = {
              ' for (i = 0; i < 10; i = i + 1) { if (i == 5) break; s = s + i; }'
              ' api->print_int(s);',
              "10"),
+    "forcont": ('int i; int s; s = 0;'
+                ' for (i = 0; i < 10; i = i + 1) { if (i == 5) continue; s = s + i; }'
+                ' api->print_int(s);',
+                "40"),
+    "fornostep": ('int i; int s; s = 0; i = 0;'
+                  ' for (; i < 5; ) { s = s + i; i = i + 1; }'
+                  ' api->print_int(s);',
+                  "10"),
     "while": ('int x; x = 1; while (x < 100) { x = x * 2; } api->print_int(x);',
               "128"),
     "recursion": ('api->print_int(fib(10));',

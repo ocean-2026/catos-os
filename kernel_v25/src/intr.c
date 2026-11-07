@@ -133,7 +133,13 @@ void exc_dump(int_frame_t *f) {
 
 void isr_exception(int_frame_t *f) {
     if ((f->cs & 3) == 3) {
-        /* ring3 fault: kill the offending task, keep the system alive */
+        /* ring3 fault:
+         *   - Page fault (INT 0x0E) may be recoverable via lazy VMA mapping.
+         *     Otherwise kill the offending task.
+         *   - All other faults kill the task immediately. */
+        if (f->intno == 14) {
+            if (task_page_fault(f) == 0) return;  /* fault handled, retry */
+        }
         task_die_fault(f);
     }
     /* ring0 kernel fault: dump and halt (no scheduler games in a broken kernel) */
