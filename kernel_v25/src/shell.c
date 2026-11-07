@@ -1,6 +1,8 @@
 #include "shell.h"
 #include "vga.h"
+#include "render.h"      /* display front-end: mode policy + text styles */
 #include "keyboard.h"
+#include "ime.h"
 #include "rtc.h"
 #include "io.h"
 #include "fs.h"
@@ -73,7 +75,20 @@ static void cmd_help(void) {
         "  uname        print OS name\n"
         "  date         show RTC date/time\n"
         "  mem          show RAM size (multiboot)\n"
-        "  color NUM    set foreground color (0-15)\n"
+        "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
+        "  -- display (front-end / back-ends) --\n"
+        "  gfx          graphics mode (256-color styled text)\n"
+        "  vbe          VBE 800x600x32 truecolour text terminal\n"
+        "  text         switch back - needs a physical Y confirmation\n"
+        "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
+        "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
+        "  palette I C  redefine CLUT[I] as RRGGBB\n"
+        "  display      backend, grid, depth, CJK, glyph count\n"
+        "  vdiag        raw VGA/VBE register diagnostic\n"
+        "  -- Chinese (GB2312 display + pinyin input) --\n"
+        "  zhdemo       built-in UTF-8 Chinese + truecolour demo\n"
+        "  F2           toggle pinyin IME (works in shell and edit)\n"
+        "  color NUM    set foreground palette index (0..255)\n"
         "  reboot       warm reboot the machine\n"
         "  hang         halt the CPU (QEMU: close window)\n"
         "  -- processes (ring3 tasks, preemptive) --\n"
@@ -102,6 +117,183 @@ static void cmd_help(void) {
     );
 }
 
+/* ---------- display front-end commands ---------------------------------
+ * These commands only talk to render.h.  They never touch a VGA register
+ * or a framebuffer, and there is deliberately no pixel-drawing command:
+ * graphics mode is a TEXT mode with more colours and styles. */
+static int style_name_eq(const char *p, int n, const char *name) {
+    int i = 0;
+    while (i < n && name[i] && p[i] == name[i]) i++;
+    return i == n && name[i] == 0;
+}
+
+static void cmd_style(const char *arg) {
+    if (!*arg) {
+        vga_write("usage: style SPEC   SPEC = decimal mask, 'off', or names\n"
+                  "       bold dim italic underline inverse strike hidden\n"
+                  "       joined with '+' e.g. style bold+underline\n");
+        return;
+    }
+    uint8_t a = 0;
+    const char *p = arg;
+    if (*p >= '0' && *p <= '9') {
+        while (*p >= '0' && *p <= '9') { a = (uint8_t)(a * 10 + (*p - '0')); p++; }
+    } else {
+        while (*p) {
+            if (*p == '+' || *p == ' ') { p++; continue; }
+            const char *s = p;
+            while (*p && *p != '+' && *p != ' ') p++;
+            int n = (int)(p - s);
+            if      (style_name_eq(s, n, "off"))      a = 0;
+            else if (style_name_eq(s, n, "none"))     a = 0;
+            else if (style_name_eq(s, n, "bold"))     a |= CON_ATTR_BOLD;
+            else if (style_name_eq(s, n, "dim"))      a |= CON_ATTR_DIM;
+            else if (style_name_eq(s, n, "italic"))   a |= CON_ATTR_ITALIC;
+            else if (style_name_eq(s, n, "underline"))a |= CON_ATTR_UNDERLINE;
+            else if (style_name_eq(s, n, "inverse"))  a |= CON_ATTR_INVERSE;
+            else if (style_name_eq(s, n, "strike"))   a |= CON_ATTR_STRIKE;
+            else if (style_name_eq(s, n, "hidden"))   a |= CON_ATTR_HIDDEN;
+            else {
+                vga_write("style: unknown token (see 'help')\n");
+                return;
+            }
+        }
+    }
+    con_set_attrs(a);
+    vga_write("style mask = 0x");
+    print_hex((uint32_t)a);
+    vga_write("\n");
+}
+
+static void skip_sp(const char **pp) { while (**pp == ' ') (*pp)++; }
+
+static uint32_t parse_hex(const char **pp) {
+    const char *p = *pp;
+    uint32_t v = 0;
+    while (*p) {
+        int d;
+        if (*p >= '0' && *p <= '9')      d = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
+        else break;
+        v = v * 16 + (uint32_t)d;
+        p++;
+    }
+    *pp = p;
+    return v;
+}
+
+static void cmd_palette(const char *arg) {
+    const char *p = arg;
+    skip_sp(&p);
+    if (!*p) { vga_write("usage: palette IDX RRGGBB\n"); return; }
+    int idx = 0;
+    while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; }
+    skip_sp(&p);
+    uint32_t rgb = parse_hex(&p);
+    if (idx < 0 || idx > 255) { vga_write("palette: index must be 0..255\n"); return; }
+    con_set_palette((uint8_t)idx, rgb);
+    vga_write("palette["); print_int(idx);
+    vga_write("] = "); print_hex(rgb); vga_write("\n");
+}
+
+static void cmd_rgb(const char *arg) {
+    const char *p = arg;
+    skip_sp(&p);
+    uint32_t fg = parse_hex(&p);
+    skip_sp(&p);
+    uint32_t bg = *p ? parse_hex(&p) : 0;
+    con_set_style_rgb(fg, bg, con_get_attrs());
+    vga_write("fg="); print_hex(fg);
+    vga_write(" bg="); print_hex(bg); vga_write("\n");
+}
+
+static void cmd_vbe(void) {
+    int r = con_request_mode(CON_MODE_VBE, CON_ORIGIN_CONSOLE);
+    if (r == CON_ENODEV) {
+        vga_write("vbe: no VBE/Bochs-dispi device found (try QEMU -vga std)\n");
+        return;
+    }
+    if (r != 0) { vga_write("vbe: switch failed\n"); return; }
+    con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
+    vga_write("  CatOS VBE 800x600x32 - truecolour TEXT terminal\n");
+    con_set_style_rgb(0xFFD700, 0x000000, 0);
+    vga_write("  中文显示测试：你好，世界！\n");
+    con_set_style_rgb(0x7CFC00, 0x000000, CON_ATTR_UNDERLINE);
+    vga_write("  16.7M 色，每个字符的颜色都是真正的 RGB\n");
+    con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+    vga_write("  type 'text' + confirm Y to leave\n\n");
+}
+
+static void cmd_gfx(void) {
+    int r = con_request_mode(CON_MODE_GFX, CON_ORIGIN_CONSOLE);
+    if (r != 0) { vga_write("gfx: switch failed\n"); return; }
+    /* Styled-text welcome.  No rectangles, no pixels, no demo drawing. */
+    con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
+    vga_write("  CatOS graphics - 40x12 8x16 TEXT cells, 256 colors\n");
+    con_set_style_rgb(0xFFD700, 0x000000, CON_ATTR_BOLD);
+    vga_write("  中文显示测试：你好，世界！\n");
+    con_set_style(CON_YELLOW, CON_BLACK, CON_ATTR_UNDERLINE);
+    vga_write("  underline   ");
+    con_set_style(CON_LIGHT_CYAN, CON_BLACK, CON_ATTR_ITALIC);
+    vga_write("italic   ");
+    con_set_style(CON_LIGHT_GREEN, CON_BLACK, CON_ATTR_BOLD);
+    vga_write("bold\n");
+    con_set_style(CON_WHITE, CON_RED, CON_ATTR_INVERSE);
+    vga_write("  inverse  ");
+    con_set_style(CON_WHITE, CON_BLACK, CON_ATTR_STRIKE);
+    vga_write("strike  ");
+    con_set_style(200, CON_BLACK, 0);
+    vga_write("grey-200\n");
+    con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+    vga_write("  'text'+Y to leave; 'style', 'rgb', 'palette' to decorate\n\n");
+}
+
+static void cmd_text(void) {
+    int r = con_request_mode(CON_MODE_TEXT, CON_ORIGIN_CONSOLE);
+    if (r == CON_EACCES)      vga_write("text: denied - mode unchanged\n");
+    else if (r == CON_ENODEV) vga_write("text: backend unavailable\n");
+    else if (r != 0)          vga_write("text: switch failed\n");
+    else {
+        con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+        vga_write("text: back to 80x25 text mode (CJK via dynamic font slots)\n");
+    }
+}
+
+static void cmd_display(void) {
+    vga_write("display backend  : "); vga_write(con_backend_name()); vga_write("\n");
+    vga_write("mode             : "); vga_write(con_mode_name(con_get_mode()));
+    vga_write("\n");
+    vga_write("logical grid     : "); print_int(con_cols());
+    vga_write(" x "); print_int(con_rows()); vga_write("\n");
+    vga_write("physical pixels  : "); print_int(con_info(CON_INFO_PIXEL_W));
+    vga_write(" x "); print_int(con_info(CON_INFO_PIXEL_H)); vga_write("\n");
+    vga_write("colours / depth  : "); print_int(con_info(CON_INFO_COLORS));
+    vga_write(" / "); print_int(con_info(CON_INFO_BPP)); vga_write(" bpp\n");
+    vga_write("style bitmask    : "); print_hex((uint32_t)con_info(CON_INFO_ATTRS));
+    vga_write("\nCJK support      : ");
+    vga_write(con_info(CON_INFO_CJK) ? "yes" : "no (degrades to '?')");
+    vga_write("\nGB2312 glyphs    : "); print_int(con_info(CON_INFO_HZ_COUNT));
+    vga_write("\nlogical cell     : "); print_int(con_info(CON_INFO_CELL_W));
+    vga_write("x"); print_int(con_info(CON_INFO_CELL_H));
+    vga_write(" px (hanzi = 2x1 cells)");
+    vga_write("\nanimated blink    : ");
+    vga_write(con_info(CON_INFO_BLINK) ? "yes (0.5 s, PIT-driven)" : "no");
+    vga_write("\nfast scrolling    : ");
+    vga_write(con_info(CON_INFO_SCROLL_FAST) ? "framebuffer move" : "full repaint");
+    vga_write("\nvbe accel         : ");
+    if (con_get_mode() == CON_MODE_VBE) {
+        vga_write(con_info(CON_INFO_WC) ? "MTRR-WC" : "UC(fallback)");
+        vga_write(" + ");
+        vga_write(con_info(CON_INFO_HW_SCROLL) ? "HW-pan" : "re-render");
+    } else {
+        vga_write("n/a (only in VBE mode)");
+    }
+    vga_write("\nIME               : F2 toggles pinyin (shell + edit)");
+    vga_write("\nuser drawing API : NONE (framebuffers are supervisor-only)\n");
+    vga_write("switch policy    : ->gfx/vbe free; ->text needs physical Y\n");
+}
+
 static void cmd_about(void) {
     vga_set_fg(VGA_LIGHT_CYAN);
     vga_write(
@@ -118,7 +310,7 @@ static void cmd_about(void) {
     vga_write("  Bootloader   : GRUB 2 (ISO9660 / El Torito)\n");
     vga_write("  Kernel       : interrupts + paging + tasks\n");
     vga_write("                 ring3 CE apps via int 0x80, uid perms\n");
-    vga_write("  Display      : VGA text mode 80x25\n");
+    vga_write("  Display      : front-end + text/gfx back-ends ('display')\n");
     vga_write("  Input        : PS/2 keyboard (IRQ-driven)\n");
     vga_write("  Filesystem   : FAT32 on IDE (persistent)\n");
     vga_write("  Runs on      : QEMU / VMware / Bochs / real PC\n");
@@ -788,8 +980,8 @@ static void cmd_format(void) {    vga_write("Format FAT32 volume?  This erases A
 
 /* ---------- nano-style full-screen editor ---------- */
 #define ED_MAX_LINES 64
-#define ED_MAX_COLS  79
-#define ED_ROWS      23          /* content rows on screen (rows 1..23) */
+#define ED_MAX_COLS  99          /* widest terminal (VBE) is 100 columns */
+#define ED_MAX_VIEW  60
 
 static char ed_lines[ED_MAX_LINES][ED_MAX_COLS + 1];
 static int  ed_nlines;
@@ -800,9 +992,27 @@ static char ed_fname[FS_NAME_MAX];
 
 static int ed_strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 
+/* v2.9: the editor follows the ACTIVE back-end's grid instead of being
+ * hard-wired to 80x25.  Row 0 is the title, row con_rows()-1 the bars. */
+static int ed_view_rows(void) {
+    int r = con_rows() - 2;
+    if (r < 1) r = 1;
+    if (r > ED_MAX_VIEW) r = ED_MAX_VIEW;
+    return r;
+}
+static int ed_max_cols(void) {
+    int c = con_cols() - 1;
+    if (c < 1) c = 1;
+    if (c > ED_MAX_COLS) c = ED_MAX_COLS;
+    return c;
+}
+
 static void ed_status_msg(const char *m) {
+    int row = con_rows() - 1;
+    if (row < 1) row = 1;
     vga_set_color(VGA_WHITE, VGA_LIGHT_BLUE);
-    vga_write_at(0, 24, m);
+    for (int x = 0; x < con_cols(); x++) vga_putc_at((uint8_t)x, (uint8_t)row, ' ');
+    vga_write_at_utf8(0, (uint8_t)row, m);
     vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
 }
 
@@ -837,49 +1047,62 @@ static int ed_save(fs_entry_t *f) {
 }
 
 static void ed_redraw(void) {
-    int y, x;
-    for (y = 1; y <= 23; y++)
-        for (x = 0; x < 80; x++)
-            vga_putc_at(x, y, ' ');
+    int sc = con_cols();
+    int last = con_rows() - 1;
+    if (last < 2) last = 2;
+    int view = ed_view_rows();
 
-    /* status row */
+    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+    for (int y = 0; y <= last; y++)
+        for (int x = 0; x < sc; x++)
+            vga_putc_at((uint8_t)x, (uint8_t)y, ' ');
+
+    /* title row */
     vga_set_color(VGA_BLACK, VGA_LIGHT_GREY);
     int sx = 0;
-    vga_write_at(sx, 0, "CatOS nano  "); sx += 12;
-    vga_write_at(sx, 0, ed_fname); sx += ed_strlen(ed_fname);
-    vga_write_at(sx, 0, "  "); sx += 2;
+    vga_write_at_utf8((uint8_t)sx, 0, "CatOS nano  "); sx += 12;
+    vga_write_at_utf8((uint8_t)sx, 0, ed_fname); sx += ed_strlen(ed_fname);
+    vga_write_at_utf8((uint8_t)sx, 0, "  "); sx += 2;
     char tmp[24];
-    itoa(ed_nlines, tmp, 0); vga_write_at(sx, 0, tmp); sx += ed_strlen(tmp);
-    vga_write_at(sx, 0, " lines"); sx += 6;
-    if (ed_modified) { vga_write_at(sx, 0, "  [modified]"); sx += 12; }
+    itoa(ed_nlines, tmp, 0);
+    vga_write_at_utf8((uint8_t)sx, 0, tmp); sx += ed_strlen(tmp);
+    vga_write_at_utf8((uint8_t)sx, 0, " lines"); sx += 6;
+    if (ed_modified) vga_write_at_utf8((uint8_t)sx, 0, "  [modified]");
 
-    /* content rows */
+    /* content rows (UTF-8 aware, so Chinese file contents display) */
     vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
-    for (int r = 0; r < ED_ROWS; r++) {
+    for (int r = 0; r < view && r + 1 < last; r++) {
         int ln = ed_top + r;
         if (ln >= ed_nlines) break;
-        vga_write_at(0, 1 + r, ed_lines[ln]);
+        vga_write_at_utf8(0, (uint8_t)(1 + r), ed_lines[ln]);
     }
 
     /* bottom bar */
     vga_set_color(VGA_WHITE, VGA_LIGHT_BLUE);
-    vga_write_at(0, 24, "^G Help  ^O Save  ^X Exit  ^K Del Line  ^U Clear  Arrows Move");
+    vga_write_at_utf8(0, (uint8_t)last,
+        "^G Help  ^O Save  ^X Exit  ^K Del Line  ^U Clear  F2 IME");
     vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
 
     int scr_y = 1 + (ed_cy - ed_top);
     if (scr_y < 1) scr_y = 1;
-    if (scr_y > 23) scr_y = 23;
-    vga_set_cursor(ed_cx, scr_y);
+    if (scr_y > last - 1) scr_y = last - 1;
+    vga_set_cursor((uint8_t)ed_cx, (uint8_t)scr_y);
 }
 
 static void ed_insert(char c) {
     char *ln = ed_lines[ed_cy];
     int l = ed_strlen(ln);
-    if (l >= ED_MAX_COLS) { ed_status_msg("Line is full (max 79 chars)"); return; }
+    int lim = ed_max_cols();
+    if (l >= lim) { ed_status_msg("Line is full for this terminal width"); return; }
     for (int i = l; i > ed_cx; i--) ln[i] = ln[i - 1];
     ln[ed_cx] = c;
     ln[l + 1] = 0;
     ed_cx++;
+}
+
+/* Insert a whole UTF-8 sequence (from the pinyin IME) as one unit. */
+static void ed_insert_utf8(const char *s) {
+    while (*s) ed_insert(*s++);
 }
 
 static void ed_backspace(void) {
@@ -976,6 +1199,19 @@ static void cmd_edit(const char *arg) {
     for (;;) {
         int k = kb_getkey();
 
+        /* v2.9: F2 pinyin IME also works inside the editor */
+        {
+            char han[5];
+            int ir = ime_feed(k, han);
+            if (ir == IME_CONSUME) { ed_redraw(); ime_refresh(); continue; }
+            if (ir == IME_COMMIT) {
+                ed_insert_utf8(han);
+                ed_modified = 1;
+                ed_redraw(); ime_refresh();
+                continue;
+            }
+        }
+
         if (k == 0x18) {                    /* ^X exit */
             int do_exit = 1;
             if (ed_modified) {
@@ -991,6 +1227,7 @@ static void cmd_edit(const char *arg) {
                 if (!do_exit) continue;
             }
             vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+            ime_off();
             vga_clear();
             vga_write("edit: saved ");
             print_int(fs_file_size(f));
@@ -1019,8 +1256,8 @@ static void cmd_edit(const char *arg) {
         else if (k == KB_RIGHT)  { int l = ed_strlen(ed_lines[ed_cy]); if (ed_cx < l) ed_cx++; }
         else if (k == KB_HOME)   { ed_cx = 0; }
         else if (k == KB_END)    { ed_cx = ed_strlen(ed_lines[ed_cy]); }
-        else if (k == KB_PGUP)   { ed_cy -= ED_ROWS; if (ed_cy < 0) ed_cy = 0; }
-        else if (k == KB_PGDN)   { ed_cy += ED_ROWS; if (ed_cy > ed_nlines - 1) ed_cy = ed_nlines - 1; }
+        else if (k == KB_PGUP)   { ed_cy -= ed_view_rows(); if (ed_cy < 0) ed_cy = 0; }
+        else if (k == KB_PGDN)   { ed_cy += ed_view_rows(); if (ed_cy > ed_nlines - 1) ed_cy = ed_nlines - 1; }
         else if (k == '\b')      { ed_backspace(); ed_modified = 1; }
         else if (k == KB_DEL)    { ed_delete(); ed_modified = 1; }
         else if (k == '\n')      { ed_enter(); ed_modified = 1; }
@@ -1028,9 +1265,12 @@ static void cmd_edit(const char *arg) {
 
         int ll = ed_strlen(ed_lines[ed_cy]);
         if (ed_cx > ll) ed_cx = ll;
+        if (ed_cx > ed_max_cols()) ed_cx = ed_max_cols();
         if (ed_cy < ed_top) ed_top = ed_cy;
-        if (ed_cy >= ed_top + ED_ROWS) ed_top = ed_cy - ED_ROWS + 1;
+        if (ed_cy >= ed_top + ed_view_rows())
+            ed_top = ed_cy - ed_view_rows() + 1;
         ed_redraw();
+        ime_refresh();
     }
 }
 
@@ -1104,6 +1344,14 @@ void shell_run(void) {
 
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "clear"))      vga_clear();
+        else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
+        else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
+        else if (!strcmp_(cmd, "text"))       cmd_text();
+        else if (!strcmp_(cmd, "style"))      cmd_style(arg);
+        else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);
+        else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
+        else if (!strcmp_(cmd, "display"))    cmd_display();
+        else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
@@ -1165,12 +1413,12 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "color")) {
             if (!*arg) {
-                vga_write("usage: color 0..15  (note: 0 is black on black)\n");
+                vga_write("usage: color 0..255  (text mode maps to 16 colors)\n");
             } else {
                 int c = 0;
                 while (*arg >= '0' && *arg <= '9') { c = c * 10 + (*arg - '0'); arg++; }
-                if (c >= 0 && c <= 15) vga_set_fg(c);
-                else vga_write("usage: color 0..15\n");
+                if (c >= 0 && c <= 255) con_set_fg((uint8_t)c);
+                else vga_write("usage: color 0..255\n");
             }
         }
         else {

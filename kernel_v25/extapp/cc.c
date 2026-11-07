@@ -324,6 +324,10 @@ static const char *const API_NAMES[] = {
     "net_ping", "net_ip", "getuid", "gettid", "kill", "yield",
     "hw_num", "hw_str", "file_read", "file_write", "file_delete",
     "pipe_create", "pipe_write", "pipe_read", "pipe_close", "spawn", "wait",
+    /* v2.7..v2.10 (slots 49..56, append-only -- see ce_abi.h) */
+    "display_mode", "display_info", "set_style",
+    "set_style_rgb", "set_palette", "palette",
+    "mmap", "munmap",
     0
 };
 static int api_slot(token_t *t) {

@@ -103,31 +103,63 @@ void frame_stats(uint32_t *total, uint32_t *used) {
 
 int  task_space_create(task_space_t *s) {
     s->dir = frame_alloc();
+    if (!s->dir) return -1;
     s->pt  = frame_alloc();
-    if (!s->dir || !s->pt) return -1;
-    uint32_t *d = (uint32_t *)s->dir;
-    uint32_t *t = (uint32_t *)s->pt;
+    s->pt2 = frame_alloc();
+    if (!s->pt || !s->pt2) {              /* don't leak on partial failure */
+        if (s->pt)  frame_free(s->pt);
+        if (s->pt2) frame_free(s->pt2);
+        frame_free(s->dir);
+        s->dir = s->pt = s->pt2 = 0;
+        return -1;
+    }
+    uint32_t *d  = (uint32_t *)s->dir;
+    uint32_t *t  = (uint32_t *)s->pt;
+    uint32_t *t2 = (uint32_t *)s->pt2;
     for (int i = 0; i < 1024; i++) d[i] = 0;
     for (int i = 0; i < 1024; i++) t[i] = 0;
+    for (int i = 0; i < 1024; i++) t2[i] = 0;
     for (int i = 0; i < 16; i++) d[i] = kdir[i];        /* kernel, supervisor */
-    d[PDE_USER] = s->pt | 0x007u;                        /* P RW US */
+    d[PDE_USER]     = s->pt  | 0x007u;                   /* P RW US */
+    d[PDE_USER_EXT] = s->pt2 | 0x007u;                   /* P RW US */
     return 0;
 }
 
-/* map a user virtual page inside PDE 8 to a physical frame */
+/* page-table entry for a user vaddr, or NULL if outside the two
+ * user PDEs (8: legacy arena, 9: ELF/mmap extension) */
+static uint32_t *pt_for(task_space_t *s, uint32_t vaddr) {
+    uint32_t pde = vaddr >> 22;
+    if (pde == PDE_USER)     return (uint32_t *)s->pt;
+    if (pde == PDE_USER_EXT) return (uint32_t *)s->pt2;
+    return 0;
+}
+
+/* map a user virtual page (PDE 8 or 9) to a physical frame */
 int task_map_page(task_space_t *s, uint32_t vaddr, uint32_t pa, int user_writable) {
-    if ((vaddr >> 22) != PDE_USER) return -1;
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return -1;
     uint32_t pte = (vaddr >> 12) & 0x3FF;
-    uint32_t *t = (uint32_t *)s->pt;
     t[pte] = (pa & ~0xFFFu) | 0x005u | (user_writable ? 0x002u : 0);
     cpu_invlpg(vaddr);
     return 0;
 }
 
-uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
-    if ((vaddr >> 22) != PDE_USER) return 0;
+/* unmap a user page and free its frame (mmap/munmap support) */
+int task_unmap_page(task_space_t *s, uint32_t vaddr) {
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return -1;
     uint32_t pte = (vaddr >> 12) & 0x3FF;
-    uint32_t *t = (uint32_t *)s->pt;
+    if (!(t[pte] & 1)) return -1;
+    frame_free(t[pte] & ~0xFFFu);
+    t[pte] = 0;
+    cpu_invlpg(vaddr);
+    return 0;
+}
+
+uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return 0;
+    uint32_t pte = (vaddr >> 12) & 0x3FF;
     if (!(t[pte] & 1)) return 0;
     return (t[pte] & ~0xFFFu) + (vaddr & 0xFFF);
 }
@@ -138,8 +170,15 @@ void task_space_destroy(task_space_t *s) {
     for (uint32_t i = 0; i < 1024; i++)
         if (t[i] & 1) frame_free(t[i] & ~0xFFFu);
     frame_free(s->pt);
+    if (s->pt2) {
+        uint32_t *t2 = (uint32_t *)s->pt2;
+        for (uint32_t i = 0; i < 1024; i++)
+            if (t2[i] & 1) frame_free(t2[i] & ~0xFFFu);
+        frame_free(s->pt2);
+    }
     if (s->dir) frame_free(s->dir);
     s->pt = 0;
+    s->pt2 = 0;
     s->dir = 0;
 }
 
@@ -151,4 +190,35 @@ void *kzalloc_frame(void) {
     uint8_t *p = (uint8_t *)f;
     for (uint32_t i = 0; i < 4096; i++) p[i] = 0;
     return p;
+}
+
+/* ---- VBE linear framebuffer -------------------------------------------
+ * The low 64 MiB is 16 PSE (4 MiB) pages.  A VBE LFB lives far above it
+ * (typically PCI BAR2 at 0xE0000000 / 0x10000000), so it needs its own
+ * 4 KiB page tables.  We refuse to touch PDEs 0..15: splitting one of
+ * those would expose the framebuffer to every ring3 task, which would
+ * break the "no user drawing API" policy. */
+void *vbe_lfb_map(uint32_t phys, uint32_t size) {
+    if (!phys || !size) return 0;
+    uint32_t pa  = phys & ~0xFFFu;
+    uint32_t end = (phys + size + 0xFFFu) & ~0xFFFu;
+    uint32_t pde0 = pa >> 22, pde1 = (end - 1) >> 22;
+    if (pde0 < 16 || pde1 < 16) return 0;
+
+    for (uint32_t pde = pde0; pde <= pde1; pde++) {
+        if (kdir[pde] & 0x80u) return 0;      /* would split a PSE page */
+        if (!(kdir[pde] & 1u)) {
+            uint32_t pt = frame_alloc();
+            if (!pt) return 0;
+            uint32_t *t = (uint32_t *)pt;
+            for (int i = 0; i < 1024; i++) t[i] = 0;
+            kdir[pde] = pt | 0x003u;         /* P | RW, supervisor-only */
+        }
+    }
+    for (; pa < end; pa += 4096) {
+        uint32_t *t = (uint32_t *)(kdir[pa >> 22] & ~0xFFFu);
+        t[(pa >> 12) & 0x3FFu] = pa | 0x003u;
+    }
+    cpu_cr3_write((uint32_t)kdir);            /* flush TLB */
+    return (void *)phys;
 }

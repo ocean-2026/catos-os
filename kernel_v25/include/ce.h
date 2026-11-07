@@ -137,6 +137,20 @@ typedef struct catos_api {
     int    (*wait)(int tid);                  /* wait child exit; exit code */
     /* ---- v2.6: memory management -------------------------------------- */
     void * (*brk)(void *addr);                /* set/get program break (0=query) */
+    /* ---- v2.7: display front-end (append-only) ------------------------
+     * Styled text and mode switching ONLY -- no drawing API is exported
+     * to ring3, in any display mode. */
+    int    (*display_mode)(int mode);         /* -1 query, 0 text, 1 gfx;
+                                                 gfx->text needs human consent */
+    int    (*display_info)(int what);         /* see CON_INFO_* in render.h */
+    void   (*set_style)(int fg, int bg, int attrs);
+    /* ---- v2.8: truecolour + user palette (append-only) --------------- */
+    void     (*set_style_rgb)(uint32_t fg, uint32_t bg, int attrs);
+    int      (*set_palette)(int idx, uint32_t rgb);
+    uint32_t (*palette)(int idx);
+    /* ---- v2.10: anonymous mmap in the extension arena (append-only) -- */
+    void    *(*mmap)(void *addr, uint32_t len, int prot, int flags);
+    int      (*munmap)(void *addr, uint32_t len);
 } catos_api_t;
 
 /* install the API (called once at boot) */

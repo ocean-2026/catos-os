@@ -17,8 +17,15 @@
  *   v2.4  slots 37..38   hw_num / hw_str
  *   v2.5  slots 39..47   big files / pipes / processes
  *   v2.6  slot   48     brk (dynamic heap break)
+ *   v2.7  slots 49..51   display mode / display info / text style
+ *   v2.8  slots 52..54   RGB style / palette set / palette query
  *
- * Total: 49 slots in v2.6 (the v2.5 header had 48).
+ * Total: 55 slots in v2.8 (the v2.7 header had 52).
+ *
+ * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
+ * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
+ * syscall, and neither 0xA0000 nor the VBE LFB is mapped into any ring3
+ * page directory.
  *
  * Keep in sync with include/ce.h (the kernel-side mirror).  A v2.4 header
  * has only 40 slots and must NOT be used to build v2.5 programs.
@@ -40,7 +47,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 49 slots, v2.6 */
+/* system-call table: 57 slots, v2.10 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -107,9 +114,48 @@ typedef struct catos_api {
     int    (*wait)(int tid);                        /* 47 child exit code */
     /* ---- v2.6: memory management (append-only; old binaries see NULL) -- */
     void * (*brk)(void *addr);                      /* 48 set/get program break (0=query) */
+    /* ---- v2.7: display front-end ------------------------------------
+     * Mode switching + styled text ONLY.  No pixel/rect/framebuffer call
+     * exists, by design.  Old binaries see NULL for these slots. */
+    int    (*display_mode)(int mode);               /* 49
+         mode: -1 query, 0 text, 1 graphics.
+         TEXT->GFX: allowed.  GFX->TEXT: the kernel asks the human at the
+         console for a physical 'Y'; a program cannot supply consent.
+         returns current mode (>=0) or negative error (-13 = denied). */
+    int    (*display_info)(int what);               /* 50
+         0 mode, 1 cols, 2 rows, 3 colours, 4 style bitmask,
+         5 pixel width, 6 pixel height; unknown -> -8 */
+    void   (*set_style)(int fg, int bg, int attrs);/* 51
+         fg/bg are palette indices 0..255 (text mode maps to 16);
+         attrs is a CON_ATTR_* bitmask (see render.h) */
+    /* ---- v2.8: truecolour + user palette (append-only) --------------- */
+    void   (*set_style_rgb)(uint32_t fg, uint32_t bg, int attrs); /* 52
+         fg/bg are literal 0x00RRGGBB.  On 8bpp back-ends they are
+         quantised to the nearest CLUT entry; on VBE 32bpp they are used
+         verbatim -- that is full 16.7M-colour text. */
+    int    (*set_palette)(int idx, uint32_t rgb);   /* 53
+         redefine CLUT[idx] (0..255) as 0x00RRGGBB.  Mode 13h writes the
+         6-bit VGA DAC; VBE keeps it in software for indexed cells.
+         Returns 0. */
+    uint32_t (*palette)(int idx);                   /* 54
+         read back CLUT[idx] as 0x00RRGGBB. */
+
+    /* ---- v2.10: anonymous mmap (append-only) -------------------------- */
+    void   *(*mmap)(void *addr, uint32_t len, int prot, int flags); /* 55
+         addr must be NULL (the kernel picks); prot bit0 = writable;
+         flags reserved.  Returns the user address after an 8 KiB guard
+         page, or NULL (-22 EINVAL / -12 ENOMEM as (void*)-err).  Pages
+         appear lazily on first touch. */
+    int     (*munmap)(void *addr, uint32_t len);    /* 56
+         unmap + free pages of a previous mmap.  0 or negative errno. */
 } catos_api_t;
 
 extern catos_api_t *__ce_api;
+
+/* Fixed address of the vsyscall table (VS_TABLE).  CE binaries get the
+ * pointer injected into their __ce_api slot; ELF binaries (no such slot)
+ * call through this constant address:  call dword [CATOS_VS_TABLE + 4*slot] */
+#define CATOS_VS_TABLE 0x2080800u
 
 /* Call the system-call table from user code.  Declaring the slot in the
  * ".ce_api" section tells the linker where to reserve the 4-byte cell

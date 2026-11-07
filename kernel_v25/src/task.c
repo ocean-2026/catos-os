@@ -14,13 +14,15 @@
 #include "task.h"
 #include "io.h"
 #include "vga.h"
+#include "render.h"      /* v2.7 display front-end (mode policy + styles) */
 #include "keyboard.h"
 #include "fs.h"
 #include "fat.h"
 #include "net.h"
 #include "ce.h"
 #include "hw.h"
-#include "paging.h"     /* for vma_t */
+#include "paging.h"
+#include "vma.h"     /* for vma_t */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -439,12 +441,22 @@ void console_wake_release(int tid) {
  * thunk emission into it and a `return 0` from ce_main jumped into
  * thunk code that never exits). */
 #define VSYSCALL_BASE   USER_VSYSCALL      /* 0x2080000 */
-#define VS_EXIT_STUB    (VSYSCALL_BASE + 0x500)
-#define VS_LS_THUNK     (VSYSCALL_BASE + 0x600)
+/* v2.9 layout: thunks 0x000..0x7FF (2 KiB, ~85 syscalls), API pointer
+ * table 0x800..0xBFF (256 slots), ls thunk 0xC00, ls scratch 0xD00+,
+ * and the ce_main return trampoline at the very END of the page 0xF00.
+ * Old .ce binaries reference NONE of these addresses directly: the
+ * kernel pushes VS_EXIT_STUB and writes VS_TABLE into the image's api
+ * slot at spawn time.  So moving them is binary-compatible. */
+#define VS_EXIT_STUB    (VSYSCALL_BASE + 0xF00)
+#define VS_LS_THUNK     (VSYSCALL_BASE + 0xC00)
 #define VS_TABLE        (VSYSCALL_BASE + 0x800)
-#define VS_LS_H         (VSYSCALL_BASE + 0xC00)
-#define VS_LS_NAME      (VSYSCALL_BASE + 0xC20)
-#define VS_LS_SIZE      (VSYSCALL_BASE + 0xC40)
+#define VS_LS_H         (VSYSCALL_BASE + 0xD00)
+#define VS_LS_NAME      (VSYSCALL_BASE + 0xD20)
+#define VS_LS_SIZE      (VSYSCALL_BASE + 0xD40)
+
+/* SYS_WRITE streaming limits (v2.9): 256-byte stack chunk, 64 KiB cap. */
+#define SYS_WRITE_CHUNK 256
+#define SYS_WRITE_MAX   65536u
 
 enum {
     SYS_WRITE = 0, SYS_PUTC, SYS_CLS, SYS_READLINE, SYS_TIME_STR,
@@ -464,6 +476,16 @@ enum {
     SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ, SYS_PIPE_CLOSE,
     SYS_SPAWN, SYS_WAIT,
     SYS_BRK,
+    /* v2.7: display front-end.  Append-only: old binaries keep their
+     * slot indices.  NOTE: there is intentionally NO drawing syscall. */
+    SYS_DISPLAY_MODE, SYS_DISPLAY_INFO, SYS_SET_STYLE,
+    /* v2.8: truecolour text + user-definable palette.  Append-only.
+     * NOTE: 55 thunks occupy ~1216 bytes.  v2.9 gave the thunk area the
+     * whole first 2 KiB (up to VS_TABLE at 0x800), i.e. room for ~85
+     * syscalls, by moving the exit trampoline to the page tail. */
+    SYS_SET_STYLE_RGB, SYS_SET_PALETTE, SYS_PALETTE,
+    /* v2.10: anonymous mmap in the extension arena (PDE 9).  Append-only. */
+    SYS_MMAP, SYS_MUNMAP,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -502,9 +524,10 @@ static void generic_thunk(emit_t *e, uint32_t idx, int nargs) {
 static void build_vsyscall_page(uint8_t *page) {
     emit_t e; e.p = page;
 
-    /* exit trampoline at +0x300: a ce_main() that plain `return`s lands
-     * here (the dummy return address pushed at spawn) */
-    e.p = page + 0x500;
+    /* exit trampoline at +0xF00: a ce_main() that plain `return`s lands
+     * here (the dummy return address pushed at spawn).  Moving it to the
+     * tail frees 0x500..0x7FF for future generic thunks. */
+    e.p = page + 0xF00;
     e8(&e,0xB8); e32(&e,SYS_EXIT);       /* mov eax,SYS_EXIT */
     e8(&e,0x31); e8(&e,0xDB);            /* xor ebx,ebx      */
     e8(&e,0xCD); e8(&e,0x80);
@@ -525,6 +548,9 @@ static void build_vsyscall_page(uint8_t *page) {
         /*42*/0, /*43*/3, /*44*/3, /*45*/1,     /* pipe create/write/read/close */
         /*46*/3, /*47*/1,                       /* spawn / wait */
         /*48*/1,                               /* brk */
+        /*49*/1, /*50*/1, /*51*/3,             /* display mode/info/style */
+        /*52*/3, /*53*/2, /*54*/1,             /* rgb style / palette set/get */
+        /*55*/4, /*56*/2,                       /* mmap / munmap */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -532,9 +558,17 @@ static void build_vsyscall_page(uint8_t *page) {
         taddr[i] = VSYSCALL_BASE + (uint32_t)(e.p - page);
         generic_thunk(&e, i, nargs[i]);
     }
+    /* Guard the hand-packed page layout: the generic thunks must never
+     * reach the API pointer table at +0x800.  Without this check a future
+     * syscall would silently corrupt the table and every api->fn() call
+     * from a CE program would jump into thunk code. */
+    if ((uint32_t)(e.p - page) > 0x800u) {
+        con_write("vsyscall: thunk overflow - system halted\n");
+        for (;;) __asm__ volatile("hlt");
+    }
 
-    /* ls thunk at +0x400: ls(path, cb, ud) via LS_OPEN + LS_NEXT loop */
-    e.p = page + 0x600;
+    /* ls thunk at +0xC00: ls(path, cb, ud) via LS_OPEN + LS_NEXT loop */
+    e.p = page + 0xC00;
     {
         e8(&e,0x53); e8(&e,0x52);                                 /* push ebx; push edx */
         e8(&e,0x8B); e8(&e,0x5C); e8(&e,0x24); e8(&e,0x0C);       /* mov ebx,[esp+0C] */
@@ -880,40 +914,66 @@ void isr_syscall(int_frame_t *f) {
 
     switch (nr) {
     case SYS_WRITE: {
-        static char b[514];
+        /* v2.9: no 512-byte cap any more.  Read the user string in 256 B
+         * chunks (64 KiB total cap), validate each page as we reach it,
+         * and keep the UTF-8 decoder alive between non-final chunks so a
+         * hanzi split across a chunk boundary still renders correctly. */
+        static char b[257];
         const char *s = (const char *)a1;
+        uint32_t total = 0;
+        int done = 0, err = 0;
         if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
-        int i = 0;
-        while (s[i] && i < 512) { b[i] = s[i]; i++; }
-        b[i] = 0;
-        /* v2.5 redirection: pipe target first, then file target, else vga */
-        if (t->out_pipe >= 0) {
-            pipe_t *pp = pipe_by_handle(t->out_pipe);
-            if (!pp) { ret = (uint32_t)-1; break; }
-            int wrote = 0; int perr = 0;
-            while (wrote < i) {
-                if (!pp->open_r) { perr = -1; break; }
-                int free = PIPE_BUF - 1 - pp->len;
-                if (free <= 0) { task_sleep_ticks(1); continue; }
-                int n = i - wrote; if (n > free) n = free;
-                for (int k = 0; k < n; k++) {
-                    pp->buf[pp->tail] = b[wrote + k];
-                    pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+        while (total < SYS_WRITE_MAX && !done) {
+            int i = 0;
+            while (i < SYS_WRITE_CHUNK) {
+                uint32_t a = (uint32_t)s + total + i;
+                /* Validate on chunk start and on every 4 KiB boundary.
+                 * validate_uaddr() also faults in demand-paged VMAs. */
+                if (i == 0 || (a & 0xFFFu) == 0) {
+                    if (validate_uaddr(t, a, 1) != 0) { err = -3; break; }
                 }
-                pp->len = (uint16_t)(pp->len + n);
-                wrote += n;
+                char c = s[total + i];
+                if (!c) { done = 1; break; }
+                b[i++] = c;
             }
-            ret = perr ? (uint32_t)perr : (uint32_t)i;
-            break;
+            if (err || !i) break;
+            /* v2.5 redirection: pipe target first, then file, else console */
+            if (t->out_pipe >= 0) {
+                pipe_t *pp = pipe_by_handle(t->out_pipe);
+                if (!pp) { err = -1; break; }
+                int wrote = 0;
+                while (wrote < i) {
+                    if (!pp->open_r) { err = -1; break; }
+                    int free = PIPE_BUF - 1 - pp->len;
+                    if (free <= 0) { task_sleep_ticks(1); continue; }
+                    int n = i - wrote; if (n > free) n = free;
+                    for (int k = 0; k < n; k++) {
+                        pp->buf[pp->tail] = b[wrote + k];
+                        pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+                    }
+                    pp->len = (uint16_t)(pp->len + n);
+                    wrote += n;
+                }
+                if (err) break;
+            } else if (t->out_file[0]) {
+                if (fs_perm_check(t->out_file, uid, PERM_WRITE) != 0) {
+                    err = -13; break;
+                }
+                /* first chunk honours truncate/append, later ones append */
+                int mode = (t->out_append || total) ? 1 : 0;
+                int r = fs_write_raw_mode(t->out_file, b,
+                                          (uint32_t)i, mode);
+                if (r != 0) { err = r; break; }
+            } else {
+                vga_write_n(b, i, done);
+            }
+            total += (uint32_t)i;
         }
-        if (t->out_file[0]) {
-            /* write to the redirect file (append or truncate-replace) */
-            if (fs_perm_check(t->out_file, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
-            int r = fs_write_raw_mode(t->out_file, b, (uint32_t)i, t->out_append ? 1 : 0);
-            ret = r == 0 ? (uint32_t)i : (uint32_t)r;
-            break;
-        }
-        vga_write(b); ret = (uint32_t)i; break;
+        /* Hit the cap without a NUL: close any dangling UTF-8 sequence
+         * instead of leaking decoder state into the next task's write. */
+        if (!done) vga_write_n(b, 0, 1);
+        ret = err ? (uint32_t)err : (uint32_t)total;
+        break;
     }
     case SYS_PUTC: vga_putc((char)a1); ret = 0; break;
     case SYS_CLS:  vga_clear(); ret = 0; break;
@@ -991,7 +1051,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_EXIT:  task_exit_current((int)a1);
     case SYS_PRINT_INT: wdec((int)a1); ret = 0; break;
     case SYS_PRINT_HEX: whex(a1); ret = 0; break;
-    case SYS_SET_FG: { int c = (int)a1; if (c < 0) c = 0; if (c > 15) c = 15; vga_set_fg(c); ret = 0; break; }
+    case SYS_SET_FG: con_set_fg((uint8_t)a1); ret = 0; break;
     case SYS_DELAY: task_sleep_ticks(a1 / 10 + 1); ret = 0; break;
     case SYS_ATOI: {
         const char *s = (const char *)a1;
@@ -1340,6 +1400,54 @@ void isr_syscall(int_frame_t *f) {
         }
         break;
     }
+    /* ---- v2.7 display front-end -------------------------------------
+     * The ONLY user-visible display surface is styled text.  No drawing
+     * syscall exists here and the framebuffer is never mapped into a
+     * ring3 page directory (PDE 0 is supervisor-only). */
+    case SYS_DISPLAY_MODE: {
+        int mode = (int)a1;
+        if (mode == CON_MODE_QUERY) { ret = (uint32_t)con_get_mode(); break; }
+        int r = con_request_mode(mode, CON_ORIGIN_TASK);
+        ret = (r == 0) ? (uint32_t)con_get_mode() : (uint32_t)r;
+        break;
+    }
+    case SYS_DISPLAY_INFO:
+        ret = (uint32_t)con_info((int)a1);
+        break;
+    case SYS_SET_STYLE:
+        con_set_style((uint8_t)a1, (uint8_t)a2, (uint8_t)a3);
+        ret = 0;
+        break;
+    /* ---- v2.8 truecolour text + user palette ------------------------ */
+    case SYS_SET_STYLE_RGB:
+        con_set_style_rgb(a1, a2, (uint8_t)a3);
+        ret = 0;
+        break;
+    case SYS_SET_PALETTE:
+        ret = (uint32_t)con_set_palette((uint8_t)a1, a2);
+        break;
+    case SYS_PALETTE:
+        ret = con_palette((uint8_t)a1);
+        break;
+    case SYS_MMAP: {
+        /* mmap(addr, len, prot, flags): anonymous mapping in the
+         * extension arena.  addr must be 0 (kernel picks); prot bit0
+         * = writable; flags reserved (must be 0).
+         * Returns the user address (after an 8 KiB guard page), or
+         * -22 EINVAL / -12 ENOMEM. */
+        if (a1 != 0 || a2 == 0 || a2 > USER_EXT_SIZE || a4 != 0) {
+            ret = (uint32_t)-22; break;
+        }
+        uint32_t va = vma_mmap_anon(t, a2, (int)(a3 & 1u));
+        ret = va ? va : (uint32_t)-12;
+        break;
+    }
+    case SYS_MUNMAP: {
+        /* munmap(addr, len): unmap + free pages; the mapping must
+         * have come from mmap() (ext arena, guard-aligned). */
+        ret = (uint32_t)vma_munmap(t, a1, a2);
+        break;
+    }
     default: ret = (uint32_t)-8; break;
     }
 
@@ -1391,6 +1499,152 @@ int task_stat(int slot, int *tid, uint32_t *cpu_ticks, uint32_t *pages,
 
 /* ---- spawn ---------------------------------------------------------------- */
 
+/* ---- ELF32 loader (v2.10) ---------------------------------------------
+ * Loads a static ELF32 i386 image into the extension arena (PDE 9).
+ * Only ET_DYN (PIE) is truly supported: the whole image is slid by an
+ * ASLR offset of 0..15 pages above USER_EXT_BASE.  ET_EXEC is accepted
+ * but treated as PIE too (fine for position-independent code, which is
+ * all our toolchain can produce anyway -- MinGW ld has no elf_i386).
+ * Syscalls: no __ce_api slot is written; ELF programs call the fixed
+ * vsyscall table directly (CATOS_VS_TABLE in ce_abi.h). */
+
+#define ELF_MAX_PHDR 16
+#define ELF_MAX_FILE (USER_EXT_SIZE / 2)     /* 2 MiB sanity cap */
+
+typedef struct {
+    uint8_t  e_ident[16];
+    uint16_t e_type, e_machine;
+    uint32_t e_version, e_entry, e_phoff, e_shoff, e_flags;
+    uint16_t e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx;
+} elf32_ehdr_t;
+
+typedef struct {
+    uint32_t p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align;
+} elf32_phdr_t;
+
+#define ELF_PT_LOAD 1u
+#define ELF_ET_EXEC 2u
+#define ELF_ET_DYN  3u
+#define ELF_EM_386  3u
+
+/* read an arbitrary byte range of a FAT file into a kernel buffer */
+static int fat_pread(uint32_t clus0, uint32_t fsize, uint32_t off, uint32_t len,
+                     uint8_t *dst) {
+    static uint8_t fb[FAT_CLUSTER_SZ_MAX];   /* ring0 only, never re-entrant */
+    uint32_t csz = fat_cluster_size();
+    if (off + len > fsize) return -1;
+    uint32_t cluster_off = (off / csz) * csz;   /* byte offset of that chain node */
+    uint32_t c = clus0;
+    for (uint32_t skip = off / csz; skip; skip--) {
+        uint32_t n = fat_get(c);
+        if (n < 2 || n >= 0x0FFFFFF0) return -1;
+        c = n;
+    }
+    uint32_t done = 0;
+    while (done < len) {
+        if (fat_read_cluster(c, fb) != 0) return -1;
+        uint32_t in_off = (off + done) - cluster_off;
+        uint32_t n = csz - in_off; if (n > len - done) n = len - done;
+        for (uint32_t i = 0; i < n; i++) dst[done + i] = fb[in_off + i];
+        done += n;
+        cluster_off += csz;
+        uint32_t nx = fat_get(c);
+        if (done < len && (nx < 2 || nx >= 0x0FFFFFF0)) return -1;
+        c = nx;
+    }
+    return 0;
+}
+
+static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
+                          uint32_t *entry_out) {
+    elf32_ehdr_t eh;
+    if (fsize < sizeof(elf32_ehdr_t) || fsize > ELF_MAX_FILE) return -5;
+    if (fat_pread(clus0, fsize, 0, sizeof(eh), (uint8_t *)&eh) != 0) return -4;
+    if (eh.e_ident[0] != 0x7F || eh.e_ident[1] != 'E' ||
+        eh.e_ident[2] != 'L'  || eh.e_ident[3] != 'F') return -5;
+    if (eh.e_ident[4] != 1 /* ELFCLASS32 */ || eh.e_ident[5] != 1 /* LE */)
+        return -5;
+    if (eh.e_type != ELF_ET_DYN && eh.e_type != ELF_ET_EXEC) return -5;
+    if (eh.e_machine != ELF_EM_386) return -5;
+    if (eh.e_phnum == 0 || eh.e_phnum > ELF_MAX_PHDR) return -5;
+    if ((uint64_t)eh.e_phoff + (uint64_t)eh.e_phnum * sizeof(elf32_phdr_t) > fsize)
+        return -5;
+
+    elf32_phdr_t ph[ELF_MAX_PHDR];
+    if (fat_pread(clus0, fsize, eh.e_phoff,
+                  (uint32_t)eh.e_phnum * sizeof(elf32_phdr_t), (uint8_t *)ph) != 0)
+        return -4;
+
+    /* ASLR slide: 0..15 pages above the extension arena.  Cheap, but the
+     * page boundary is what matters -- it moves every symbol by 4..64 KiB. */
+    uint32_t base = USER_EXT_BASE;
+    if (eh.e_type == ELF_ET_DYN)
+        base += ((timer_ticks * 2654435761u) >> 24) % 16u * 4096u;
+
+    /* collect + merge page ranges of all PT_LOAD segments (segments may
+     * share a page), then map each merged range once */
+    struct { uint32_t start, end; int w; } rg[ELF_MAX_PHDR];
+    int nrg = 0;
+    for (int i = 0; i < eh.e_phnum; i++) {
+        if (ph[i].p_type != ELF_PT_LOAD) continue;
+        if (ph[i].p_memsz < ph[i].p_filesz) return -5;
+        if (ph[i].p_offset + ph[i].p_filesz > fsize) return -5;
+        uint32_t s = (base + ph[i].p_vaddr) & ~0xFFFu;
+        uint32_t e = (base + ph[i].p_vaddr + ph[i].p_memsz + 0xFFFu) & ~0xFFFu;
+        if (s < USER_EXT_BASE || e > USER_EXT_END) return -5;   /* must stay in PDE 9 */
+        int w = (ph[i].p_flags & 2) ? 1 : 0;                    /* PF_W */
+        int merged = 0;
+        for (int j = 0; j < nrg; j++) {
+            if (s <= rg[j].end && e >= rg[j].start) {
+                if (s < rg[j].start) rg[j].start = s;
+                if (e > rg[j].end)   rg[j].end   = e;
+                rg[j].w |= w;
+                merged = 1; break;
+            }
+        }
+        if (!merged && nrg < ELF_MAX_PHDR) {
+            rg[nrg].start = s; rg[nrg].end = e; rg[nrg].w = w; nrg++;
+        } else if (!merged) return -5;
+    }
+    if (nrg == 0) return -5;
+
+    for (int i = 0; i < nrg; i++) {
+        for (uint32_t p = rg[i].start; p < rg[i].end; p += 4096) {
+            uint32_t f = (uint32_t)kzalloc_frame();
+            if (!f) return -12;
+            if (task_map_page(&t->space, p, f, rg[i].w) != 0) {
+                frame_free(f);
+                return -12;
+            }
+        }
+        vma_t *v = vma_new(rg[i].start, rg[i].end, VMA_IMAGE, rg[i].w);
+        if (!v) return -12;
+        t->vm = vma_insert(t->vm, v);
+    }
+
+    /* copy file bytes (bss pages stay zeroed by kzalloc_frame) */
+    for (int i = 0; i < eh.e_phnum; i++) {
+        if (ph[i].p_type != ELF_PT_LOAD || ph[i].p_filesz == 0) continue;
+        static uint8_t fb2[FAT_CLUSTER_SZ_MAX];
+        uint32_t remaining = ph[i].p_filesz, off = ph[i].p_offset;
+        uint32_t va = base + ph[i].p_vaddr;
+        while (remaining) {
+            uint32_t n = remaining > sizeof(fb2) ? sizeof(fb2) : remaining;
+            if (fat_pread(clus0, fsize, off, n, fb2) != 0) return -4;
+            k2u_copy(&t->space, va, fb2, n);
+            va += n; off += n; remaining -= n;
+        }
+    }
+
+    uint32_t entry = base + eh.e_entry;
+    int ok = 0;
+    for (int i = 0; i < nrg; i++)
+        if (entry >= rg[i].start && entry < rg[i].end) ok = 1;
+    if (!ok) return -5;
+    *entry_out = entry;
+    return 0;
+}
+
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
@@ -1399,7 +1653,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
 
     uint32_t clus = 0, size = 0;
     if (!path || fs_resolve_file(path, &clus, &size) != 0) return -2;
-    if (size < sizeof(ce_header_t) || size > CE_MAX_IMAGE + sizeof(ce_header_t)) return -3;
+    if (size < 4) return -3;
 
     /* v2.5: read the first cluster, parse the 20-byte header there (no
      * big bounce buffer).  The image then walks the FAT chain into the
@@ -1407,13 +1661,26 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     static uint8_t fbuf[FAT_CLUSTER_SZ_MAX];
     uint32_t csz = fat_cluster_size();
     if (fat_read_cluster(clus, fbuf) != 0) return -4;
-    ce_header_t *h = (ce_header_t *)fbuf;
-    if (h->magic[0]!=CE_MAGIC0||h->magic[1]!=CE_MAGIC1||h->magic[2]!=CE_MAGIC2||h->magic[3]!=CE_MAGIC3)
-        return -5;
-    uint32_t img = h->image_size, bss = h->bss_size, api = h->api_offset;
-    if (h->entry != 0 || img > CE_MAX_IMAGE || bss > CE_MAX_BSS) return -5;
-    if (img + sizeof(ce_header_t) > size) return -5;
-    if (api + 4 > img) return -5;
+
+    /* v2.10: dual-track dispatch -- CE01 flat image (legacy, fixed
+     * offsets in PDE 8) or ELF32 (PIE + ASLR in the PDE 9 extension). */
+    int is_elf = (fbuf[0] == 0x7F && fbuf[1] == 'E' && fbuf[2] == 'L' && fbuf[3] == 'F');
+    uint32_t entry = USER_IMAGE_BASE;
+    uint32_t img, bss, api;
+
+    if (is_elf) {
+        if (size > ELF_MAX_FILE) return -3;
+        img = bss = api = 0;
+    } else {
+        if (size < sizeof(ce_header_t) || size > CE_MAX_IMAGE + sizeof(ce_header_t)) return -3;
+        ce_header_t *h = (ce_header_t *)fbuf;
+        if (h->magic[0]!=CE_MAGIC0||h->magic[1]!=CE_MAGIC1||h->magic[2]!=CE_MAGIC2||h->magic[3]!=CE_MAGIC3)
+            return -5;
+        img = h->image_size; bss = h->bss_size; api = h->api_offset;
+        if (h->entry != 0 || img > CE_MAX_IMAGE || bss > CE_MAX_BSS) return -5;
+        if (img + sizeof(ce_header_t) > size) return -5;
+        if (api + 4 > img) return -5;
+    }
 
     task_t *t = &tasks[slot];
     /* v2.5: always reset redirect fields -- tasks[] is static and a reused
@@ -1429,6 +1696,15 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
 
     if (task_space_create(&t->space) != 0) return -6;
 
+    if (is_elf) {
+        /* ELF path: segments are mapped, copied and VMA-tagged inside
+         * spawn_load_elf (extension arena, PIE + ASLR). */
+        int r = spawn_load_elf(t, clus, size, &entry);
+        if (r != 0) {
+            task_space_destroy(&t->space);
+            return r;
+        }
+    } else {
     /* map image/bss pages (bss zero: kzalloc_frame) */
     uint32_t span = (img + bss + 0xFFF) & ~0xFFFu;
     for (uint32_t off = 0; off < span; off += 4096) {
@@ -1464,6 +1740,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         }
         if (img_written < img) goto fail_space4;
     }
+    } /* !is_elf */
 
     /* vsyscall page (user read-only) */
     {
@@ -1486,8 +1763,11 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * Heap VMA is created lazily on first SYS_ALLOC. */
     {
         uint32_t span = (img + bss + 0xFFF) & ~0xFFFu;
-        t->vm = vma_new(USER_IMAGE_BASE, USER_IMAGE_BASE + span, VMA_IMAGE, 0);
-        if (!t->vm) goto fail_space6;
+        if (!is_elf) {
+            vma_t *im = vma_new(USER_IMAGE_BASE, USER_IMAGE_BASE + span, VMA_IMAGE, 0);
+            if (!im) goto fail_space6;
+            t->vm = im;
+        }
         vma_t *vs = vma_new(USER_VSYSCALL, USER_VSYSCALL + 4096, VMA_VSYSCALL, 0);
         if (!vs) goto fail_space6;
         t->vm = vma_insert(t->vm, vs);
@@ -1532,8 +1812,9 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     }
 #endif
 
-    /* api table pointer into the image's api slot */
-    {
+    /* api table pointer into the image's api slot (CE only; ELF programs
+     * call the vsyscall table directly at CATOS_VS_TABLE) */
+    if (!is_elf) {
         uint32_t pa = task_virt_to_phys(&t->space, USER_IMAGE_BASE + api);
         *(uint32_t *)pa = VS_TABLE;
     }
@@ -1542,7 +1823,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int_frame_t *fr = (int_frame_t *)(ks_top - sizeof(int_frame_t) - 16);
     uint8_t *fb = (uint8_t *)fr;
     for (uint32_t i = 0; i < sizeof(int_frame_t); i++) fb[i] = 0;
-    fr->eip = USER_IMAGE_BASE;             /* ce_main at image offset 0 */
+    fr->eip = entry;                       /* CE: image base; ELF: ASLR-slid */
     fr->cs = SEL_UCODE;
     fr->eflags = 0x202;                    /* IF set */
     fr->esp = usp;

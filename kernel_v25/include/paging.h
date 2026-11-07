@@ -25,11 +25,14 @@ void    *kzalloc_frame(void);          /* one zeroed frame, kernel-virtual */
 
 typedef struct task_space {
     uint32_t dir;
-    uint32_t pt;
+    uint32_t pt;        /* user page table for PDE 8  (0x2000000..0x2400000) */
+    uint32_t pt2;       /* user page table for PDE 9  (0x2400000..0x2800000),
+                         * ELF images and anonymous mmap live here */
 } task_space_t;
 
 int      task_space_create(task_space_t *s);
 int      task_map_page(task_space_t *s, uint32_t vaddr, uint32_t pa, int user_writable);
+int      task_unmap_page(task_space_t *s, uint32_t vaddr);   /* frees the frame */
 uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr);
 void     task_space_destroy(task_space_t *s);
 
@@ -78,5 +81,22 @@ int    vma_contains(const vma_t *list, uint32_t addr);
 #define USER_STACK_TOP  0x2200000u
 #define USER_STACK_SZ   0x10000u       /* 64 KiB */
 #define USER_ARENA_END  0x2400000u
+
+/* ---- extension arena: PDE 9 (36..40 MiB, one 4 KiB page table) --------
+ * Home of ELF images (PIE, ASLR-slid base) and anonymous mmap regions.
+ * All of it is lazy-mapped: pages appear on first touch via the VMA
+ * page-fault path. */
+#define USER_EXT_BASE   0x2400000u
+#define USER_EXT_END    0x2800000u
+#define USER_EXT_SIZE   (USER_EXT_END - USER_EXT_BASE)
+#define PDE_USER_EXT    9u
+
+/* ---- VBE linear framebuffer -------------------------------------------
+ * Map a PCI MMIO framebuffer into the KERNEL page directory (identity,
+ * supervisor-only, 4 KiB pages).  Returns the usable virtual address
+ * (== phys) or 0 on failure.  Ring3 page directories copy only PDEs
+ * 0..15, so a high LFB is never reachable from user mode -- this is what
+ * keeps the "no user drawing API" guarantee in truecolour mode too. */
+void *vbe_lfb_map(uint32_t phys, uint32_t size);
 
 #endif

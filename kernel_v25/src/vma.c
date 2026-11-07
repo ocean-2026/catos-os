@@ -12,31 +12,9 @@
  */
 
 #include "paging.h"
+#include "vma.h"
 #include "task.h"
 #include "vga.h"
-
-/* ---- tiny helpers ---------------------------------------------------- */
-
-static void w(const char *s) { vga_write(s); }
-
-static void whex(uint32_t v) {
-    static const char *h = "0123456789abcdef";
-    char b[11]; b[0] = '0'; b[1] = 'x';
-    for (int i = 0; i < 8; i++) b[2 + i] = h[(v >> (28 - i * 4)) & 0xF];
-    b[10] = 0; w(b);
-}
-
-static void wdec(int v) {
-    char b[12]; int i = 0, neg = 0;
-    unsigned u = (unsigned)v;
-    if (v < 0) { neg = 1; u = 0u - u; }
-    if (u == 0) b[i++] = '0';
-    while (u) { b[i++] = (char)('0' + u % 10); u /= 10; }
-    char o[13]; int j = 0;
-    if (neg) o[j++] = '-';
-    while (i) o[j++] = b[--i];
-    o[j] = 0; w(o);
-}
 
 /* ---- VMA list ops ---------------------------------------------------- */
 
@@ -142,16 +120,14 @@ int task_page_fault(int_frame_t *f) {
     task_t *t = task_current();
     if (!t || t->ring0) return -14;
     if (vma_map_page_on_fault(t, cr2) == 0) return 0;  /* retry the faulting instruction */
-    /* unrecoverable: kill the task */
-    w("\n[task "); wdec(t->tid); w(" '"); w(t->name);
-    w("' killed: page fault at cr2="); whex(cr2); w("]\n");
-    /* Note: task_cleanup/maybe_autoreap/reschedule are in task.c and
-     * cannot be called directly from vma.c due to circular dependencies.
-     * Fall back to an unsafe direct call that mirrors task_die_fault. */
-    /* This is intentional: page fault handling is a kernel-wide emergency
-     * path that bypasses normal cleanup to avoid deadlocks. */
-    (void)0;  /* placeholder - see task_die_fault for reference */
-    __builtin_unreachable();
+    /* TD-01 (fixed): unrecoverable fault.  Return -14 and let the
+     * exception dispatcher (intr.c) route to task_die_fault(), which
+     * performs task_cleanup + zombie + reschedule.  The old code here
+     * printed the kill banner and then hit __builtin_unreachable()
+     * without ever returning, so the task was neither cleaned up nor
+     * killed -- and control could fall into garbage code.  No circular
+     * dependency exists: task.c is the caller's caller, not a callee. */
+    return -14;
 }
 
 /* ---- VMA-backed user-pointer helpers --------------------------------- */
@@ -206,6 +182,65 @@ int copy_from_user(task_t *t, void *dst, const void *src, uint32_t len) {
         const uint8_t *sp = (const uint8_t *)(pa + off);
         for (uint32_t i = 0; i < n; i++) dp[i] = sp[i];
         s += n; dp += n; len -= n;
+    }
+    return 0;
+}
+
+/* ---- anonymous mmap / munmap ------------------------------------------
+ * Regions live in the extension arena (PDE 9, 36..40 MiB) so they can
+ * coexist with the CE legacy layout in PDE 8.  Pages are mapped lazily
+ * by the page-fault path; a munmap'd page is unmapped and freed.
+ * Layout per mapping: [guard 8 KiB | user region | (tail slack)]
+ * The returned address sits after the guard, so an underrun write hits
+ * an unbacked guard page and kills the task instead of a neighbour. */
+
+#include "task.h"
+
+uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
+    if (!t || len == 0) return 0;
+    /* first-fit gap scan over the (start-sorted) VMA list, restricted
+     * to the extension arena; the returned base needs room for the
+     * guard pages plus len, page-aligned */
+    uint32_t want = VMA_GUARD_SZ + ((len + 0xFFFu) & ~0xFFFu);
+    uint32_t cur = USER_EXT_BASE;
+    while (1) {
+        uint32_t next = USER_EXT_END;
+        for (vma_t *x = t->vm; x; x = x->next)
+            if (x->start >= cur && x->start < next) next = x->start;
+        if (next - cur >= want && cur + want <= USER_EXT_END) {
+            uint32_t base = cur;
+            vma_t *nv = vma_new(base, base + want, VMA_ANON, writable ? 1 : 0);
+            if (!nv) return 0;
+            t->vm = vma_insert(t->vm, nv);
+            return base + VMA_GUARD_SZ;
+        }
+        if (next >= USER_EXT_END) return 0;     /* arena exhausted */
+        cur = next;
+        /* skip past the whole VMA that starts at cur */
+        for (vma_t *x = t->vm; x; x = x->next)
+            if (x->start == cur && x->end > cur) { cur = x->end; break; }
+        if (cur >= USER_EXT_END) return 0;
+    }
+}
+
+int vma_munmap(task_t *t, uint32_t addr, uint32_t len) {
+    if (!t || len == 0) return -22;
+    if (addr < USER_EXT_BASE || addr + ((len + 0xFFFu) & ~0xFFFu) > USER_EXT_END)
+        return -22;                             /* only ext-arena mappings */
+    uint32_t start = addr & ~0xFFFu;
+    uint32_t end   = addr + ((len + 0xFFFu) & ~0xFFFu);
+    /* the whole range must lie inside ONE mapping we created */
+    vma_t *v = vma_find(t->vm, start);
+    if (!v || v->kind != VMA_ANON || end > v->end || start < v->start + VMA_GUARD_SZ)
+        return -22;
+    for (uint32_t p = start; p < end; p += 4096)
+        task_unmap_page(&t->space, p);          /* frees frames; lazy pages are fine */
+    if (start == v->start + VMA_GUARD_SZ && end == v->end) {
+        /* whole region gone: drop the VMA (incl. its guard pages) */
+        t->vm = vma_remove(t->vm, v);
+        vma_free(v);
+    } else {
+        v->start = end;                          /* partial: shrink the region */
     }
     return 0;
 }
