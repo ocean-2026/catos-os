@@ -26,6 +26,7 @@
 - GP 崩溃（spawn+wait 后 pop gs）已修复；pipe_read 死锁已修复
 - 详细：见 ../problem.md、../CatOS-内核问题清单.md
 
-## 已知遗留
-- fat_flush 每次写 8MB FAT 全区（性能，功能正常，后续脏段追踪）
-- #46 POSIX syscall 入口面（libc 层）未做——下一步用户侧 libc 封装
+## 已知遗留（10-28 快照记录，状态核对至 2026-11-06）
+- ~~fat_flush 每次写 8MB FAT 全区~~ → **已在 b31 修复**：脏表项 journal + 脏扇区 RMW 增量写盘（见 `../docs/CatOS-内核问题清单.md` 第九节 #48/#3）
+- #46 POSIX syscall 入口面（libc 层）仍未做——下一步用户侧 libc 封装
+- ~~工具链 CE 镜像上限 64 KiB~~ → 与内核 `ce.h` 的 256 KiB 不一致，**2026-11-06 已修复**：mkce.py 运行时读取 ce.h 并把加载器校验前移；见 `../docs/CatOS-内核问题清单.md` 第十节 #47

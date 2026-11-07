@@ -9,7 +9,7 @@
 
 | # | 问题 | 确认值 | 影响 | 规避/对策 | 发现版本 | 状态 |
 |---|---|---|---|---|---|---|
-| 1 | CE 镜像大小上限 | ≤65536 字节（CE01 头，build.sh/mkce.py 检查） | ocntools.ce v1.6=60120B、v1.7=57400B，贴近上限 | 持续瘦身；体积敏感的代码尽量外置 .csc | v1.0 起 | 已确认 |
+| 1 | CE 镜像大小上限 | **v2.5 起 262144 字节（256 KiB）**：`include/ce.h` 的 `CE_MAX_IMAGE=0x40000`，`CE_MAX_BSS=0x40000`；v1.x 的 65536 字节是旧 `mkce.py` 的检查值 | ocntools.ce v1.6=60120B、v1.7=57400B 曾贴近旧上限；v2.5 自举产物 CC2.CE≈82KB 被旧检查直接拒掉（见 #47） | 工具链上限从 ce.h 运行时读取，不再单独硬编码；体积敏感代码仍可外置 .csc | v1.0 起 / v2.5 更新 / 2026-11-06 修正 | 已确认/已修正 |
 | 2 | 内核栈仅 8KiB | 8 KiB | CE 程序大栈帧会踩栈（v1.6 B1：run_script_args 栈上 buf[8192]+lines[128][97]≈21.4KB） | 大缓冲必须文件级 static；v1.6 已把 CSC 解释器缓冲 static 化 + g_csc_active 防重入 | v1.6 | 已确认/已修复 |
 | 3 | 堆为 64KiB 静态池 | api->alloc/free，64 KiB 静态池 | alloc 失败即池耗尽；大块分配需及时 free | alloc 后立即 free；脚本里 alloc/free 配对 | v1.7 | 已确认 |
 | 4 | 无固定地址 alloc + 固定链接基址 0x02000000 | 链接基址固定，无固定地址分配 | CE 程序无法动态加载/运行其他 CE（ot 不能 run .ce） | cecheck 作为用户态安全等价物（不依赖内核加载器） | v1.2 评估 | 已确认/已规避 |
@@ -40,7 +40,7 @@
 
 | # | 问题 | 确认值 | 影响 | 规避/对策 | 发现版本 | 状态 |
 |---|---|---|---|---|---|---|
-| 17 | mkce.py 的 bss_size quirk | 把 readelf 的 .bss **文件偏移**当 bss_size 写入 CE01 头（真实 .bss=126224B） | 头字段值可疑，实测运行正常 | 暂沿用；建议后续单独核对内核加载逻辑（v1.6 审查跟进项） | v1.4 起 | 待核对 |
+| 17 | mkce.py 的 bss_size quirk | 把 readelf 的 .bss **文件偏移**当 bss_size 写入 CE01 头（真实 .bss=126224B） | 头字段值可疑，实测运行正常 | **2026-11-06 核对**：本快照两份 `mkce.py` 都不解析 readelf；bss 由 `build_ce.sh` 取 `objdump -h` 第 3 列（**Size**，非 offset）作参数传入，无此 bug；另在构建期增加 bss 上限校验（见 #47） | v1.4 起 | 已核对/本快照不适用 |
 | 18 | CE01 头 / 基址 / 重定位 | magic/entry/bss_size/api_offset/image_size 实测正确；基址 0x02000000；无重定位 | 正常 | — | v1.6 审查 | 已确认 |
 | 19 | QEMU sendkey 丢键 | 空格/字母/回车偶发丢失（测试环境噪音） | 长命令粘连、验证误判 | 慢速发送 + vga 屏幕回显校验 + BS 清行重试 | v1.0 起 | 环境噪音（非内核） |
 | 20 | fatfs.py 工具 bug/口径 | dump_tree 递归 TypeError 勿用；read_chain 参数是簇链 list 非 slot 号 | 误用会崩或读错 | 用 add_file/delete_file/read_chain（簇链） | v1.0 起 | 工具备忘 |
@@ -74,7 +74,7 @@
 | 29 | typecmd.py/type_slow.py 数字键码 off-by-one | DIGITS 映射把 '2' 发成 '3' 的键码（0x02+i 应为 0x02+i-1） | 含数字的命令会输错 | 已修复两个脚本 | adofai 项目 | 已修复（工具） |
 | 30 | QEMU 运行中宿主侧 fatfs 注入会被 VM 写回缓存覆盖 | 运行时 add 的文件 VM 看不到 | 测试注入无效 | 注入前停 VM，注入后重启 VM；add_file_safe 重复注入会生成重复条目 | adofai 项目 | 工具备忘 |
 | 31 | CE 菜单阶段（内核 getch）按键随机丢失：单独发 '1' 可启动游戏，伴随其它按键或快速连发时 '1' 频繁丢失；游玩阶段屏蔽 IRQ1 直轮询 PS/2 则 100% 可靠 | 疑似 shell 后台任务与 CE 竞争内核 kb_in 队列，或 IRQ1 路径快速按键溢出 | CE 应用应全程屏蔽 IRQ1 直轮询 PS/2（菜单/结果/游玩统一），readline 等内核输入路径临时恢复 IRQ1 | adofai 项目实测 | 已确认/已规避 |
-| 32 | mkce.py 的 readelf .bss 列解析 bug（取 offset 当 size）→ CE01 头 bss 字段偏小，内核只清零部分 BSS，静态数组尾部为垃圾值 | readelf -S 第5列 offset vs 第6列 size | 已修复（adofai/mkce.py 取第6列）；ocean_tools 的 mkce.py 若同源需同步修复 | adofai 项目 | 已修复（工具） |
+| 32 | mkce.py 的 readelf .bss 列解析 bug（取 offset 当 size）→ CE01 头 bss 字段偏小，内核只清零部分 BSS，静态数组尾部为垃圾值 | readelf -S 第5列 offset vs 第6列 size | 已修复（adofai/mkce.py 取第6列）；**2026-11-06 核对**：本快照两份 mkce.py 无 readelf 解析路径，bss 取自 objdump Size 列，无需同步修；adofai 侧修复保留 | adofai 项目 | 已修复（工具）/本快照已核对 |
 | 33 | QEMU monitor screendump 偶发不写文件（同一命令多次重试可成功），且 screendump 实际捕获状态比发出时刻滞后 ~1.5-2s | 工具备忘 | 测试脚本需重试 + 容忍滞后；判断状态用色彩统计（绿=游玩准度条/黄=胜利/红=失败屏） | adofai 项目 | 工具备忘 |
 | 34 | QEMU 新实例 PS/2 键盘注入完全失效 | 新启动 QEMU 实例（12+ 实测）键盘 0% 接收率（HMP sendkey 键名/数字、QMP input-send-event、长 hold、bios.bin/bios-256k.bin、v1.8/v1.9 磁盘均无效），仅长时间运行的老实例部分正常（~80%） | VM 交互测试前先单键探测；备用：STARTUP_CMD 自动执行路径可绕过键盘（ot 启动后自动跑）；根因待查（疑似 CatOS 键盘驱动初始化时序/IRQ1 状态） | ot v1.9 | 环境问题/未决 |
 | 35 | QEMU sendkey 注入存在不可控秒级延迟 + 键排队（2026-10-24 晚新证据） | sendkey 1 后 0.6s screendump 拍到的是注入前状态（菜单屏），键约 1~2s 后才被 CE 处理（此前 probe 轮"sendkey 1 → 失败屏"即为延迟送达）；菜单阶段 spc/数字键同样丢/延迟；10 连拍轮询 screendump（0.25s 间隔）全拍到同一失败屏=键未送达或排队未消费 | 节奏游戏"进关→LEADIN 1.2s→游玩"窗口截图时机失效：screendump 时游戏还没开始或已失败；精准跟拍判定词/胜利屏基本不可行 | ①screendump 轮询 + 色彩统计判断当前屏（绿=游玩准度条/黄=胜利/红=失败屏，单键即可区分）②连发键等延迟送达后消费 ③STARTUP_CMD 自动执行绕键盘 ④O 扫动准度条只能在 LEADIN 期间出现，属最稀缺画面 | 2026-10-24 adofai 实测 | 环境问题/未决 |
@@ -108,3 +108,32 @@
 | F1 | task_spawn_ce 失败路径泄漏子进程地址空间（反复失败 spawn 累积） | task_space_create 成功后的失败分支（原 -4/-6 direct return）不释放页表/页框 | 失败路径 goto fail_space4/fail_space6 → 先 `task_space_destroy(&t->space)` 再返回 | 已修复（spawn_fail.ce：40 次失败 spawn 后真实 spawn 仍成功） |
 | A2 | fat_append_file 中途失败无回滚，内存 FAT 悬挂链残留 | fat_alloc/fat_write_cluster 失败时已写 FAT 链接不还原 | aundo[512] undo 日志逆序回滚全部 FAT 链接，失败后内存 FAT 与调用前一致 | 已修复（test_ab 100KB 追加+偏移读+管道+spawn+delete 全过） |
 | #3 | fat_flush 每次整 FAT 区 8MB 全刷（性能） | 旧 fat_flush 写 FAT#1+FAT#2 全区 | 随 #48 改为脏扇区增量 RMW，不再全刷 | 已修复（随 #48 闭合） |
+
+---
+
+## 十、工具链常量与内核一致性核对（2026-11-06）
+
+> 本节条目号 47 为清单序号，与第九节的内核问题编号 #48/#49 不是同一命名空间。
+> 执行环境：隔离分支 `workbuddy/todo-20261106-1906`（主工作树 `D:/CatOs` 当时有他人并行改动，未触碰）。
+
+| # | 问题 | 确认值（源码证据） | 影响 | 处置 | 发现版本 | 状态 |
+|---|---|---|---|---|---|---|
+| 47 | **构建工具镜像上限与内核漂移** | 内核 `include/ce.h:35` 为 `CE_MAX_IMAGE 0x40000`（256 KiB，v2.5 由 64 KiB 提升）；旧版 `kernel_v25/build/mkce.py` 与 `kernel_v25/extapp/build/mkce.py` 第 31 行均判 `len(data) > 0x10000` 即报错。旧版对 80 KiB 镜像实测输出 `error: image too big (81920 bytes, max 65536)` | 任何 >64 KiB 的镜像在宿主构建阶段被拒（自举产物 CC2.CE≈82KB 正落在此区间），表现为「编译器正常、镜像出不来」；与 `task_spawn_ce()` 的 256 KiB 判定不一致 | 两份 mkce.py 运行时解析 `include/ce.h` 的 `CE_MAX_IMAGE/CE_MAX_BSS` 作唯一真值源（找不到时回退内置 256 KiB），并把加载器三条判定（image / bss / api_offset+4）前移到构建期；两份保持字节一致，由 `tests/test_mkce.py` 断言 | v2.5 快照 / 2026-11-06 | 已修复 |
+
+**同源问题：`tests/build_ce.sh` 是失效的旧副本。** 脚本按 `tests/` 拼 `ce.ld`、`ce_stub.c`、`$ROOT/build/mkce.py`，三者均不存在；实测 `sh tests/build_ce.sh spawn_fail.c` → exit 127，从未可用。已改为薄包装：解析源文件绝对路径后 `exec` 转发给 `kernel_v25/extapp/build_ce.sh`，只保留一套真实工具链。实测产出合法 CE01（`image=4408 bss=0 api_off=4404`，api+4 恰等于 image 边界）。
+
+**核对结论**
+
+1. **#17 / #32（readelf .bss 列解析）**：本快照 `build_ce.sh` 用 `objdump -h` 第 3 列（Size），mkce.py 不解析 readelf，无需同步修复；adofai 侧修复保留。
+2. **第九节 b31 闭合表**：#48 / F1 / A2 / #49 / #3 五项均已列出，状态与 `problem.md` 的「已修复」记录一致，无需补项。
+3. **验收**：`tests/test_mkce.py` 48/48 PASS；`tests/test_cc.py` 8/8 PASS（含指令级模拟器，另 `--no-sim` 8/8）；宿主构建链端到端产出合法 CE01。QEMU 实机仍待云侧环境。
+4. **独立复核**：只读复核发现并已修复两处——(a) 测试只比上限数值、不比来源，因回退常量与 ce.h 恰好相等而构成假阳性；(b) 非法/负数/超 uint32 参数抛 Python traceback 而非 `error:`。现已断言 `load_limits()` 的 source 必须指向 `include/ce.h`，并覆盖 0x 前缀、非法 hex、负数、超范围、uint32 回绕等边界。
+
+**本轮发现但未修改的既有问题（交主工作树合流处理，避免与并行开发冲突）**
+
+| 位置 | 问题 | 建议 |
+|---|---|---|
+| `src/task.c:1345`（`task_spawn_ce`） | `api` / `img` 为 `uint32_t`，`api + 4 > img` 会回绕：`api=0xFFFFFFFC` 时和为 0，校验被绕过，随后在 `USER_IMAGE_BASE + 0xFFFFFFFC` 写 4 字节 API 表指针 → 越界写 | 改为防溢出形式（如先判 `img < 4`，再 `api > img - 4`）；构建工具侧已更严拦截，但宿主注入等非 mkce 路径仍可绕过 |
+| `kernel_v25/extapp/build_ce.sh:48-49` | `CFLAGS` 内 `-I$CEBASE -I$ROOT/include` 未加引号，而 `$CFLAGS` 又以无引号形式展开；工作目录含空格时 gcc 收到被分词的错误参数 | 把 `-I` 两项移出 `CFLAGS`，在 gcc 命令行直接写成 `-I"$CEBASE" -I"$ROOT/include"` |
+
+> 说明：上述两处不在本轮改动清单内——`task.c` 与 `extapp/build_ce.sh` 属主工作树正在并行修改的活跃文件，隔离分支不擅自改动，以免合流冲突。

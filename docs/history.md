@@ -31,3 +31,9 @@
 - [node解释器][易错点] `typeof x`（无括号）解析成相邻两标识符 → perr "expected )"；实现 `typeof` 为 unary 关键字（转 E_CALL 内建）即可支持两种写法
 - [node解释器][易错点] 宿主侧验证命令：`gcc -O2 -w -I extapp -o /tmp/node_test extapp/node.c extapp/host_stub.c`；CE 构建 `sh extapp/build_ce.sh node.c`（从内核根目录、文件名不带路径，带路径会 cc1 找不到文件）；改 node.c 后两步都要跑
 - [node解释器][易错点] 数组越界访问返回 VAL_UNDEF → `total + arr[i]` 报 "+ needs numbers/strings"（demo 曾用 `i<5` 配 3 元素数组自踩）；脚本边界与解释器严格报错行为要区分
+- [ot内核v2.5/工具链][易错点] **构建工具与内核常量各自硬编码会漂移**：内核 v2.5 把 `CE_MAX_IMAGE` 从 64 KiB 提到 256 KiB（`include/ce.h` 0x40000），但两份 `mkce.py` 仍按 `0x10000` 拒绝镜像；自举产物 CC2.CE≈82KB 在宿主构建阶段就被拒，表现为「编译器正常、镜像出不来」。旧版对 80 KiB 镜像实测输出 `error: image too big (81920 bytes, max 65536)`；修法 = 运行时解析 ce.h 作唯一真值源 + 两份副本字节一致断言
+- [ot内核v2.5/工具链][易错点] `tests/build_ce.sh` 是 extapp 脚本的旧副本，却按 `tests/` 拼 `ce.ld` / `ce_stub.c` / `$ROOT/build/mkce.py`，三者全不存在，实测 exit 127 从未可用；改为薄包装委托 `kernel_v25/extapp/build_ce.sh`，只保留一套真实工具链
+- [ot内核v2.5/工具链][易错点] 构建期不校验 bss / api_offset，错误只在 QEMU 里以 `task_spawn_ce` err -5 暴露；把加载器三条早退判定（img>CE_MAX_IMAGE、bss>CE_MAX_BSS、api+4>img）前移到 mkce.py。注意 `api+4 == img` 是合法边界（实测 spawn_fail.ce：image=4408 / api_off=4404），写成 `>=` 会误伤真实产物
+- [ot内核v2.5/工具链][易错点] 本机跑 MinGW 构建脚本须显式给工具链 PATH 与 `PYTHON`（`PATH=/c/msys64/mingw32/bin:/usr/bin:/bin PYTHON=<python> sh tests/build_ce.sh ...`）；只设 PATH 会因 python 不在 PATH 报 `ERROR: no python found`，不设 PATH 则 gcc 以 127 失败
+- [ot内核v2.5/工具链][易错点] **回退值与头文件恰好相等会让测试变假阳性**：`load_limits()` 找不到 ce.h 时回退内置 256 KiB，而 ce.h 当前也是 256 KiB，只断言「脚本读到的上限 == 头文件上限」在相对路径完全失效时照样全绿；必须连第三个返回值 `source`（是否指向真实 ce.h 路径）一起断言
+- [ot内核v2.5/工具链][易错点] 失败用例复用同一个输出文件路径时，「拒绝后不应产出文件」的断言会被上一次成功用例的残留文件误伤；每个拒绝用例运行前先删除输出文件，再判 `not os.path.exists(out)`

@@ -64,16 +64,17 @@
 ### P0 —— 目标一：GNU 工具链 CatOS 自举（子集）【任务 #19】
 - [x] **微型 C 编译器（cc.ce）**：CE 用户态实现——词法/语法解析 → x86 代码生成 → CE01 镜像（`extapp/cc.c`，1129 行）
 - [x] 编译 `hello.c` 等简单 C 源码 → 生成可执行 CE 程序（fib(10)=55、sum(1..5)=15 实测正确）
-- [ ] 自举环：cc.ce 编译自身源码（**待办**：cc.c 用到的 goto/结构体/switch 尚未支持）
+- [ ] 自举环：cc.ce 编译自身源码（11-02 版 cc.c 已支持 goto/结构体/switch；**主体由主工作树并行开发中，本轮不重复改 cc.c**；本轮已清除工具链 64 KiB 上限阻塞，见第七节）
 - [ ] 依赖内核能力：文件读写（#42 ✅）/管道（#44 ✅）/spawn+wait（#44 ✅）已具备；如需标准 syscall 入口面（#46）再评估
-- [ ] 双审闭环 + git commit + GitHub 推送
-- [x] 回归套件 `tests/test_cc.py`（8 用例：算术/除法/循环/break/递归/全局指针/比较）全 PASS
-- [ ] QEMU 实机验证（本机无 QEMU 且下载受阻，见「六、本轮环境限制」）
+- [x] 本地 git commit（隔离分支 `workbuddy/todo-20261106-1906`，2026-11-06）；独立只读复核完成（非正式双审闭环）
+- [ ] 双审闭环（功能 + 审美子代理）与 GitHub 推送：需用户授权远程仓库与凭据，本轮未做（不擅自外部推送）
+- [x] 回归套件 `tests/test_cc.py`（8 用例：算术/除法/循环/break/递归/全局指针/比较）全 PASS；新增 `tests/test_mkce.py` 48/48 PASS
+- [ ] QEMU 实机验证（本机无 QEMU 且下载受阻，见「六、本轮环境限制」；云侧环境就绪后执行）
 
 ### P1 —— 收尾与打磨
-- [ ] 推送 `node.c` 到 GitHub（可拆 commit 分批推，或用 create_or_update_file 大文件通道）
-- [ ] 内核 b31 快照 kernel-v25 已同步；如需发新版 problem.md 版本号（v2.5.4 → v2.6）再更新
-- [ ] CatOS-内核问题清单.md 第九节闭合表核对（#48/F1/A2/#49 已列）
+- [ ] 推送 `node.c` 到 GitHub（可拆 commit 分批推，或用 create_or_update_file 大文件通道）——外部动作，待用户授权
+- [ ] problem.md 版本号（v2.5.4 → v2.6）：**须等云侧 QEMU 全量回归通过后**再更新，本轮不提前改版本号
+- [x] CatOS-内核问题清单.md 第九节闭合表核对（2026-11-06：#48/F1/A2/#49/#3 五项齐全，与 problem.md 一致）；顺带闭合 #17/#32 待核对项，新增 #47
 
 ### P2 —— 后续扩展（可选）
 - [ ] node 子集增强：字符串方法/更多内置对象/模块加载
@@ -114,3 +115,22 @@
 | `build/gen_builtin.py` | 硬编码 10 个应用 + 2 个文档，v2.5 精简树缺文件导致中断 | 改为必需+可选两组，缺失时跳过并提示 |
 | `kernel_v25/pe.ld` | 缺失（内核链接脚本） | 从基线工程恢复 |
 | `extapp/*.c` + `docs/` | v2.5 快照只含变动文件，内置应用集缺失 | 从基线补齐 calc/sysinfo/demo/curl/netinfo/spinner/crash/perms/hw + API.TXT/CEFORMAT.TXT |
+
+---
+
+## 七、2026-11-06 隔离分支工作记录（`workbuddy/todo-20261106-1906`）
+
+**占用判定**：主工作树 `D:/CatOs`（master）确认有他人正在操作——20+ 个已跟踪文件未提交、40+ 个未跟踪新文件，最近 15 分钟内 80 个文件被改动，`P0_VMA_实现报告.md` / `CatOS_P0_总结与经验教训.md` 于 18:54 / 18:55 刚写入。按「先隔离再工作」执行：本工作树与 master 本就物理隔离，另基于 `ae0ee2d` 新建独立分支 `workbuddy/todo-20261106-1906`；**全程只读取 `D:/CatOs`，未写入一个字节**。
+
+| 待办 | 本轮结果 |
+|---|---|
+| P0 自举环阻塞 | 修复 `mkce.py` 64 KiB 上限与内核 256 KiB 的漂移；上限改为运行时解析 `include/ce.h`；`task_spawn_ce` 的三条判定前移到构建期 |
+| P0 回归验证 | 新增 `tests/test_mkce.py` 48/48 PASS（80 KiB / 256 KiB 边界、bss、api_offset、header、参数健壮性、两份脚本一致性）；`tests/test_cc.py` 8/8 PASS（含模拟器），无回归 |
+| P1 问题清单核对 | 第九节闭合表核对完成；#1 确认值更新为 256 KiB；#17 / #32 待核对项闭合；新增 #47 |
+| 工具链收口 | `tests/build_ce.sh` 由失效旧副本改为薄包装，端到端实测产出合法 CE01（image=4408, api_off=4404） |
+| P0 git commit | 本地提交完成；**未 push** |
+| 独立复核 | 只读复核发现并修复 2 处新代码缺陷（测试假阳性：只比上限值不比来源；非法参数抛 traceback），另记录 2 个既有缺陷见下 |
+
+**改动文件**：`kernel_v25/build/mkce.py`、`kernel_v25/extapp/build/mkce.py`、`tests/build_ce.sh`、`tests/test_mkce.py`（新增）、`docs/PROGRESS.md`、`docs/CatOS-内核问题清单.md`、`docs/history.md`、`docs/experience.md`、`kernel_v25/README.md`。
+
+**未做项及原因**：① 自举环主体（cc.c / cc_self.c）正由主工作树并行开发，本轮不重复改，避免合流冲突；② QEMU 实机验证需云侧环境；③ GitHub 推送 / 双审闭环需用户授权远程与凭据，不擅自外部动作；④ v2.6 版本号须等 QEMU 全量回归通过，不提前改；⑤ 复核新发现的两个既有缺陷（`src/task.c` 的 api_offset uint32 回绕越界写、`extapp/build_ce.sh` 的 `-I` 路径未加引号）已记入 `CatOS-内核问题清单.md` 第十节「本轮发现但未修改」，因属主工作树活跃文件，本轮不改以免合流冲突。

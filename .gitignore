@@ -59,3 +59,6 @@ Thumbs.db
 *.swp
 __pycache__/
 *.pyc
+
+# ---- WorkBuddy workspace memory (project-local notes, not source) ----
+.workbuddy/
