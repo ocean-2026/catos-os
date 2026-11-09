@@ -163,9 +163,25 @@ def ppm_to_png(ppm, png):
     os.remove(ppm)
 
 def shot(s, name):
+    """Take a screenshot and return the PNG path.
+
+    HMP screendump is asynchronous: the monitor acknowledges the command
+    before the guest has finished writing the file, so the file may not
+    be there yet when we look.  Wait for it instead of assuming 1.2 s was
+    enough -- on a slow (or freshly created) disk image it is not, and
+    the failure then looks like "no PNG" rather than "not ready".
+    """
     png = os.path.join(SHOTS, name + ".png")
     ppm = os.path.join(SHOTS, name + ".ppm")
-    cmd(s, "screendump %s" % ppm.replace("\\", "/"), 1.2)
+    if os.path.exists(ppm):
+        os.remove(ppm)
+    cmd(s, "screendump %s" % ppm.replace("\\", "/"), 0.5)
+    for _ in range(40):                 # up to ~20 s
+        if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("screendump produced no file for %s" % name)
     ppm_to_png(ppm, png)
     return png
 
