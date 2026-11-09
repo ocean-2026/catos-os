@@ -7,6 +7,13 @@
 
 ## 一、内存与执行模型
 
+> **编号命名空间说明（2026-11-09 落档补充）**
+> 本节及第四节使用**主清单编号**（一~八节连续编号 `#1`~`#46`）。
+> 2026-11-09 按合并要求落档 D-1~D-15 时，第一节续编 `#48`~`#50`、第四节续编 `#51`~`#65`。
+> 第九节的 `#48`/`F1`/`A2`/`#3` 与第十节的 `#47` 属于**各自独立的局部命名空间**
+> （第九节是 b31 修复闭合表、第十节是工具链常量核对表，均已在节首自行声明），
+> 与主清单编号**不冲突、不互相引用**。引用时请连节号一起写（如"第四节 #61"）。
+
 | # | 问题 | 确认值 | 影响 | 规避/对策 | 发现版本 | 状态 |
 |---|---|---|---|---|---|---|
 | 1 | CE 镜像大小上限 | **v2.5 起 262144 字节（256 KiB）**：`include/ce.h` 的 `CE_MAX_IMAGE=0x40000`，`CE_MAX_BSS=0x40000`；v1.x 的 65536 字节是旧 `mkce.py` 的检查值 | ocntools.ce v1.6=60120B、v1.7=57400B 曾贴近旧上限；v2.5 自举产物 CC2.CE≈82KB 被旧检查直接拒掉（见 #47） | 工具链上限从 ce.h 运行时读取，不再单独硬编码；体积敏感代码仍可外置 .csc | v1.0 起 / v2.5 更新 / 2026-11-06 修正 | 已确认/已修正 |
@@ -15,6 +22,9 @@
 | 4 | 无固定地址 alloc + 固定链接基址 0x02000000 | 链接基址固定，无固定地址分配 | CE 程序无法动态加载/运行其他 CE（ot 不能 run .ce） | cecheck 作为用户态安全等价物（不依赖内核加载器） | v1.2 评估 | 已确认/已规避 |
 | 5 | api->exit() 有 bug：重载同一镜像 | exit() 会 relaunch 同镜像 | 调用 exit() 导致程序反复重启 | ce_main 直接 return 0，禁止调 api->exit() | v1.0 起 | 已确认/已规避 |
 | 6 | 无浮点运算 | 内核 API 无浮点 | 数学只能整数 | 全部整数运算 | v1.0 起 | 已确认 |
+| **48** | **`heap_ensure()` 只映射 1 页 ⇒ 跨页分配触发 `#PF` 杀任务**（原项目的 `heap_ensure_range()` 在 VMA 重构时丢失） | 现项目 `kernel_v25/src/task.c:706` `heap_ensure()` 每次只 `kzalloc_frame()` + `task_map_page()` **单页**；全仓 `grep heap_ensure_range kernel_v25/` → **0 命中**；原项目 `src/task.c:661` 有多页版 `heap_ensure_range()` | 分配跨越 4 KiB 页边界时未映射页被访问 ⇒ `#PF cr2=0x02101007` ⇒ 任务直接被杀（PM 已实机复现） | 移植原项目 `heap_ensure_range()`（约 20 行）；**必须放在 `heap_ensure()` 定义之后或加前置声明**，否则 `implicit declaration` 编译错误 | v2.10 VMA 重构后回归 / 2026-11-09 核实 | 已确认/待修复（PRD **P0-2**） |
+| **49** | **`USER_STACK_SZ` 相对原项目倒退**（自举需要 128 KiB） | 现项目 `kernel_v25/include/paging.h:82` `USER_STACK_SZ 0x10000u`（**64 KiB**）；原项目 `include/paging.h:35` `0x20000u`（128 KiB，原注释："2026-11-02: CC2.CE self-host needs >64K"） | 自举编译（`cc.ce` 编译自身）栈空间不足；大栈帧 CE 程序踩栈 | 改 `0x20000u` | 原项目 2026-11-02 引入 / 现项目未同步，2026-11-09 核实 | 已确认/待修复（PRD **P0-3**） |
+| **50** | **`USER_HEAP_MAX` 相对原项目倒退**（自举需 ~380 KiB） | 现项目 `kernel_v25/include/paging.h:80` `USER_HEAP_MAX 0x40000u`（**256 KiB**）；原项目 `include/paging.h:33` `0x80000u`（512 KiB，原注释："2026-10-31: cc.c self-host needs ~380K"） | 自举编译器堆不够用（arena 申请失败 → 编译中断） | 改 `0x80000u` | 原项目 2026-10-31 引入 / 现项目未同步，2026-11-09 核实 | 已确认/待修复（PRD **P0-3**） |
 
 ## 二、文件系统（FAT32）
 
@@ -45,6 +55,40 @@
 | 19 | QEMU sendkey 丢键 | 空格/字母/回车偶发丢失（测试环境噪音） | 长命令粘连、验证误判 | 慢速发送 + vga 屏幕回显校验 + BS 清行重试 | v1.0 起 | 环境噪音（非内核） |
 | 20 | fatfs.py 工具 bug/口径 | dump_tree 递归 TypeError 勿用；read_chain 参数是簇链 list 非 slot 号 | 误用会崩或读错 | 用 add_file/delete_file/read_chain（簇链） | v1.0 起 | 工具备忘 |
 | 21 | 测试环境每轮重置 | Ubuntu 云环境 qemu 等配置可能每轮消失 | 直接测试会失败 | 开工先检查 qemu/gcc/git 配置（AGENTS.md 规则） | v1.0 起 | 环境规则 |
+| **51** | **`cc.c` 停在阶段 0，阶段 1-3 能力在 `cc_self.c` 里却是死代码** | `kernel_v25/extapp/cc.c` **1,237 行**（阶段 0：无 struct/typedef/enum/switch/goto、无 `no ce_main` 报错）；`kernel_v25/extapp/cc_self.c` **2,250 行**（阶段 1-3 已实现）。全仓 `grep -rn cc_self kernel_v25/ tests/ --include=*.sh --include=*.py` → **0 命中**（无任何构建脚本引用 `cc_self.c`） | 改 `cc.c` 源码得不到阶段 1-3 能力；`cc_self.c` 的 2,250 行是全树无引用的死代码 | **用户拍板：用 `cc_self.c` 覆盖 `cc.c`**（两份均归档保留）；替换时需核对 `TOK_MAX`/缓冲尺寸与 `OB_MAX`/`SRC_MAX` 是否适配 512 KiB 堆 | 原项目 `TODO_STAGE5.md` 记录 / 2026-11-09 核实 | 已确认/待修复（PRD **P1-3**） |
+| **52** | **`CC2.CE` 自举固定点（cc2 → cc3 字节级一致）未验证** | 原项目 `build/HOSTCC2_REF.CE` = 81,522 B / md5 `eeec32f838fbab4c111d428df22aa409`（Linux 机器编译的期望输出）；本机构建 `build/CC2_NEW.CE` = 82,586 B / md5 `d21d66ea5845492dab406d04f666c60e`（= 已从根目录删除的 `Catos_Better_b`）。二者**字节级不一致** | 「cc 能自举」目前只是"两个产物大小接近"，没有固定点证明 | 跑 `build/verify_bootstrap.sh`（移植并改写为相对路径）：cc2 编译 cc.c → CC3.CE，与 CC2.CE 比 md5；**gcc 版本差异（Rev4 vs Rev5）会导致字节不一致，需先记录参考值的工具链版本** | 原项目 `BUILD_REPORT_STAGE5.md` / `HANDOFF_STAGE5.md` 记录 / 2026-11-09 核实 | 待核对（PRD **P2-1**） |
+| **53** | **Go 解释器 FIND-G3：无递归深度上限** | 原项目 `extapp/go.c:783` `g_call_depth` + `:784` `CALL_DEPTH_MAX 200` + `:1048` 入口检查（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 无限递归撑爆 C 栈（CE 用户栈仅 64 KiB，与 #49 同源） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G3 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **54** | **Go 解释器 FIND-G4：非法字符被词法 default 静默吞** | 原项目 `extapp/go.c:358-362` default 分支置 `g_perr`/`g_errline`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 非法字节不在词法期报错，而是延后变成运行时"undefined variable" | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G4 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **55** | **Go 解释器 FIND-G5：`readfile` 请求 20479 > 内核 `file_read` 单次 16384 上限** | 原项目 `extapp/go.c:1085` 新增 `read_whole()`，按 `FS_CHUNK 16384` **分块循环读至 EOF**（**源码已修**）；但 `docs/go-review.md` 仍记为"未修"。内核 `ce_abi.h` 注释：`file_read ... max <= 16384 per call` | 未修则 >16 KiB 的脚本被拒（`got<0` → `""` 或 "cannot read script"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G5 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **56** | **Go 解释器 FIND-G6：arena 扩容 `s->v`/`a->v` 未判空** | 原项目 `extapp/go.c:701` 与 `:732` 补 `if (!s->v) { g_oom = 1; return 0; }`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | arena 耗尽时 `s->v/a->v = 0`，后续 `scope_declare`/`arr_push` 解引用空指针 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G6 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **57** | **Go 解释器 FIND-G7：字符串字面量 >1023 静默截断、未闭合引号不报错** | 原项目 `extapp/go.c:223-235` 改为**两遍扫描**（先数解码长度再按 arena 尺寸分配），未闭合引号报词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 长字面量被静默截断；引号不闭合导致后续解析错乱 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G7 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **58** | **Go 解释器 FIND-G8：顶层 break/continue/return 静默停跑不报错** | 原项目 `extapp/go.c:188-191` 解析期嵌套计数器 `g_loop_depth`/`g_func_depth` + `:658/:665/:669` 三处 `depth==0` 报错（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 脚本在顶层误用 `break` 会静默终止，后续语句不执行 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G8 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **59** | **Go 解释器 FIND-G9：for init 的 `:=` 变量泄漏外层作用域** | 原项目 `extapp/go.c:882-899` 每个 for 循环建独立 `Scope`（parent = 调用者作用域），结束恢复 `g_scope`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 循环变量泄漏到外层，与 Go 语义不符（原评为"无害"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G9 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **60** | **Go 解释器 FIND-G10：数字字面量溢出无检测（int32 UB）** | 原项目 `extapp/go.c:302-313` 扫描时检测 `> 2147483647` 并置词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 超大字面量静默溢出为负数/回绕 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G10 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
+| **61** | **`kernel_v25/build/catos_work.iso` 从未入库 ⇒ 干净克隆不可构建** | `git ls-files kernel_v25/build/` 仅返回 `gen_builtin.py` / `mkce.py` / `patch_work_iso.py`；`kernel_v25/build/patch_work_iso.py:5` 硬依赖 `build/catos_work.iso`（10,725,376 B GRUB El Torito 模板）；`.gitignore` 的 `!kernel_v25/build/catos_work.iso` 否定规则写在 `*.iso` **之前**（第 7/12 行 vs 第 27 行），被覆盖 | 干净克隆执行 `build.sh iso` 抛 `FileNotFoundError: build/catos_work.iso`；**当前"基线 12/12 PASS"依赖手工拷贝的未跟踪模板，不具备 CI 意义** | 把模板提交入库**并**把 `!` 否定规则移到 `*.iso` **之后**（git 是 last-match-wins；只 `git add -f` 不移位是假修复） | 2026-11-09 核实 | 已确认/待修复（PRD **P0-4**） |
+| **62** | **`build.sh` 应用列表不含 `cc` ⇒ `cc.ce` 是陈旧产物** | `kernel_v25/build.sh:43` 应用列表 = `hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest`（**无 `cc`**）；`kernel_v25/extapp/bin/cc.ce` = 26,952 B（入库值），源码重编应为 27,080 B | 改 `cc.c` 源码**没有任何效果**，却因"产物在库里"看起来像已验证 —— 伪装成已验证 | 把 `cc` 加入 `build.sh` 应用列表（`gen_builtin.py` 的 `OPTIONAL` 已含 `/bin/cc.ce`） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-4**） |
+| **63** | **`node.c` 从不被任何构建脚本编译** | `grep -rn node kernel_v25/build.sh kernel_v25/extapp/build_ce.sh` → **0 命中**；`kernel_v25/node/node.c`（1,414 行）与 `node.ce`（35,116 B）**均已入库**，且与原项目 `node/node.c` diff **0 行差异**、`node.ce` **逐字节相同** | `node.ce` 是**无法复现的预编译产物**（与 #62 同构）：一旦有人改 `node.c`，镜像里的 `node.ce` 会静默过期 | 把 `node` 加入 `build.sh` 应用列表；补独立验收 `tests/node_regress.py`（QEMU 内 `run /bin/node.ce` 跑 `TEST.JS`） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-9 / P1-10**） |
+| **64** | **`tests/inject_any.py` 的 FAT 几何参数过时** | 脚本 `tests/inject_any.py:18-21` 硬编码 `SPC=8` / `RSVD=33` / `FAT_SZ=8192`（按 4 GiB 稀疏盘假设）；内核 `kernel_v25/src/fat.c:8` 实为 `RESERVED 32u`，且 `fat_sz`/`spc` 由卷大小动态决定（`fat.c:635/647/650`）。该脚本与原项目 `tools/inject_any.py` **逐字节相同** | 任何"注入新应用再验证"的流程**第一步即失败**（报 `BIN dir not found`），极易被误判为"移植不成功" | 改为从 DBR 读取几何（PM 已用读 DBR 的版本验证可正常注入） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-7**） |
+| **65** | **`.gitignore` 否定规则位置写反（dead negation）** | `.gitignore:7` 与 `:12` 有 `!kernel_v25/build/catos_work.iso`，但 `.gitignore:27` 是 `*.iso`；git 是 **last-match-wins** ⇒ `git check-ignore -v kernel_v25/build/catos_work.iso` 命中的是 `.gitignore:27:*.iso`（**忽略规则**），否定规则形同虚设。注释写的 *"exceptions must precede rules"* **结论是错的** | 构建产物跟踪状态脆弱；下次有人删了重建该文件会再次被 `*.iso` 忽略，构建可复现性再次失效 | 把否定规则移到 `*.iso` **之后**，并把注释改成符合 git 语义的表述 | 2026-11-09 核实 | 已确认/待修复（PRD **P0-4**） |
+
+### Go 子集解释器（`go.c`）现状 —— 2026-11-09 落档说明
+
+**现项目 `kernel_v25/` 中当前没有 `go.c`。** 它是原项目（`D:/CatOs/Catos_Better_better/extapp/go.c`，
+1,300 行 / md5 `f9876f42fa646c58ec21da649ed934e4`）独有的资产，已由 PM 在 57 槽 ABI 下
+实测编译通过并跑通 QEMU（PRD **P1-1** / **P1-2**）。
+
+- **CE ABI 兼容性**：原项目用的是 **48 槽** `ce_abi.h`，现项目是 **57 槽**。
+  `go.c` 实际只调用 7 个槽（`write`/`putc`/`print_int`/`alloc`/`atoi`/`file_exists`/`file_read`），
+  索引**全部 ≤39**，落在 append-only 旧前缀内 ⇒ **57 槽下零改动可编译**。
+- **上述 #53~#60（FIND-G3~G10）**：这 8 条在原项目 `go.c` **源码里其实已经修复**
+  （逐条证据见 `docs/orig-archive/README.md` 的「FIND-G 逐条核实」表），
+  只有 `docs/go-review.md` / `GO-DESIGN.md` §6 的状态描述停留在"未修"。
+  ⇒ 移植时要做的是**逐条验证修复随行**，而不是重新实现。
+- **已知遗留缺陷**（未被 FIND 覆盖、需在移植时留意）：
+  `readfile` 的源缓冲 `g_filebuf[20480]` 与内核 `file_read` 单次 16 KiB 上限的落差
+  （已由 `read_whole()` 分块解决，见 #55），以及 `api->alloc` 拿不到内存时的
+  静态 64 KiB arena 兜底（依赖 P0-1 修复后才有 192 KiB 动态 arena）。
+
 
 ## 五、未决问题
 
@@ -101,6 +145,12 @@
 | 46 | **标准 syscall 入口面（libc 层）** | CE API 为 33 槽自定义（ce.h），非 POSIX | GCC 编译产物需统一 ABI（exit/read/write/open/malloc） | 用户侧 libc 封装层可先做；内核侧可选提供 POSIX 兼容入口；**本次未做（属下一步，仅记录）** |
 
 ## 九、b31 内核修复闭合（2026-10-29，随 node 交付轮）
+
+> **编号命名空间说明（2026-11-09 落档补充）**
+> 本节「项」列用的是 **b31 修复闭合表的局部编号**（`#48`/`F1`/`A2`/`#3`），
+> 与第一节~第八节的**主清单编号**、第十节的 `#47` **互不引用**。
+> 主清单在 2026-11-09 落档后已续编到 `#65`（第一节 `#48`~`#50`、第四节 `#51`~`#65`），
+> 引用本节条目时请写"第九节 #48"以免与主清单混淆。
 
 | 项 | 问题 | 根因（源码证据） | 修复 | 状态 |
 |---|---|---|---|---|
