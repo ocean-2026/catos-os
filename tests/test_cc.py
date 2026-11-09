@@ -94,7 +94,15 @@ def build_host_cc():
     src = os.path.join(EXTAPP, "cc.c")
     with open(src, "r", encoding="utf-8", errors="replace") as f:
         text = f.read().lstrip("?")
-    # the CE-only bits: the api slot section attribute and its definition
+    # The live compiler is cc_self.c's content, which has two build shapes:
+    #   #ifdef CC_HOST -> the real 57-slot CE ABI (ce_abi.h) + the api slot
+    #   #else          -> freestanding type shims, catos_api_t = void
+    # The host build wants the CC_HOST shape (it needs the real struct
+    # members), so -DCC_HOST is passed on the gcc command line below.
+    #
+    # the CE-only bits: the api slot section attribute and its definition.
+    # The attribute is meaningless on the host, so the definition becomes an
+    # extern declaration resolved by tests/host_shim.c.
     text = text.replace(
         'catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;',
         'extern catos_api_t *__ce_api;')
@@ -108,8 +116,11 @@ def build_host_cc():
     # MinGW gcc under MSYS does not accept backslash paths
     def posix(p):
         return p.replace("\\", "/")
-    cmd = [gcc, "-O1", "-w", "-I" + posix(inc), "-o", posix(out), posix(host_c),
-           posix(os.path.join(TESTS, "host_shim.c"))]
+    # -DCC_HOST selects the real-ABI branch of the compiler source (see the
+    # comment above).  Without it catos_api_t is `typedef void` and every
+    # api->write / api->alloc call fails to compile.
+    cmd = [gcc, "-O1", "-w", "-DCC_HOST", "-I" + posix(inc), "-o", posix(out),
+           posix(host_c), posix(os.path.join(TESTS, "host_shim.c"))]
     # capture to a file instead of pipes: under a restricted sandbox a
     # piped grandchild spawn fails, so redirect stdout/stderr to disk.
     # gcc needs its own directory on PATH when spawned from the harness
