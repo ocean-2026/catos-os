@@ -176,6 +176,30 @@ class Machine:
             self.out.append("0x%08x" % args[0]); return 0
         if name == "strlen":
             return len(self.cstr(args[0]))
+        if name == "atoi":
+            # strtol(s, NULL, 10) truncated to int.  The Go subset
+            # interpreter calls it to parse the numeric literals in a
+            # .GO source, so without it the interpreter cannot get
+            # past the first constant in TEST.GO.
+            s = self.cstr(args[0]).decode("latin-1")
+            i = 0
+            while i < len(s) and s[i] in " \t\n\r\f\v":
+                i += 1
+            sign = 1
+            if i < len(s) and s[i] in "+-":
+                if s[i] == "-":
+                    sign = -1
+                i += 1
+            val = 0
+            while i < len(s) and s[i].isdigit():
+                val = val * 10 + (ord(s[i]) - 48)
+                i += 1
+            val *= sign
+            # clamp to the 32-bit range the guest would wrap to
+            val &= 0xFFFFFFFF
+            if val >= 0x80000000:
+                val -= 0x100000000
+            return val
         if name == "time_str":
             s = b"2026-10-30 12:00:00\x00"
             self.mem[args[0] - LOAD_BASE: args[0] - LOAD_BASE + len(s)] = s
