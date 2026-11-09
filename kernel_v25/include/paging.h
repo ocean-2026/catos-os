@@ -77,9 +77,18 @@ int    vma_contains(const vma_t *list, uint32_t addr);
 #define USER_IMAGE_BASE 0x2000000u
 #define USER_VSYSCALL   0x2080000u
 #define USER_HEAP_BASE  0x2100000u
-#define USER_HEAP_MAX   0x40000u       /* 256 KiB */
+/* P0-3: restored to the original project's 512 KiB.  The v2.6 VMA
+ * refactor had shrunk it to 256 KiB, which starved any CE program
+ * that keeps a large working buffer (e.g. the Go interpreter's arena
+ * or the cc self-compiler's source/token tables).  The heap lives in
+ * PDE 8 (0x2100000..0x2400000) and must stay below USER_ARENA_END so
+ * it never reaches the mmap extension arena in PDE 9. */
+#define USER_HEAP_MAX   0x80000u       /* 512 KiB */
 #define USER_STACK_TOP  0x2200000u
-#define USER_STACK_SZ   0x10000u       /* 64 KiB */
+/* P0-3: restored to the original project's 128 KiB (was 64 KiB).
+ * 0x21e0000..0x2200000 -- still inside PDE 8, and still clear of the
+ * heap (which ends at 0x2180000). */
+#define USER_STACK_SZ   0x20000u       /* 128 KiB */
 #define USER_ARENA_END  0x2400000u
 
 /* ---- extension arena: PDE 9 (36..40 MiB, one 4 KiB page table) --------

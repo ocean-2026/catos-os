@@ -703,26 +703,83 @@ static void k2u_copy(task_space_t *s, uint32_t dst, const void *src, uint32_t le
  */
 typedef struct heap_hdr { uint32_t size; uint32_t next; } heap_hdr_t;
 
+/* Locate the task's heap VMA, if it has been created yet.  The heap VMA
+ * is the anonymous region anchored exactly at USER_HEAP_BASE; matching
+ * on `start` (rather than "any anonymous VMA") keeps it distinct from
+ * the stack VMA, which lives in the same address space. */
+static vma_t *heap_vma_of(task_t *t) {
+    for (vma_t *v = t->vm; v; v = v->next)
+        if (v->kind == VMA_ANON && v->start == USER_HEAP_BASE) return v;
+    return 0;
+}
+
+/* True when `a` lies inside the task's heap VMA. */
+static int heap_vma_has(task_t *t, uint32_t a) {
+    vma_t *h = heap_vma_of(t);
+    return h && a >= h->start && a < h->end;
+}
+
+/* P0-2: map EVERY page the byte range [start, start+len) touches.
+ *
+ * The old heap_ensure() mapped only the single page containing the
+ * requested address, so a payload that crossed a page boundary faulted
+ * on its second page (cr2=0x02101007) and the task was killed.  The
+ * original project fixed this with heap_ensure_range(); the v2.6 VMA
+ * refactor dropped the function and only kept the single-page version.
+ *
+ * The range is validated against the heap VMA (not against any VMA):
+ * the stack VMA lives in the same address space and a heap range must
+ * never be allowed to reach it.
+ */
+static int heap_ensure_range(task_t *t, uint32_t start, uint32_t len) {
+    if (len == 0) return 0;
+    uint32_t last = (start + len - 1) & ~0xFFFu;
+    for (uint32_t a = start & ~0xFFFu; ; a += 0x1000u) {
+        if (!heap_vma_has(t, a)) return -1;
+        if (!task_virt_to_phys(&t->space, a)) {
+            uint32_t f = (uint32_t)kzalloc_frame();
+            if (!f) return -1;
+            if (task_map_page(&t->space, a, f, 1) != 0) {
+                frame_free(f);
+                return -1;
+            }
+        }
+        if (a >= last) break;
+    }
+    return 0;
+}
+
+/* Map the single page containing `vaddr`.  Thin wrapper over
+ * heap_ensure_range() so there is exactly one mapping implementation. */
 static int heap_ensure(task_t *t, uint32_t vaddr) {
-    /* vaddr must lie inside the task's heap VMA (which covers
-     * USER_HEAP_BASE .. USER_HEAP_BASE+USER_HEAP_MAX). */
-    if (!vma_contains(t->vm, vaddr)) return -1;
-    if (task_virt_to_phys(&t->space, vaddr & ~0xFFFu)) return 0;
-    uint32_t f = (uint32_t)kzalloc_frame();
-    if (!f) return -1;
-    return task_map_page(&t->space, vaddr & ~0xFFFu, f, 1);
+    if (!heap_vma_has(t, vaddr)) return -1;
+    return heap_ensure_range(t, vaddr & ~0xFFFu, 1);
 }
 
 /* freelist head kept in the kernel (task_t has no spare field: use a
  * static table indexed by tid) */
 static uint32_t heap_free_root[MAX_TASKS];
 
-/* called once on the first SYS_ALLOC to carve out the heap VMA. */
+/* called once on the first SYS_ALLOC to carve out the heap VMA.
+ *
+ * P0-1: the old guard was `if (t->vm) return 0;`, which is ALWAYS true
+ * for a ring3 task -- task_spawn_ce() already built the image/vsyscall/
+ * stack VMAs into t->vm before the task ever ran.  So the heap VMA was
+ * never created, heap_ensure()'s vma_contains() test always failed, and
+ * api->alloc() returned NULL for every request.  A CE program that
+ * relied on alloc() (notably cc.ce, the self-hosted C compiler) silently
+ * fell back to a small static buffer and could only handle tiny inputs.
+ *
+ * The VMA must be INSERTED, never assigned: t->vm already holds the
+ * image/vsyscall/stack VMAs and overwriting it would drop all three.
+ */
 static int heap_vma_init(task_t *t) {
-    if (t->vm) return 0;   /* already initialized */
-    t->vm = vma_new(USER_HEAP_BASE, USER_HEAP_BASE + USER_HEAP_MAX,
-                    VMA_ANON, 1);
-    return t->vm ? 0 : -1;
+    if (heap_vma_of(t)) return 0;   /* heap VMA already present */
+    vma_t *v = vma_new(USER_HEAP_BASE, USER_HEAP_BASE + USER_HEAP_MAX,
+                        VMA_ANON, 1);
+    if (!v) return -1;
+    t->vm = vma_insert(t->vm, v);   /* keeps image/vsyscall/stack */
+    return 0;
 }
 
 static void *sys_alloc(task_t *t, uint32_t size) {
@@ -743,14 +800,32 @@ static void *sys_alloc(task_t *t, uint32_t size) {
         if (h->size >= size) {
             if (h->size >= size + sizeof(heap_hdr_t) + 8) {
                 heap_hdr_t *rest = (heap_hdr_t *)((uint8_t *)h + sizeof(heap_hdr_t) + size);
-                if (heap_ensure(t, (uint32_t)rest + sizeof(heap_hdr_t)) != 0) return 0;
+                /* map the remainder's header BEFORE writing it: rest may
+                 * land on the next page boundary. */
+                if (heap_ensure_range(t, (uint32_t)rest, sizeof(heap_hdr_t)) != 0) return 0;
                 rest->size = h->size - size - sizeof(heap_hdr_t);
                 rest->next = h->next;
                 *pp = (uint32_t)rest;
                 h->size = size;
             } else {
                 *pp = h->next;
+                /* P0-2 sibling fix (#66): the whole block is consumed
+                 * here, so `h` must record the size actually handed
+                 * out.  The original project has this line
+                 * (Catos_Better_better/src/task.c:704); it was lost in
+                 * the v2.6 port.  Without it, sys_free() pushes the
+                 * block back onto the freelist carrying its OLD (larger)
+                 * size, so the next allocation of that block believes
+                 * it owns more bytes than the user was given -> out of
+                 * bounds write. */
+                h->size = size;
             }
+            /* P0-2: the payload may span several pages.  Map them all
+             * before handing the block to the user -- mapping only the
+             * first page made a cross-page allocation fault (cr2=0x02101007)
+             * and kill the task. */
+            if (heap_ensure_range(t, (uint32_t)((uint8_t *)h + sizeof(heap_hdr_t)),
+                                  size) != 0) return 0;
             return (void *)((uint8_t *)h + sizeof(heap_hdr_t));
         }
         pp = &h->next;
@@ -1679,7 +1754,13 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         img = h->image_size; bss = h->bss_size; api = h->api_offset;
         if (h->entry != 0 || img > CE_MAX_IMAGE || bss > CE_MAX_BSS) return -5;
         if (img + sizeof(ce_header_t) > size) return -5;
-        if (api + 4 > img) return -5;
+        /* The API slot is a 4-byte pointer stored at `api` inside the
+         * image.  The old check `api + 4 > img` wrapped around in
+         * uint32 arithmetic: api=0xFFFFFFFC made api+4 evaluate to 0,
+         * which passed the test, and the loader then wrote the vsyscall
+         * table pointer 4 GiB outside the image.  Compare without
+         * overflowing instead. */
+        if (img < 4 || api > img - 4) return -5;
     }
 
     task_t *t = &tasks[slot];
