@@ -1,15 +1,12 @@
 # CatOS working tree -- ignore build artifacts, disk images and logs.
 # Everything ignored here is either reproducible from source or a bulky
 # earlier drop; the repository tracks source, documentation and tests.
-
-# The GRUB boot template is a required build input for build.sh, so it
-# stays tracked even though it is an .iso (exceptions must precede rules).
-!kernel_v25/build/catos_work.iso
-
-# Kernel build scripts that happen to live in the build/ directory are
-# tracked; everything else produced there is not.
-!kernel_v25/build/*.py
-!kernel_v25/build/catos_work.iso
+#
+# NOTE ON RULE ORDER: git resolves .gitignore with LAST-MATCH-WINS semantics.
+# A negation ("!pattern") only takes effect if it appears AFTER the pattern
+# it is meant to override.  The exceptions for the GRUB boot template and the
+# build scripts therefore live at the bottom of this file, next to the
+# "*.iso" / "*.py" rules they cancel out.
 
 # ---- compiled objects and intermediate link output ----
 *.o
@@ -29,6 +26,17 @@ kernel_v25/extapp/build/*
 *.vhdx
 *.vhd
 *.qcow2
+
+# ---- exceptions to the rules above (must stay BELOW them) ----
+# The GRUB boot template is a REQUIRED build input for build.sh: it is the
+# proven El Torito no-emulation image that build/patch_work_iso.py rewrites
+# to append kernel.bin.  Without it a clean clone cannot produce an ISO, so it
+# is tracked even though it is an .iso.
+!kernel_v25/build/catos_work.iso
+
+# Kernel build scripts that happen to live in the build/ directory are
+# tracked; everything else produced there is not.
+!kernel_v25/build/*.py
 
 # ---- archives of earlier drops ----
 *.zip
