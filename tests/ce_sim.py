@@ -55,6 +55,24 @@ def sx32(v):
     return v - 0x100000000 if v & 0x80000000 else v
 
 
+def sx8(v):
+    v &= 0xFF
+    return v - 0x100 if v & 0x80 else v
+
+
+def sx16(v):
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def trunc_div(a, d):
+    """Signed division truncated toward zero, as the x86 idiv does."""
+    q = abs(a) // abs(d)
+    if (a < 0) != (d < 0):
+        q = -q
+    return q, a - q * d
+
+
 def setzsf(m, res):
     """Latch ZF/SF the way x86 arithmetic does: on the written result."""
     m.zf = 1 if (res & 0xFFFFFFFF) == 0 else 0
@@ -75,6 +93,7 @@ class Machine:
         self.regs = dict.fromkeys(REG32, 0)
         self.last_cmp = (0, 0)
         self.cf = 0
+        self.of = 0
         self.last_test = (0, 0)
         self.steps = 0
         self.max_steps = max_steps
@@ -358,6 +377,8 @@ class Machine:
             return self.op_mov8(pc)
         if op == 0xF7:
             return self.op_group3(pc)
+        if op == 0xF6:
+            return self.op_group3(pc, byte_form=True)
         if op == 0xD3:
             return self.op_group2(pc)
         if op in (0xD0, 0xD1):                 # group2, count == 1
@@ -451,6 +472,16 @@ class Machine:
                              imm - 0x100 if imm & 0x80 else imm)
             self.zf = 1 if res == 0 else 0
             self.sf = 1 if res & 0x80 else 0
+            # CF (unsigned borrow) MUST be maintained here: gcc -O2
+            # inlines cc's `is_idc()` helper into
+            #     and $0xffffffdf,%eax / sub $0x41,%eax /
+            #     cmp $0x19,%al   (0x3C) / jbe   (0x76)
+            # and `jbe` (CF|ZF) reads the CF latch.  Leaving CF stale
+            # made the simulated lexer take the wrong branch and stall
+            # the Go interpreter in its tokenizer loop.
+            # Every other `cmp` form below (0x38/0x39/0x3A/0x3D) already
+            # maintained CF; 0x3C was the only gap.
+            self.cf = 1 if al < (imm & 0xFF) else 0
             self.last_op_bt = False
             return pc + 2
         if op == 0xA9:                                   # test eax, imm32
@@ -710,29 +741,133 @@ class Machine:
             self.ww(ea, res)
         return npc
 
-    def op_group3(self, pc):
+    def op_group3(self, pc, byte_form=False):
+        """Group3 (opcode 0xF6 / 0xF7): test/not/neg/mul/imul/div/idiv.
+
+        The sub-opcode lives in the modrm `reg` field.  Both the
+        register form and the memory form are implemented: gcc emits
+        `idiv dword ptr [ebp-0x18c]` for a 32-bit signed division, and
+        a register-only implementation made the simulator abort with
+        "group3 memory operand not emitted" instead of executing it.
+
+        `byte_form` selects the 0xF6 (8-bit) encoding; 0xF7 is 32-bit.
+        """
         b = self.rb(pc + 1)
         sub = (b >> 3) & 7
         mod, reg, rm, npc, ea = self.modrm(pc + 1)
-        if mod != 3:
-            raise CeError("group3 memory operand not emitted")
-        v = self.get_reg(rm)
-        if sub == 3:                                    # neg
-            self.set_reg(rm, -sx32(v))
+
+        mask = 0xFF if byte_form else 0xFFFFFFFF
+
+        def read_rm():
+            if mod == 3:
+                return self.get_reg(rm) & mask
+            return self.rb(ea) if byte_form else self.rw(ea)
+
+        def write_rm(val):
+            if mod == 3:
+                if byte_form:
+                    self.set_reg(rm, (self.get_reg(rm) & ~0xFF) | (val & 0xFF))
+                else:
+                    self.set_reg(rm, val & 0xFFFFFFFF)
+            else:
+                if byte_form:
+                    self.wb(ea, val & 0xFF)
+                else:
+                    self.ww(ea, val & 0xFFFFFFFF)
+
+        v = read_rm()
+
+        if sub in (0, 1):                                    # test r/m, imm
+            imm = self.rb(npc) if byte_form else self.rw(npc)
+            npc += 1 if byte_form else 4
+            res = v & imm
+            self.last_cmp = (res, 0)
+            self.last_test = (res, 0)
+            self.last_op_bt = False
+            if byte_form:
+                self.zf = 1 if (res & 0xFF) == 0 else 0
+                self.sf = 1 if res & 0x80 else 0
+            else:
+                setzsf(self, res)
+            self.cf = 0
             return npc
-        if sub == 2:                                    # not
-            self.set_reg(rm, ~v & 0xFFFFFFFF)
+
+        if sub == 2:                                        # not r/m
+            write_rm(~v & mask)
             return npc
-        if sub == 7:                                    # idiv
-            if v == 0:
-                raise CeError("idiv by zero")
-            a, d = sx32(self.regs["eax"]), sx32(v)
-            q = abs(a) // abs(d)
-            if (a < 0) != (d < 0):
-                q = -q
-            self.regs["eax"] = q & 0xFFFFFFFF
-            self.regs["edx"] = (a - q * d) & 0xFFFFFFFF
+
+        if sub == 3:                                        # neg r/m
+            write_rm((-v) & mask)
+            self.cf = 1 if v != 0 else 0
             return npc
+
+        if sub == 4:                                        # mul r/m (unsigned)
+            if byte_form:
+                res = (self.regs["eax"] & 0xFF) * v
+                self.regs["eax"] = (self.regs["eax"] & 0xFFFF0000) | (res & 0xFFFF)
+                self.cf = self.of = 1 if (res >> 8) else 0
+            else:
+                res = self.regs["eax"] * v
+                self.regs["eax"] = res & 0xFFFFFFFF
+                self.regs["edx"] = (res >> 32) & 0xFFFFFFFF
+                self.cf = self.of = 1 if (res >> 32) else 0
+            return npc
+
+        if sub == 5:                                        # imul r/m (signed, 1-op)
+            if byte_form:
+                res = sx8(self.regs["eax"] & 0xFF) * sx8(v)
+                self.regs["eax"] = (self.regs["eax"] & 0xFFFF0000) | (res & 0xFFFF)
+                self.cf = self.of = 1 if (res >> 8) else 0
+            else:
+                res = sx32(self.regs["eax"]) * sx32(v)
+                self.regs["eax"] = res & 0xFFFFFFFF
+                self.regs["edx"] = (res >> 32) & 0xFFFFFFFF
+                self.cf = self.of = 1 if (res >> 32) else 0
+            return npc
+
+        if sub == 6:                                        # div r/m (unsigned)
+            if byte_form:
+                if v == 0:
+                    raise CeError("div by zero")
+                dividend = self.regs["eax"] & 0xFFFF
+                q = dividend // v
+                if q > 0xFF:
+                    raise CeError("divide overflow")
+                r = dividend % v
+                self.regs["eax"] = (self.regs["eax"] & 0xFFFF0000) | ((r & 0xFF) << 8) | (q & 0xFF)
+            else:
+                if v == 0:
+                    raise CeError("div by zero")
+                dividend = (self.regs["edx"] << 32) | self.regs["eax"]
+                q = dividend // v
+                if q > 0xFFFFFFFF:
+                    raise CeError("divide overflow")
+                self.regs["eax"] = q & 0xFFFFFFFF
+                self.regs["edx"] = (dividend % v) & 0xFFFFFFFF
+            return npc
+
+        if sub == 7:                                        # idiv r/m (signed)
+            if byte_form:
+                if v == 0:
+                    raise CeError("idiv by zero")
+                dividend = sx16(self.regs["eax"] & 0xFFFF)
+                q, r = trunc_div(dividend, sx8(v))
+                if not (-128 <= q <= 127):
+                    raise CeError("divide overflow")
+                self.regs["eax"] = (self.regs["eax"] & 0xFFFF0000) | ((r & 0xFF) << 8) | (q & 0xFF)
+            else:
+                if v == 0:
+                    raise CeError("idiv by zero")
+                dividend = (self.regs["edx"] << 32) | self.regs["eax"]
+                if dividend & 0x8000000000000000:
+                    dividend -= 0x10000000000000000
+                q, r = trunc_div(dividend, sx32(v))
+                if not (-0x80000000 <= q <= 0x7FFFFFFF):
+                    raise CeError("divide overflow")
+                self.regs["eax"] = q & 0xFFFFFFFF
+                self.regs["edx"] = r & 0xFFFFFFFF
+            return npc
+
         raise CeError("group3 /%d" % sub)
 
     def op_group2(self, pc, imm8=False):

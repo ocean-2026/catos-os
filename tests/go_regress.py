@@ -45,6 +45,17 @@ DEFAULT_QEMU_CANDIDATES = [
     "qemu-system-i386",
 ]
 
+# The script corpus the acceptance steps run against.  The interpreters
+# read their source from the FAT volume, so these have to be injected
+# into /BIN before the interpreter steps run.
+REPO = os.path.dirname(HERE)
+CASE_FILES = [
+    (os.path.join(REPO, "kernel_v25", "extapp", "cases", "TEST.GO"), "TEST.GO"),
+    (os.path.join(REPO, "kernel_v25", "extapp", "cases", "SYN.GO"), "SYN.GO"),
+    (os.path.join(REPO, "kernel_v25", "extapp", "cases", "DEMO.GO"), "DEMO.GO"),
+    (os.path.join(REPO, "kernel_v25", "node", "TEST.JS"), "TEST.JS"),
+]
+
 
 def find_qemu(explicit=None):
     if explicit:
@@ -59,14 +70,30 @@ def find_qemu(explicit=None):
     return None
 
 
-def kill_qemu():
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-i386.exe"],
-                   capture_output=True)
+def kill_qemu(proc=None):
+    """Stop the QEMU instance THIS script started.
+
+    The old implementation ran `taskkill /IM qemu-system-i386.exe`,
+    which kills every QEMU on the machine -- including the ones other
+    test drivers are running concurrently.  That made two unrelated
+    drivers tear each other's guest down (the survivor sees the monitor
+    socket reset with WinError 10054).  Killing only our own child
+    process keeps concurrent runs independent.
+    """
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        pass
 
 
 def boot(iso, qemu, disk):
-    kill_qemu()
-    time.sleep(1)
     cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
            "-cdrom", iso, "-boot", "order=d",
            "-display", "none",
@@ -74,12 +101,14 @@ def boot(iso, qemu, disk):
     if disk:
         cmd += ["-drive", "file=%s,format=raw,if=ide" % disk]
     print("boot:", " ".join(cmd))
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
     for _ in range(20):
         try:
-            return socket.create_connection(MONITOR, timeout=5)
+            return socket.create_connection(MONITOR, timeout=5), proc
         except OSError:
             time.sleep(2)
+    kill_qemu(proc)
     raise RuntimeError("could not reach the QEMU monitor")
 
 
@@ -170,6 +199,33 @@ def screen_text(s):
     return re.sub(r"\s+", " ", read_screen(s))
 
 
+def wait_for_prompt(s, timeout=90.0, poll=2.0):
+    """Wait until the CatOS shell prompt is on screen.
+
+    A fixed sleep is not enough here: the kernel boots through GRUB and
+    then installs the built-in apps, and a command typed before the
+    shell is listening is simply dropped -- which is what made the
+    `format` step silently do nothing and left the disk image blank.
+    Polling the real VGA frame buffer for the prompt is the reliable
+    signal that the shell is ready for input.
+
+    The match has to be anchored on the prompt's actual shape
+    ("catos" ":" <pwd> "$"), not on the bare word "catos": the GRUB
+    boot menu also contains "catos" (it names the CatOS entry), and a
+    loose match returns immediately while the kernel is still booting.
+    """
+    pattern = re.compile(r"catos:[^\n]*\$")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pattern.search(read_screen(s)):
+                return True
+        except Exception:
+            pass                      # monitor hiccup: keep polling
+        time.sleep(poll)
+    return False
+
+
 def main():
     args = sys.argv[1:]
     iso = None
@@ -188,14 +244,53 @@ def main():
         print("qemu-system-i386 not found")
         return 2
 
-    disk = os.path.join(HERE, "qemu_disk.img")
+    disk = os.path.join(HERE, "qemu_disk_go.img")
     if not os.path.exists(disk):
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    s = boot(iso, qemu, disk)
-    print("monitor connected")
-    time.sleep(25)                      # boot to shell (TCG is slow)
+    # ---- pass 1: format the volume ----
+    # The FAT volume has to exist before anything can be injected into
+    # it, and the kernel's `format` command is the only thing that
+    # creates it.  So the run is split in two: format now (with the
+    # guest up), then stop the guest, inject the script corpus into the
+    # resulting FAT image with inject_any.py, then boot again and run
+    # the acceptance steps against the populated volume.
+    s, proc = boot(iso, qemu, disk)
+    print("monitor connected (pass 1: format)")
+    if not wait_for_prompt(s):
+        print("FATAL: shell prompt never appeared in pass 1")
+        kill_qemu(proc)
+        return 3
+    type_text(s, "format")
+    sendkey(s, "ret", 1.0)
+    sendkey(s, "y", 0.4)
+    sendkey(s, "ret", 12.0)            # fs_format(64 MiB) + install
+    kill_qemu(proc)
+    time.sleep(3)
+
+    # ---- inject the script corpus into /BIN ----
+    for src, name83 in CASE_FILES:
+        if not os.path.isfile(src):
+            print("inject: SKIP %s (missing %s)" % (name83, src))
+            continue
+        rc = subprocess.run([sys.executable,
+                             os.path.join(HERE, "inject_any.py"),
+                             disk, src, name83],
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print("inject: FAIL %s -- %s %s"
+                  % (name83, rc.stdout.strip(), rc.stderr.strip()))
+        else:
+            print("inject: OK   %s" % name83)
+
+    # ---- pass 2: boot with the corpus in place ----
+    s, proc = boot(iso, qemu, disk)
+    print("monitor connected (pass 2: acceptance)")
+    if not wait_for_prompt(s):
+        print("FATAL: shell prompt never appeared in pass 2")
+        kill_qemu(proc)
+        return 3
 
     results = []
 
@@ -213,15 +308,17 @@ def main():
         sendkey(s, "ret", wait)
 
     def clear():
-        """Blank the screen so the next command's output is unambiguous."""
-        do("cls", 1.0)
+        """Blank the screen so the next command's output is unambiguous.
+
+        The kernel's command is `clear` -- `cls` is not in the shell's
+        dispatch table, so typing `cls` just printed "unknown command"
+        and left the previous output on screen, which quietly made the
+        substring assertions match against stale text.
+        """
+        do("clear", 1.0)
 
     def step_format():
-        clear()
-        do("format", 1.0)
-        sendkey(s, "y", 0.4)
-        sendkey(s, "ret", 10.0)          # fs_format(64 MiB) + install
-        return True, "formatted"
+        return True, "formatted (done before injection)"
 
     def step_ls_bin():
         clear()
@@ -264,15 +361,35 @@ def main():
                       ["ALL PASS", "node: exit ok"],
                       "node", wait=12.0)
 
+    def step_cat_bin():
+        """Dump /bin so a missing script file is distinguishable from a
+        broken interpreter.
+
+        There is no `cat` command in the CatOS shell, so the listing is
+        the only way to prove the injected corpus is actually on the
+        volume -- asking for `cat` just produced "unknown command".
+        """
+        clear()
+        do("ls /bin", 3.0)
+        listing = screen_text(s)
+        print("---- ls /bin ----")
+        print(read_screen(s))
+        print("-----------------")
+        low = listing.lower()
+        missing = [f for f in ("test.go", "syn.go", "test.js")
+                   if f not in low]
+        return (not missing), ("missing=%r" % missing if missing else "all present")
+
     step("format", step_format)
     step("ls-bin", step_ls_bin)
+    step("cat-bin", step_cat_bin)
     step("go-demo", step_go_demo)
     step("go-test", step_go_test)
     step("go-syntax-err", step_go_syn)
     step("node-test", step_node_test)
 
     if "--keep" not in args:
-        kill_qemu()
+        kill_qemu(proc)
     fails = [r for r in results if not r[1]]
     print("\nsteps=%d ok=%d fail=%d" % (len(results),
                                         len(results) - len(fails), len(fails)))
