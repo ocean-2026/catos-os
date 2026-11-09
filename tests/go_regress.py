@@ -32,6 +32,13 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The QEMU lifecycle lives in tests/qemu_driver.py: PID-safe teardown,
+# the VGA text-buffer decoder and the 'clear' (not 'cls') convention.
+from qemu_driver import (boot as _qemu_boot, cmd, find_qemu,  # noqa: E402
+                          kill_qemu, read_screen, screen_text,
+                          sendkey, type_text)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MONITOR = ("127.0.0.1", 4444)
 VGA_TEXT = 0xB8000
@@ -55,148 +62,6 @@ CASE_FILES = [
     (os.path.join(REPO, "kernel_v25", "extapp", "cases", "DEMO.GO"), "DEMO.GO"),
     (os.path.join(REPO, "kernel_v25", "node", "TEST.JS"), "TEST.JS"),
 ]
-
-
-def find_qemu(explicit=None):
-    if explicit:
-        return explicit if os.path.isfile(explicit) else explicit
-    for c in DEFAULT_QEMU_CANDIDATES:
-        if os.path.isfile(c):
-            return c
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        p = os.path.join(d, "qemu-system-i386.exe")
-        if os.path.isfile(p):
-            return p
-    return None
-
-
-def kill_qemu(proc=None):
-    """Stop the QEMU instance THIS script started.
-
-    The old implementation ran `taskkill /IM qemu-system-i386.exe`,
-    which kills every QEMU on the machine -- including the ones other
-    test drivers are running concurrently.  That made two unrelated
-    drivers tear each other's guest down (the survivor sees the monitor
-    socket reset with WinError 10054).  Killing only our own child
-    process keeps concurrent runs independent.
-    """
-    if proc is None:
-        return
-    try:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-    except Exception:
-        pass
-
-
-def boot(iso, qemu, disk):
-    cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
-           "-cdrom", iso, "-boot", "order=d",
-           "-display", "none",
-           "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
-    if disk:
-        cmd += ["-drive", "file=%s,format=raw,if=ide" % disk]
-    print("boot:", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-    for _ in range(20):
-        try:
-            return socket.create_connection(MONITOR, timeout=5), proc
-        except OSError:
-            time.sleep(2)
-    kill_qemu(proc)
-    raise RuntimeError("could not reach the QEMU monitor")
-
-
-def cmd(s, c, wait=0.5):
-    """Send one HMP command and return everything it printed."""
-    s.sendall((c + "\n").encode())
-    time.sleep(wait)
-    chunks = []
-    try:
-        s.setblocking(False)
-        time.sleep(0.15)
-        while True:
-            try:
-                b = s.recv(65536)
-            except BlockingIOError:
-                break
-            if not b:
-                break
-            chunks.append(b)
-    finally:
-        s.setblocking(True)
-    return b"".join(chunks).decode("latin-1", "replace")
-
-
-def sendkey(s, key, wait=0.12):
-    cmd(s, "sendkey " + key, wait)
-
-
-def type_text(s, text, wait=0.12):
-    special = {" ": "spc", "-": "minus", "=": "equal", ".": "dot",
-               "/": "slash", "\n": "ret"}
-    for ch in text:
-        k = special.get(ch)
-        if k is None:
-            k = "shift-%s" % ch.lower() if ch.isupper() else ch
-        sendkey(s, k, wait)
-
-
-def read_screen(s):
-    """Read the VGA text frame buffer through the monitor's xp dump.
-
-    The kernel's text back-end writes 0xB8000 in 80x25 cells of
-    (char, attribute).  xp prints the bytes as hex; we keep every second
-    byte of each cell, i.e. the character.
-
-    Parsing notes (learned the hard way):
-      * `xp /N 0xADDR` prints one line per 16 bytes, each line shaped
-            000b8000: 0x0b200b20 0x0b5f0b20 0x0b5f0b5f 0x0b5f0b5f
-        i.e. FOUR 32-bit words per line, each word holding FOUR bytes
-        in LITTLE-ENDIAN order (low address first).
-      * The monitor also echoes the command line back into the socket,
-        mangled ("xxpxp xp /4000 0xb8000"), so only lines that start
-        with an 8-hex-digit address are memory dumps.
-
-    A 2-hex-digit regex would capture fragments such as "0x0b" out of
-    "0x0b200b20" and scramble every character -- hence the explicit
-    8-digit match plus little-endian unpacking.
-    """
-    nbytes = VGA_COLS * VGA_ROWS * 2
-    out = cmd(s, "xp /%d 0x%x" % (nbytes, VGA_TEXT), wait=2.0)
-    data = bytearray()
-    for line in out.splitlines():
-        line = line.strip()
-        if not re.match(r"^[0-9a-fA-F]{8}:", line):
-            continue                      # monitor echo / prompt noise
-        for word in re.findall(r"0x([0-9a-fA-F]{8})", line):
-            v = int(word, 16)
-            # little-endian: the lowest byte is the lowest address
-            data += bytes((v & 0xFF, (v >> 8) & 0xFF,
-                           (v >> 16) & 0xFF, (v >> 24) & 0xFF))
-    if not data:
-        return ""
-    rows = []
-    for r in range(VGA_ROWS):
-        chars = []
-        base = r * VGA_COLS * 2
-        for c in range(VGA_COLS):
-            off = base + c * 2
-            if off < len(data):
-                chars.append(chr(data[off]) if 32 <= data[off] < 127 else " ")
-        rows.append("".join(chars).rstrip())
-    return "\n".join(rows)
-
-
-def screen_text(s):
-    """The screen as one blob with whitespace collapsed, for substring
-    assertions that must survive line wrapping."""
-    return re.sub(r"\s+", " ", read_screen(s))
 
 
 def wait_for_prompt(s, timeout=90.0, poll=2.0):
@@ -256,7 +121,7 @@ def main():
     # guest up), then stop the guest, inject the script corpus into the
     # resulting FAT image with inject_any.py, then boot again and run
     # the acceptance steps against the populated volume.
-    s, proc = boot(iso, qemu, disk)
+    proc, s = _qemu_boot(qemu, iso, MONITOR[1], disk=disk)
     print("monitor connected (pass 1: format)")
     if not wait_for_prompt(s):
         print("FATAL: shell prompt never appeared in pass 1")
@@ -285,7 +150,7 @@ def main():
             print("inject: OK   %s" % name83)
 
     # ---- pass 2: boot with the corpus in place ----
-    s, proc = boot(iso, qemu, disk)
+    proc, s = _qemu_boot(qemu, iso, MONITOR[1], disk=disk)
     print("monitor connected (pass 2: acceptance)")
     if not wait_for_prompt(s):
         print("FATAL: shell prompt never appeared in pass 2")
