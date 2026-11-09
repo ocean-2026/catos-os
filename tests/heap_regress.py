@@ -44,7 +44,7 @@ VGA_TEXT = 0xB8000
 VGA_COLS = 80
 VGA_ROWS = 25
 
-def boot(iso, qemu, disk):
+def boot(iso, qemu, disk, port=None):
     """Start the guest and connect to its monitor.
 
     Returns (proc, sock): the caller must keep `proc` and hand it to
@@ -52,10 +52,11 @@ def boot(iso, qemu, disk):
     """
     kill_qemu()                 # no-op: nothing of ours is running yet
     time.sleep(1)
+    mon_port = port or MONITOR[1]
     cmdline = [qemu, "-m", "256", "-no-reboot", "-net", "none",
                "-cdrom", iso, "-boot", "order=d",
                "-display", "none",
-               "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
+               "-monitor", "tcp:%s:%d,server,nowait" % (MONITOR[0], mon_port)]
     if disk:
         cmdline += ["-drive", "file=%s,format=raw,if=ide" % disk]
     print("boot:", " ".join(cmdline))
@@ -63,7 +64,8 @@ def boot(iso, qemu, disk):
                             stderr=subprocess.DEVNULL)
     for _ in range(20):
         try:
-            return proc, socket.create_connection(MONITOR, timeout=5)
+            return proc, socket.create_connection((MONITOR[0], mon_port),
+                                                   timeout=5)
         except OSError:
             time.sleep(2)
     kill_qemu(proc)
@@ -89,7 +91,22 @@ def main():
     if "--qemu" in args:
         i = args.index("--qemu")
         if i + 1 < len(args):
-            qemu = args[i + 1]
+            qemu = args.pop(i + 1)
+            args.pop(i)
+    # --port / --disk let two drivers run concurrently on one host
+    # without fighting over the monitor port or the FAT volume image.
+    port = MONITOR[1]
+    if "--port" in args:
+        i = args.index("--port")
+        if i + 1 < len(args):
+            port = int(args.pop(i + 1))
+            args.pop(i)
+    disk_override = None
+    if "--disk" in args:
+        i = args.index("--disk")
+        if i + 1 < len(args):
+            disk_override = args.pop(i + 1)
+            args.pop(i)
     if iso is None:
         iso = os.path.join(os.path.dirname(HERE), "kernel_v25", "catos.iso")
     iso = os.path.abspath(iso)
@@ -98,12 +115,13 @@ def main():
         print("qemu-system-i386 not found")
         return 2
 
-    disk = os.path.join(HERE, "qemu_disk.img")
+    disk = os.path.abspath(disk_override or
+                           os.path.join(HERE, "qemu_disk.img"))
     if not os.path.exists(disk):
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    proc, s = boot(iso, qemu, disk)
+    proc, s = boot(iso, qemu, disk, port=port)
     print("monitor connected")
     time.sleep(25)                      # boot to shell (TCG is slow)
 

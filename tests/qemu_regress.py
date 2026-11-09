@@ -74,13 +74,14 @@ def kill_qemu(proc=None):
     except Exception:
         pass
 
-def boot(iso, qemu, disk=None):
+def boot(iso, qemu, disk=None, port=None):
     kill_qemu()                 # no-op: nothing of ours is running yet
     time.sleep(1)
+    mon_port = port or MONITOR[1]
     cmdline = [qemu, "-m", "256", "-no-reboot", "-net", "none",
                "-cdrom", iso, "-boot", "order=d",
                "-display", "none",
-               "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
+               "-monitor", "tcp:%s:%d,server,nowait" % (MONITOR[0], mon_port)]
     if disk:
         cmdline += ["-drive", "file=%s,format=raw,if=ide" % disk]
     print("boot:", " ".join(cmdline))
@@ -88,7 +89,8 @@ def boot(iso, qemu, disk=None):
                             stderr=subprocess.DEVNULL)
     for _ in range(20):
         try:
-            return proc, socket.create_connection(MONITOR, timeout=5)
+            return proc, socket.create_connection((MONITOR[0], mon_port),
+                                                   timeout=5)
         except OSError:
             time.sleep(2)
     kill_qemu(proc)
@@ -205,27 +207,47 @@ def png_size_and_nonblack(path):
     return (w, h, bright / max(total, 1))
 
 def main():
-    iso = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        ROOT_DIR(), "kernel_v25", "catos.iso")
+    args = sys.argv[1:]
+    iso = None
+    if args and not args[0].startswith("--"):
+        iso = args.pop(0)
     qemu = None
-    if "--qemu" in sys.argv:
-        i = sys.argv.index("--qemu")
-        if i + 1 < len(sys.argv):
-            qemu = sys.argv[i + 1]
+    if "--qemu" in args:
+        i = args.index("--qemu")
+        if i + 1 < len(args):
+            qemu = args.pop(i + 1)
+            args.pop(i)
+    # --port / --disk let two drivers run concurrently on one host
+    # without fighting over the monitor port or the FAT volume image.
+    port = MONITOR[1]
+    if "--port" in args:
+        i = args.index("--port")
+        if i + 1 < len(args):
+            port = int(args.pop(i + 1))
+            args.pop(i)
+    disk_override = None
+    if "--disk" in args:
+        i = args.index("--disk")
+        if i + 1 < len(args):
+            disk_override = args.pop(i + 1)
+            args.pop(i)
+    if iso is None:
+        iso = os.path.join(ROOT_DIR(), "kernel_v25", "catos.iso")
     qemu = find_qemu(qemu)
     if not qemu:
         print("qemu-system-i386 not found; install QEMU first "
-              "(winget install SoftwareFreedomConservancy.QEMU)")
+              "(winget install SoftwareFreedomConservacy.QEMU)")
         return 2
     os.makedirs(SHOTS, exist_ok=True)
     for old in glob.glob(os.path.join(SHOTS, "*.png")):
         os.remove(old)
 
-    disk = os.path.abspath(os.path.join(SHOTS, "..", "qemu_disk.img"))
+    disk = os.path.abspath(disk_override or
+                           os.path.join(SHOTS, "..", "qemu_disk.img"))
     if not os.path.exists(disk):
         with open(disk, "wb") as f:
             f.truncate(64 * 1024 * 1024)      # sparse 64 MiB IDE disk
-    proc, s = boot(iso, qemu, disk)
+    proc, s = boot(iso, qemu, disk, port=port)
     print("monitor connected")
     time.sleep(25)                     # boot to shell (TCG is slow; GRUB alone takes ~10s)
     results = []
