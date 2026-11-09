@@ -9,7 +9,8 @@
 
 > **编号命名空间说明（2026-11-09 落档补充）**
 > 本节及第四节使用**主清单编号**（一~八节连续编号 `#1`~`#46`）。
-> 2026-11-09 按合并要求落档 D-1~D-15 时，第一节续编 `#48`~`#50`、第四节续编 `#51`~`#65`。
+> 2026-11-09 按合并要求落档 D-1~D-15 时，第一节续编 `#48`~`#50`、第四节续编 `#51`~`#65`；
+> 同日移植 Go 解释器时暴露 `u2k_str()` 的 argv 校验缺陷，第四节续编 `#68`。
 > 第九节的 `#48`/`F1`/`A2`/`#3` 与第十节的 `#47` 属于**各自独立的局部命名空间**
 > （第九节是 b31 修复闭合表、第十节是工具链常量核对表，均已在节首自行声明），
 > 与主清单编号**不冲突、不互相引用**。引用时请连节号一起写（如"第四节 #61"）。
@@ -70,6 +71,7 @@
 | **63** | **`node.c` 从不被任何构建脚本编译** | `grep -rn node kernel_v25/build.sh kernel_v25/extapp/build_ce.sh` → **0 命中**；`kernel_v25/node/node.c`（1,414 行）与 `node.ce`（35,116 B）**均已入库**，且与原项目 `node/node.c` diff **0 行差异**、`node.ce` **逐字节相同** | `node.ce` 是**无法复现的预编译产物**（与 #62 同构）：一旦有人改 `node.c`，镜像里的 `node.ce` 会静默过期 | 把 `node` 加入 `build.sh` 应用列表；补独立验收 `tests/node_regress.py`（QEMU 内 `run /bin/node.ce` 跑 `TEST.JS`） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-9 / P1-10**） |
 | **64** | **`tests/inject_any.py` 的 FAT 几何参数过时** | 脚本 `tests/inject_any.py:18-21` 硬编码 `SPC=8` / `RSVD=33` / `FAT_SZ=8192`（按 4 GiB 稀疏盘假设）；内核 `kernel_v25/src/fat.c:8` 实为 `RESERVED 32u`，且 `fat_sz`/`spc` 由卷大小动态决定（`fat.c:635/647/650`）。该脚本与原项目 `tools/inject_any.py` **逐字节相同** | 任何"注入新应用再验证"的流程**第一步即失败**（报 `BIN dir not found`），极易被误判为"移植不成功" | 改为从 DBR 读取几何（PM 已用读 DBR 的版本验证可正常注入） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-7**） |
 | **65** | **`.gitignore` 否定规则位置写反（dead negation）** | `.gitignore:7` 与 `:12` 有 `!kernel_v25/build/catos_work.iso`，但 `.gitignore:27` 是 `*.iso`；git 是 **last-match-wins** ⇒ `git check-ignore -v kernel_v25/build/catos_work.iso` 命中的是 `.gitignore:27:*.iso`（**忽略规则**），否定规则形同虚设。注释写的 *"exceptions must precede rules"* **结论是错的** | 构建产物跟踪状态脆弱；下次有人删了重建该文件会再次被 `*.iso` 忽略，构建可复现性再次失效 | 把否定规则移到 `*.iso` **之后**，并把注释改成符合 git 语义的表述 | 2026-11-09 核实 | 已确认/待修复（PRD **P0-4**） |
+| **68** | **`u2k_str()` 用整段 `max` 字节窗口校验用户字符串 ⇒ argv 传参路径全线失效** | 现项目 `kernel_v25/src/task.c:668` 的 `u2k_str()` 一次性校验 `[us, us+max-1]` 整段（`max = FS_PATH_MAX = 160`），而 `task_spawn_ce()` 把 argv 字符串**放在用户栈顶**（`sp = USER_STACK_TOP - 0x10`，逐个 `sp -= l+1`）⇒ 160 字节窗口必然越过 `USER_STACK_TOP` ⇒ `validate_uaddr()` 的 `vma_contains(t->vm, end)` 失败 ⇒ 返 -14 ⇒ `u2k_str` 返 -1 ⇒ `SYS_FILE_READ` 返 **-3**、`SYS_FILE_EXISTS` 返 **0**（"不存在"）。**第二重缺陷**：修前 `dst[i] = us[i]` 是从 ring0 **直接解引用用户指针**（读内核地址空间）；CE image 恰好被恒等映射所以能 work，用户栈**没有**恒等映射。**原项目**（`D:/CatOs/Catos_Better_better/src/task.c:618`）用的是**单点 arena 边界检查**（`USER_IMAGE_BASE <= us < USER_ARENA_END`），**没有 160 字节窗口** ⇒ 原项目不触发此缺陷 | `run /bin/go.ce /BIN/TEST.GO` 实机答 `go: cannot read script: /BIN/TEST.GO`，但该文件**确实在 FAT 卷上**（独立宿主侧 FAT32 解析器逐簇核对内容正确）。**决定性对照实验**：同一路径，字面量（在 image VMA 内）`exists=1 / file_read=592` **成功**，argv（在栈顶）`exists=0 / file_read=-3` **失败** ⇒ 缺陷在内核字符串拷贝路径，与 Go 解释器无关。**影响 7 条 syscall**：`FILE_READ`/`FILE_EXISTS`/`FILE_WRITE`/`SAVE`/`SPAWN` 的 argv 拷贝 + 网络的 `url`/`host`/`ip` 三张参数表 —— 全部是同一 bug 的受害者。原项目当年验 go 只走**无参内置 demo 回退**（`go.c:1215`），从未走 argv ⇒ 缺陷一直潜伏 | 逐字节校验（`validate_uaddr(t, a, 1)`）+ 经任务页表翻译读取（`task_virt_to_phys()` + 内核恒等映射别名），不再从 ring0 直接解引用。**2026-11-09 已修复**（commit `38fee6a`），修复后 `run /bin/go.ce /BIN/TEST.GO` → `ALL PASS`、`run /bin/node.ce /BIN/TEST.JS` → `ALL PASS`（两条都依赖 argv 传参，修前必然失败） | 移植 Go 解释器时暴露 / 2026-11-09 核实 | **已修复** |
 
 ### Go 子集解释器（`go.c`）现状 —— 2026-11-09 落档说明
 
@@ -150,6 +152,7 @@
 > 本节「项」列用的是 **b31 修复闭合表的局部编号**（`#48`/`F1`/`A2`/`#3`），
 > 与第一节~第八节的**主清单编号**、第十节的 `#47` **互不引用**。
 > 主清单在 2026-11-09 落档后已续编到 `#65`（第一节 `#48`~`#50`、第四节 `#51`~`#65`），
+> 第四节同日另续编 `#68`（`u2k_str()` argv 校验缺陷，已修复），
 > 引用本节条目时请写"第九节 #48"以免与主清单混淆。
 
 | 项 | 问题 | 根因（源码证据） | 修复 | 状态 |

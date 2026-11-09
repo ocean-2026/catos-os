@@ -284,3 +284,241 @@ tests/qemu_regress.py→ steps=12 ok=12 warn=0
 | **架构师（核对）** | forward-call-fix（原项目 `extapp/cc.c:1832` 的原型符号复用逻辑）是否已并入现项目 `cc_self.c` | `docs/orig-archive/README.md` A-5 判定表 |
 | **实施阶段** | P1-1（`go.c` 进内核 + 移植 5 个 `.GO` 用例，**逐条验证 FIND-G3~G10 修复随行**）、P1-3（`cc_self.c` 覆盖 `cc.c`）、P1-4/P1-9（补构建链）、P1-7（修 `inject_any.py`） | PRD §3、本文档 §五 |
 | **工程师（后续）** | `docs/merge-harvest-design.md` 落地后，实施阶段收尾时的回归验证 | — |
+
+---
+
+## 十、第二阶段实施结论（内核层 T02–T05 + 应用层 P1）
+
+> **本节记录**：内核层任务单 T02/T03/T04/T05 的执行结果、应用层 P1 各项的落点，
+> 以及本次移植过程中**暴露并修复的 3 个内核/测试层缺陷**。
+> 每一项都给出「缺陷 → 源码位置 → 移植后是否仍存在 → 验证方式」。
+
+### 10.1 内核层任务单落点
+
+| 任务 | 内容 | 落点 | 验收（真实输出） |
+|---|---|---|---|
+| **T02** | P0-1 + P0-2：`heap_vma_init()` 改用 `vma_insert()`；新增 `heap_ensure_range()`；`sys_alloc()` 对 payload 全范围调用 | `kernel_v25/src/task.c:734`（`heap_ensure_range`）、`:781`（`t->vm = vma_insert(t->vm, v)`） | `run /bin/allocprobe.ce` → `ALLOCPROBE: alloc works`；`run /bin/heaptest.ce` → `HEAPTEST PASS`；`qemu_regress.py` 仍 12/12 |
+| **T03** | P0-3 常量恢复：`USER_STACK_SZ` 0x10000→**0x20000**、`USER_HEAP_MAX` 0x40000→**0x80000** | `kernel_v25/include/paging.h` | `qemu_regress.py` 仍 12/12；堆探针全绿 |
+| **T04** | `cc.c` ← `cc_self.c` 接管（阶段 1-3 编译器）；`-DCC_HOST` 前置；token heap 预算重整 | `kernel_v25/extapp/cc.c`（2,317 行）、`kernel_v25/extapp/build_ce.sh` 的 `CFLAGS` | `tests/test_cc.py` **10/10**（含新增 `struct`/`switch`/`goto` 用例）；`cc.ce` = 48,104 B ≪ 256 KiB |
+| **T05** | 构建链两处列表一次改完：`build.sh` 应用列表 + `gen_builtin.py` 的 `FILES`/`OPTIONAL` 同时加入 `go`/`node`/`cc`/`allocprobe`/`heaptest` | `kernel_v25/build.sh`、`kernel_v25/build/gen_builtin.py` | **同一个 commit**（`00b54d8`）—— 两处列表不允许分两次改 |
+
+**T02/T03 顺带修掉的两个隐患**（架构师 §8 指出的）：
+
+| # | 缺陷 | 位置 | 修法 | 后果 |
+|---|---|---|---|---|
+| **#66** | `sys_alloc()` 整块消费分支缺 `h->size = size;` | `task.c` `sys_alloc()` 的 `else { *pp = h->next; }` | 补 `h->size = size;` | freelist 回收后 size 语义漂移 ⇒ 下一轮分配「以为」自己拥有比用户拿到的更多字节 ⇒ **潜在越界写** |
+| **#67** | `cc_alloc()` 失败路径不设 `*cap` | `kernel_v25/extapp/cc.c` `cc_alloc()` | 失败路径补 `*cap = fallback_cap;`（8 个调用点全部补参数） | `g_tok_cap = 0` ⇒ 后续分配直接返回 NULL 而非降级到静态缓冲 |
+
+### 10.2 token heap 预算重整（架构师算式落地）
+
+**问题**：架构师算出 `cc_self.c` 的 **8 路堆工作集 = 1,004,992 B**，而用户拍板的 512 KiB 堆
+payload 只有 **524,280 B**（`USER_HEAP_MAX 0x80000` 减去头部/对齐）。`TOK_MAX * sizeof(token_t)`
+= 25,000 × 24 = **600,000 B 单笔就放不下** ⇒ `cc_alloc()` 回落 512-token 静态缓冲 ⇒
+编译器对**任何源码立即报 "source too complex"**（比 PRD 说的「只能编 <8 KiB 源码」更严重）。
+
+**处置**（按架构师方案）：
+
+| 项 | 数值 | 说明 |
+|---|---|---|
+| `TOK_HEAP`（新增） | **4800** | 512K/8 路全过的精确上限是 4,968，取 4,800 留余量 |
+| `sizeof(token_t)` | **24 B** | `kernel_v25/extapp/cc.c` |
+| 单笔 token 缓冲 | 4,800 × 24 = **115,200 B** | |
+| 8 路工作集合计 | **520,192 B** | 131072+98304+115200+65536+65536+28160+8192+8192 |
+| 对 524,280 B payload | **≤**，slack **4,088 B** | 全部 8 路同时活跃也放得下 |
+| `TOK_MAX`（保留） | **25,000** | 编译期**源码语言上限**（token 数组的静态维度），与堆预算解耦 |
+
+**取舍必须写明（用户级决策）**：现役编译器能力 = 阶段 1-3 的 `struct`/`typedef`/`enum`/`switch`/`goto`
+回来了，但 **token 容量受限于用户拍板的 512 KiB 堆**（原项目是 20,000 token / 需约 1 MiB 堆）。
+若将来要恢复 20,000 token，需把 `USER_HEAP_MAX` 提到 1 MiB —— **这是用户级决策，已向上汇报，
+工程师不自行改堆上限**。
+
+**验收（实的）**：用 `cc.ce` 编译**超过 8 KiB 的源码**，确认能出 `.ce` 且**不是** "source too complex"。
+`tests/test_cc.py` 的 10 个用例全部编过，其中 `struct`/`switch`/`goto` 三例合计源码 >8 KiB。
+
+### 10.3 P0-6：`u2k_str()` 越界校验 —— **原项目固有的内核缺陷，移植时暴露并修复**
+
+> **这是本次合并的正收益**：不是移植引入的缺陷，而是移植过程**暴露**了它并**顺手修好**。
+
+**现象**
+
+`run /bin/go.ce /BIN/TEST.GO` 在实机上回答 `go: cannot read script: /BIN/TEST.GO`，
+但 `/BIN/TEST.GO` **确实在 FAT 卷上**（用独立写的宿主侧 FAT32 解析器逐簇核对过内容正确）。
+
+**决定性对照实验**（`kernel_v25/extapp/readtest.c` 探针，同一个路径、两种传参方式）：
+
+```
+LITERAL path=/BIN/DEMO.GO exists=1   file_read=592    <- 字面量（在 image VMA 内）成功
+ARGV    path=/BIN/TEST.GO exists=0   file_read=-3     <- argv（在用户栈顶）失败
+```
+
+⇒ **同一个路径，字面量可用、argv 传参不可用** ⇒ 缺陷与 Go 解释器无关、与文件是否在盘上无关，
+**在内核的用户字符串拷贝路径上**。
+
+**根因**（`kernel_v25/src/task.c:668`，修前）
+
+```c
+static int u2k_str(char *dst, const char *us, int max) {
+    task_t *t = cur_task;
+    if (validate_uaddr(t, (uint32_t)us, max) != 0) return -1;   /* ← 缺陷 1 */
+    for (int i = 0; i < max - 1; i++) {
+        dst[i] = us[i];                                          /* ← 缺陷 2 */
+        if (!us[i]) return 0;
+    }
+    ...
+}
+```
+
+1. **窗口校验越界**：`max = FS_PATH_MAX = 160`，`validate_uaddr()` 会检查
+   `[us, us+max-1]` **整段**是否落在同一个 VMA 内。而 `task_spawn_ce()` 把 argv 字符串
+   **放在用户栈顶**（`sp = USER_STACK_TOP - 0x10`，逐个 `sp -= l + 1`）⇒ 160 字节窗口
+   **必然越过 `USER_STACK_TOP`** ⇒ `vma_contains(t->vm, end)` 失败 ⇒ 返回 -14 ⇒
+   `u2k_str` 返 -1 ⇒ `SYS_FILE_READ` 返 **-3**、`SYS_FILE_EXISTS` 返 **0**（"不存在"）。
+   算术核验：`argv[0]` 落在 0x021FFFE5，窗口末 0x02200085 > 栈顶 0x02200000。
+2. **ring0 直接解引用用户指针**：`dst[i] = us[i]` 用的是**内核地址空间**。
+   CE image 恰好被恒等映射所以能 work，用户栈**没有**恒等映射 ⇒ 这条路径本身就是坏的，
+   只是被第 1 点掩盖了。
+
+**归属判断：原项目固有缺陷，不是移植引入**
+
+原项目（只读复核 `D:/CatOs/Catos_Better_better/src/task.c:618`）用的是**另一种**校验：
+
+```c
+static int u2k_str(char *dst, const char *us, int max) {
+    if ((uint32_t)us < USER_IMAGE_BASE || (uint32_t)us >= USER_ARENA_END) return -1;
+    for (int i = 0; i < max - 1; i++) { dst[i] = us[i]; if (!us[i]) return 0; ... }
+    ...
+}
+```
+
+—— 是**单点 arena 边界检查**（`USER_IMAGE_BASE ≤ us < USER_ARENA_END`，栈在 arena 内所以放行），
+**没有 160 字节窗口**，因此原项目**不会**触发本缺陷。原项目当年验证 go 时用的是**无参的内置 demo 回退**
+（`go.c:1215`），从未走过 argv 传参路径 ⇒ 缺陷一直潜伏。
+
+**影响面（同一处修复覆盖 7 条 syscall 路径）**：`SYS_FILE_READ` / `SYS_FILE_EXISTS` /
+`SYS_FILE_WRITE` / `SYS_SAVE` / `SYS_SPAWN` 的 argv 拷贝 / 网络调用的 `url`/`host`/`ip`
+三张参数表 —— **全部是同一个 bug 的受害者**。
+
+**修法**（commit `38fee6a`）：逐字节校验 + 经任务页表翻译读取，不再从 ring0 直接解引用：
+
+```c
+for (int i = 0; i < max - 1; i++) {
+    uint32_t a = u + i;
+    if (validate_uaddr(t, a, 1) != 0) { dst[i] = 0; return -1; }
+    uint32_t pa = task_virt_to_phys(&t->space, a & ~0xFFFu);
+    if (!pa) { dst[i] = 0; return -1; }
+    char ch = *(char *)(pa + (a & 0xFFF));
+    dst[i] = ch;
+    if (!ch) return 0;
+}
+```
+
+（内核把低 64 MiB 恒等映射，`pa + offset` 是合法的内核别名 —— 与既有的 `k2u_copy()` 同一模式。）
+
+**验证方式**：见 §10.5 的 `run /bin/go.ce /BIN/TEST.GO` → `ALL PASS`，
+以及 `run /bin/node.ce /BIN/TEST.JS` → `ALL PASS`（**两条都依赖 argv 传参**，
+修前必然失败，修后通过 —— 这就是该缺陷的直接验收信号）。
+
+**同时落档**：作为内核老问题续编号写入 `docs/CatOS-内核问题清单.md` **#68**。
+
+### 10.4 FIND-G3~G10 逐条随行验证
+
+> 任务书要求：「移植后 8 条修复必须**逐条随行且有效**」，每条写一行
+> 「缺陷 → 源码位置 → 移植后是否仍存在 → 验证方式」，并**至少对其中 2-3 条做实机验证**。
+
+| FIND | 缺陷 | 源码位置（`kernel_v25/extapp/go.c`） | 移植后是否仍存在 | 验证方式 |
+|---|---|---|---|---|
+| **G3** | 递归深度无上限 → 栈溢出 | `:783` `g_call_depth` + `:784` `CALL_DEPTH_MAX 200` + `:1048` 入口检查 + `:1053/:1058/:1074` 增减配平 | **不存在**（修复随行） | **实机**：`tests/go_regress.py` 的 `go-test` 跑 `TEST.GO`（含深递归用例）→ `ALL PASS`。**宿主桩**：`host_stub_go.c` 编译 `go.c` 后跑 `TEST.GO` 全绿 |
+| **G4** | 非法字符被静默吞掉 | `:358-362` default 分支置 `g_perr`/`g_errline` | **不存在** | **实机**：`run /bin/go.ce /BIN/SYN.GO` → 报 `syntax error at line 3`（不是静默通过） |
+| **G5** | 读文件 16 KiB 上限 | `:1085` `read_whole()`，`FS_CHUNK 16384` 分块循环读至 EOF | **不存在** | **静态核对**：`read_whole()` 循环 + `go_regress.py` 的 `go-test` 覆盖多段读取路径 |
+| **G6** | arena 分配未判空 | `:701` 与 `:732` `if (!s->v) { g_oom = 1; return 0; }` | **不存在** | **宿主桩**（注入 OOM）：分配失败时置 `g_oom` 并返回 0，解释器不崩、报 OOM 而非野指针 |
+| **G7** | 字面量 1023 截断 | `:223-235` 两遍扫描（先数解码长度再按 arena 尺寸分配）；未闭合引号报词法错误 | **不存在** | **静态核对**：两遍扫描代码路径存在；`go-test` 用例含字符串字面量 |
+| **G8** | 顶层 break/continue 未报错 | `:188-191` `g_loop_depth`/`g_func_depth` + `:658/:665/:669` 三处 `depth==0` 报错 | **不存在** | **宿主桩**（注入用例）：顶层 `break` 被拒绝并报错，不越出函数边界 |
+| **G9** | for `:=` 作用域泄漏 | `:882-899` 每个 for 建独立 `Scope`，结束恢复 `g_scope` | **不存在** | **静态核对**：`Scope` 创建/恢复代码路径存在 |
+| **G10** | 数字溢出 | `:302-313` 扫描时检测 `> 2147483647` | **不存在** | **宿主桩**（注入用例）：溢出数字被拒绝并报错 |
+
+**额外发现并修复的移植侧缺陷（不在 G3~G10 之内）**：`go.c` 的 `a_alloc()` 边界判断写死
+`ARENA_SZ`（192 KiB），但静态兜底 arena 只有 64 KiB ⇒ 越界隐患。**已修**并实测各用例 arena 峰值。
+
+### 10.5 `ce_regress` 的 `go.ce` FAIL —— 判定为**模拟器建模缺陷**，非移植引入
+
+**现象**：`tests/ce_regress.py` 从 `FAIL=0` 变成 `FAIL=1`，FAIL 项是 `go.ce`，
+报 `[ce_sim] ERROR: step limit 3000000 hit at pc=0x02002d05`。
+
+**对照实验（主理人执行）**：用**原项目未经改动的 `go.c`**（md5 `f9876f42fa646c58ec21da649ed934e4`）
+走**完全相同**的构建路径（`build_ce.sh` → image=26812 / bss=0x292c0 / api_off=0x68b8）与
+同一个 `ce_sim`（6 M 步预算）⇒ 原版 `go_orig.ce` 报 `pc=0x02002f25`，
+移植版报 `pc=0x02002f23`，**输出停点完全一致**（`CatOS go subset v1.0 / ---- / script: built-in demo`）。
+20 M 步仍然撞上限。⇒ **移植没有引入这个失败**。
+
+**根因（本次确证）**：`tests/ce_sim.py` **漏维护 CF 标志**。
+模拟器为 `0x38`/`0x39`/`0x3A`/`0x3D` 四种 `cmp` 形式都正确设置了 `self.cf`，
+**唯独 `0x3C`（`cmp al, imm8`）从不设置**。而 gcc -O2 把 `is_idc()` 内联成：
+
+```
+and $0xffffffdf,%eax / sub $0x41,%eax / cmp $0x19,%al (0x3C) / jbe (0x76)
+```
+
+`jbe` 读的是 **CF|ZF**，CF 残留自上一条指令 ⇒ 模拟器在词法器里走错分支。
+
+**证据链**：
+1. PC 直方图：3,000,000 步内 57,883 次重复同一段循环（151 个不同 PC），输出恒停在 banner 之后；
+2. 读解释器全局：`g_pos = 24`（冻结）、`g_tokn = 4096`（= `TOK_MAX`）、`g_line = 2`、
+   `src[24:] = b'func fib(n int) int {\n    if n < 2 { ret'` ⇒ 词法器停在第 24 字节；
+3. 反汇编热点 PC：`0x02002f21: 3c 19`（`cmp $0x19,%al`）后紧跟 `0x02002f23: 76 6b`（`jbe`）；
+4. `ce_sim.py` 的 `0x3C` 分支确实缺 `self.cf = ...`。
+
+**处置（走任务书的路线 (a)「判定慢还是死循环」，而不是 (b) 放宽判据）**：
+修 `ce_sim.py` 的 CF 闩锁（commit `7f8b225`），**未删任何测试、未放宽任何判据**。
+修后 `go.ce` 在 `ce_sim` 下 **COMPLETED，246,041 步，`g_pos=563/563`，`g_tokn=200`**
+（源码读完、200 个 token）⇒ **证实 Go 解释器本身没有死循环**。
+
+同时补齐了 group3（`0xF6`/`0xF7`）的**内存操作数**形式 —— gcc 为 32 位有符号除法发的是
+`idiv dword ptr [ebp-0x18c]`，只有寄存器形式的模拟器会直接 abort 而不是执行它。
+
+**归属**：`ce_sim.py` 的建模缺陷（测试层），**不是** `go.c` 的 CE 侧缺陷、**不是**移植引入。
+**对照证据**：同一份 `go.ce` 在**真实 QEMU** 上完整跑出 `fib(10)= 55` / `demo done` / `go: exit ok`。
+
+### 10.6 ISO 内置 vs 磁盘 FAT 卷（V-8 到底验的是哪一份）
+
+**结论：两者内容同源、载体不同；V-8 验的是「磁盘 FAT 卷上的 `/bin/go.ce`」。**
+
+| 载体 | 生成方式 | 谁读它 |
+|---|---|---|
+| **ISO 内置表** | `kernel_v25/src/builtin_apps.inc`（由 `build/gen_builtin.py` 生成，`FILES` 必需 + `OPTIONAL` 缺失则跳过） | `ce_install_builtins()` 在 `format` 之后与开机时**拷贝**到 FAT 卷 |
+| **磁盘 FAT 卷** | `ce_install_builtins()` 写入 IDE 磁盘的 FAT32 卷 | 内核 shell 的 `run /bin/x.ce` —— **shell 从 FAT 卷读，不是从 ISO 内置表读** |
+
+⇒ `run /bin/go.ce` 实机跑的是**磁盘上那一份**。它由 ISO 内置表拷贝而来，所以内容同源，
+但**载体不同**（`run` 命令读的是 FAT32 文件）。**注意**：`ce_install_builtins()` 里
+`fs_write_raw` 失败即 `return` ⇒ 后续文件不再安装 —— 这是 FAT 卷损坏时 `/bin` 缺文件的机制。
+
+**FAT 8.3 名截断**（影响所有 `ls /bin` 断言）：`fat_name83()` 取**最后一个**点号分扩展名、
+base 截 8、ext 截 3、**全部大写**；`fat_name_show()` 输出时转小写 ⇒ `allocprobe.ce` 显示为
+`allocpro.ce`、`readtest.ce` 显示为 `readtes~1.ce`。断言必须用 8.3 名。
+
+### 10.7 argv 通道：ABI 零改动（任务书要求核实的三条之一）
+
+| 核实项 | 结论 | 证据 |
+|---|---|---|
+| `ce_load_ce()` 是不是 GRUB 启动主路径？ | **不是**。P0-5 因此**不成立**。 | `grep -rn "ce_load_ce" kernel_v25/src/` 两棵树都 **0 命中**；CE01 magic 校验在 `task.c:1677`，对象是 FAT 读上来的用户态 `.ce`，与 GRUB 加载的 `kernel.bin` 无关。`ce_load_ce` 唯一的历史调用点是 `load_ce.bin`（一条**不走 GRUB** 的路径） |
+| go.c 无参数时脚本路径怎么传？ | **不传** —— 走**内置 demo 回退**：`go.c` 的 `ce_main()` 检查 `argc >= 2 && argv[1][0]`，否则用 `file_exists("/BIN/DEMO.GO")` 或内嵌 demo 源码 | `kernel_v25/extapp/go.c` 的 `ce_main()` 路径选择分支 |
+| CE ABI 有没有 argv 槽位？ | **有，且早已有** ⇒ **零 ABI 改动** | `kernel_v25/include/ce.h:20-26` 的 argv 契约 + `task.c:1783-1800` 压栈（`argv_ptr[]` + `argv_arr` → 入口帧 `[esp]=VS_EXIT_STUB, [esp+4]=argc, [esp+8]=argv`）+ `shell.c:576-579` 切分 + `go.c:1199` 已是 `int ce_main(int argc, char **argv)` |
+
+**go.c 只用 ≤39 号 CE 槽**（`write`0/`putc`1/`alloc`11/`print_int`14/`atoi`18/`file_exists`23/`file_read`39），
+全部落在 57 槽 append-only 的**旧前缀**内 ⇒ **不需要改 ABI**。
+
+### 10.8 共享机器纪律（本次协作事故的记录）
+
+**事故**：探针脚本用 `taskkill /F /IM qemu-system-i386.exe`（**按镜像名全局杀**）做开机前清理，
+在共享机器上把**其他驱动正在跑的 guest 一起杀掉** ⇒ 幸存者的 HMP monitor socket 被复位
+（`WinError 10054`）⇒ 表现为「同一个脚本两次跑出完全不同的结果」（4/7 vs 2/7）的随机失败。
+
+**根因**：按镜像名清理在共享机器上是**禁止动作**；正确做法是**按 PID** 精确清理自己启动的进程。
+
+**处置**：
+- 新增 `tests/qemu_driver.py` —— 共享的、**PID 安全**的 QEMU 驱动模块，
+  统一提供 `kill_qemu(proc)`（按 PID）、`boot()`（返回 `(proc, sock)`）、读屏、`sendkey`、
+  以及 `clear_screen()`；
+- `tests/heap_regress.py` 与 `tests/qemu_regress.py` 改为按 PID 清理；
+- **附带修正两个 shell 事实**：CatOS shell 的清屏命令是 **`clear` 不是 `cls`**
+  （`cls` 会打印 `unknown command: cls` 且不清屏 ⇒ 断言会匹配到上一屏的残留文本）；
+  CatOS shell **没有 `cat` 命令**（确认文件存在只能用 `ls /bin`）。
