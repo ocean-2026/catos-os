@@ -27,6 +27,9 @@ FILES = [
     ("/bin/zhdemo.ce",   os.path.join(ROOT, "extapp", "bin", "zhdemo.ce")),
     ("/bin/hello.elf",    os.path.join(ROOT, "extapp", "bin", "hello.elf")),
     ("/bin/mmaptest.ce",  os.path.join(ROOT, "extapp", "bin", "mmaptest.ce")),
+    ("/bin/allocprobe.ce", os.path.join(ROOT, "extapp", "bin", "allocprobe.ce")),
+    ("/bin/heaptest.ce",  os.path.join(ROOT, "extapp", "bin", "heaptest.ce")),
+    ("/bin/go.ce",        os.path.join(ROOT, "extapp", "bin", "go.ce")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]
@@ -39,6 +42,17 @@ OPTIONAL = [
     ("/bin/node.ce",     os.path.join(ROOT, "node", "node.ce")),
     ("/bin/TEST.JS",     os.path.join(ROOT, "node", "TEST.JS")),
     ("/appdevelop/HELLO.C",   os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
+    # Go scripts: the interpreter's own regression corpus.  They are
+    # installed on the FAT volume as /bin/*.GO so that
+    # "run /bin/go.ce /BIN/TEST.GO" works on real hardware.  The FAT
+    # directory entries are 8.3 upper-case, and go.c looks the script up
+    # with the same upper-case path.  Optional so a tree without them
+    # still links.
+    ("/bin/DEMO.GO",     os.path.join(ROOT, "extapp", "cases", "DEMO.GO")),
+    ("/bin/TEST.GO",     os.path.join(ROOT, "extapp", "cases", "TEST.GO")),
+    ("/bin/MINI_GO.GO",  os.path.join(ROOT, "extapp", "cases", "MINI_GO.GO")),
+    ("/bin/MINI_IN.GO",  os.path.join(ROOT, "extapp", "cases", "MINI_IN.GO")),
+    ("/bin/SYN.GO",      os.path.join(ROOT, "extapp", "cases", "SYN.GO")),
 ]
 
 def c_ident(path):

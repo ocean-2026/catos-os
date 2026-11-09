@@ -40,9 +40,15 @@ fi
 mkdir -p build
 
 echo "== building CE apps (extapp) =="
-for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest; do
+for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest allocprobe heaptest go; do
     sh extapp/build_ce.sh $app.c
 done
+
+# node.c lives outside extapp/ (kernel_v25/node/), and its .ce has always
+# been kept next to the source, so build it into ../node (the second
+# argument to build_ce.sh selects the output directory).
+echo "== building CE apps (node) =="
+sh extapp/build_ce.sh ../node/node.c ../node
 
 echo "== generating built-in app blobs =="
 if [ -n "$PY" ]; then

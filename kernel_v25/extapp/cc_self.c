@@ -41,7 +41,40 @@ catos_api_t *__ce_api = 0;
 /* constants formerly #define-d */
 enum {
     OB_MAX = 131072, CE_LOAD_BASE = 33554432, SRC_MAX = 98304,
-    TOK_MAX = 25000, SYM_MAX = 1024, LOC_MAX = 128, REL_MAX = 1024,
+    TOK_MAX = 25000,
+    /* TOK_HEAP: how many tokens are actually requested from the heap.
+     *
+     * cc_self.c draws EIGHT working sets from the per-task heap (see
+     * cc_alloc() below).  With the P0-3 heap of 512 KiB the usable
+     * arena payload is USER_HEAP_MAX - sizeof(heap_hdr_t) = 524,280 B.
+     * The eight requests must all fit in that budget:
+     *
+     *   OB_MAX                        131,072
+     *   SRC_MAX                        98,304
+     *   TOK_HEAP * sizeof(token_t)    115,200   (4,800 * 24)
+     *   DATA_MAX                       65,536
+     *   SYM_MAX * sizeof(sym_t)        65,536
+     *   STRUCT_MAX * sizeof(stdef_t)   28,160
+     *   2 * REL_MAX * sizeof(int)       8,192
+     *   2 * CALLMAX * sizeof(int)       8,192
+     *                                  ---------
+     *                                   520,192   <= 524,280  (slack 4,088)
+     *
+     * The exact maximum is 4,968 tokens; 4,800 keeps a >4 KB margin.
+     * Requesting the full TOK_MAX (25,000 * 24 = 600,000 B) would NOT
+     * fit at all, so the token array silently fell back to the
+     * 512-token static buffer -- and because cc_alloc() did not set
+     * *cap on the failure path, g_tok_cap became 0 and the lexer
+     * rejected EVERY source with "source too complex".
+     *
+     * Consequence (documented, not a regression): the self-hosting
+     * bootstrap (compiling cc_self.c with itself, ~24.2K tokens) is
+     * NOT reachable under the 512 KiB heap.  Restoring it would need
+     * USER_HEAP_MAX = 1 MiB -- a user-level decision, out of scope
+     * here.  TOK_MAX stays 25,000 as the compile-time ceiling.
+     */
+    TOK_HEAP = 4800,
+    SYM_MAX = 1024, LOC_MAX = 128, REL_MAX = 1024,
     CALLMAX = 1024, APIREF_MAX = 256, DREL_MAX = 64, STRUCT_MAX = 16,
     SMEM_MAX = 48, TAG_MAX = 24, TALIAS_MAX = 24, CONST_MAX = 96,
     BRK_MAX = 64, LBL_MAX = 48, IMG_MAX = 262144,
@@ -141,10 +174,13 @@ static void err_set(const char *m) {
  * 256 KiB window (USER_HEAP_BASE).  If the heap cannot serve a request we
  * fall back to the small static buffers so the compiler still runs on a
  * minimal kernel.
+ *
+ * The eight heap requests are reconciled with the 512 KiB budget by the
+ * TOK_HEAP constant in the enum above; see its comment for the table.
  * ================================================================== */
-/* Heap working-set sizes.  USER_HEAP_MAX is 256 KiB total, shared
- * with anything else the compiler allocates:
- *     code 128K + source 64K + tokens 56K ~= 248K. */
+/* Heap working-set sizes.  USER_HEAP_MAX is 512 KiB total (P0-3),
+ * shared with anything else the compiler allocates:
+ *     code 128K + source 96K + tokens 112K + data 64K + ... ~= 508K. */
 /* kernel loads the CE image at this base (include/ce.h CE_LOAD_BASE);
  * cc.c references it for absolute fixups so define it locally to stay
  * compilable against minimal headers. */
@@ -152,9 +188,23 @@ static uint8_t  g_ob_static[8192];
 static uint32_t g_ob_cap = 8192;
 static uint8_t *g_ob;             /* set to the fallback in ce_main */
 
-static void *cc_alloc(catos_api_t *api, uint32_t n, void *fallback, uint32_t *cap) {
+/* Draw a working set from the heap, falling back to a static buffer.
+ *
+ * `fallback_cap` is the REAL capacity of `fallback` in BYTES.  It is
+ * written to *cap when the heap request fails.
+ *
+ * Why that matters: the callers derive an element count from *cap
+ * (g_tok_cap = cap / sizeof(token_t), and so on).  The old version
+ * left *cap untouched on the failure path, so it stayed 0 and the
+ * derived element count became 0 -- and the lexer then rejected EVERY
+ * source with "source too complex" (0 >= 0 - 1).  A graceful fallback
+ * must report the capacity it actually has.
+ */
+static void *cc_alloc(catos_api_t *api, uint32_t n, void *fallback,
+                      uint32_t fallback_cap, uint32_t *cap) {
     void *p = api->alloc(n);
     if (p) { *cap = n; return p; }
+    *cap = fallback_cap;
     return fallback;
 }
 
@@ -185,7 +235,10 @@ static uint32_t g_slen;
 enum { TK_EOF = 0, TK_ID, TK_NUM, TK_STR, TK_CHR, TK_PUNCT };
 
 typedef struct { int kind, num, op, len, line; const char *sp; } token_t;
-#define TOK_MAX (25000)       /* self-compile of cc_self.c needs ~24.2K */
+/* TOK_MAX (compile-time ceiling) and TOK_HEAP (heap-backed count) live in
+ * the enum at the top of this file -- they used to be two separate
+ * #defines here, which shadowed each other.  The heap-backed count is
+ * TOK_HEAP; see the enum for the budget table. */
 static token_t  g_tok_static[512];
 static token_t *g_tok;            /* set to the fallback in ce_main */
 static int      g_tok_cap = 512;
@@ -2133,37 +2186,51 @@ int ce_main(int argc, char **argv) {
 
     /* Take the working sets from the heap: the CE image+bss window is only
      * 512 KiB (USER_IMAGE_BASE..USER_VSYSCALL) and the code must fit too,
-     * while api->alloc() draws from a separate 256 KiB window. */
-    g_ob  = (uint8_t *)cc_alloc(api, OB_MAX,  g_ob_static,  &g_ob_cap);
-    g_src = (char *)   cc_alloc(api, SRC_MAX, (void *)g_src_static, &g_src_cap);
+     * while api->alloc() draws from a separate 512 KiB window.
+     *
+     * The `fallback_cap` argument is the real capacity of the static
+     * buffer in bytes; cc_alloc() writes it to *cap when the heap
+     * request fails so the derived element count stays meaningful.
+     * The eight requests total 520,192 B, which fits the 524,280 B
+     * arena payload of the 512 KiB heap with 4,088 B to spare. */
+    g_ob  = (uint8_t *)cc_alloc(api, OB_MAX,  g_ob_static,
+                                 (uint32_t)sizeof(g_ob_static),  &g_ob_cap);
+    g_src = (char *)   cc_alloc(api, SRC_MAX, (void *)g_src_static,
+                                 (uint32_t)sizeof(g_src_static), &g_src_cap);
     {
         uint32_t cap = 0;
-        token_t *t = (token_t *)cc_alloc(api, (uint32_t)TOK_MAX * sizeof(token_t),
-                                          g_tok_static, &cap);
+        token_t *t = (token_t *)cc_alloc(api, (uint32_t)TOK_HEAP * sizeof(token_t),
+                                         g_tok_static,
+                                         (uint32_t)sizeof(g_tok_static), &cap);
         g_tok = t; g_tok_cap = cap / (int)sizeof(token_t);
     }
-    g_data = (uint8_t *)cc_alloc(api, DATA_MAX, g_data_static, &g_data_cap);
+    g_data = (uint8_t *)cc_alloc(api, DATA_MAX, g_data_static,
+                                 (uint32_t)sizeof(g_data_static), &g_data_cap);
     {
         uint32_t cap = 0;
         sym_t *t = (sym_t *)cc_alloc(api, (uint32_t)SYM_MAX * sizeof(sym_t),
-                                     g_sym_static, &cap);
+                                     g_sym_static,
+                                     (uint32_t)sizeof(g_sym_static), &cap);
         g_sym = t; g_sym_cap = cap / (uint32_t)sizeof(sym_t);
     }
     {
         uint32_t cap = 0;
         stdef_t *t = (stdef_t *)cc_alloc(api, (uint32_t)STRUCT_MAX * sizeof(stdef_t),
-                                         g_st_static, &cap);
+                                         g_st_static,
+                                         (uint32_t)sizeof(g_st_static), &cap);
         g_st = t; g_st_cap = cap / (uint32_t)sizeof(stdef_t);
     }
     {
         uint32_t cap = 0;
-        int *t = (int *)cc_alloc(api, 2u * REL_MAX * sizeof(int), g_rel_static, &cap);
+        int *t = (int *)cc_alloc(api, 2u * REL_MAX * sizeof(int), g_rel_static,
+                                 (uint32_t)sizeof(g_rel_static), &cap);
         g_rel_cap = cap / (2u * (uint32_t)sizeof(int));
         g_rel_at = t; g_rel_off = t + g_rel_cap;
     }
     {
         uint32_t cap = 0;
-        int *t = (int *)cc_alloc(api, 2u * CALLMAX * sizeof(int), g_call_static, &cap);
+        int *t = (int *)cc_alloc(api, 2u * CALLMAX * sizeof(int), g_call_static,
+                                 (uint32_t)sizeof(g_call_static), &cap);
         g_call_cap = cap / (2u * (uint32_t)sizeof(int));
         g_call_at = t; g_call_sym = t + g_call_cap;
     }

@@ -1,7 +1,12 @@
 #!/bin/sh
-# build_ce.sh <app.c> - compile one CatOS application into bin/<app>.ce
+# build_ce.sh <app.c> [outdir] - compile one CatOS application into a .ce
 #
-#   sh build_ce.sh hello.c
+#   sh build_ce.sh hello.c              -> bin/hello.ce
+#   sh build_ce.sh ../node/node.c ../node -> ../node/node.ce
+#
+# outdir is relative to this script's directory (extapp/) and defaults to
+# "bin".  It exists so an app whose source lives outside extapp/ can keep
+# its .ce next to its source (node/ lives at kernel_v25/node/).
 #
 # Pipeline: gcc (freestanding i386) -> ld (PE, extapp/ce.ld) ->
 # objcopy -O binary -> build/mkce.py wraps the CE01 header.
@@ -32,23 +37,40 @@ fi
 if [ -z "$PY" ]; then echo "ERROR: no python found"; exit 1; fi
 
 SRC=$1
-if [ -z "$SRC" ]; then echo "usage: sh build_ce.sh app.c"; exit 1; fi
+if [ -z "$SRC" ]; then echo "usage: sh build_ce.sh app.c [outdir]"; exit 1; fi
+OUTREL=${2:-bin}
 NAME=$(basename "$SRC" .c)
 CEBASE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$CEBASE/.." && pwd)
-mkdir -p "$CEBASE/build" "$CEBASE/bin"
+mkdir -p "$CEBASE/build" "$CEBASE/$OUTREL"
 cd "$CEBASE"   # compile/link/output paths are relative to extapp/
 
 echo "== building $NAME.ce =="
 # -I"$CEBASE"     : app-local headers (ce.ld-adjacent, API.txt examples)
-# -I"$ROOT/include": the v2.5 user-mode ABI, ce_abi.h (48-slot table)
+# -I"$ROOT/include": the v2.5 user-mode ABI, ce_abi.h (57-slot table)
+# NOTE: the -I paths are passed as SEPARATE, quoted arguments at the point
+# of use rather than embedded in $CFLAGS.  $CFLAGS is expanded unquoted,
+# so a path containing a space would be split into two arguments; and a
+# quote character stored inside a variable is NOT re-processed as a
+# quote during that expansion, so "-I\"$CEBASE\"" would hand gcc a
+# literal '"' instead of protecting the space.
+#
+# -DCC_HOST selects the "compile against the real CE ABI" branch of the
+# self-hosting compiler (kernel_v25/extapp/cc.c, content-identical to
+# cc_self.c).  Without it that branch is skipped and the file falls back
+# to its freestanding type shims, where catos_api_t is `typedef void`:
+# every api->alloc / api->write call then fails to compile, and the
+# `section(".text.ce_entry")` attribute on ce_main disappears, so the
+# "ce_main not at image offset 0" check below would fail too.
+# Only cc.c reacts to the macro -- every other CE app ignores it.
 CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check \
     -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-80387 \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \
-    -O2 -fno-omit-frame-pointer -std=c99 -I$CEBASE -I$ROOT/include"
-"$GCC" $CFLAGS -c "$SRC" -o "$CEBASE/build/$NAME.o"
+    -O2 -fno-omit-frame-pointer -std=c99 -DCC_HOST"
+"$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$SRC" -o "$CEBASE/build/$NAME.o"
 # runtime stub (__chkstk_ms etc.) -- see ce_stub.c
-"$GCC" $CFLAGS -c "$CEBASE/ce_stub.c" -o "$CEBASE/build/ce_stub.o"
+"$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$CEBASE/ce_stub.c" \
+    -o "$CEBASE/build/ce_stub.o"
 
 # ce_main must be at offset 0: force it via the linker script.
 # (MinGW mangles C symbols with a leading underscore: _ce_main; GNU ld on
@@ -92,5 +114,5 @@ if [ -z "$API" ]; then echo "ERROR: no __ce_api symbol"; exit 1; fi
 API_HEX=$("$PY" -c "import sys; print('%x' % (int('$API',16) - 0x2000000))")
 
 "$PY" "$CEBASE/build/mkce.py" "$CEBASE/build/$NAME.bin" \
-    "$CEBASE/bin/$NAME.ce" "$BSS" "$API_HEX"
-echo "OK -> extapp/bin/$NAME.ce"
+    "$CEBASE/$OUTREL/$NAME.ce" "$BSS" "$API_HEX"
+echo "OK -> $OUTREL/$NAME.ce"
