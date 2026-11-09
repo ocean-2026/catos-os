@@ -79,7 +79,7 @@
 | `src/shell.c` | `gfx` / `text` / `style` / `display` / `vdiag`，`color` 扩到 0..255 |
 | `extapp/gfxdemo.c` | ring3 演示程序 `/bin/gfxdemo.ce` |
 | `extapp/docs/API.txt` | v2.7 API 文档 |
-| `build.sh`（根） | 改成委托 `kernel_v25/build.sh` 的入口；根级 `gfx.*/vga.c/shell.c` 是**冻结快照，不是构建输入** |
+| `build.sh`（根） | 改成委托 `kernel_v25/build.sh` 的入口；根级 `gfx.*/vga.c/shell.c` 是**冻结快照，不是构建输入**（2026-11-09 已从仓库删除） |
 | `kernel_v25/build.sh` | 编译/链接列表加入 5 个新 .o，`gfxdemo` 加入 CE 构建列表 |
 | `build/gen_builtin.py` | 加入 `/bin/gfxdemo.ce`；输出固定 LF，避免全文件 diff |
 
@@ -158,8 +158,9 @@ PATH=/c/msys64/mingw32/bin:$PATH PYTHON=python sh build.sh iso
 3. 同意门在「后台任务 + shell 同时在读键盘」时可能与 shell 抢按键；建议用前台任务
    调用 `display_mode(0)`。要彻底解决需要给同意门加独立的控制台所有权协议。
 4. `con_force_text()` 没有调用方，只是给未来 panic 路径留的内核后门。
-5. 根目录 `gfx.c/gfx.h/vga.c/shell.c` 是 2026-11-05 的冻结快照，**不参与构建**；
-   单一源码事实是 `kernel_v25/`。合并回主线时建议把这几个根级文件归档或删除。
+5. 根目录 `gfx.c/gfx.h/vga.c/shell.c` 曾是 2026-11-05 的冻结快照，**不参与构建**；
+   单一源码事实是 `kernel_v25/`。这几个根级文件已于 2026-11-09 仓库治理时**删除**
+   （零引用核实），本文档中相关表格作为历史记录保留。
 
 ---
 

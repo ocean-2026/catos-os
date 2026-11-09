@@ -1,51 +1,64 @@
-# CatOS v0.3 图形模式（Mode 13h）成就包
+# CatOS
 
-**日期**: 2026-11-05
-**状态**: 已完成并在 QEMU 实测通过
+一个面向 32 位 x86 的实验性 hobby 操作系统内核，附带用户态 CE（Custom Executable）
+应用生态。内核以 GRUB El Torito no-emulation ISO 引导启动，用户态应用通过一组
+**只增不改（append-only）** 的系统调用槽位与内核通信。
 
-## 一、本包包含的新成就
+> **文档索引**
+> - `docs/` —— 全部设计文档、进度记录、问题清单与历史归档
+> - `docs/merge-harvest-PRD.md` —— 「现项目 × 原项目合并取精华」需求分析（合并期权威依据）
+> - `docs/merge-harvest-assess.md` —— 合并期评估与执行结论
+> - `docs/orig-archive/` —— 原项目（`Catos_Better_better`）文档归档，**不参与构建**
+> - `docs/CatOS-内核问题清单.md` —— 已知缺陷与遗留问题追踪
+> - `docs/CatOS-v0.3-图形模式成就包.md` —— v0.3 Mode 13h 图形模式成就包（历史记录）
 
-### 1. 内核图形模式（VGA Mode 13h）
-- **320x200x256** 帧缓冲模式，8x8 点阵软终端（40x25 网格）
-- shell 新增命令：**`gfx`** 进入图形模式、**`text`** 返回文本模式
-- DAC 调色板：0-15 标准 VGA 色 + 16-255 灰度渐变
-- 图元：putpixel / fillrect / hline / vline / rect / drawchar / text
-- 图形演示：渐变横带 + 白边框 + 标题 + 16 色块 + 信息文本
+## 目录结构
 
-### 2. 关键 bug 修复：`text` 切回后竖条纹屏（字形缺失）
-**根因**（QEMU v8.2.0 `hw/display/vga.c` 源码取证）：
-- QEMU 的 VGA 内存窗口映射由 `GC 0x06` 决定：`memory_map_mode = (GR06>>2)&3`
-- 文本模式 `GR06=0x0E` → **mode 3（B8000 32KB 窗口）**：
-  ```c
-  case 3: addr -= 0x18000; if (addr >= 0x8000) return;  /* 静默丢弃 */
-  ```
-- CPU 向 **0xA0000** 的写入被判定为窗口外地址（addr 下溢），**全部静默丢弃**
-- 因此旧版 `vga_reload_font()` 写 0xA0000 字形区完全无效，QEMU 渲染引擎读到 chain4 污染后的垃圾 → 竖条纹
-- 图形模式 `GR06=0x05` → mode 1（A0000 64KB 窗口），0xA0000 写有效，故 gfx 正常
-
-**修复**：`vga_reload_font()` 改经 **0xB8000 窗口** + **latched 写**（`GR05=0x00`）：
-- 窗口偏移 `a = 32*c + r` → `vram[4*a + plane] = vram[128*c + 4*r + 2]`
-- 与 QEMU 渲染读取位置（`font_base = vram + 2 + 128*ch`）**逐字节一致**
-
-**验证**：
-- 内核 `vdiag` 命令读回 `'A'` 字模 = `00 00 20 20 50 50 88 88`，与内置 font8x8_basic 完全一致
-- QEMU 实测：gfx 图形模式渲染正常 → text 恢复文本正常（无竖条纹）→ 再次 gfx → text 多轮往返稳定
-
-## 二、文件清单
-
-| 文件 | 说明 |
+| 路径 | 说明 |
 |---|---|
-| `gfx.h` | 图形模式头文件（API + 常量） |
-| `gfx.c` | Mode13h/Text03 寄存器序列、DAC、图元、8x8 软终端、字形重载 |
-| `vga.c` | vga_clear/putc/set_color/set_fg 图形分支 + `vdiag` 诊断命令 |
-| `shell.c` | 命令分发表新增 `gfx` / `text` / `vdiag` |
-| `build.sh` | 编译链接列表加入 gfx.o |
-| `catos.iso` | 完整可启动镜像（含图形模式 + 全部修复） |
-| `shot-gfx-mode.png` | QEMU 实测：图形模式正常渲染 |
-| `shot-text-restored.png` | QEMU 实测：text 恢复后文本正常（无条纹） |
+| `kernel_v25/` | **内核与构建的唯一源码事实**（`src/`、`include/`、`extapp/`、`build/`） |
+| `tests/` | CE 格式测试、CE 回归、QEMU 实机回归、宿主侧测试工具 |
+| `docs/` | 设计文档、进度、问题清单、归档 |
+| `build.sh` | 根目录构建入口（委托给 `kernel_v25/build.sh`） |
 
-## 三、QEMU 验证命令
-```bash
-qemu-system-i386 -m 128 -cdrom catos.iso -boot order=d
-# shell 内: gfx 进入图形模式; text 返回文本模式; vdiag 查看 VGA 寄存器与字形校验
+## 构建
+
+依赖：GNU 工具链（MSYS2 mingw32 的 `gcc` / `ld` / `objcopy`）、`python`（用于 CE 应用
+打包与 ISO 生成）、以及 **已入库的 GRUB 引导模板** `kernel_v25/build/catos_work.iso`。
+
+```sh
+sh build.sh kernel   # 仅产出 kernel_v25/build/kernel.bin
+sh build.sh iso      # 产出 kernel_v25/build/kernel.bin 与 kernel_v25/catos.iso
 ```
+
+在 Windows（Git Bash）下的推荐调用方式——显式给出 MinGW 路径，避免 `gcc` 被其他
+工具链劫持：
+
+```sh
+cd kernel_v25 && env -i \
+  PATH=/d/msys/mingw32/bin:/usr/bin:/bin HOME=/tmp TMP=/tmp TEMP=/tmp \
+  PYTHON=/c/Users/Admin/.workbuddy/binaries/python/versions/3.13.12/python.exe \
+  sh build.sh iso
+```
+
+ISO 的组装由 `kernel_v25/build/patch_work_iso.py` 完成：它读取 GRUB 模板
+`build/catos_work.iso`，把 `kernel.bin` 作为 `kernel.bin;1` 目录项追加进去。
+**该模板是构建的必需输入，必须随仓库一起分发**（详见 `.gitignore` 中的说明）。
+
+## 运行
+
+```sh
+qemu-system-i386 -cdrom kernel_v25/catos.iso -m 256
+```
+
+## 测试
+
+```sh
+python tests/test_mkce.py                                        # CE01 格式单元测试
+python tests/ce_regress.py                                       # CE 应用回归
+python tests/qemu_regress.py kernel_v25/catos.iso --qemu 'C:\qemu-portable\qemu-system-i386.exe'
+```
+
+## 许可
+
+仓库内代码与文档仅供学习与研究使用。

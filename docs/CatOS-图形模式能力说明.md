@@ -157,10 +157,16 @@ static void cmd_gfx_demo(void) {
 
 ## 九、交付物清单（本包）
 
+> **归档说明（2026-11-09 仓库治理）**：下表为 2026-11-05 成就包的**历史快照清单**。
+> `gfx.h` / `gfx.c` / `vga.c` / `shell.c` / `shot-gfx-mode.png` /
+> `shot-text-restored.png` 为一次性快照文件，已于 2026-11-09 从仓库中删除
+> （零引用核实；单一源码事实为 `kernel_v25/`，功能已下沉到 `kernel_v25/src/be_*.c`）。
+> 本文档与 `docs/CatOS-v0.3-图形模式成就包.md` 作为历史记录保留。
+
 | 文件 | 说明 |
 |---|---|
 | `CatOS-图形模式能力说明.md` | 本文档 |
-| `README.md` | 成就包说明（含 bug 修复根因） |
+| `README.md` | 成就包说明（含 bug 修复根因）→ 现位于 `docs/CatOS-v0.3-图形模式成就包.md` |
 | `gfx.h` | 图形模式头文件（API + 常量） |
 | `gfx.c` | Mode13h/Text03 序列、DAC、图元、软终端、字形重载（370 行） |
 | `vga.c` | vga_* 图形分支 + vdiag 诊断（162 行） |
