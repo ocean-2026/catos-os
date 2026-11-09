@@ -20,6 +20,12 @@ The script only asserts structural facts (non-black frames, frame
 changes between steps); text-level verification is done by a human
 looking at the PNGs, since there is no OCR dependency here.
 
+QEMU lifecycle: the guest is torn down BY PID, never by image name.
+A global `taskkill /IM qemu-system-i386.exe` also kills the guests of
+other drivers running concurrently on the same machine, which makes
+both drivers fail in a random-looking way (the survivor's monitor
+socket is reset with WinError 10054).
+
 usage:
   python tests/qemu_regress.py <catos.iso> [--qemu PATH] [--keep]
 """
@@ -48,26 +54,44 @@ def find_qemu(explicit=None):
             return p
     return None
 
-def kill_qemu():
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-i386.exe"],
-                   capture_output=True)
+def kill_qemu(proc=None):
+    """Stop the QEMU instance THIS script started.
+
+    `taskkill /IM qemu-system-i386.exe` kills every QEMU on the machine,
+    including the ones other drivers run concurrently.  Two unrelated
+    drivers then tear each other's guest down (the survivor sees the
+    monitor socket reset with WinError 10054).
+    """
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        pass
 
 def boot(iso, qemu, disk=None):
-    kill_qemu()
+    kill_qemu()                 # no-op: nothing of ours is running yet
     time.sleep(1)
-    cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
-           "-cdrom", iso, "-boot", "order=d",
-           "-display", "none",
-           "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
+    cmdline = [qemu, "-m", "256", "-no-reboot", "-net", "none",
+               "-cdrom", iso, "-boot", "order=d",
+               "-display", "none",
+               "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
     if disk:
-        cmd += ["-drive", "file=%s,format=raw,if=ide" % disk]
-    print("boot:", " ".join(cmd))
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmdline += ["-drive", "file=%s,format=raw,if=ide" % disk]
+    print("boot:", " ".join(cmdline))
+    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
     for _ in range(20):
         try:
-            return socket.create_connection(MONITOR, timeout=5)
+            return proc, socket.create_connection(MONITOR, timeout=5)
         except OSError:
             time.sleep(2)
+    kill_qemu(proc)
     raise RuntimeError("could not reach the QEMU monitor")
 
 def cmd(s, c, wait=0.5):
@@ -201,7 +225,7 @@ def main():
     if not os.path.exists(disk):
         with open(disk, "wb") as f:
             f.truncate(64 * 1024 * 1024)      # sparse 64 MiB IDE disk
-    s = boot(iso, qemu, disk)
+    proc, s = boot(iso, qemu, disk)
     print("monitor connected")
     time.sleep(25)                     # boot to shell (TCG is slow; GRUB alone takes ~10s)
     results = []
@@ -272,7 +296,7 @@ def main():
     step("vdiag", lambda: (do("vdiag"), frame_changed("08_vdiag"))[1])
     step("final-frame", lambda: snap_and_check("09_final"))
 
-    kill_qemu()
+    kill_qemu(proc)              # by PID: never touch another driver's guest
     fails = [r for r in results if not r[1]]
     print("\nsteps=%d ok=%d warn=%d  shots in %s"
           % (len(results), len(results) - len(fails), len(fails), SHOTS))

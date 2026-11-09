@@ -16,6 +16,14 @@ the VGA text buffer ("xp /4000 0xb8000") instead of being OCR-ed from a
 screenshot -- the frame buffer holds (char, attribute) pairs, so the
 character is every second byte.
 
+The QEMU lifecycle lives in tests/qemu_driver.py.  Two rules matter on
+a shared machine:
+
+  * the guest is torn down BY PID, never by image name -- a global
+    `taskkill /IM qemu-system-i386.exe` also kills the guests of other
+    drivers running concurrently (see qemu_driver.kill_qemu);
+  * the shell's screen-clear command is `clear`, not `cls`.
+
 usage:
   python tests/heap_regress.py <catos.iso> [--qemu PATH] [--keep]
 """
@@ -26,137 +34,50 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qemu_driver import (clear_screen, cmd, find_qemu, kill_qemu,  # noqa: E402
+                          read_screen, screen_text, sendkey, type_text)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MONITOR = ("127.0.0.1", 4444)
 VGA_TEXT = 0xB8000
 VGA_COLS = 80
 VGA_ROWS = 25
 
-DEFAULT_QEMU_CANDIDATES = [
-    r"C:\qemu-portable\qemu-system-i386.exe",
-    r"C:\Program Files\qemu\qemu-system-i386.exe",
-    r"C:\Program Files\QEMU\qemu-system-i386.exe",
-    "qemu-system-i386",
-]
-
-
-def find_qemu(explicit=None):
-    if explicit:
-        return explicit
-    for c in DEFAULT_QEMU_CANDIDATES:
-        if os.path.isfile(c):
-            return c
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        p = os.path.join(d, "qemu-system-i386.exe")
-        if os.path.isfile(p):
-            return p
-    return None
-
-
-def kill_qemu():
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-i386.exe"],
-                   capture_output=True)
-
-
 def boot(iso, qemu, disk):
-    kill_qemu()
+    """Start the guest and connect to its monitor.
+
+    Returns (proc, sock): the caller must keep `proc` and hand it to
+    kill_qemu() so that no OTHER qemu on this machine is disturbed.
+    """
+    kill_qemu()                 # no-op: nothing of ours is running yet
     time.sleep(1)
-    cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
-           "-cdrom", iso, "-boot", "order=d",
-           "-display", "none",
-           "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
+    cmdline = [qemu, "-m", "256", "-no-reboot", "-net", "none",
+               "-cdrom", iso, "-boot", "order=d",
+               "-display", "none",
+               "-monitor", "tcp:%s:%d,server,nowait" % MONITOR]
     if disk:
-        cmd += ["-drive", "file=%s,format=raw,if=ide" % disk]
-    print("boot:", " ".join(cmd))
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmdline += ["-drive", "file=%s,format=raw,if=ide" % disk]
+    print("boot:", " ".join(cmdline))
+    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
     for _ in range(20):
         try:
-            return socket.create_connection(MONITOR, timeout=5)
+            return proc, socket.create_connection(MONITOR, timeout=5)
         except OSError:
             time.sleep(2)
+    kill_qemu(proc)
     raise RuntimeError("could not reach the QEMU monitor")
 
 
-def cmd(s, c, wait=0.5):
-    """Send one HMP command and return everything it printed."""
-    s.sendall((c + "\n").encode())
-    time.sleep(wait)
-    chunks = []
-    try:
-        s.setblocking(False)
-        time.sleep(0.15)
-        while True:
-            try:
-                b = s.recv(65536)
-            except BlockingIOError:
-                break
-            if not b:
-                break
-            chunks.append(b)
-    finally:
-        s.setblocking(True)
-    return b"".join(chunks).decode("latin-1", "replace")
 
 
-def sendkey(s, key, wait=0.12):
-    cmd(s, "sendkey " + key, wait)
 
 
-def type_text(s, text, wait=0.12):
-    special = {" ": "spc", "-": "minus", "=": "equal", ".": "dot",
-               "/": "slash", "\n": "ret"}
-    for ch in text:
-        k = special.get(ch)
-        if k is None:
-            k = "shift-%s" % ch.lower() if ch.isupper() else ch
-        sendkey(s, k, wait)
 
 
-def read_screen(s):
-    """Read the VGA text frame buffer through the monitor's xp dump.
-
-    `xp /N 0xADDR` prints one line per 16 bytes:
-
-        000b8000: 0x0b200b20 0x0b5f0b20 0x0b5f0b5f 0x0b5f0b5f
-
-    i.e. FOUR 32-bit words per line, each holding FOUR bytes in
-    LITTLE-ENDIAN order (lowest address first).  The monitor also echoes
-    the command back into the socket, mangled ("xxpxp xp /4000 0xb8000"),
-    so only lines starting with an 8-hex-digit address are memory dumps.
-
-    A 2-hex-digit regex would capture fragments such as "0x0b" out of
-    "0x0b200b20" and scramble every character -- hence the explicit
-    8-digit match plus little-endian unpacking.
-    """
-    nbytes = VGA_COLS * VGA_ROWS * 2
-    out = cmd(s, "xp /%d 0x%x" % (nbytes, VGA_TEXT), wait=2.0)
-    data = bytearray()
-    for line in out.splitlines():
-        line = line.strip()
-        if not re.match(r"^[0-9a-fA-F]{8}:", line):
-            continue
-        for word in re.findall(r"0x([0-9a-fA-F]{8})", line):
-            v = int(word, 16)
-            data += bytes((v & 0xFF, (v >> 8) & 0xFF,
-                           (v >> 16) & 0xFF, (v >> 24) & 0xFF))
-    if not data:
-        return ""
-    rows = []
-    for r in range(VGA_ROWS):
-        chars = []
-        base = r * VGA_COLS * 2
-        for c in range(VGA_COLS):
-            off = base + c * 2
-            if off < len(data):
-                chars.append(chr(data[off]) if 32 <= data[off] < 127 else " ")
-        rows.append("".join(chars).rstrip())
-    return "\n".join(rows)
 
 
-def screen_text(s):
-    """The screen as one blob with whitespace collapsed, for substring
-    assertions that must survive line wrapping."""
-    return re.sub(r"\s+", " ", read_screen(s))
 
 
 def main():
@@ -182,7 +103,7 @@ def main():
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    s = boot(iso, qemu, disk)
+    proc, s = boot(iso, qemu, disk)
     print("monitor connected")
     time.sleep(25)                      # boot to shell (TCG is slow)
 
@@ -202,7 +123,10 @@ def main():
         sendkey(s, "ret", wait)
 
     def clear():
-        do("cls", 1.0)
+        # `clear`, not `cls`: the CatOS shell has no `cls` command, so
+        # using it leaves the previous screen contents in place and a
+        # later assertion can match stale text.
+        clear_screen(s, 1.0)
 
     def step_format():
         clear()
@@ -244,7 +168,7 @@ def main():
     step("heaptest", step_heaptest)
 
     if "--keep" not in args:
-        kill_qemu()
+        kill_qemu(proc)
     fails = [r for r in results if not r[1]]
     print("\nsteps=%d ok=%d fail=%d" % (len(results),
                                         len(results) - len(fails), len(fails)))
