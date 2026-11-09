@@ -665,12 +665,41 @@ void fs_perm_seed(void) {
 
 /* ---- user memory helpers ------------------------------------------------ */
 
+/* Copy a NUL-terminated string out of user space into a kernel buffer.
+ *
+ * P0-6: the old version validated the WHOLE `max`-byte window up front
+ * and then dereferenced the user pointer directly.  Both were wrong:
+ *
+ *  1) validating `max` bytes (FS_PATH_MAX = 160) rejects strings that
+ *     sit near the end of their VMA, even though the string itself is
+ *     perfectly valid.  argv strings live exactly there -- task_spawn_ce()
+ *     parks them at USER_STACK_TOP - 0x10 - len -- so EVERY syscall that
+ *     takes a user string failed for ring3 programs: "run /bin/go.ce
+ *     /BIN/TEST.GO" returned "cannot read script" even though the file
+ *     was on disk.  The same bug hit file_read/file_write/save, the
+ *     network calls (url/host/ip) and SYS_SPAWN's argv copy.
+ *
+ *  2) dereferencing a user pointer from ring0 reads the KERNEL's address
+ *     space at that virtual address, which only works for regions the
+ *     kernel happens to have mapped (the CE image is identity-mapped, the
+ *     user stack is not).
+ *
+ * So: validate and read ONE byte at a time, and translate through the
+ * task's page table instead of touching the user address directly.
+ */
 static int u2k_str(char *dst, const char *us, int max) {
     task_t *t = cur_task;
-    if (validate_uaddr(t, (uint32_t)us, max) != 0) return -1;
+    if (!dst || !us || max < 1) return -1;
+    uint32_t u = (uint32_t)us;
     for (int i = 0; i < max - 1; i++) {
-        dst[i] = us[i];
-        if (!us[i]) return 0;
+        uint32_t a = u + i;
+        /* validate_uaddr() checks the VMA and maps the page on demand */
+        if (validate_uaddr(t, a, 1) != 0) { dst[i] = 0; return -1; }
+        uint32_t pa = task_virt_to_phys(&t->space, a & ~0xFFFu);
+        if (!pa) { dst[i] = 0; return -1; }
+        char ch = *(char *)(pa + (a & 0xFFF));
+        dst[i] = ch;
+        if (!ch) return 0;
     }
     dst[max - 1] = 0;
     return 0;
