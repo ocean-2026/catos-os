@@ -216,3 +216,30 @@ def clear_screen(s, wait=1.0):
     """
     type_text(s, "clear")
     sendkey(s, "ret", wait)
+
+
+def wait_for_prompt(s, timeout=90.0, poll=2.0):
+    """Wait until the CatOS shell prompt is on screen; return True/False.
+
+    A fixed sleep is not enough: the kernel boots through GRUB and then
+    installs the built-in apps, and a command typed before the shell is
+    listening is silently dropped.  That is not a harmless race -- the
+    dropped `format` command leaves the disk image completely blank, and
+    the next step then fails with a confusing "no such file" instead of
+    "the guest was not ready yet".
+
+    The match is anchored on the prompt's shape ("catos" ":" <pwd> "$")
+    rather than on the bare word "catos": the GRUB boot menu also names
+    the CatOS entry, so a loose match returns while the kernel is still
+    booting and the first real command is dropped again.
+    """
+    pattern = re.compile(r"catos:[^\n]*\$")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pattern.search(read_screen(s)):
+                return True
+        except Exception:
+            pass                      # monitor hiccup: keep polling
+        time.sleep(poll)
+    return False
