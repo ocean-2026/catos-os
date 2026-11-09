@@ -40,7 +40,11 @@ fi
 mkdir -p build
 
 echo "== building CE apps (extapp) =="
-for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest allocprobe heaptest go; do
+# 'cc' is the self-hosting C compiler.  It was NOT in this list until
+# now, which is why extapp/bin/cc.ce had been a stale artifact since
+# ae0ee2d: the source changed but the image was never rebuilt, so the
+# shipped compiler bore no reproducible relation to the source tree.
+for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest allocprobe heaptest go cc; do
     sh extapp/build_ce.sh $app.c
 done
 
