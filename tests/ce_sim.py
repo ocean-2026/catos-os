@@ -41,6 +41,11 @@ API_NAMES = [
     "display_mode", "display_info", "set_style",
     "set_style_rgb", "set_palette", "palette",
     "mmap", "munmap",
+    # v2.11 (slots 57..60, append-only): SB16 audio.  The host has no
+    # sound card, so they are modelled as "device absent" rather than
+    # raising "not modelled" -- sndtest.ce then takes its skip path and
+    # ce_regress stays FAIL=0.
+    "snd_info", "snd_play", "snd_stop", "snd_tone",
 ]
 
 REG32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
@@ -274,6 +279,13 @@ class Machine:
                             j += 1
                     return 0
             return -22
+        # ---- v2.11 SB16 audio: no device on the host ----
+        if name == "snd_info":
+            # 0 = no SB16 for SND_INFO_READY; 0 for every other selector
+            # is fine too because the app stops at the ready check.
+            return 0
+        if name == "snd_play" or name == "snd_stop" or name == "snd_tone":
+            return -8                     # ENOSYS (no card)
         raise CeError("api '%s' is not modelled by ce_sim" % name)
 
     # ---- run ----

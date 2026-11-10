@@ -151,6 +151,12 @@ typedef struct catos_api {
     /* ---- v2.10: anonymous mmap in the extension arena (append-only) -- */
     void    *(*mmap)(void *addr, uint32_t len, int prot, int flags);
     int      (*munmap)(void *addr, uint32_t len);
+    /* ---- v2.11: SB16 PCM audio (append-only).  Keep in lockstep with
+     * ce_abi.h slots 57..60; old binaries index only the old prefix. */
+    int      (*snd_info)(int what);
+    int      (*snd_play)(const void *pcm, int len, int rate);
+    int      (*snd_stop)(void);
+    int      (*snd_tone)(int freq_hz, int ms);
 } catos_api_t;
 
 /* install the API (called once at boot) */

@@ -40,6 +40,9 @@ FILES = [
 OPTIONAL = [
     ("/bin/cc.ce",       os.path.join(ROOT, "extapp", "bin", "cc.ce")),
     ("/bin/node.ce",     os.path.join(ROOT, "node", "node.ce")),
+    # SB16 audio probe (v2.11).  Optional so a tree that has not built it
+    # yet still links -- build.sh compiles it, so a normal build embeds it.
+    ("/bin/sndtest.ce",  os.path.join(ROOT, "extapp", "bin", "sndtest.ce")),
     ("/bin/TEST.JS",     os.path.join(ROOT, "node", "TEST.JS")),
     ("/appdevelop/HELLO.C",   os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
     # Go scripts: the interpreter's own regression corpus.  They are

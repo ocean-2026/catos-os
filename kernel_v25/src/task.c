@@ -23,6 +23,7 @@
 #include "hw.h"
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
+#include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -486,6 +487,9 @@ enum {
     SYS_SET_STYLE_RGB, SYS_SET_PALETTE, SYS_PALETTE,
     /* v2.10: anonymous mmap in the extension arena (PDE 9).  Append-only. */
     SYS_MMAP, SYS_MUNMAP,
+    /* v2.11: SB16 PCM audio.  Append-only; 61 thunks still fit in the
+     * 2 KiB thunk area (the guard in build_vsyscall_page() enforces it). */
+    SYS_SND_INFO, SYS_SND_PLAY, SYS_SND_STOP, SYS_SND_TONE,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -551,6 +555,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*49*/1, /*50*/1, /*51*/3,             /* display mode/info/style */
         /*52*/3, /*53*/2, /*54*/1,             /* rgb style / palette set/get */
         /*55*/4, /*56*/2,                       /* mmap / munmap */
+        /*57*/1, /*58*/3, /*59*/0, /*60*/2,     /* snd_info/play/stop/tone */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -1552,6 +1557,35 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)vma_munmap(t, a1, a2);
         break;
     }
+    /* ---- v2.11: SB16 PCM audio ------------------------------------
+     * The kernel owns the low-memory ISA DMA buffer; the caller's PCM
+     * is copied in with the same VMA-backed validation used by every
+     * other user-pointer syscall (copy_from_user -> validate_uaddr), so
+     * a ring3 task can never make the kernel read arbitrary physical
+     * memory or write outside the DMA window. */
+    case SYS_SND_INFO:
+        ret = (uint32_t)snd_info((int)a1);
+        break;
+    case SYS_SND_PLAY: {
+        int len = (int)a2;
+        if (a1 == 0 || len <= 0 || len > (int)SND_DMA_BUF_SZ) {
+            ret = (uint32_t)-22;                       /* EINVAL */
+            break;
+        }
+        if (copy_from_user(t, snd_dma_buffer(), (const void *)a1,
+                           (uint32_t)len) != 0) {
+            ret = (uint32_t)-14;                       /* EFAULT */
+            break;
+        }
+        ret = (uint32_t)snd_play(snd_dma_buffer(), (uint32_t)len, a3);
+        break;
+    }
+    case SYS_SND_STOP:
+        ret = (uint32_t)snd_stop();
+        break;
+    case SYS_SND_TONE:
+        ret = (uint32_t)snd_tone(a1, a2);
+        break;
     default: ret = (uint32_t)-8; break;
     }
 
@@ -1566,16 +1600,31 @@ void isr_syscall(int_frame_t *f) {
 
 /* ---- per-task stats for `top` -------------------------------------------- */
 
+/* Count the pages a task ACTUALLY has mapped.
+ *
+ * Issue #74: the v2.10 implementation added (v->end - v->start) >> 12 for
+ * every VMA, i.e. the whole reserved span.  Since heap_vma_init() creates
+ * a 512 KiB VMA that is backed lazily one page at a time by
+ * heap_ensure_range(), every ring3 task that ever called api->alloc()
+ * was reported as owning 128 extra pages that were never allocated; the
+ * 128 KiB stack VMA is likewise only touched near the top.  `top`'s PAGES
+ * column was therefore a reserved-address-space figure mislabelled as
+ * resident memory.
+ *
+ * Walk each VMA page by page and ask the task's OWN page tables whether
+ * the PTE is present.  task_virt_to_phys() reads t->space.pt / pt2
+ * directly (kernel identity map), so it stays correct even when another
+ * task's page directory is currently loaded in CR3 -- the flaw the old
+ * raw-PT scan had. */
 static uint32_t task_pages_of(task_t *t) {
     if (!t->space.pt) return 0;
-    /* Count pages by walking the VMA list: each VMA covers a range of
-     * pages; count the total span.  This is an approximation but cheap.
-     * The old approach scanned the raw PT and was wrong for tasks whose
-     * page table was switched away. */
     uint32_t n = 0;
     for (const vma_t *v = t->vm; v; v = v->next) {
         if (v->kind == VMA_VSYSCALL) continue;  /* syscall page not counted */
-        n += (v->end - v->start) >> 12;
+        uint32_t a   = v->start & ~0xFFFu;
+        uint32_t end = (v->end + 0xFFFu) & ~0xFFFu;
+        for (; a < end; a += 4096u)
+            if (task_virt_to_phys(&t->space, a)) n++;
     }
     return n;
 }

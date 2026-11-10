@@ -7,6 +7,7 @@
 #include "paging.h"
 #include "task.h"
 #include "hw.h"
+#include "snd.h"
 
 uint32_t multiboot_info_ptr = 0;
 uint32_t multiboot_flags = 0;
@@ -50,6 +51,19 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     intr_enable();
     hw_mem_boot(lo, hi);
     hw_calibrate_cpu();      /* 100 ms: TSC vs PIT -> hw_num(HW_CPU_MHZ) */
+
+    /* Sound Blaster 16 (ISA, IRQ5).  Must come after intr_enable() --
+     * snd_init() unmasks IRQ5 -- and before shell_run(), which never
+     * returns.  A missing card is not fatal; the existing no-audio QEMU
+     * regressions must keep booting unchanged.  To hear anything, add:
+     *   -audiodev wav,id=snd0,path=snd.wav
+     *   -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
+     * (QEMU >= 7.1 removed -soundhw; -device is the only form now.) */
+    if (snd_init() == 0) {
+        vga_write("snd: Sound Blaster 16 ready (0x220 irq5 dma1)\n");
+    } else {
+        vga_write("snd: no SB16 detected (audio disabled)\n");
+    }
 
     if (net_init() < 0) {
         vga_write("net: AMD PCnet-PCI (1022:2000) NOT found\n");

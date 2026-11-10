@@ -148,15 +148,18 @@ PRD 计划 4 个 P0（其中 P0-4 构建可复现性由工程师实施）。实�
 | P2 | `shot()` 异步截图竞态 | **已修复**（`3fd56cb`） |
 | P2 | 验收脚本全局 taskkill | **已修复**（`0855cda`） |
 
-**遗留（已知、不阻断）**
+**遗留（已知、不阻断）—— 2026-11-10 合流复核后的真实状态**
 
-| 级别 | 条目 | 说明 |
-|---|---|---|
-| P2 | `task_spawn_ce` 的 `api+4 > img` uint32 回绕判定 | 架构师 T11 标注，需防溢出写法，本期未改 |
-| P2 | `extapp/build_ce.sh` 的 `CFLAGS` 里 `-I` 未加引号 | 已加 `-DCC_HOST`，`-I` 引号问题待处理 |
-| P2 | `task_pages_of()` 页数虚高（堆 VMA 常驻后每任务 +128 页） | 仅显示问题 |
-| P2 | FAT 目录项 cluster 为 u16（`@26`） | 卷上限 64k 簇（64 MiB 测试盘够用），真实限制已记录 |
-| P2 | `cc_self.c` 8 路缓冲工作集 1,004,992 B > 512 KiB 堆 | 已用 `TOK_HEAP=4800` 预算化解，但自举（P2-1）仍不可达 |
+| 级别 | 条目 | 原记录 | 合流复核结论 |
+|---|---|---|---|
+| P2 | `task_spawn_ce` 的 `api+4 > img` uint32 回绕判定 | 「本期未改」 | **已修复**（`e1e9a88`）：`task.c:1792` 已是 `if (img < 4 \|\| api > img - 4) return -5;`，并附回绕成因注释 |
+| P2 | `extapp/build_ce.sh` 的 `CFLAGS` 里 `-I` 未加引号 | 「待处理」 | **已修复**（`176c559`）：`:70`/`:72` 是独立带引号参数，`:51-56` 注释说明变量内引号不重解析；`-DCC_HOST` 在 `:69` |
+| P2 | `task_pages_of()` 页数虚高（堆 VMA 常驻后每任务 +128 页） | 「仅显示问题」 | **已修复**（2026-11-10）：逐页查 `task_virt_to_phys()` 判定 PTE present，见问题清单 #74 |
+| P2 | FAT 目录项 cluster 为 u16（`@26`） | 真实限制 | **未改**（设计限制）：卷上限 64k 簇，64 MiB 测试盘够用 |
+| P2 | `cc_self.c` 8 路缓冲工作集 1,004,992 B > 512 KiB 堆 | `TOK_HEAP=4800` 化解 | **未改**（自举 P2-1 仍不可达，属后续立项） |
+
+> 同轮发现「文档状态滞后」本身是一个问题：问题清单 9 条状态列、Go 现状段、
+> 本报告遗留表与 S-8 都停留在合流前。已全部同步，见问题清单 #75。
 
 ---
 
@@ -171,7 +174,7 @@ PRD 计划 4 个 P0（其中 P0-4 构建可复现性由工程师实施）。实�
 | S-5 | 栈顶 0x02200000 未侵占 mmap 竞技场 0x02400000..0x02800000 | **PASS** | 边界分离，无重叠 |
 | S-6 | `cc.c` 已是阶段 1-3 版本（struct/typedef/enum/switch/goto + `no ce_main`） | **PASS** | `1c7d72d`，`test_cc.py` 8→10 用例 |
 | S-7 | `TOK_HEAP=4800` 且注释含 8 路缓冲预算表 | **PASS** | `cc_self.c` |
-| S-8 | `build_ce.sh` 含 `-DCC_HOST` 与 `-I` 引号修复 | **PARTIAL** | `-DCC_HOST` 已加；`-I` 已加引号 |
+| S-8 | `build_ce.sh` 含 `-DCC_HOST` 与 `-I` 引号修复 | **PASS** | `-DCC_HOST` 在 `:69`；`-I"$CEBASE" -I"$ROOT/include"` 是 `:70`/`:72` 的独立带引号参数（2026-11-10 复核更正，原 PARTIAL 判定有误） |
 | S-9 | `build.sh` 与 `gen_builtin.py` 的应用列表**都**含 `go`/`node` | **PASS** | 两处一致（历史上"改一处漏一处"的坑已避开） |
 
 ---
@@ -244,7 +247,59 @@ PRD 计划 4 个 P0（其中 P0-4 构建可复现性由工程师实施）。实�
 
 ## 10. 已知限制
 
-1. **未 push** —— 外部推送需用户授权。当前分支 `workbuddy/todo-20261106-1906` 领先 master，合流需用户确认时机。
+1. **已合流，未 push** —— 2026-11-10 用户确认后，`workbuddy/todo-20261106-1906`（`6945860`）
+   已 fast-forward 合入 `D:/CatOs` 的 master，工作目录迁回主仓库。外部推送仍需用户授权。
 2. **架构师任务表形式缺失** —— 首任架构师超时零交付，第二任被框架 IPC 故障打掉两次，最终由首任在被终止后 17 分钟交付 2436 行设计稿。设计**实质**完整，**任务表形式**由 PM 的 PRD §3 补足。
 3. **QA 独立终验未由 QA 角色执行** —— 四次 QA 派发全部因框架级 IPC 故障（`400 connect ENOENT` / `request timed out`）失败，终验由主理人独立完成。本报告的证据全部是亲手跑出的原始输出，但**缺少"实施者与验证者分离"这一层**。
 4. **P2 全部未做** —— fork/exec/COW、POSIX 信号、musl 移植、VFS、设备文件，多周量级，建议单独立项。
+
+---
+
+## 11. 合流后追加验收（2026-11-10）：遗留修复 + SB16 声卡驱动
+
+> 执行环境：`D:/CatOs` master（工作目录已从隔离 worktree 迁回），QEMU 11.1.0，
+> MinGW `/d/msys/mingw32`，Python 3.13.12。本节全部为合流后复跑的原始结果。
+
+### 11.1 闸门总表
+
+| # | 闸门 | 结果 | 证据 |
+|---|---|---|---|
+| A-1 | 干净构建 ISO（含 `src/snd.c` + `sndtest.ce`） | **PASS** | `OK -> catos.iso (16631808 bytes)` |
+| A-2 | `tests/test_mkce.py` | **PASS** | `48 passed, 0 failed` |
+| A-3 | `tests/test_cc.py` | **PASS** | `10 passed, 0 failed` |
+| A-4 | `tests/ce_regress.py` | **PASS** | `PASS=9 SKIP=13 FAIL=0`（新增 `sndtest.ce` 为 PASS） |
+| A-5 | `tests/go_cases.py` | **PASS** | `cases=5 ok=5 fail=0` |
+| A-6 | `tests/qemu_regress.py`（无声卡） | **PASS** | `steps=12 ok=12 warn=0` |
+| A-7 | `tests/heap_regress.py`（无声卡） | **PASS** | `steps=4 ok=4 fail=0` |
+| A-8 | `tests/go_regress.py`（无声卡） | **PASS** | `steps=7 ok=7 fail=0` |
+| A-9 | `tests/snd_regress.py`（`-device sb16`） | **PASS** | `steps=6 ok=6 fail=0` |
+
+A-6~A-8 证明 `snd_init()` 在**没有** SB16 时快速失败并禁用，不破坏既有回归路径；
+A-9 证明接上声卡后内核、shell、ring3 三级通路全部工作。
+
+### 11.2 音频实机证据
+
+```
+PASS format             FAT32 volume ready
+PASS bin-has-sndtest    sndtest.ce=True
+PASS sndinfo            DSP/IRQ/DMA readback ok
+PASS sndtest-tone       snd: playing 440 Hz for 800 ms
+                        snd: irqs=1 busy=0  SNDTEST PASS
+PASS ring3-sndtest      snd: ce irqs=1 busy=0  SND CE PASS
+                        [task 1 'sndtest' exit(0)]
+PASS wav-non-silent     data=193420 bytes frames=48355 44100Hz/2ch/16bit
+                        distinct=36 min=0 max=255 (header patched by driver)
+```
+
+WAV 峰值 ±23040、9 万个非零样本，排除「驱动探测成功但 DMA 从未搬数据」这一假阳性。
+QEMU wav 后端头未 finalize 的坑见问题清单 #76。
+
+### 11.3 本轮改动
+
+- **修复**：`task_pages_of()` 真实页数统计（#74）；问题清单 / 本报告状态列同步（#75）。
+- **新增**：`include/snd.h`、`src/snd.c`、`extapp/sndtest.c`、`tests/snd_regress.py`。
+- **接入**：`intr.c`（IRQ5 case）、`kernel.c`（init）、`paging.c`（DMA 保留区）、
+  `shell.c`（`sndinfo`/`sndtest`）、`task.c`（4 个 syscall）、`ce.h`/`ce_abi.h`（槽 57~60）、
+  `build.sh`（源文件 + .o + CE 应用）、`gen_builtin.py`（`/bin/sndtest.ce`）、
+  `ce_sim.py`（4 个 API 的「无设备」建模）。
+- **ABI**：57 → 61 槽，append-only；旧 `.ce` 二进制全部保持兼容（A-4/A-8 已验证）。

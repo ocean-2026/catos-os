@@ -433,3 +433,42 @@ The committed source subset is tools/unifont-gb2312.hex; regeneration
 is offline (tools/gen_hz_font.py) and the build needs nothing but the
 committed .inc.  The pinyin table is tools/gen_pinyin.py (pypinyin +
 jieba, build-time only, MIT).
+
+--- v2.11: Sound Blaster 16 PCM audio (slots 57..60) ------------
+Four slots were appended; older binaries keep every old index, but must
+check that the pointer is non-NULL before calling it.  A machine booted
+without an SB16 answers snd_info(SND_INFO_READY) == 0.
+
+  int snd_info(int what);                         /* slot 57 */
+  int snd_play(const void *pcm, int len, int rate); /* slot 58 */
+  int snd_stop(void);                            /* slot 59 */
+  int snd_tone(int freq_hz, int ms);             /* slot 60 */
+
+snd_play() takes 8-bit UNSIGNED MONO PCM (0x80 = silence), len <= 32768,
+rate 5000..45000.  It is ASYNCHRONOUS: it arms the ISA DMA transfer and
+returns immediately, because int 0x80 enters through an interrupt gate
+(IF=0) and the kernel must never wait for a completion IRQ inside a
+syscall.  Poll snd_info(SND_INFO_PLAYING) from user context, e.g. with
+delay(10), then check snd_info(SND_INFO_IRQS) increased.  The kernel
+copies your buffer through the normal VMA validation, so invalid user
+pointers return -14 (EFAULT) instead of pointing DMA at kernel memory.
+
+snd_info() selectors (defined in ce_abi.h):
+  0 READY    1 = card probed and IRQ5 unmasked
+  1 VERSION  DSP version, 0xMMmm
+  2 PLAYING  1 = DMA block still in flight
+  3 IRQS     acknowledged 8-bit DMA completion IRQs
+  4 ERROR    last driver error code
+  5 BUFSZ    DMA buffer capacity (32768)
+  6 RATE     sample rate of the last play request
+  7 IRQSET   mixer 0x80 IRQ bitmap (diagnostic)
+  8 DMASET   mixer 0x81 DMA bitmap (diagnostic)
+
+snd_tone() fills the kernel's DMA buffer with an integer sine at 22050 Hz
+and starts it; the kernel is built -mno-80387, so there is no FP.  Shell
+equivalents are `sndinfo` and `sndtest [HZ MS]`.
+
+To hear it under QEMU >= 7.1 (-soundhw was removed), boot with:
+  -audiodev wav,id=snd0,path=snd.wav
+  -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
+See tests/snd_regress.py and docs/CatOS-内核问题清单.md section 11.

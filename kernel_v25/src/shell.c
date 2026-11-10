@@ -12,6 +12,7 @@
 #include "net.h"
 #include "task.h"
 #include "hw.h"
+#include "snd.h"        /* v2.11 SB16 info / self-test commands */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -99,6 +100,9 @@ static void cmd_help(void) {
         "  uptime       seconds since boot + task count\n"
         "  top          live task monitor (CPU% per task, any key quits)\n"
         "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
+        "  -- audio (Sound Blaster 16, ISA) --\n"
+        "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
+        "  sndtest [HZ MS]  play a tone (default 440 Hz / 800 ms)\n"
         "  -- network (PCnet) --\n"
         "  curl URL     HTTP GET (http://IP[:port]/path)\n"
         "  ping IP      ICMP echo (3 tries)\n"
@@ -115,6 +119,88 @@ static void cmd_help(void) {
         "  edit FILE    nano-style full-screen editor\n"
         "               (arrows move, ^O save, ^X exit, ^K del line, ^U clear)\n"
     );
+}
+
+/* ---------- SB16 audio (v2.11) -----------------------------------------
+ * The shell runs in ring0 with interrupts enabled, so it can call the
+ * driver directly; ring3 programs go through the four v2.11 ABI slots.
+ * To get sound out of QEMU >= 7.1 (-soundhw was removed):
+ *   -audiodev wav,id=snd0,path=snd.wav
+ *   -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
+ * ---------------------------------------------------------------------- */
+static void cmd_sndinfo(void) {
+    if (!snd_info(SND_INFO_READY)) {
+        vga_write("snd: no SB16 detected (add -device sb16,audiodev=snd0)\n");
+        return;
+    }
+    vga_write("snd: SB16 ready iobase=");
+    print_hex(SND_IOBASE);
+    vga_write(" irq=");   print_int(SND_IRQ_LINE);
+    vga_write(" dma=");   print_int(SND_DMA8_CHAN);
+    vga_write(" dsp=0x"); print_hex((uint32_t)snd_info(SND_INFO_VERSION));
+    vga_write(" rate=");  print_int(snd_info(SND_INFO_RATE));
+    vga_write(" irqs=");  print_int(snd_info(SND_INFO_IRQS));
+    vga_write("\n");
+    vga_write("snd: dma buffer ");
+    print_int(snd_info(SND_INFO_BUFSZ));
+    vga_write(" bytes at 0x"); print_hex(SND_DMA_PHYS);
+    vga_write(" mixer irq=");  print_hex((uint32_t)snd_info(SND_INFO_IRQSET));
+    vga_write(" dma=");        print_hex((uint32_t)snd_info(SND_INFO_DMASET));
+    vga_write("\n");
+}
+
+/* Read one unsigned decimal from *pp; leave 0 unchanged when absent. */
+static uint32_t snd_parse_u32(const char **pp) {
+    const char *p = *pp;
+    while (*p == ' ') p++;
+    uint32_t v = 0;
+    int any = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10u + (uint32_t)(*p - '0');
+        p++; any = 1;
+    }
+    *pp = p;
+    return any ? v : 0;
+}
+
+static void cmd_sndtest(const char *arg) {
+    uint32_t freq = 440u, ms = 800u;
+    if (*arg) {
+        uint32_t f = snd_parse_u32(&arg);
+        uint32_t m = snd_parse_u32(&arg);
+        if (f) freq = f;
+        if (m) ms = m;
+    }
+    if (!snd_info(SND_INFO_READY)) {
+        vga_write("snd: no SB16 - SNDTEST SKIP\n");
+        return;
+    }
+    int before = snd_info(SND_INFO_IRQS);
+    vga_write("snd: playing "); print_int((int)freq);
+    vga_write(" Hz for ");     print_int((int)ms);
+    vga_write(" ms\n");
+
+    int rc = snd_tone(freq, ms);
+    if (rc < 0) {
+        vga_write("snd: play failed rc="); print_int(rc);
+        vga_write("\nSNDTEST FAIL\n");
+        return;
+    }
+    /* Wait for the DMA-completion IRQ to clear SND_INFO_PLAYING.  `hlt`
+     * parks the CPU until the next interrupt; the shell is ring0 with
+     * IF=1, so PIT/SB16 interrupts still arrive.  Upper bound 4 s. */
+    uint32_t deadline = task_uptime_ms() + 4000u;
+    while (snd_info(SND_INFO_PLAYING) && task_uptime_ms() < deadline)
+        __asm__ volatile ("hlt");
+
+    int after = snd_info(SND_INFO_IRQS);
+    vga_write("snd: irqs="); print_int(after - before);
+    vga_write(" busy=");     print_int(snd_info(SND_INFO_PLAYING));
+    vga_write("\n");
+    if (after > before && !snd_info(SND_INFO_PLAYING))
+        vga_write("SNDTEST PASS\n");
+    else
+        vga_write("SNDTEST FAIL (no DMA completion IRQ)\n");
 }
 
 /* ---------- display front-end commands ---------------------------------
@@ -1404,6 +1490,8 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "ps"))          task_ps_print();
         else if (!strcmp_(cmd, "top"))         cmd_top();
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
+        else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo();
+        else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
         else if (!strcmp_(cmd, "netcfg"))       cmd_netcfg(arg);
         else if (!strcmp_(cmd, "uptime")) {
             print_int((int)(task_uptime_ms() / 1000));

@@ -13,6 +13,9 @@
 > 同日移植 Go 解释器时暴露 `u2k_str()` 的 argv 校验缺陷，第四节续编 `#68`；
 > 同日核实 Go 解释器"死循环"实为模拟器缺陷，续编 `#69`~`#72`（`ce_sim` 的 CF 锁存缺口、
 > group3 缺内存操作数、实机验收脚本三处自身缺陷、`atoi` 未建模）。
+> 2026-11-10 合流续编 `#73`（干净克隆截图竞态）与 `#74`~`#77`（第十一节：
+> `task_pages_of()` 页数虚高、文档状态滞后、QEMU wav 头未 finalize、
+> SB16 驱动接入时 int 0x80 关中断陷阱）。
 > 第九节的 `#48`/`F1`/`A2`/`#3` 与第十节的 `#47` 属于**各自独立的局部命名空间**
 > （第九节是 b31 修复闭合表、第十节是工具链常量核对表，均已在节首自行声明），
 > 与主清单编号**不冲突、不互相引用**。引用时请连节号一起写（如"第四节 #61"）。
@@ -25,9 +28,9 @@
 | 4 | 无固定地址 alloc + 固定链接基址 0x02000000 | 链接基址固定，无固定地址分配 | CE 程序无法动态加载/运行其他 CE（ot 不能 run .ce） | cecheck 作为用户态安全等价物（不依赖内核加载器） | v1.2 评估 | 已确认/已规避 |
 | 5 | api->exit() 有 bug：重载同一镜像 | exit() 会 relaunch 同镜像 | 调用 exit() 导致程序反复重启 | ce_main 直接 return 0，禁止调 api->exit() | v1.0 起 | 已确认/已规避 |
 | 6 | 无浮点运算 | 内核 API 无浮点 | 数学只能整数 | 全部整数运算 | v1.0 起 | 已确认 |
-| **48** | **`heap_ensure()` 只映射 1 页 ⇒ 跨页分配触发 `#PF` 杀任务**（原项目的 `heap_ensure_range()` 在 VMA 重构时丢失） | 现项目 `kernel_v25/src/task.c:706` `heap_ensure()` 每次只 `kzalloc_frame()` + `task_map_page()` **单页**；全仓 `grep heap_ensure_range kernel_v25/` → **0 命中**；原项目 `src/task.c:661` 有多页版 `heap_ensure_range()` | 分配跨越 4 KiB 页边界时未映射页被访问 ⇒ `#PF cr2=0x02101007` ⇒ 任务直接被杀（PM 已实机复现） | 移植原项目 `heap_ensure_range()`（约 20 行）；**必须放在 `heap_ensure()` 定义之后或加前置声明**，否则 `implicit declaration` 编译错误 | v2.10 VMA 重构后回归 / 2026-11-09 核实 | 已确认/待修复（PRD **P0-2**） |
-| **49** | **`USER_STACK_SZ` 相对原项目倒退**（自举需要 128 KiB） | 现项目 `kernel_v25/include/paging.h:82` `USER_STACK_SZ 0x10000u`（**64 KiB**）；原项目 `include/paging.h:35` `0x20000u`（128 KiB，原注释："2026-11-02: CC2.CE self-host needs >64K"） | 自举编译（`cc.ce` 编译自身）栈空间不足；大栈帧 CE 程序踩栈 | 改 `0x20000u` | 原项目 2026-11-02 引入 / 现项目未同步，2026-11-09 核实 | 已确认/待修复（PRD **P0-3**） |
-| **50** | **`USER_HEAP_MAX` 相对原项目倒退**（自举需 ~380 KiB） | 现项目 `kernel_v25/include/paging.h:80` `USER_HEAP_MAX 0x40000u`（**256 KiB**）；原项目 `include/paging.h:33` `0x80000u`（512 KiB，原注释："2026-10-31: cc.c self-host needs ~380K"） | 自举编译器堆不够用（arena 申请失败 → 编译中断） | 改 `0x80000u` | 原项目 2026-10-31 引入 / 现项目未同步，2026-11-09 核实 | 已确认/待修复（PRD **P0-3**） |
+| **48** | **`heap_ensure()` 只映射 1 页 ⇒ 跨页分配触发 `#PF` 杀任务**（原项目的 `heap_ensure_range()` 在 VMA 重构时丢失） | 现项目 `kernel_v25/src/task.c:706` `heap_ensure()` 每次只 `kzalloc_frame()` + `task_map_page()` **单页**；全仓 `grep heap_ensure_range kernel_v25/` → **0 命中**；原项目 `src/task.c:661` 有多页版 `heap_ensure_range()` | 分配跨越 4 KiB 页边界时未映射页被访问 ⇒ `#PF cr2=0x02101007` ⇒ 任务直接被杀（PM 已实机复现） | 移植原项目 `heap_ensure_range()`（约 20 行）；**必须放在 `heap_ensure()` 定义之后或加前置声明**，否则 `implicit declaration` 编译错误 | v2.10 VMA 重构后回归 / 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **49** | **`USER_STACK_SZ` 相对原项目倒退**（自举需要 128 KiB） | 现项目 `kernel_v25/include/paging.h:82` `USER_STACK_SZ 0x10000u`（**64 KiB**）；原项目 `include/paging.h:35` `0x20000u`（128 KiB，原注释："2026-11-02: CC2.CE self-host needs >64K"） | 自举编译（`cc.ce` 编译自身）栈空间不足；大栈帧 CE 程序踩栈 | 改 `0x20000u` | 原项目 2026-11-02 引入 / 现项目未同步，2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **50** | **`USER_HEAP_MAX` 相对原项目倒退**（自举需 ~380 KiB） | 现项目 `kernel_v25/include/paging.h:80` `USER_HEAP_MAX 0x40000u`（**256 KiB**）；原项目 `include/paging.h:33` `0x80000u`（512 KiB，原注释："2026-10-31: cc.c self-host needs ~380K"） | 自举编译器堆不够用（arena 申请失败 → 编译中断） | 改 `0x80000u` | 原项目 2026-10-31 引入 / 现项目未同步，2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
 
 ## 二、文件系统（FAT32）
 
@@ -58,21 +61,21 @@
 | 19 | QEMU sendkey 丢键 | 空格/字母/回车偶发丢失（测试环境噪音） | 长命令粘连、验证误判 | 慢速发送 + vga 屏幕回显校验 + BS 清行重试 | v1.0 起 | 环境噪音（非内核） |
 | 20 | fatfs.py 工具 bug/口径 | dump_tree 递归 TypeError 勿用；read_chain 参数是簇链 list 非 slot 号 | 误用会崩或读错 | 用 add_file/delete_file/read_chain（簇链） | v1.0 起 | 工具备忘 |
 | 21 | 测试环境每轮重置 | Ubuntu 云环境 qemu 等配置可能每轮消失 | 直接测试会失败 | 开工先检查 qemu/gcc/git 配置（AGENTS.md 规则） | v1.0 起 | 环境规则 |
-| **51** | **`cc.c` 停在阶段 0，阶段 1-3 能力在 `cc_self.c` 里却是死代码** | `kernel_v25/extapp/cc.c` **1,237 行**（阶段 0：无 struct/typedef/enum/switch/goto、无 `no ce_main` 报错）；`kernel_v25/extapp/cc_self.c` **2,250 行**（阶段 1-3 已实现）。全仓 `grep -rn cc_self kernel_v25/ tests/ --include=*.sh --include=*.py` → **0 命中**（无任何构建脚本引用 `cc_self.c`） | 改 `cc.c` 源码得不到阶段 1-3 能力；`cc_self.c` 的 2,250 行是全树无引用的死代码 | **用户拍板：用 `cc_self.c` 覆盖 `cc.c`**（两份均归档保留）；替换时需核对 `TOK_MAX`/缓冲尺寸与 `OB_MAX`/`SRC_MAX` 是否适配 512 KiB 堆 | 原项目 `TODO_STAGE5.md` 记录 / 2026-11-09 核实 | 已确认/待修复（PRD **P1-3**） |
+| **51** | **`cc.c` 停在阶段 0，阶段 1-3 能力在 `cc_self.c` 里却是死代码** | `kernel_v25/extapp/cc.c` **1,237 行**（阶段 0：无 struct/typedef/enum/switch/goto、无 `no ce_main` 报错）；`kernel_v25/extapp/cc_self.c` **2,250 行**（阶段 1-3 已实现）。全仓 `grep -rn cc_self kernel_v25/ tests/ --include=*.sh --include=*.py` → **0 命中**（无任何构建脚本引用 `cc_self.c`） | 改 `cc.c` 源码得不到阶段 1-3 能力；`cc_self.c` 的 2,250 行是全树无引用的死代码 | **用户拍板：用 `cc_self.c` 覆盖 `cc.c`**（两份均归档保留）；替换时需核对 `TOK_MAX`/缓冲尺寸与 `OB_MAX`/`SRC_MAX` 是否适配 512 KiB 堆 | 原项目 `TODO_STAGE5.md` 记录 / 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
 | **52** | **`CC2.CE` 自举固定点（cc2 → cc3 字节级一致）未验证** | 原项目 `build/HOSTCC2_REF.CE` = 81,522 B / md5 `eeec32f838fbab4c111d428df22aa409`（Linux 机器编译的期望输出）；本机构建 `build/CC2_NEW.CE` = 82,586 B / md5 `d21d66ea5845492dab406d04f666c60e`（= 已从根目录删除的 `Catos_Better_b`）。二者**字节级不一致** | 「cc 能自举」目前只是"两个产物大小接近"，没有固定点证明 | 跑 `build/verify_bootstrap.sh`（移植并改写为相对路径）：cc2 编译 cc.c → CC3.CE，与 CC2.CE 比 md5；**gcc 版本差异（Rev4 vs Rev5）会导致字节不一致，需先记录参考值的工具链版本** | 原项目 `BUILD_REPORT_STAGE5.md` / `HANDOFF_STAGE5.md` 记录 / 2026-11-09 核实 | 待核对（PRD **P2-1**） |
-| **53** | **Go 解释器 FIND-G3：无递归深度上限** | 原项目 `extapp/go.c:783` `g_call_depth` + `:784` `CALL_DEPTH_MAX 200` + `:1048` 入口检查（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 无限递归撑爆 C 栈（CE 用户栈仅 64 KiB，与 #49 同源） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G3 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **54** | **Go 解释器 FIND-G4：非法字符被词法 default 静默吞** | 原项目 `extapp/go.c:358-362` default 分支置 `g_perr`/`g_errline`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 非法字节不在词法期报错，而是延后变成运行时"undefined variable" | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G4 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **55** | **Go 解释器 FIND-G5：`readfile` 请求 20479 > 内核 `file_read` 单次 16384 上限** | 原项目 `extapp/go.c:1085` 新增 `read_whole()`，按 `FS_CHUNK 16384` **分块循环读至 EOF**（**源码已修**）；但 `docs/go-review.md` 仍记为"未修"。内核 `ce_abi.h` 注释：`file_read ... max <= 16384 per call` | 未修则 >16 KiB 的脚本被拒（`got<0` → `""` 或 "cannot read script"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G5 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **56** | **Go 解释器 FIND-G6：arena 扩容 `s->v`/`a->v` 未判空** | 原项目 `extapp/go.c:701` 与 `:732` 补 `if (!s->v) { g_oom = 1; return 0; }`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | arena 耗尽时 `s->v/a->v = 0`，后续 `scope_declare`/`arr_push` 解引用空指针 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G6 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **57** | **Go 解释器 FIND-G7：字符串字面量 >1023 静默截断、未闭合引号不报错** | 原项目 `extapp/go.c:223-235` 改为**两遍扫描**（先数解码长度再按 arena 尺寸分配），未闭合引号报词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 长字面量被静默截断；引号不闭合导致后续解析错乱 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G7 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **58** | **Go 解释器 FIND-G8：顶层 break/continue/return 静默停跑不报错** | 原项目 `extapp/go.c:188-191` 解析期嵌套计数器 `g_loop_depth`/`g_func_depth` + `:658/:665/:669` 三处 `depth==0` 报错（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 脚本在顶层误用 `break` 会静默终止，后续语句不执行 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G8 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **59** | **Go 解释器 FIND-G9：for init 的 `:=` 变量泄漏外层作用域** | 原项目 `extapp/go.c:882-899` 每个 for 循环建独立 `Scope`（parent = 调用者作用域），结束恢复 `g_scope`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 循环变量泄漏到外层，与 Go 语义不符（原评为"无害"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G9 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **60** | **Go 解释器 FIND-G10：数字字面量溢出无检测（int32 UB）** | 原项目 `extapp/go.c:302-313` 扫描时检测 `> 2147483647` 并置词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 超大字面量静默溢出为负数/回绕 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G10 / 2026-11-09 核实 | 原项目已修/移植待验证（PRD **P1-2**） |
-| **61** | **`kernel_v25/build/catos_work.iso` 从未入库 ⇒ 干净克隆不可构建** | `git ls-files kernel_v25/build/` 仅返回 `gen_builtin.py` / `mkce.py` / `patch_work_iso.py`；`kernel_v25/build/patch_work_iso.py:5` 硬依赖 `build/catos_work.iso`（10,725,376 B GRUB El Torito 模板）；`.gitignore` 的 `!kernel_v25/build/catos_work.iso` 否定规则写在 `*.iso` **之前**（第 7/12 行 vs 第 27 行），被覆盖 | 干净克隆执行 `build.sh iso` 抛 `FileNotFoundError: build/catos_work.iso`；**当前"基线 12/12 PASS"依赖手工拷贝的未跟踪模板，不具备 CI 意义** | 把模板提交入库**并**把 `!` 否定规则移到 `*.iso` **之后**（git 是 last-match-wins；只 `git add -f` 不移位是假修复） | 2026-11-09 核实 | 已确认/待修复（PRD **P0-4**） |
-| **62** | **`build.sh` 应用列表不含 `cc` ⇒ `cc.ce` 是陈旧产物** | `kernel_v25/build.sh:43` 应用列表 = `hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest`（**无 `cc`**）；`kernel_v25/extapp/bin/cc.ce` = 26,952 B（入库值），源码重编应为 27,080 B | 改 `cc.c` 源码**没有任何效果**，却因"产物在库里"看起来像已验证 —— 伪装成已验证 | 把 `cc` 加入 `build.sh` 应用列表（`gen_builtin.py` 的 `OPTIONAL` 已含 `/bin/cc.ce`） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-4**） |
-| **63** | **`node.c` 从不被任何构建脚本编译** | `grep -rn node kernel_v25/build.sh kernel_v25/extapp/build_ce.sh` → **0 命中**；`kernel_v25/node/node.c`（1,414 行）与 `node.ce`（35,116 B）**均已入库**，且与原项目 `node/node.c` diff **0 行差异**、`node.ce` **逐字节相同** | `node.ce` 是**无法复现的预编译产物**（与 #62 同构）：一旦有人改 `node.c`，镜像里的 `node.ce` 会静默过期 | 把 `node` 加入 `build.sh` 应用列表；补独立验收 `tests/node_regress.py`（QEMU 内 `run /bin/node.ce` 跑 `TEST.JS`） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-9 / P1-10**） |
-| **64** | **`tests/inject_any.py` 的 FAT 几何参数过时** | 脚本 `tests/inject_any.py:18-21` 硬编码 `SPC=8` / `RSVD=33` / `FAT_SZ=8192`（按 4 GiB 稀疏盘假设）；内核 `kernel_v25/src/fat.c:8` 实为 `RESERVED 32u`，且 `fat_sz`/`spc` 由卷大小动态决定（`fat.c:635/647/650`）。该脚本与原项目 `tools/inject_any.py` **逐字节相同** | 任何"注入新应用再验证"的流程**第一步即失败**（报 `BIN dir not found`），极易被误判为"移植不成功" | 改为从 DBR 读取几何（PM 已用读 DBR 的版本验证可正常注入） | 2026-11-09 核实 | 已确认/待修复（PRD **P1-7**） |
-| **65** | **`.gitignore` 否定规则位置写反（dead negation）** | `.gitignore:7` 与 `:12` 有 `!kernel_v25/build/catos_work.iso`，但 `.gitignore:27` 是 `*.iso`；git 是 **last-match-wins** ⇒ `git check-ignore -v kernel_v25/build/catos_work.iso` 命中的是 `.gitignore:27:*.iso`（**忽略规则**），否定规则形同虚设。注释写的 *"exceptions must precede rules"* **结论是错的** | 构建产物跟踪状态脆弱；下次有人删了重建该文件会再次被 `*.iso` 忽略，构建可复现性再次失效 | 把否定规则移到 `*.iso` **之后**，并把注释改成符合 git 语义的表述 | 2026-11-09 核实 | 已确认/待修复（PRD **P0-4**） |
+| **53** | **Go 解释器 FIND-G3：无递归深度上限** | 原项目 `extapp/go.c:783` `g_call_depth` + `:784` `CALL_DEPTH_MAX 200` + `:1048` 入口检查（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 无限递归撑爆 C 栈（CE 用户栈仅 64 KiB，与 #49 同源） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G3 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **54** | **Go 解释器 FIND-G4：非法字符被词法 default 静默吞** | 原项目 `extapp/go.c:358-362` default 分支置 `g_perr`/`g_errline`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 非法字节不在词法期报错，而是延后变成运行时"undefined variable" | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G4 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **55** | **Go 解释器 FIND-G5：`readfile` 请求 20479 > 内核 `file_read` 单次 16384 上限** | 原项目 `extapp/go.c:1085` 新增 `read_whole()`，按 `FS_CHUNK 16384` **分块循环读至 EOF**（**源码已修**）；但 `docs/go-review.md` 仍记为"未修"。内核 `ce_abi.h` 注释：`file_read ... max <= 16384 per call` | 未修则 >16 KiB 的脚本被拒（`got<0` → `""` 或 "cannot read script"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G5 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **56** | **Go 解释器 FIND-G6：arena 扩容 `s->v`/`a->v` 未判空** | 原项目 `extapp/go.c:701` 与 `:732` 补 `if (!s->v) { g_oom = 1; return 0; }`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | arena 耗尽时 `s->v/a->v = 0`，后续 `scope_declare`/`arr_push` 解引用空指针 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G6 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **57** | **Go 解释器 FIND-G7：字符串字面量 >1023 静默截断、未闭合引号不报错** | 原项目 `extapp/go.c:223-235` 改为**两遍扫描**（先数解码长度再按 arena 尺寸分配），未闭合引号报词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 长字面量被静默截断；引号不闭合导致后续解析错乱 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G7 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **58** | **Go 解释器 FIND-G8：顶层 break/continue/return 静默停跑不报错** | 原项目 `extapp/go.c:188-191` 解析期嵌套计数器 `g_loop_depth`/`g_func_depth` + `:658/:665/:669` 三处 `depth==0` 报错（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 脚本在顶层误用 `break` 会静默终止，后续语句不执行 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G8 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **59** | **Go 解释器 FIND-G9：for init 的 `:=` 变量泄漏外层作用域** | 原项目 `extapp/go.c:882-899` 每个 for 循环建独立 `Scope`（parent = 调用者作用域），结束恢复 `g_scope`（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 循环变量泄漏到外层，与 Go 语义不符（原评为"无害"） | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G9 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **60** | **Go 解释器 FIND-G10：数字字面量溢出无检测（int32 UB）** | 原项目 `extapp/go.c:302-313` 扫描时检测 `> 2147483647` 并置词法错误（**源码已修**）；但 `docs/go-review.md` 仍记为"未修" | 超大字面量静默溢出为负数/回绕 | 移植 `go.c` 后逐条确认该修复随行 | 原项目 `go-review.md` FIND-G10 / 2026-11-09 核实 | 原项目已修/移植已验证（2026-11-10 复核） |
+| **61** | **`kernel_v25/build/catos_work.iso` 从未入库 ⇒ 干净克隆不可构建** | `git ls-files kernel_v25/build/` 仅返回 `gen_builtin.py` / `mkce.py` / `patch_work_iso.py`；`kernel_v25/build/patch_work_iso.py:5` 硬依赖 `build/catos_work.iso`（10,725,376 B GRUB El Torito 模板）；`.gitignore` 的 `!kernel_v25/build/catos_work.iso` 否定规则写在 `*.iso` **之前**（第 7/12 行 vs 第 27 行），被覆盖 | 干净克隆执行 `build.sh iso` 抛 `FileNotFoundError: build/catos_work.iso`；**当前"基线 12/12 PASS"依赖手工拷贝的未跟踪模板，不具备 CI 意义** | 把模板提交入库**并**把 `!` 否定规则移到 `*.iso` **之后**（git 是 last-match-wins；只 `git add -f` 不移位是假修复） | 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **62** | **`build.sh` 应用列表不含 `cc` ⇒ `cc.ce` 是陈旧产物** | `kernel_v25/build.sh:43` 应用列表 = `hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest`（**无 `cc`**）；`kernel_v25/extapp/bin/cc.ce` = 26,952 B（入库值），源码重编应为 27,080 B | 改 `cc.c` 源码**没有任何效果**，却因"产物在库里"看起来像已验证 —— 伪装成已验证 | 把 `cc` 加入 `build.sh` 应用列表（`gen_builtin.py` 的 `OPTIONAL` 已含 `/bin/cc.ce`） | 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **63** | **`node.c` 从不被任何构建脚本编译** | `grep -rn node kernel_v25/build.sh kernel_v25/extapp/build_ce.sh` → **0 命中**；`kernel_v25/node/node.c`（1,414 行）与 `node.ce`（35,116 B）**均已入库**，且与原项目 `node/node.c` diff **0 行差异**、`node.ce` **逐字节相同** | `node.ce` 是**无法复现的预编译产物**（与 #62 同构）：一旦有人改 `node.c`，镜像里的 `node.ce` 会静默过期 | 把 `node` 加入 `build.sh` 应用列表；补独立验收 `tests/node_regress.py`（QEMU 内 `run /bin/node.ce` 跑 `TEST.JS`） | 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **64** | **`tests/inject_any.py` 的 FAT 几何参数过时** | 脚本 `tests/inject_any.py:18-21` 硬编码 `SPC=8` / `RSVD=33` / `FAT_SZ=8192`（按 4 GiB 稀疏盘假设）；内核 `kernel_v25/src/fat.c:8` 实为 `RESERVED 32u`，且 `fat_sz`/`spc` 由卷大小动态决定（`fat.c:635/647/650`）。该脚本与原项目 `tools/inject_any.py` **逐字节相同** | 任何"注入新应用再验证"的流程**第一步即失败**（报 `BIN dir not found`），极易被误判为"移植不成功" | 改为从 DBR 读取几何（PM 已用读 DBR 的版本验证可正常注入） | 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
+| **65** | **`.gitignore` 否定规则位置写反（dead negation）** | `.gitignore:7` 与 `:12` 有 `!kernel_v25/build/catos_work.iso`，但 `.gitignore:27` 是 `*.iso`；git 是 **last-match-wins** ⇒ `git check-ignore -v kernel_v25/build/catos_work.iso` 命中的是 `.gitignore:27:*.iso`（**忽略规则**），否定规则形同虚设。注释写的 *"exceptions must precede rules"* **结论是错的** | 构建产物跟踪状态脆弱；下次有人删了重建该文件会再次被 `*.iso` 忽略，构建可复现性再次失效 | 把否定规则移到 `*.iso` **之后**，并把注释改成符合 git 语义的表述 | 2026-11-09 核实 | 已修复（合流 6945860 / 2026-11-10 复核） |
 | **68** | **`u2k_str()` 用整段 `max` 字节窗口校验用户字符串 ⇒ argv 传参路径全线失效** | 现项目 `kernel_v25/src/task.c:668` 的 `u2k_str()` 一次性校验 `[us, us+max-1]` 整段（`max = FS_PATH_MAX = 160`），而 `task_spawn_ce()` 把 argv 字符串**放在用户栈顶**（`sp = USER_STACK_TOP - 0x10`，逐个 `sp -= l+1`）⇒ 160 字节窗口必然越过 `USER_STACK_TOP` ⇒ `validate_uaddr()` 的 `vma_contains(t->vm, end)` 失败 ⇒ 返 -14 ⇒ `u2k_str` 返 -1 ⇒ `SYS_FILE_READ` 返 **-3**、`SYS_FILE_EXISTS` 返 **0**（"不存在"）。**第二重缺陷**：修前 `dst[i] = us[i]` 是从 ring0 **直接解引用用户指针**（读内核地址空间）；CE image 恰好被恒等映射所以能 work，用户栈**没有**恒等映射。**原项目**（`D:/CatOs/Catos_Better_better/src/task.c:618`）用的是**单点 arena 边界检查**（`USER_IMAGE_BASE <= us < USER_ARENA_END`），**没有 160 字节窗口** ⇒ 原项目不触发此缺陷 | `run /bin/go.ce /BIN/TEST.GO` 实机答 `go: cannot read script: /BIN/TEST.GO`，但该文件**确实在 FAT 卷上**（独立宿主侧 FAT32 解析器逐簇核对内容正确）。**决定性对照实验**：同一路径，字面量（在 image VMA 内）`exists=1 / file_read=592` **成功**，argv（在栈顶）`exists=0 / file_read=-3` **失败** ⇒ 缺陷在内核字符串拷贝路径，与 Go 解释器无关。**影响 7 条 syscall**：`FILE_READ`/`FILE_EXISTS`/`FILE_WRITE`/`SAVE`/`SPAWN` 的 argv 拷贝 + 网络的 `url`/`host`/`ip` 三张参数表 —— 全部是同一 bug 的受害者。原项目当年验 go 只走**无参内置 demo 回退**（`go.c:1215`），从未走 argv ⇒ 缺陷一直潜伏 | 逐字节校验（`validate_uaddr(t, a, 1)`）+ 经任务页表翻译读取（`task_virt_to_phys()` + 内核恒等映射别名），不再从 ring0 直接解引用。**2026-11-09 已修复**（commit `38fee6a`），修复后 `run /bin/go.ce /BIN/TEST.GO` → `ALL PASS`、`run /bin/node.ce /BIN/TEST.JS` → `ALL PASS`（两条都依赖 argv 传参，修前必然失败） | 移植 Go 解释器时暴露 / 2026-11-09 核实 | **已修复** |
 | **69** | **`ce_sim` 的 `cmp al, imm8`（0x3C）不锁存 CF ⇒ Go 解释器被误判为"死循环"** | `tests/ce_sim.py` 对 `cmp` 的 0x38/0x39/0x3A/0x3D 四种形式都维护了 CF，**唯独 0x3C（`cmp al, imm8`）漏了**。gcc -O2 把 cc 的 `is_idc()` 内联成 `and $0xffffffdf,%eax / sub $0x41,%eax / cmp $0x19,%al / jbe`，而 **`jbe` 读的就是 CF 锁存器** ⇒ CF 保持陈旧值 ⇒ 模拟的 lexer 走错分支 ⇒ 看起来卡死在 tokenizer 循环 | `ce_regress` 把 `go.ce` 判成 FAIL，极易被误读为「Go 解释器有死循环缺陷」而重写实现。**真实结论相反：Go 解释器本身没有死循环** | 补上 `self.cf = 1 if al < (imm & 0xFF) else 0`。修复后 `go.ce` 在 `ce_sim` 下 **COMPLETED，246041 步，rc=0**，`g_pos=563/563`、`g_tokn=200`（源码读完、200 个 token） | 移植 Go 解释器时暴露 / 2026-11-09 核实 | **已修复**（commit `7f8b225`） |
 | **70** | **`ce_sim` 的 group3 子指令组只实现寄存器形式 ⇒ 缺内存操作数即中止** | `tests/ce_sim.py` 的 `op_group3()` 开头是 `if mod != 3: raise CeError("group3 memory operand not emitted")`，即 `test/not/neg/mul/imul/div/idiv`（opcode 0xF6/0xF7）**只有寄存器形式**。gcc 为 32 位有符号除法发出的是 **`idiv dword ptr [ebp-0x18c]`**（实测字节 `f7 bd 74 fe ff ff`）⇒ 模拟器直接抛错中止 | 与 #69 叠加后，Go 解释器在 `ce_sim` 下完全无法推进；此前把这一现象整体归因为"解释器死循环"，掩盖了两处**模拟器**缺陷 | 补全 group3：内存操作数形式、8 位变体（0xF6）、32 位除法溢出检测、`test` 的立即数形式；新增 `sx8`/`sx16`/`trunc_div` 辅助函数与 `of` 标志 | 同上 | **已修复**（commit `7f8b225`） |
@@ -81,23 +84,23 @@
 | **73** | **`qemu_regress.py` 的 `shot()` 不等 screendump 落盘 ⇒ 干净克隆下 12 步全报 ERR** | HMP `screendump` 是**异步**的：monitor 先回显命令、guest 再写文件。`tests/qemu_regress.py` 的 `shot()` 固定 `sleep(1.2)` 后直接 `open(ppm)`。在主工作树里磁盘早已格式化过、写入很快，1.2 s 够用；在**干净克隆**里磁盘是刚创建的稀疏空文件、写盘慢 ⇒ 文件尚未出现 | **症状极具误导性**：12 个步骤全部 ERR（`FileNotFoundError: ...00_boot.ppm`），看起来像"guest 挂了/内核崩了"，实际 guest 一路正常跑到最后一步。这个假象曾让我把大量时间浪费在"内核是否在 QEMU 下崩溃"的错误方向上 | `shot()` 改为**轮询等待文件出现**（最多 ~20 s），真没有时报明确的 `screendump produced no file`；同时先删除旧 `.ppm` 避免读到上一帧 | 干净克隆（空白磁盘）终验 / 2026-11-09 核实 | **已修复**（commit `3fd56cb`；修复后干净克隆 12/12 PASS） |
 
 
-### Go 子集解释器（`go.c`）现状 —— 2026-11-09 落档说明
+### Go 子集解释器（`go.c`）现状 —— 2026-11-10 合流后更新
 
-**现项目 `kernel_v25/` 中当前没有 `go.c`。** 它是原项目（`D:/CatOs/Catos_Better_better/extapp/go.c`，
-1,300 行 / md5 `f9876f42fa646c58ec21da649ed934e4`）独有的资产，已由 PM 在 57 槽 ABI 下
-实测编译通过并跑通 QEMU（PRD **P1-1** / **P1-2**）。
+> 2026-11-09 的原文写「现项目 `kernel_v25/` 中当前没有 `go.c`」，该描述**已在合流后失效**，
+> 以下为当前真实状态（复核于 `D:/CatOs` master `6945860`）。
 
-- **CE ABI 兼容性**：原项目用的是 **48 槽** `ce_abi.h`，现项目是 **57 槽**。
-  `go.c` 实际只调用 7 个槽（`write`/`putc`/`print_int`/`alloc`/`atoi`/`file_exists`/`file_read`），
-  索引**全部 ≤39**，落在 append-only 旧前缀内 ⇒ **57 槽下零改动可编译**。
-- **上述 #53~#60（FIND-G3~G10）**：这 8 条在原项目 `go.c` **源码里其实已经修复**
-  （逐条证据见 `docs/orig-archive/README.md` 的「FIND-G 逐条核实」表），
-  只有 `docs/go-review.md` / `GO-DESIGN.md` §6 的状态描述停留在"未修"。
-  ⇒ 移植时要做的是**逐条验证修复随行**，而不是重新实现。
-- **已知遗留缺陷**（未被 FIND 覆盖、需在移植时留意）：
-  `readfile` 的源缓冲 `g_filebuf[20480]` 与内核 `file_read` 单次 16 KiB 上限的落差
-  （已由 `read_whole()` 分块解决，见 #55），以及 `api->alloc` 拿不到内存时的
-  静态 64 KiB arena 兜底（依赖 P0-1 修复后才有 192 KiB 动态 arena）。
+- **已移植**：`kernel_v25/extapp/go.c`（1,319 行）与 `extapp/bin/go.ce`（26,832 B）均已入库；
+  `kernel_v25/build.sh:47` 的 CE 应用列表含 `go`，`build/gen_builtin.py:32` 的 `FILES` 含 `/bin/go.ce`。
+  实机 `run /bin/go.ce /BIN/TEST.GO` → `ALL PASS`，`fib(10)= 55`。
+- **CE ABI 兼容性**：原项目是 **48 槽**，合流时现项目为 **57 槽**（v2.11 起 61 槽）。
+  `go.c` 只调用 7 个槽（`write`/`putc`/`print_int`/`alloc`/`atoi`/`file_exists`/`file_read`），
+  索引**全部 ≤39**，落在 append-only 旧前缀内 ⇒ 57 槽、61 槽下均零改动可编译。
+- **#53~#60（FIND-G3~G10）**：8 项修复随移植保留（宿主 `tests/go_cases.py` 5/5、
+  实机 `tests/go_regress.py` 7/7）。`docs/go-review.md` / `GO-DESIGN.md` §6 仍写"未修"，
+  属**原项目的历史记录**，不代表当前源码状态。
+- **移植时顺手修掉的一处**：静态 64 KiB arena 兜底原本按 `ARENA_SZ`(192 KiB) 判边界，
+  动态 arena 只有 64 KiB 时会越界写；已引入 `g_arena_cap` 让边界跟随实际容量。
+  `readfile` 的 20480 B 缓冲与 `file_read` 单次 16 KiB 上限的落差由 `read_whole()` 分块解决。
 
 
 ## 五、未决问题
@@ -190,11 +193,68 @@
 3. **验收**：`tests/test_mkce.py` 48/48 PASS；`tests/test_cc.py` 8/8 PASS（含指令级模拟器，另 `--no-sim` 8/8）；宿主构建链端到端产出合法 CE01。QEMU 实机仍待云侧环境。
 4. **独立复核**：只读复核发现并已修复两处——(a) 测试只比上限数值、不比来源，因回退常量与 ce.h 恰好相等而构成假阳性；(b) 非法/负数/超 uint32 参数抛 Python traceback 而非 `error:`。现已断言 `load_limits()` 的 source 必须指向 `include/ce.h`，并覆盖 0x 前缀、非法 hex、负数、超范围、uint32 回绕等边界。
 
-**本轮发现但未修改的既有问题（交主工作树合流处理，避免与并行开发冲突）**
+**本轮发现、合流时一并修复的既有问题（2026-11-10 复核：两条均已闭合）**
 
-| 位置 | 问题 | 建议 |
-|---|---|---|
-| `src/task.c:1345`（`task_spawn_ce`） | `api` / `img` 为 `uint32_t`，`api + 4 > img` 会回绕：`api=0xFFFFFFFC` 时和为 0，校验被绕过，随后在 `USER_IMAGE_BASE + 0xFFFFFFFC` 写 4 字节 API 表指针 → 越界写 | 改为防溢出形式（如先判 `img < 4`，再 `api > img - 4`）；构建工具侧已更严拦截，但宿主注入等非 mkce 路径仍可绕过 |
-| `kernel_v25/extapp/build_ce.sh:48-49` | `CFLAGS` 内 `-I$CEBASE -I$ROOT/include` 未加引号，而 `$CFLAGS` 又以无引号形式展开；工作目录含空格时 gcc 收到被分词的错误参数 | 把 `-I` 两项移出 `CFLAGS`，在 gcc 命令行直接写成 `-I"$CEBASE" -I"$ROOT/include"` |
+| 位置 | 问题 | 实际修复 | 状态 |
+|---|---|---|---|
+| `src/task.c:1779-1793`（`task_spawn_ce`） | `api` / `img` 为 `uint32_t`，`api + 4 > img` 会回绕：`api=0xFFFFFFFC` 时和为 0，校验被绕过，随后在 `USER_IMAGE_BASE + 0xFFFFFFFC` 写 4 字节 API 表指针 → 越界写 | 已改为防溢出形式 `if (img < 4 \|\| api > img - 4) return -5;`（提交 `e1e9a88`），并在源码注释里记录了回绕成因 | **已修复** |
+| `kernel_v25/extapp/build_ce.sh:48-70` | `CFLAGS` 内 `-I$CEBASE -I$ROOT/include` 未加引号，而 `$CFLAGS` 又以无引号形式展开；工作目录含空格时 gcc 收到被分词的错误参数 | `-I` 已移出 `CFLAGS`，在 gcc 命令行写成独立的 `-I"$CEBASE" -I"$ROOT/include"`（`:70`、`:72`），`:51-56` 注释解释了「变量内的引号不会被重新解析」；同轮补上 `-DCC_HOST`（`:69`）（提交 `176c559`） | **已修复** |
 
-> 说明：上述两处不在本轮改动清单内——`task.c` 与 `extapp/build_ce.sh` 属主工作树正在并行修改的活跃文件，隔离分支不擅自改动，以免合流冲突。
+> 说明：这两条在隔离分支上刻意未改（当时主工作树有并行会话）。2026-11-10 合流到
+> `D:/CatOs` 的 master 后逐行复核，确认均已落地；`merge-harvest-QA-final.md` 的
+> 「遗留」表与 S-8 判定同样已同步更正。
+
+---
+
+## 十一、合流后续修 + 声卡驱动（2026-11-10，v2.11）
+
+> 背景：`workbuddy/todo-20261106-1906`（`6945860`，27 个提交）fast-forward 合入
+> `D:/CatOs` 的 master（`a7eae5a`），工作目录从隔离 worktree 迁回 `D:/CatOs`。
+> 合流后逐条复核代码，发现「遗留缺陷」多数其实已修，真正剩下的只有文档状态滞后
+> 与 `task_pages_of()` 一处；同轮新增 SB16 声卡驱动。
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **74** | **`task_pages_of()` 把 VMA 跨度当成已映射页数 ⇒ `top` 的 PAGES 列虚高** | `task.c` 原实现 `n += (v->end - v->start) >> 12`。`heap_vma_init()` 建的是 512 KiB 堆 VMA，实际由 `heap_ensure_range()` 按需逐页映射；任何调过 `api->alloc()` 的 ring3 任务恒被多算 **128 页**，128 KiB 栈 VMA 同理。唯一调用点是 `task_stat()` → `shell.c` 的 `cmd_top()`，`sysinfo.ce` 不打印该值，**不影响实际内存分配** | `top` 的驻留页数不可信，容易被误读成内存泄漏 | 改为逐页 `task_virt_to_phys(&t->space, a)` 判定 PTE present。该函数读的是任务自己的 `pt`/`pt2`（内核恒等映射），不依赖当前 CR3，规避了旧版 raw-PT 扫描"页表被切走就错"的缺陷 | **已修复** |
+| **75** | **问题清单 / QA 报告的状态列大面积滞后于代码** | #48/#49/#50/#51/#61~#65 共 9 条仍写「已确认/待修复」，`go.c` 现状段仍写「现项目没有 go.c」，`merge-harvest-QA-final.md` 的遗留表写「本期未改」、S-8 写 PARTIAL 且自相矛盾；逐行复核 **全部已在合流分支修复或验证** | 后来者会重复劳动，或按错误状态回退已修代码（比代码缺陷更危险） | 状态列统一改为「已修复（合流 6945860 / 2026-11-10 复核）」；Go 段改写为真实状态；QA 报告遗留表与 S-8 同步更正 | **已修复** |
+| **76** | **QEMU `-audiodev wav` 的 RIFF/data size 字段恒为 0 ⇒ 音频回归误判「无数据」** | `audio/wavaudio.c` 的 `wav_init_out()` 先写 44 字节**全零长度**头，`wav_fini_out()` 在 voice 关闭时才回填；HMP `quit` 不保证走到 fini。实测文件 192,100 B、尾部 `00 de 00 de` 是真实波形，但 `data` chunk size=0，按标准解析会得到「no data chunk」 | 音频明明录到了却报 FAIL，症状酷似驱动没工作 | `tests/snd_regress.py` 的 `wav_check()` 定位 `data` 标记后取到 EOF 的全部字节，并**自己回填** RIFF size(@4)/data size(@40)，再用标准库 `wave` 复验头合法；不依赖 QEMU 是否 finalize | **已规避/已验证** |
+| **77** | **不能在 int 0x80 syscall 里等音频播放完成** | `intr.c:202` 把 int 0x80 装成 **0xEE 中断门**，CPU 进入时清 IF；`cpu.s:_isr_0x80` 没有 `sti`。在 `isr_syscall()` 里 `hlt` 会永久挂起，`timer_ticks` 也因 PIT IRQ 被屏蔽而不再递增 → 死等 | 若 `snd_play()` 同步等待 DMA 完成，整个内核会死锁 | 播放设计为**异步**：`snd_play()`/`snd_tone()` 只武装 DMA 立即返回，`snd_irq()` 清 busy 标志；等待放在 shell（ring0，IF=1）或 ring3 的 `delay()` 轮询中 | **已规避/已验证** |
+
+### 11.1 声卡驱动（Sound Blaster 16，ISA）
+
+**选型依据**：内核有裸 PCI 配置空间读写（`hw.c` / `net.c` / `be_vbe.c`）但**没有通用 PCI 驱动框架**，
+`intr.c` 的 IRQ 分发是一个硬编码 switch，`intr_enable()` 只解屏蔽 IRQ0/1/2。SB16 是 ISA 设备，
+iobase `0x220` / IRQ5 / 8 位 DMA ch1 均固定，只需「一个 `case 5` + 一个 IMR 位」即可打通；
+AC97 / ES1370 / intel-hda 都要求 PCI 枚举 + bus master + BDL + PCI INTA 路由同时成立，风险高得多。
+
+| 项 | 值 |
+|---|---|
+| 驱动文件 | `kernel_v25/include/snd.h`、`kernel_v25/src/snd.c` |
+| DSP 流程 | reset → `0xAA` → `0xE1` 读版本 → `0x41` 设输出率（高字节先）→ `0x14` 8 位单次 DMA（`len-1`，低字节先） |
+| IRQ 应答 | 读 `0x22E` 清 mixer `0x82` bit0；PIC EOI 仍由 `intr.c:177-178` 统一发 |
+| DMA 缓冲 | 物理 `0x520000`，32 KiB，64 KiB 对齐、<16 MiB、不跨 64 KiB 边界；`paging.c` 的 `DMA_HI` 扩到 `0x528000` 记录保留区 |
+| 8237 ch1 | mode `0x49`（single / read / increment），addr `0x02`，count `0x03`，page `0x83`，mask `0x0A` |
+| ABI | append-only 槽 **57~60**：`snd_info` / `snd_play` / `snd_stop` / `snd_tone`；`SYS_COUNT` 57→61，thunk 区仍 < 0x800 |
+| 用户指针 | `SYS_SND_PLAY` 先 `copy_from_user()` → `validate_uaddr()`，再写入内核 DMA 缓冲；ring3 无法让 DMA 指向任意物理内存 |
+| shell | `sndinfo`、`sndtest [HZ MS]`（直接调内核，ring0） |
+| 无设备时 | `snd_init()` 有界轮询，失败即打印一行并禁用；既有 12/12、4/4、7/7 回归不受影响（已实测） |
+
+**QEMU 参数**（`-soundhw` 在 QEMU 7.1 已移除，11.1.0 只能用 `-device`）：
+
+```
+-audiodev wav,id=snd0,path=D:/CatOs/tests/qemu_shots/snd.wav
+-device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
+```
+
+**实机验收**（`tests/snd_regress.py`，独立 monitor 端口 4460，按 PID 清理）：
+
+```
+PASS format / bin-has-sndtest / sndinfo / sndtest-tone / ring3-sndtest / wav-non-silent
+sndtest      -> snd: irqs=1 busy=0   SNDTEST PASS
+ring3 CE     -> snd: ce irqs=1 busy=0   SND CE PASS  [task 1 'sndtest' exit(0)]
+WAV          -> 44100Hz/2ch/16bit, 48355 frames, distinct=36, min=0 max=255 (非静音)
+```
+
+**已知限制**：仅 8 位无符号单声道单次 DMA（非 auto-init、无双缓冲），单次 ≤32 KiB；
+`snd_tone()` 用 32 点整数正弦表（内核 `-mno-80387`）；没有录音（ADC）、混音器音量策略或
+16 位/立体声路径。这些都属于后续扩展，不影响「有可用 PCM 输出」这一交付目标。

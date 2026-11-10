@@ -20,7 +20,13 @@
 #define MEM_TOP      0x4000000u     /* we manage the low 64 MiB only   */
 #define PDE_USER     8u             /* 32..36 MiB = task arena         */
 #define DMA_LO       0x500000u      /* PCnet DMA area (see net.c)      */
-#define DMA_HI       0x510000u
+/* 0x510000..0x528000 is the SB16 ISA DMA buffer (SND_DMA_PHYS in
+ * include/snd.h).  It must stay out of the frame allocator: the 8237
+ * page register is only 8 bits, so this buffer has to live below 16 MiB.
+ * Both reservations are below frames_base on this kernel (which is
+ * linked at 16 MiB), but recording the upper bound here keeps the
+ * invariant explicit if the kernel load address ever moves. */
+#define DMA_HI       0x528000u
 
 extern char _bss_end[];             /* end of the flat kernel image     */
 

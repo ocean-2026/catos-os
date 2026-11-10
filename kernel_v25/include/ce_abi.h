@@ -19,8 +19,10 @@
  *   v2.6  slot   48     brk (dynamic heap break)
  *   v2.7  slots 49..51   display mode / display info / text style
  *   v2.8  slots 52..54   RGB style / palette set / palette query
+ *   v2.10 slots 55..56   anonymous mmap / munmap
+ *   v2.11 slots 57..60   SB16 PCM audio (info / play / stop / tone)
  *
- * Total: 55 slots in v2.8 (the v2.7 header had 52).
+ * Total: 61 slots in v2.11 (the v2.7 header had 52).
  *
  * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
  * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
@@ -47,7 +49,7 @@ typedef struct {
 /* directory listing callback used by catos_api_t::ls */
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
-/* system-call table: 57 slots, v2.10 */
+/* system-call table: 61 slots, v2.11 */
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -148,7 +150,36 @@ typedef struct catos_api {
          appear lazily on first touch. */
     int     (*munmap)(void *addr, uint32_t len);    /* 56
          unmap + free pages of a previous mmap.  0 or negative errno. */
+
+    /* ---- v2.11: Sound Blaster 16 PCM audio (append-only) --------------
+     * Old binaries see NULL for these four slots: always check
+     * api->snd_info before calling them.  A machine booted without an
+     * SB16 answers snd_info(SND_INFO_READY) == 0. */
+    int     (*snd_info)(int what);                  /* 57
+         SND_INFO_* selector; -8 ENOSYS for an unknown selector, or
+         -8 from the whole driver when the card is absent. */
+    int     (*snd_play)(const void *pcm, int len, int rate); /* 58
+         Start an 8-bit UNSIGNED MONO DMA block.  len <= 32768,
+         rate 5000..45000.  Asynchronous: poll SND_INFO_PLAYING.
+         0 ok, -8 no card, -22 EINVAL, -16 EBUSY, -14 EFAULT. */
+    int     (*snd_stop)(void);                      /* 59
+         Halt the current 8-bit DMA transfer.  0 or -8. */
+    int     (*snd_tone)(int freq_hz, int ms);       /* 60
+         Kernel-generated integer sine at 22050 Hz; asynchronous.
+         0 ok, negative errno. */
 } catos_api_t;
+
+/* snd_info() selectors.  Kept in the user-visible header so CE apps do
+ * not have to include the kernel-only snd.h.  Values are mirrored there. */
+#define SND_INFO_READY    0   /* 1 = SB16 probed and IRQ5 unmasked        */
+#define SND_INFO_VERSION  1   /* DSP version, 0xMMmm                      */
+#define SND_INFO_PLAYING  2   /* 1 = DMA block still in flight             */
+#define SND_INFO_IRQS     3   /* acknowledged 8-bit DMA completion IRQs    */
+#define SND_INFO_ERROR    4   /* last driver error code                    */
+#define SND_INFO_BUFSZ    5   /* DMA buffer capacity (32768)               */
+#define SND_INFO_RATE     6   /* sample rate of the last play request      */
+#define SND_INFO_IRQSET   7   /* mixer 0x80 IRQ bitmap (diagnostic)        */
+#define SND_INFO_DMASET   8   /* mixer 0x81 DMA bitmap (diagnostic)        */
 
 extern catos_api_t *__ce_api;
 

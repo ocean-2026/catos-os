@@ -13,6 +13,7 @@
 #include "vga.h"
 #include "render.h"
 #include "keyboard.h"
+#include "snd.h"        /* IRQ5 top half for the SB16 audio driver */
 #include "task.h"
 
 /* ---- GDT -------------------------------------------------------------- */
@@ -170,6 +171,9 @@ void isr_irq(int_frame_t *f) {
         break;
     case 1:
         kb_irq();                            /* PS/2 scancodes -> ring buffer */
+        break;
+    case 5:
+        snd_irq();                           /* SB16 8-bit DMA block done */
         break;
     default:
         break;
