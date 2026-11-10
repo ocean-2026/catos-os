@@ -26,7 +26,7 @@ vma_t *vma_new(uint32_t start, uint32_t end, uint8_t kind, uint8_t writable) {
     v->end        = end;
     v->kind       = kind;
     v->writable   = writable;
-    v->reserved   = 0;
+    v->guard_pages = 0;
     v->ref_count  = 1;
     v->next       = 0;
     return v;
@@ -81,8 +81,10 @@ void vma_foreach(const vma_t *list, void (*fn)(void *ud, const vma_t *v), void *
  * page on demand, maps it, and returns so the faulting instruction
  * retries.
  *
- * Guard pages: the first VMA_GUARD_PAGES pages of each writable VMA are
- * left unmapped; touching them causes the task to be killed.
+ * Guard pages: only mmap() regions (guard_pages = VMA_GUARD_PAGES) keep
+ * their first VMA_GUARD_PAGES pages unmapped; the pointer mmap() returns
+ * sits just past them, so an underrun kills the task.  Heap, stack and
+ * image VMAs have guard_pages = 0 -- their first page is a real page.
  */
 
 #define VMA_GUARD_PAGES 2   /* 8 KiB guard at the bottom of each writable VMA */
@@ -94,10 +96,17 @@ static int vma_map_page_on_fault(task_t *t, uint32_t vaddr) {
     if (!t->vm) return -1;
     vma_t *v = vma_find(t->vm, vaddr);
     if (!v) return -1;                 /* truly unmapped -> fatal */
-    uint32_t guard_start = v->start + VMA_GUARD_SZ;
+    /* Issue #78: the 8 KiB guard belongs to mmap() regions only, where
+     * the returned pointer sits 8 KiB past the VMA start.  Heap, stack and
+     * image VMAs start at their first USABLE page; treating their first two
+     * pages as guard made validate_uaddr() unable to fault in page 2 of a
+     * heap buffer, so every n-byte syscall copy was rejected. */
+    uint32_t guard_start = v->start + (uint32_t)v->guard_pages * 4096u;
     if (vaddr < guard_start) return -1;  /* hit a guard page -> fatal */
-    /* Align up to page boundary */
-    if ((vaddr & 0xFFF) != 0) vaddr = (vaddr & ~0xFFFu) + 4096;
+    /* Align DOWN to the containing page.  The old "align up" moved a
+     * non-page-aligned CR2 to the NEXT page, so the retried instruction
+     * faulted again on the page that was actually requested. */
+    vaddr &= ~0xFFFu;
     /* Already mapped? */
     if (task_virt_to_phys(&t->space, vaddr)) return 0;
     uint32_t pa = (uint32_t)kzalloc_frame();
@@ -140,6 +149,10 @@ int uaddr_in_vma(task_t *t, uint32_t addr) {
 int validate_uaddr(task_t *t, uint32_t addr, uint32_t len) {
     if (len == 0) return 0;
     if (!t || t->ring0) return -14;
+    /* Issue #78: reject ranges whose end wraps past 2^32.  Otherwise
+     * addr + len - 1 can land on a low address that happens to be inside
+     * a VMA, and the page-walk loop below is silently skipped. */
+    if (len - 1 > 0xFFFFFFFFu - addr) return -14;
     uint32_t end = addr + len - 1;
     if (!vma_contains(t->vm, addr) || !vma_contains(t->vm, end))
         return -14;
@@ -211,6 +224,8 @@ uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
             uint32_t base = cur;
             vma_t *nv = vma_new(base, base + want, VMA_ANON, writable ? 1 : 0);
             if (!nv) return 0;
+            /* Only mmap() regions carry the leading guard pages. */
+            nv->guard_pages = VMA_GUARD_PAGES;
             t->vm = vma_insert(t->vm, nv);
             return base + VMA_GUARD_SZ;
         }

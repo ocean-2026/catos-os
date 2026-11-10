@@ -48,8 +48,8 @@ typedef struct vma {
     uint32_t  end;       /* exclusive */
     uint8_t   kind;
     uint8_t   writable;  /* 0 = read-only (e.g. code page, vsyscall) */
-    uint8_t   reserved;
-    uint8_t   ref_count; /* for future COW / shared maps */
+    uint8_t   guard_pages; /* leading pages kept unmapped (mmap only) */
+    uint8_t   ref_count;    /* for future COW / shared maps */
     struct vma *next;    /* sorted by start ascending */
 } vma_t;
 

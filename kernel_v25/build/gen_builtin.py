@@ -43,6 +43,8 @@ OPTIONAL = [
     # SB16 audio probe (v2.11).  Optional so a tree that has not built it
     # yet still links -- build.sh compiles it, so a normal build embeds it.
     ("/bin/sndtest.ce",  os.path.join(ROOT, "extapp", "bin", "sndtest.ce")),
+    # Issue #78 cross-page user-buffer probe (tests/vprobe_regress.py).
+    ("/bin/vprobe.ce",   os.path.join(ROOT, "extapp", "bin", "vprobe.ce")),
     ("/bin/TEST.JS",     os.path.join(ROOT, "node", "TEST.JS")),
     ("/appdevelop/HELLO.C",   os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
     # Go scripts: the interpreter's own regression corpus.  They are

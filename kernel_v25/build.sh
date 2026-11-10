@@ -44,7 +44,7 @@ echo "== building CE apps (extapp) =="
 # now, which is why extapp/bin/cc.ce had been a stale artifact since
 # ae0ee2d: the source changed but the image was never rebuilt, so the
 # shipped compiler bore no reproducible relation to the source tree.
-for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest allocprobe heaptest go cc sndtest; do
+for app in hello calc sysinfo demo curl netinfo spinner crash perms hw gfxdemo zhdemo mmaptest allocprobe heaptest go cc sndtest vprobe; do
     sh extapp/build_ce.sh $app.c
 done
 

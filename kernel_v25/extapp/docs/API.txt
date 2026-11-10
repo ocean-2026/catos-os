@@ -472,3 +472,13 @@ To hear it under QEMU >= 7.1 (-soundhw was removed), boot with:
   -audiodev wav,id=snd0,path=snd.wav
   -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
 See tests/snd_regress.py and docs/CatOS-内核问题清单.md section 11.
+
+--- user buffer validation (issue #78, 2026-11-10) ------------------
+Every syscall that fills or reads a user buffer validates the FULL range
+it may touch (not just its first byte) and copies through the task's page
+tables with copy_to_user() / copy_from_user().  Lazily mapped heap/mmap
+pages inside that range are faulted in by the kernel; a range outside your
+VMAs is rejected with an error instead of halting the machine.  Still
+pass a buffer that really covers the requested max/size: the kernel maps
+pages, it does not grow your allocation.  Regression: /bin/vprobe.ce and
+tests/vprobe_regress.py.

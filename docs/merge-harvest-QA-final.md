@@ -303,3 +303,42 @@ QEMU wav 后端头未 finalize 的坑见问题清单 #76。
   `build.sh`（源文件 + .o + CE 应用）、`gen_builtin.py`（`/bin/sndtest.ce`）、
   `ce_sim.py`（4 个 API 的「无设备」建模）。
 - **ABI**：57 → 61 槽，append-only；旧 `.ce` 二进制全部保持兼容（A-4/A-8 已验证）。
+
+---
+
+## 12. 用户指针跨页校验 P0 修复（2026-11-10 14:23 起）
+
+来源：`.workbuddy/reports/bug11-10.md`（本机另一路检查 13:40–13:55 生成）。该报告第二节的
+P0 缺陷经本会话逐行复核**属实且范围更广**，详见问题清单第十二节 #78~#82。报告 §0 把
+13:51 修改 `task.c` 的进程判为「他人并发会话」，实际是本会话上一轮的 #74 修复；复核时
+`D:/CatOs` master 停在 `cc631c8`、工作树无未提交的跟踪文件。
+
+### 12.1 闸门总表（全部在 `D:/CatOs` 复跑）
+
+| # | 闸门 | 结果 | 证据 |
+|---|---|---|---|
+| B-0 | 修复前**复现**缺陷 | **REPRODUCED** | `vprobe_regress.py --only fr` → `ring0 kernel fault - system halted`（`int=0x0e err=0x2`） |
+| B-1 | 干净构建 ISO（含 `/bin/vprobe.ce`） | **PASS** | `OK -> catos.iso (16660480 bytes)` |
+| B-2 | `test_mkce.py` / `test_cc.py` | **PASS** | `48 passed, 0 failed` / `10 passed, 0 failed` |
+| B-3 | `ce_regress.py` | **PASS** | `PASS=10 SKIP=13 FAIL=0`（新增 `vprobe.ce` 为 PASS） |
+| B-4 | `go_cases.py` | **PASS** | `cases=5 ok=5 fail=0` |
+| B-5 | `vprobe_regress.py`（5 个跨页 case） | **PASS** | `steps=7 ok=7 fail=0` |
+| B-6 | `qemu_regress.py`（含 `mmaptest`） | **PASS** | `steps=12 ok=12 warn=0` |
+| B-7 | `heap_regress.py` | **PASS** | `steps=4 ok=4 fail=0` |
+| B-8 | `go_regress.py` | **PASS** | `steps=7 ok=7 fail=0` |
+| B-9 | `snd_regress.py`（`-device sb16`） | **PASS** | `steps=6 ok=6 fail=0` |
+
+B-6 的 `mmaptest` 与 B-7 的 `heaptest` 专门覆盖 `guard_pages` 字段化、缺页向下对齐两处改动，
+均未回归。
+
+### 12.2 修复面
+
+- `src/task.c`：14 处 syscall 用户缓冲访问收敛为 `copy_to_user()` / `copy_from_user()` /
+  `u2k_str()`；字符串类（`atoi`/`strlen`/`strcmp`/`strcpy`）改为内核快照；`SYS_HW_STR`
+  先在 `static hb[4096]` 生成再拷；`SYS_SPAWN` argv 防溢出 + 页表读取。
+- `src/vma.c`：`validate_uaddr()` 防 `addr+len-1` 回绕；`vma_t.guard_pages` 只对 `mmap()`
+  区生效；缺页地址由向上对齐改为向下对齐。
+- `include/paging.h`：`vma_t.reserved` → `guard_pages`。
+- 新增 `extapp/vprobe.c`、`tests/vprobe_regress.py`；`build.sh` 应用列表与
+  `gen_builtin.py` 的 OPTIONAL 同步纳入 `/bin/vprobe.ce`。
+- ABI **未变**（仍 61 槽），旧 `.ce` 二进制保持兼容。

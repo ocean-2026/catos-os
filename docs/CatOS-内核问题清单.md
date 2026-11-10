@@ -258,3 +258,52 @@ WAV          -> 44100Hz/2ch/16bit, 48355 frames, distinct=36, min=0 max=255 (非
 **已知限制**：仅 8 位无符号单声道单次 DMA（非 auto-init、无双缓冲），单次 ≤32 KiB；
 `snd_tone()` 用 32 点整数正弦表（内核 `-mno-80387`）；没有录音（ADC）、混音器音量策略或
 16 位/立体声路径。这些都属于后续扩展，不影响「有可用 PCM 输出」这一交付目标。
+
+---
+
+## 十二、用户指针跨页校验（2026-11-10，P0，来源 `.workbuddy/reports/bug11-10.md`）
+
+> 报告由本机另一路检查在 13:40–13:55 生成，第二节报了一个「1 字节校验换 n 字节写入 →
+> 整机停机」的 P0 缺陷，并用临时探针 `vprobe.c` 实机复现。该检查把 13:51 修改
+> `task.c`（加 Issue #74 注释）的进程判为「他人并发会话」，实际就是本会话上一轮的
+> 合流后续修；`D:/CatOs` 随之被标成「当前目录有人在用」。本会话 14:23 起复核时
+> master 已停在 `cc631c8`、工作树只有历史遗留的未跟踪杂项文件，遂直接在本目录修复。
+>
+> 报告的临时探针/脚本当时已删净，缺陷因此**没有任何回归防护**。本轮把探针做成永久资产：
+> `kernel_v25/extapp/vprobe.c` → `/bin/vprobe.ce`（进 `build.sh` + `gen_builtin.py`），
+> 配 `tests/vprobe_regress.py`（独立 monitor 端口 4461，按 PID 清理）。
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **78** | **多个 syscall 只 `validate_uaddr(t, buf, 1)` 却按 n 字节写/读用户缓冲 ⇒ 任意 ring3 程序可打停内核** | `validate_uaddr()`（`vma.c:140`）按 `len` 逐页 `vma_map_page_on_fault()`；`len=1` 只补映射首页。报告列的 4 处写方向：`SYS_CAT`(≤4096)、`SYS_HTTP_GET`(≤8192)、`SYS_NET_UDP_RECV`(≤2048)、`SYS_FILE_READ`(≤16384)。本轮复核**另发现** `SYS_HW_STR`(≤4096 写)、`SYS_NET_UDP_SEND`(≤1400 读)，以及 `SYS_ATOI`/`SYS_STRLEN`/`SYS_STRCMP`/`SYS_STRCPY`（未知长度字符串跨页读/写）同类 | 第 2 页仍是 not-present PTE，ring0 直接解引用 → `int=0x0e err=0x2 cs=0x08`；`isr_exception()` 对 `cs&3==0` 不恢复，`exc_dump` 后 `hlt` **整机停机**。最小触发：`p=alloc(16); file_read(path,p,16384,0)`（复现 `cr2=0x02101000`）。现有 CE 的 `g_filebuf`/`g_src` 都在随镜像整段映射的 .bss 内，所以历史回归全绿也查不出来 | 统一模型：① 写方向按**真实上界 `max`** `validate_uaddr()` 补页，再用 `copy_to_user()` 经任务页表写入；② 读方向用 `copy_from_user()`；③ 字符串类改用 `u2k_str()` 逐字节取内核快照；④ `SYS_HW_STR` 先在内核缓冲里生成再拷；⑤ `SYS_TIME_STR`/`SYS_NET_DNS`/`SYS_NET_IP`/`SYS_READLINE`/`SYS_PIPE_READ`/`SYS_SAVE`/`SYS_SPAWN` 的裸写裸读一并按页表收敛 | **已修复** |
+| **79** | **VMA guard 误伤堆/栈 VMA，导致按长度校验仍无法补页** | `vma_map_page_on_fault()` 无条件把「VMA 起始 + 8 KiB」之前判为 guard 页。但 `heap_vma_init()` 建的堆 VMA 起点就是 `USER_HEAP_BASE`（首块 payload 就在第一页），栈 VMA 亦同；只有 `vma_mmap_anon()` 返回的指针才位于 guard 之后。修好 #78 后 5 个探针全报 `verdict FAIL`，根因即第二页 `0x02101000 < 0x02102000` 被拒，`validate_uaddr()` 返回 -14 | 任何按长度校验的 syscall 都无法写入堆缓冲第二页；也会让栈 VMA 的按需映射失效 | `vma_t` 的闲置 `reserved` 字段改为 `guard_pages`（`paging.h`）；`vma_new()` 默认 0，只有 `vma_mmap_anon()` 显式设为 `VMA_GUARD_PAGES`；`vma_map_page_on_fault()` 按该字段计算 `guard_start`。语义与 `mmap()` 的 guard 设计保持一致 | **已修复** |
+| **80** | **`vma_map_page_on_fault()` 把非页对齐 CR2 向上对齐到「下一页」** | 原代码 `if (vaddr & 0xFFF) vaddr = (vaddr & ~0xFFF) + 4096;`。ring3 访问 `0x...1008` 缺页时映射的是 `0x...2000`，iret 重试后仍在 `0x...1000` 缺页 → 反复缺页/任务被杀。`validate_uaddr()` 传页对齐地址，所以不触发；只有真实 CR2 路径受影响 | ring3 首次触碰懒映射页内非首字节时可能反复缺页 | 改为向下对齐 `vaddr &= ~0xFFFu`；guard 判定仍用对齐前的原始地址 | **已修复** |
+| **81** | **`SYS_SPAWN` argv 数组上界回绕 + 裸读未校验页** | 原 `if (argv_u + (i+1)*4 > USER_ARENA_END)` 只判上界，`argv_u` 接近 2^32 时求和回绕绕过；随后 `*(uint32_t *)(argv_u + i*4)` 是 ring0 裸读，而 `uaddr_in_vma()` 只查 VMA **不会补页** | 可绕过上界检查；argv 落在懒映射页时 ring0 读缺页停机 | 改为防溢出形式 `argv_u > END-4 || off > END-4-argv_u`，并用 `copy_from_user()` 读 4 字节指针 | **已修复** |
+| **82** | **`validate_uaddr()` 的 `addr + len - 1` 回绕** | `addr` 接近 2^32 且 `len` 较大时 `end` 回绕到低地址，若恰落在某个 VMA 内则 `vma_contains(end)` 通过，而逐页循环 `while (p <= end)` 被跳过 → 未补页却返回 0 | 后续页表拷贝拿到 not-present 页，轻则 EFAULT 重则（配合 #78 的旧裸写）停机 | 增加 `if (len - 1 > 0xFFFFFFFFu - addr) return -14;` | **已修复** |
+
+### 12.1 修复前后对照（同一探针、同一 ISO 流程）
+
+```
+修复前  python tests/vprobe_regress.py --only fr
+        FAIL fr    kernel fault: ... 0x0000000e 0x00000002 ... ring0 kernel fault - system halted
+
+修复后  python tests/vprobe_regress.py
+        PASS format / bin-has-vprobe / fr / cat / hw / str / strcpy
+        steps=7 ok=7 fail=0
+```
+
+`vprobe.ce` 用 `alloc(16)` 拿到「首页已映射、第二页 not-present」的堆缓冲，5 个 case 分别让
+`file_read` / `cat` / `hw_str` / `strlen+strcmp+atoi` / `strcpy` 跨越 4 KiB 边界；每个 case 独立
+`run`，脚本识别内核 fault banner 并停机归因。修复前首例即停机，修复后 5 例均返回
+`VPROBE <case> PASS`。
+
+### 12.2 本轮遗留观察（不阻断，P2）
+
+- `SYS_WRITE`（每 4 KiB 边界重新校验后逐字节裸读）、`SYS_PIPE_WRITE`（按 `len` 校验后逐字节裸读）、
+  `SYS_FILE_WRITE`（按 `size` 校验后把用户指针交给 `fs_write_raw_mode()`）仍保留裸指针访问。
+  它们的 `validate_uaddr()` 长度已覆盖实际访问范围，**不会再触发缺页停机**，但依赖「syscall
+  期间 CR3 恒为当前任务页表」这一前提；后续允许长 syscall 中途让出 CPU 时应统一改成
+  `copy_from_user()`。
+- 报告第三节提到的 `static char fbuf[16384] / b[4096] / b[8192]` 全任务共享内核缓冲依旧存在，
+  目前靠 `task_sleep_ticks()` 里 `if (g_in_syscall) return;` 保证 syscall 不被抢占；若将来允许
+  长 syscall 让出 CPU，需改成按 tid 分槽（内核栈仅 8 KiB，不能简单挪到栈上）。

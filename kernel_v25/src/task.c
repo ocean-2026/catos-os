@@ -977,9 +977,10 @@ static int sys_save_uid(const char *upath, const char *udata, uint32_t size, int
     static char buf[FS_DATA_MAX];
     if (size > FS_DATA_MAX) return -7;
     if (u2k_str(p, upath, sizeof(p)) != 0) return -3;
-    if (validate_uaddr(task_current(), (uint32_t)udata, size) != 0) return -3;
+    /* Issue #78: copy through the task's page tables.  copy_from_user()
+     * validates and faults in every page of [udata, udata+size). */
+    if (copy_from_user(task_current(), buf, udata, size) != 0) return -3;
     if (fs_perm_check(p, uid, PERM_WRITE) != 0) return -13;
-    for (uint32_t i = 0; i < size; i++) buf[i] = udata[i];
     uint32_t c, s;
     int existed = fs_resolve_file(p, &c, &s) == 0;
     int r = fs_write_text(p, buf, size);
@@ -1089,8 +1090,11 @@ void isr_syscall(int_frame_t *f) {
     case SYS_READLINE: {
         static char b[256];
         char *ub = (char *)a1; int max = (int)a2;
-        if (max <= 0) { ret = (uint32_t)-3; break; } if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
+        if (max <= 0) { ret = (uint32_t)-3; break; }
         if (max > 255) max = 255;
+        /* Issue #78: validate the exact span we are going to write, not a
+         * single byte, and copy through the task's page tables. */
+        if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (t->in_pipe >= 0) {
             /* v2.5: read one line from the pipe instead of the keyboard */
             pipe_t *pp = pipe_by_handle(t->in_pipe);
@@ -1109,21 +1113,29 @@ void isr_syscall(int_frame_t *f) {
                 if (c == '\n' || bi >= max - 1) break;
             }
             b[bi] = 0;
-            for (int j = 0; j < max; j++) { ub[j] = b[j]; if (!b[j]) break; }
+            if (copy_to_user(t, ub, b, (uint32_t)bi + 1) != 0) {
+                ret = (uint32_t)-3; break;
+            }
             ret = 1;
             break;
         }
         while (!console_try_own()) task_block(T_WAIT_KB);
         kb_readline(b, max);
         console_release();
-        for (int i = 0; ; i++) { char c = b[i]; if (i >= max - 1) c = 0; ub[i] = c; if (!c) break; }
+        {
+            int i = 0;
+            for (;; i++) { char c = b[i]; if (i >= max - 1) c = 0; b[i] = c; if (!c) break; }
+            if (copy_to_user(t, ub, b, (uint32_t)i + 1) != 0) {
+                ret = (uint32_t)-3; break;
+            }
+        }
         ret = 1;
         break;
     }
     case SYS_TIME_STR: {
-        char *ub = (char *)a1;
-        if (validate_uaddr(t, (uint32_t)ub, 20) != 0) { ret = (uint32_t)-3; break; }
-        ce_time_str_fill(ub);
+        char tmp[24];
+        ce_time_str_fill(tmp);
+        if (copy_to_user(t, (char *)a1, tmp, 20) != 0) { ret = (uint32_t)-3; break; }
         ret = 0; break;
     }
     case SYS_FS_READY: ret = fs_fs_ready(); break;
@@ -1145,12 +1157,18 @@ void isr_syscall(int_frame_t *f) {
         char p[FS_PATH_MAX];
         static char b[4096];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 4096) max = 4096;
         if (max <= 0) { ret = (uint32_t)-3; break; }
+        /* Issue #78: fault in the whole possible output span first, then
+         * copy through the task's page tables.  Validating one byte and
+         * storing n bytes used to kill the kernel on a ring3 buffer whose
+         * second page was still not-present. */
+        if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
         int n = fs_read_text(p, b, max);
-        if (n > 0) for (int i = 0; i < n; i++) ((char *)a2)[i] = b[i];
+        if (n > 0 && copy_to_user(t, (char *)a2, b, (uint32_t)n) != 0) {
+            ret = (uint32_t)-3; break;
+        }
         ret = (uint32_t)n;
         break;
     }
@@ -1162,36 +1180,42 @@ void isr_syscall(int_frame_t *f) {
     case SYS_PRINT_HEX: whex(a1); ret = 0; break;
     case SYS_SET_FG: con_set_fg((uint8_t)a1); ret = 0; break;
     case SYS_DELAY: task_sleep_ticks(a1 / 10 + 1); ret = 0; break;
+    /* Issue #78: a NUL-terminated user string has no declared length, so
+     * validating only its first byte leaves every later page unmapped.
+     * u2k_str() validates byte by byte and reads through the task's page
+     * tables; the string syscalls now operate on a kernel snapshot. */
     case SYS_ATOI: {
-        const char *s = (const char *)a1;
-        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = 0; break; }
+        char tmp[64];
+        if (u2k_str(tmp, (const char *)a1, (int)sizeof(tmp)) != 0) { ret = 0; break; }
         int v = 0, neg = 0, i = 0;
-        while (s[i] == ' ' || s[i] == '\t') i++;
-        if (s[i] == '-') { neg = 1; i++; } else if (s[i] == '+') i++;
-        while (s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+        while (tmp[i] == ' ' || tmp[i] == '\t') i++;
+        if (tmp[i] == '-') { neg = 1; i++; } else if (tmp[i] == '+') i++;
+        while (tmp[i] >= '0' && tmp[i] <= '9') { v = v * 10 + (tmp[i] - '0'); i++; }
         ret = (uint32_t)(neg ? -v : v);
         break;
     }
     case SYS_STRLEN: {
-        const char *s = (const char *)a1;
-        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = 0; break; }
-        uint32_t n = 0; while (s[n] && n < 4096) n++;
+        static char tmp[4097];
+        if (u2k_str(tmp, (const char *)a1, (int)sizeof(tmp)) != 0) { ret = 0; break; }
+        uint32_t n = 0; while (tmp[n] && n < 4096) n++;
         ret = n; break;
     }
     case SYS_STRCMP: {
-        const char *a = (const char *)a1, *b = (const char *)a2;
-        if (validate_uaddr(t, (uint32_t)a, 1) != 0 || validate_uaddr(t, (uint32_t)b, 1) != 0) { ret = (uint32_t)-3; break; }
+        static char sa[4097], sb[4097];
+        if (u2k_str(sa, (const char *)a1, (int)sizeof(sa)) != 0 ||
+            u2k_str(sb, (const char *)a2, (int)sizeof(sb)) != 0) {
+            ret = (uint32_t)-3; break;
+        }
         uint32_t i = 0;
-        while (a[i] && a[i] == b[i] && i < 4096) i++;
-        ret = (uint32_t)((unsigned char)a[i] - (unsigned char)b[i]);
+        while (sa[i] && sa[i] == sb[i] && i < 4096) i++;
+        ret = (uint32_t)((unsigned char)sa[i] - (unsigned char)sb[i]);
         break;
     }
     case SYS_STRCPY: {
-        char *d = (char *)a1; const char *s = (const char *)a2;
-        if (validate_uaddr(t, (uint32_t)d, 1) != 0 || validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
-        uint32_t i = 0;
-        for (; s[i] && i < 256; i++) d[i] = s[i];
-        d[i] = 0;
+        char tmp[257];
+        if (u2k_str(tmp, (const char *)a2, (int)sizeof(tmp)) != 0) { ret = (uint32_t)-3; break; }
+        uint32_t i = 0; while (tmp[i] && i < 256) i++;
+        if (copy_to_user(t, (char *)a1, tmp, i + 1) != 0) { ret = (uint32_t)-3; break; }
         ret = i;
         break;
     }
@@ -1229,21 +1253,24 @@ void isr_syscall(int_frame_t *f) {
         char url[160];
         static char b[8192];
         if (u2k_str(url, (const char *)a1, sizeof(url)) != 0) { ret = (uint32_t)-1; break; }
-        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-1; break; }
         int max = (int)a3; if (max > 8192) max = 8192;
         if (max <= 0) { ret = (uint32_t)-1; break; }
+        /* Issue #78: fault in the whole output span, then copy via page
+         * tables -- the response can be up to 8 KiB (two pages). */
+        if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-1; break; }
         int n = net_http_get(url, b, max);
-        if (n > 0) for (int i = 0; i < n; i++) ((char *)a2)[i] = b[i];
+        if (n > 0 && copy_to_user(t, (char *)a2, b, (uint32_t)n) != 0) {
+            ret = (uint32_t)-1; break;
+        }
         ret = (uint32_t)n;
         break;
     }
     case SYS_NET_DNS: {
         char host[128];
         if (u2k_str(host, (const char *)a1, sizeof(host)) != 0) { ret = (uint32_t)-1; break; }
-        if (validate_uaddr(t, (uint32_t)a2, 16) != 0) { ret = (uint32_t)-1; break; }
         uint8_t ip[4];
         if (net_dns_lookup(host, ip) != 0) { ret = (uint32_t)-1; break; }
-        char *o = (char *)a2; int oi = 0;
+        char o[16]; int oi = 0;
         for (int i = 0; i < 4; i++) {
             int d = ip[i]; char tb[4]; int ti = 0;
             if (d == 0) tb[ti++] = '0';
@@ -1252,6 +1279,10 @@ void isr_syscall(int_frame_t *f) {
             if (i < 3) o[oi++] = '.';
         }
         o[oi] = 0;
+        /* Issue #78: build in kernel memory, then copy via page tables. */
+        if (copy_to_user(t, (char *)a2, o, (uint32_t)oi + 1) != 0) {
+            ret = (uint32_t)-1; break;
+        }
         ret = 0;
         break;
     }
@@ -1259,10 +1290,13 @@ void isr_syscall(int_frame_t *f) {
         char ip[128];
         static char b[1400];
         if (u2k_str(ip, (const char *)a1, sizeof(ip)) != 0) { ret = (uint32_t)-1; break; }
-        if (validate_uaddr(t, (uint32_t)a3, 1) != 0 ||
-            (int)a4 <= 0 || (int)a4 > 1400) { ret = (uint32_t)-1; break; }
-        for (int i = 0; i < (int)a4; i++) b[i] = ((const char *)a3)[i];
-        ret = (uint32_t)net_udp_send(ip, (uint16_t)a2, (const uint8_t *)b, (uint32_t)a4);
+        if ((int)a4 <= 0 || (int)a4 > 1400) { ret = (uint32_t)-1; break; }
+        /* Issue #78: the payload can cross a page; copy_from_user()
+         * validates and faults in its full 1400-byte span. */
+        if (copy_from_user(t, b, (const void *)a3, a4) != 0) {
+            ret = (uint32_t)-1; break;
+        }
+        ret = (uint32_t)net_udp_send(ip, (uint16_t)a2, (const uint8_t *)b, a4);
         break;
     }
     case SYS_NET_UDP_RECV: {
@@ -1270,22 +1304,29 @@ void isr_syscall(int_frame_t *f) {
          * (also fixes the old "udp: no reply" bug - the RX path never
          * polled the card) */
         static char ipb[24]; static char b[2048];
-        if (validate_uaddr(t, (uint32_t)a3, 1) != 0) { ret = (uint32_t)-1; break; }
-        int max = (int)a4; if (max > 2048) max = 2048; if (max <= 0) { ret = (uint32_t)-1; break; }
+        int max = (int)a4; if (max > 2048) max = 2048;
+        /* Issue #78: the payload spans up to 2048 bytes; validate and
+         * fault in that whole span before the kernel writes anything. */
+        if (max <= 0 || validate_uaddr(t, a3, (uint32_t)max) != 0) {
+            ret = (uint32_t)-1; break;
+        }
         int port = 0;
         uint32_t deadline = timer_ticks + 200;
         for (;;) {
             if (net_up()) net_poll();
             int n = net_udp_recv(ipb, &port, (uint8_t *)b, max);
             if (n > 0) {
-                for (int i = 0; i < n; i++) ((char *)a3)[i] = b[i];
-                if (validate_uaddr(t, (uint32_t)a1, 24) == 0) {
-                    int i;
-                    for (i = 0; i < 23 && ipb[i]; i++) ((char *)a1)[i] = ipb[i];
-                    ((char *)a1)[i] = 0;
+                char ips[24];
+                int i;
+                if (copy_to_user(t, (char *)a3, b, (uint32_t)n) != 0) {
+                    ret = (uint32_t)-1; break;
                 }
-                if (validate_uaddr(t, (uint32_t)a2, 4) == 0)
-                    *(int *)a2 = port;
+                for (i = 0; i < 23 && ipb[i]; i++) ips[i] = ipb[i];
+                ips[i] = 0;
+                /* ip / port are optional outputs: a caller passing 0 (or an
+                 * unmapped pointer) still gets the payload, as before. */
+                if (a1) (void)copy_to_user(t, (char *)a1, ips, (uint32_t)i + 1);
+                if (a2) (void)copy_to_user(t, (char *)a2, &port, 4);
                 ret = (uint32_t)n;
                 break;
             }
@@ -1301,8 +1342,7 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_NET_IP: {
-        char *o = (char *)a1;
-        if (validate_uaddr(t, (uint32_t)o, 16) != 0) { ret = 0; break; }
+        char o[16];
         int oi = 0;
         for (int i = 0; i < 4; i++) {
             int d = net_our_ip[i]; char tb[4]; int ti = 0;
@@ -1312,6 +1352,8 @@ void isr_syscall(int_frame_t *f) {
             if (i < 3) o[oi++] = '.';
         }
         o[oi] = 0;
+        /* Issue #78: build in kernel memory, copy via page tables. */
+        if (copy_to_user(t, (char *)a1, o, (uint32_t)oi + 1) != 0) { ret = 0; break; }
         ret = 0;
         break;
     }
@@ -1323,12 +1365,19 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)hw_num((int)a1);
         break;
     case SYS_HW_STR: {
-        char *ub = (char *)a2;
+        static char hb[4096];
         int max = (int)a3;
-        if (validate_uaddr(t, (uint32_t)ub, 1) != 0 ||
-            max <= 0) { ret = (uint32_t)-1; break; }
+        if (max <= 0) { ret = (uint32_t)-1; break; }
         if (max > 4096) max = 4096;
-        ret = (uint32_t)hw_str((int)a1, ub, max);
+        /* Issue #78: hw_str() writes up to `max` bytes into its buffer.
+         * Run it on a kernel buffer, then copy the NUL-terminated result
+         * through the task's page tables. */
+        int n = hw_str((int)a1, hb, max);
+        if (n < 0) { ret = (uint32_t)-1; break; }
+        if (copy_to_user(t, (char *)a2, hb, (uint32_t)n + 1) != 0) {
+            ret = (uint32_t)-1; break;
+        }
+        ret = (uint32_t)n;
         break;
     }
     case SYS_LS_NEXT: {                    /* LS_NEXT(handle): one entry */
@@ -1349,13 +1398,18 @@ void isr_syscall(int_frame_t *f) {
         char p[FS_PATH_MAX];
         static char fbuf[16384];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if (validate_uaddr(t, (uint32_t)a2, 1) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
+        /* Issue #78: this is the syscall that originally killed the kernel.
+         * A 16 KiB read spans five lazily-mapped heap pages; validate the
+         * full span, then copy through the task's page tables. */
+        if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
         int n = fs_read_at(p, fbuf, off, max);
         if (n < 0) { ret = (uint32_t)-1; break; }
-        if (n > 0) for (int i = 0; i < n; i++) ((char *)a2)[i] = fbuf[i];
+        if (n > 0 && copy_to_user(t, (char *)a2, fbuf, (uint32_t)n) != 0) {
+            ret = (uint32_t)-3; break;
+        }
         ret = (uint32_t)n;
         break;
     }
@@ -1418,6 +1472,7 @@ void isr_syscall(int_frame_t *f) {
         int max = (int)a3;
         if (!pp || max < 0 || max > PIPE_BUF) { ret = (uint32_t)-1; break; }
         char *ub = (char *)a2;
+        static char prb[PIPE_BUF];
         if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (max == 0) { ret = 0; break; }
         int got = 0;
@@ -1427,12 +1482,16 @@ void isr_syscall(int_frame_t *f) {
                 task_sleep_ticks(1);
             }
             if (got >= max) break;
-            ub[got++] = pp->buf[pp->head];
+            prb[got++] = pp->buf[pp->head];
             pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
             pp->len = (uint16_t)(pp->len - 1);
             if (pp->len == 0) break;    /* drained what we have: return now */
         }
     pipe_rd_done:
+        /* Issue #78: publish the payload through the task's page tables. */
+        if (got > 0 && copy_to_user(t, ub, prb, (uint32_t)got) != 0) {
+            ret = (uint32_t)-3; break;
+        }
         ret = (uint32_t)got;
         break;
     }
@@ -1456,8 +1515,16 @@ void isr_syscall(int_frame_t *f) {
         static char kargv_buf[CE_ARGC_MAX][64];
         int bad = 0;
         for (int i = 0; i < argc; i++) {
-            if (argv_u + (i + 1) * 4 > USER_ARENA_END) { bad = 1; break; }
-            uint32_t aup = *(uint32_t *)(argv_u + i * 4);
+            /* Issue #78: bound-check without uint32 wraparound, and read
+             * the argv pointer array through the task's page tables --
+             * uaddr_in_vma() only inspects the VMA list, it does not fault
+             * in pages, so a raw load here could halt the kernel. */
+            uint32_t off = (uint32_t)i * 4u;
+            if (argv_u > USER_ARENA_END - 4u ||
+                off > USER_ARENA_END - 4u - argv_u) { bad = 1; break; }
+            uint32_t ent = argv_u + off;
+            uint32_t aup;
+            if (copy_from_user(t, &aup, (const void *)ent, 4) != 0) { bad = 1; break; }
             if (!uaddr_in_vma(t, aup)) { bad = 1; break; }
             if (u2k_str(kargv_buf[i], (const char *)aup, 64) != 0) { bad = 1; break; }
             kargv[i] = kargv_buf[i];
