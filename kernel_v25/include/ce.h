@@ -45,6 +45,21 @@
 
 #define CE_ARGC_MAX   16           /* argv slots passed to ce_main() */
 
+/* ---- v2.12: 24bpp drawing descriptors (mirror of ce_abi.h) -----------
+ * Same guard on purpose: including both ce.h and ce_abi.h in one
+ * translation unit must not redefine these typedefs. */
+#ifndef CATOS_GFX_TYPES_H
+#define CATOS_GFX_TYPES_H
+typedef struct {
+    int32_t  x, y, w, h;
+    uint32_t rgb;
+} gfx_rect_t;
+typedef struct {
+    const uint8_t *src;
+    int32_t  x, y, w, h;
+} gfx_blit_t;
+#endif
+
 typedef struct {
     uint8_t  magic[4];     /* "CE01" */
     uint32_t entry;        /* entry offset inside the image (0 = start) */
@@ -157,6 +172,11 @@ typedef struct catos_api {
     int      (*snd_play)(const void *pcm, int len, int rate);
     int      (*snd_stop)(void);
     int      (*snd_tone)(int freq_hz, int ms);
+    /* ---- v2.12: 24bpp truecolour drawing (append-only).  Keep in
+     * lockstep with ce_abi.h slots 61..63. */
+    int      (*gfx_info)(int what);
+    int      (*gfx_rect)(const gfx_rect_t *r);
+    int      (*gfx_blit)(const gfx_blit_t *b);
 } catos_api_t;
 
 /* install the API (called once at boot) */

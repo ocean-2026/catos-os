@@ -307,3 +307,55 @@ WAV          -> 44100Hz/2ch/16bit, 48355 frames, distinct=36, min=0 max=255 (非
 - 报告第三节提到的 `static char fbuf[16384] / b[4096] / b[8192]` 全任务共享内核缓冲依旧存在，
   目前靠 `task_sleep_ticks()` 里 `if (g_in_syscall) return;` 保证 syscall 不被抢占；若将来允许
   长 syscall 让出 CPU，需改成按 tid 分槽（内核栈仅 8 KiB，不能简单挪到栈上）。
+
+
+## 十三、v2.12 24bpp 真彩与用户绘图 API（2026-11-10）
+
+本轮交付：`be_vbe24.c` 后端（800x600x24，3 字节 BGR，pitch 2400）、`include/gfx24.h`
+内核绘图原语、CE ABI v2.12 槽 61..63、shell `gfx24` 命令、`/bin/gfx24.ce` 探针、
+`tests/gfx24_regress.py` 像素级实机回归。**以下 #83 / #84 是修复 24bpp 过程中实测发现的两个真 bug，
+#85 是本轮需求闭环。**
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **83** | **VBE 32bpp 后端把 PCI BAR2 当成线性帧缓冲** | `be_vbe.c:find_lfb()` 读 `0x18`(BAR2)。QEMU 11.1 `info pci` 实测 1234:1111 的 **BAR0 = `0xfd000000`[0xfdffffff]（16 MiB 可预取帧缓冲）**，**BAR2 = `0xfebf0000`[0xfebf0fff]（仅 4 KiB MMIO 窗口）**。后端把 1.9 MB 像素写到 MMIO 区之后的地址，`screendump` 恒为 640x480 全黑；文件头还自述 "compiled and linked, NOT verified on QEMU" | 32bpp 真彩后端自合流起从未点亮；`vbe` 命令切过去只有黑屏，历史上被误当成"没实机所以没法验" | `find_lfb()` 改读 `0x10`(BAR0)，`pci_bar_size()` 同步；注释写明两个 BAR 的实测值。修复后 `screendump` 变为 800x600 且非黑（72,484 个非黑字节） | **已修复** |
+| **84** | **ring3 syscall 在用户 CR3 下写 VBE LFB ⇒ #PF 连锁 triple fault** | `vbe_lfb_map()` 只把 LFB 的 PDE（0x3F4）装进 `kdir`，而 `task_space_create()` 只复制 PDE 0..15；syscall 执行在**调用者的 CR3** 上，内核代写 VRAM 直接缺页。QEMU `-d cpu_reset` 日志明确 `Triple fault`。触发点：`run /bin/gfx24.ce` 回车后 monitor 立刻 `WinError 10054`；`gfx24` 命令在 ring0（CR3=kDIR）下静置 12 秒完全正常 | 任何从 ring3 触发的显存写入都会打停整机：新增的 `gfx_rect`/`gfx_blit`，乃至图形模式下 `write()` → `con_write()` → 后端 `draw_cell()`。是 v2.7 起就潜伏的通用缺陷 | `paging.c` 记录 LFB PDE 范围；`vbe_lfb_map()` 同步**当前** CR3 对应的目录并只 flush 活动目录（不再无条件切 `kdir`）；`task_space_create()` 为新目录镜像 PDE；`isr_syscall()` 开头对 ring3 调用兜底同步。PTE 始终 `0x003`（无 US 位），ring3 依旧无法访问 VRAM，`task_space_destroy()` 也不释放共享页表 | **已修复** |
+| **85** | **缺少 24 位真彩模式与用户态绘图能力（需求）** | 原有后端只有 8bpp 索引 / 32bpp 真彩文本；`display` 明写 `user drawing API : NONE`；CE ABI 无绘图槽 | 用户程序无法输出任何像素、色块或位图 | 新增 `CON_MODE_VBE24=3` + `be_vbe24.c` + `gfx24.h`；ABI append-only 扩到 64 槽；三槽用**描述符结构体**绕开 thunk 只转发 4 参数的限制；用户位图经 `copy_from_user()` 逐行校验（沿用 #78 的模型） | **已实现** |
+
+### 13.1 验证结果（同一 ISO，`tests/gfx24_regress.py`）
+
+```
+PASS format + builtin install / /bin/gfx24.ce installed
+PASS DISPI switched to 800x600
+PASS red/green/blue/white blocks、24-bit backdrop 0x102040、
+     256-step gradient midpoint (127,0,128)、black/white bars
+PASS gfx_rect from ring3 (cyan)      (530,150) == (0,255,255)
+PASS gfx_blit RGB24 row 32 col 30    (630,332) == (120,128,128)
+PASS demo pixels still intact after the CE run
+0 step(s) failed
+```
+
+像素从 QEMU `screendump` 的 PPM 里逐点读取，因此 BGR 顺序、24bpp pitch=2400、
+渐变色阶、ring3 描述符与跨页位图拷贝全部被真实硬件状态验证，而不是只看命令回显。
+
+### 13.2 回归总账（v2.12 ISO）
+
+| 套件 | 结果 |
+|---|---|
+| `tests/gfx24_regress.py` | 0 failed（16 项像素 / 状态断言） |
+| `tests/ce_regress.py` | PASS=11 SKIP=13 FAIL=0（新增 `gfx24.ce` 模拟器 SKIP 通过） |
+| `tests/test_mkce.py` / `tests/test_cc.py` | 48 / 10 passed, 0 failed |
+| `tests/qemu_regress.py` | steps=12 ok=12 warn=0 |
+| `tests/vprobe_regress.py` | steps=7 ok=7 fail=0（#78 未被 paging 改动破坏） |
+| `tests/snd_regress.py` / `heap_regress.py` / `go_regress.py` | 6/6、4/4、7/7 全 PASS |
+| `tests/qa_probe_final.py` | exit=0 |
+
+### 13.3 已知取舍（P2，不阻断）
+
+- `be_vbe24.c` 故意**不启用硬件 pan 滚动**（`VIRT_HEIGHT=600`，`scroll=NULL`）与 MTRR-WC：
+  虚拟帧缓冲会让用户矩形滚出视野后又突然出现，语义难解释；WC 与用户驱动写入混用需要更多验证。
+  代价是滚动走前端全量重绘、显存为 UC，1.44 MB 规模实测无感。
+- 32bpp 后端 `be_vbe.c` 的 BAR 已修（#83），但其硬件 pan + MTRR-WC 路径仍只做过点亮验证，
+  未做逐像素回归；24bpp 是默认推荐的真彩模式。
+- `gfx_blit` 逐行 `copy_from_user`，内核行缓冲 2400 B；`w*h*3` 无总量上限但受 800x600 裁剪，
+  一次全屏 blit = 600 次 syscall 内拷贝，属同步操作，不要在 int 0x80 里期望异步完成。

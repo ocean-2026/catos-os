@@ -24,6 +24,7 @@
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
+#include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -490,6 +491,11 @@ enum {
     /* v2.11: SB16 PCM audio.  Append-only; 61 thunks still fit in the
      * 2 KiB thunk area (the guard in build_vsyscall_page() enforces it). */
     SYS_SND_INFO, SYS_SND_PLAY, SYS_SND_STOP, SYS_SND_TONE,
+    /* v2.12: 24bpp truecolour drawing.  Append-only; 64 thunks still fit
+     * in the 2 KiB area.  The three calls take 1/1/1 arguments: the
+     * multi-field descriptors are copied from user space by the kernel
+     * (the generic thunk only forwards ebx/ecx/edx/esi, not edi). */
+    SYS_GFX_INFO, SYS_GFX_RECT, SYS_GFX_BLIT,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -556,6 +562,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*52*/3, /*53*/2, /*54*/1,             /* rgb style / palette set/get */
         /*55*/4, /*56*/2,                       /* mmap / munmap */
         /*57*/1, /*58*/3, /*59*/0, /*60*/2,     /* snd_info/play/stop/tone */
+        /*61*/1, /*62*/1, /*63*/1,               /* gfx_info/rect/blit */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -1012,6 +1019,10 @@ void isr_syscall(int_frame_t *f) {
     uint32_t nr = f->eax;
     uint32_t a1 = f->ebx, a2 = f->ecx, a3 = f->edx, a4 = f->esi, a5 = f->edi;
     task_t *t = cur_task;
+    /* v2.12: a syscall runs on the caller's CR3.  Mirror the VBE LFB's
+     * supervisor-only PDEs into it so con_write()/gfx_* drawing from a
+     * ring3 context does not #PF (see paging.c).  Cheap no-op otherwise. */
+    if (!t->ring0 && t->space.dir) paging_sync_lfb_dir(t->space.dir);
     int uid = t->uid;
     uint32_t ret = (uint32_t)-8;               /* ENOSYS */
     /* v2.5 fix: a fresh trap means our execution context now lives in the
@@ -1653,6 +1664,62 @@ void isr_syscall(int_frame_t *f) {
     case SYS_SND_TONE:
         ret = (uint32_t)snd_tone(a1, a2);
         break;
+    /* ---- v2.12: 24bpp truecolour drawing ----------------------------
+     * The framebuffer is never mapped into a ring3 page directory.  Both
+     * the descriptor and (for blit) every pixel row come in through
+     * copy_from_user(), which validates the WHOLE user range page by page
+     * before the kernel writes VRAM.  A ring3 task therefore cannot make
+     * the kernel read arbitrary physical memory or scribble outside the
+     * 800x600 surface (issue #78's lesson, applied to the new surface). */
+    case SYS_GFX_INFO:
+        ret = (uint32_t)gfx24_info((int)a1);
+        break;
+    case SYS_GFX_RECT: {
+        if (!gfx24_active()) { ret = (uint32_t)-8; break; }
+        gfx_rect_t r;
+        if (a1 == 0 ||
+            copy_from_user(t, &r, (const void *)a1, (uint32_t)sizeof(r)) != 0) {
+            ret = (uint32_t)-14;                /* EFAULT */
+            break;
+        }
+        if (r.w <= 0 || r.h <= 0 || r.w > GFX24_W || r.h > GFX24_H) {
+            ret = (uint32_t)-22;                /* EINVAL */
+            break;
+        }
+        gfx24_rect(r.x, r.y, r.w, r.h, r.rgb);
+        ret = 0;
+        break;
+    }
+    case SYS_GFX_BLIT: {
+        if (!gfx24_active()) { ret = (uint32_t)-8; break; }
+        gfx_blit_t b;
+        if (a1 == 0 ||
+            copy_from_user(t, &b, (const void *)a1, (uint32_t)sizeof(b)) != 0) {
+            ret = (uint32_t)-14;                /* EFAULT */
+            break;
+        }
+        if (b.src == 0 || b.w <= 0 || b.h <= 0 ||
+            b.w > GFX24_W || b.h > GFX24_H) {
+            ret = (uint32_t)-22;                /* EINVAL */
+            break;
+        }
+        /* One row at a time: no 1.44 MB kernel staging buffer, and every
+         * user page in the bitmap is validated before it is read. */
+        static uint8_t row[GFX24_W * 3];
+        uint32_t rowbytes = (uint32_t)b.w * 3u;
+        int rc = 0;
+        for (int j = 0; j < b.h; j++) {
+            const uint8_t *u = (const uint8_t *)b.src +
+                               (uint32_t)j * rowbytes;
+            if (copy_from_user(t, row, u, rowbytes) != 0) {
+                rc = -14;                       /* EFAULT */
+                break;
+            }
+            gfx24_blit(row, b.x, b.y + j, b.w, 1);
+        }
+        ret = (uint32_t)rc;
+        break;
+    }
     default: ret = (uint32_t)-8; break;
     }
 

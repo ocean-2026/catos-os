@@ -482,3 +482,70 @@ VMAs is rejected with an error instead of halting the machine.  Still
 pass a buffer that really covers the requested max/size: the kernel maps
 pages, it does not grow your allocation.  Regression: /bin/vprobe.ce and
 tests/vprobe_regress.py.
+
+=====================================================================
+ v2.12 -- 800x600x24 TRUECOLOUR DRAWING (2026-11-10)
+=====================================================================
+
+This is the FIRST user-visible drawing surface in CatOS.  The framebuffer
+is STILL supervisor-only: a CE program never receives a pointer to VRAM.
+Instead it hands the kernel a descriptor / bitmap; the kernel validates
+every page with copy_from_user() and performs the writes itself.
+
+New slots (append-only; an old kernel leaves them NULL -- ALWAYS check
+the pointer before calling):
+
+  int gfx_info(int what);                  /* slot 61 */
+  int gfx_rect(const gfx_rect_t *r);      /* slot 62 */
+  int gfx_blit(const gfx_blit_t *b);      /* slot 63 */
+
+  typedef struct {
+      int32_t  x, y, w, h;
+      uint32_t rgb;            /* 0x00RRGGBB */
+  } gfx_rect_t;
+  typedef struct {
+      const uint8_t *src;      /* w*h*3 tightly packed RGB24 (R,G,B) */
+      int32_t  x, y, w, h;
+  } gfx_blit_t;
+
+The generic syscall thunk forwards at most FOUR arguments (ebx/ecx/edx/
+esi -- edi is NOT forwarded), so the multi-field drawing calls take ONE
+descriptor pointer instead of five scalar arguments.
+
+Enable the mode first (3 == CON_MODE_VBE24):
+
+  api->display_mode(3);                    /* or shell command `gfx24` */
+  if (api->gfx_info(GFX_INFO_ACTIVE) != 1) { /* no 24bpp hardware */ }
+
+Switching INTO a graphics mode is free; switching back to text STILL
+requires a physical Y keypress (the consent gate is unchanged).
+
+gfx_info() selectors (macros in ce_abi.h):
+  0 ACTIVE     1 = 24bpp LFB live, 0 = another display mode
+  1 WIDTH      800
+  2 HEIGHT     600
+  3 BPP        24
+  4 PITCH      2400 bytes per row
+  5 FB_BYTES   1440000
+  6 LFB_PHYS   PCI BAR0 address (supervisor-only; informational)
+
+Pixel format in VRAM: 3 bytes per pixel, B then G then R, no padding and
+no alpha byte.  All RGB values passed TO the API are 0x00RRGGBB;
+gfx_blit() source buffers are R,G,B triples.  Coordinates are clipped to
+800x600; w must be 1..800 and h 1..600.
+
+Return values: 0 ok, -8 ENOSYS (mode inactive / unknown selector),
+-14 EFAULT (bad user pointer), -22 EINVAL (bad dimensions).
+
+  catos_api_t *api = __ce_api;
+  if (!api->gfx_info || !api->gfx_rect) return 0;    /* older kernel */
+  api->display_mode(3);
+  if (api->gfx_info(GFX_INFO_ACTIVE) != 1) return 0;
+  gfx_rect_t r = { 10, 10, 100, 60, 0x00FFFF };      /* cyan */
+  api->gfx_rect(&r);
+
+Shell: `gfx24` switches to mode 3 and paints a fixed diagnostic picture
+(four pure colour blocks, a 256-step gradient, eight bars).  `display`
+now reports the drawing API; `vdiag` prints the LFB / BAR details.
+Reference app: /bin/gfx24.ce.  Pixel-exact on-metal regression:
+tests/gfx24_regress.py (QEMU -vga std, parses screendump PPM).

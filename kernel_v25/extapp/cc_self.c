@@ -83,7 +83,7 @@ enum {
 
 /* ---- runtime-initialised tables (brace init cannot take strings) ---- */
 static char *g_punct[46];
-static char *g_apin[57];
+static char *g_apin[65];   /* 64 slots + NULL sentinel */
 
 static void init_tables(void) {
     g_punct[0] = "<<=";  g_punct[1] = ">>=";  g_punct[2] = "==";
@@ -126,6 +126,11 @@ static void init_tables(void) {
     g_apin[51] = "set_style";  g_apin[52] = "set_style_rgb";
     g_apin[53] = "set_palette"; g_apin[54] = "palette";
     g_apin[55] = "mmap";       g_apin[56] = "munmap";
+    /* v2.11 SB16 + v2.12 24bpp drawing (slots 57..63). */
+    g_apin[57] = "snd_info";   g_apin[58] = "snd_play";
+    g_apin[59] = "snd_stop";   g_apin[60] = "snd_tone";
+    g_apin[61] = "gfx_info";   g_apin[62] = "gfx_rect";
+    g_apin[63] = "gfx_blit";
 }
 
 /* zero n bytes through a char* (replaces ((unsigned char*)p)[i] = 0) */

@@ -46,6 +46,10 @@ API_NAMES = [
     # raising "not modelled" -- sndtest.ce then takes its skip path and
     # ce_regress stays FAIL=0.
     "snd_info", "snd_play", "snd_stop", "snd_tone",
+    # v2.12 (slots 61..63, append-only): 24bpp truecolour drawing.  The
+    # host simulator has no framebuffer, so gfx_info reports "inactive"
+    # and the CE probe takes its SKIP path (ce_regress stays FAIL=0).
+    "gfx_info", "gfx_rect", "gfx_blit",
 ]
 
 REG32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
@@ -279,6 +283,11 @@ class Machine:
                             j += 1
                     return 0
             return -22
+        # The host has no display hardware either.  gfx24.ce probes
+        # display_mode(3) when gfx_info() says inactive; answer ENOSYS
+        # instead of raising "not modelled" so it takes the SKIP path.
+        if name == "display_mode":
+            return -8
         # ---- v2.11 SB16 audio: no device on the host ----
         if name == "snd_info":
             # 0 = no SB16 for SND_INFO_READY; 0 for every other selector
@@ -286,6 +295,11 @@ class Machine:
             return 0
         if name == "snd_play" or name == "snd_stop" or name == "snd_tone":
             return -8                     # ENOSYS (no card)
+        # ---- v2.12 24bpp: host has no framebuffer ----
+        if name == "gfx_info":
+            return 0                      # GFX_INFO_ACTIVE = not active
+        if name == "gfx_rect" or name == "gfx_blit":
+            return -8                     # ENOSYS (mode inactive)
         raise CeError("api '%s' is not modelled by ce_sim" % name)
 
     # ---- run ----

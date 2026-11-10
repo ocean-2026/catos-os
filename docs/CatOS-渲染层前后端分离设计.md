@@ -563,3 +563,49 @@ monitor `xp` 直读物理内存，可随时对比任意两个时刻的完整 VGA
 摘标结论：v2.9.1 的 `[MTRR/pan UNTESTED]` 中，VBE 模式进入/退出、
 text 同意门、闪烁光标、mmap、ELF 均已实机验证；MTRR WC 与
 HW-pan 滚动本身仍需在 `vbe` 模式下跑 `vdiag` 确认（本轮未跑 VBE 路径）。
+
+
+---
+
+## 十二、v2.12 增量：24bpp 真彩后端 + 用户绘图 API（2026-11-10）
+
+**本节推翻第一节点 3 与第五节的「用户态没有任何绘制 API」结论**；第一至十一节的其余
+结论（前后端分离、单元格网格、同意门、append-only 等）继续有效。以本节为准。
+
+### 12.1 变更
+
+| 项 | v2.7~v2.11 | v2.12 |
+|---|---|---|
+| 后端 | 3 个：text / gfx(8bpp) / vbe(32bpp) | 新增第 4 个 `be_vbe24.c`：800x600x24，3 字节 BGR，pitch 2400，1,440,000 B |
+| 模式枚举 | 0 / 1 / 2 | 追加 `CON_MODE_VBE24 = 3`；`display_mode(3)` 与 shell `gfx24` 均可进入 |
+| 绘图符号 | 全部 `static`，链接产物里没有 `gfx_*` | `gfx24.h` 导出 `gfx24_clear/pixel/rect/blit/info/demo`，由 shell 与 syscall 调用 |
+| CE ABI | 61 槽，无绘图槽 | 64 槽：61 `gfx_info`、62 `gfx_rect`、63 `gfx_blit` |
+| `display` 输出 | `user drawing API : NONE` | vbe24 下报告 `GFX24 (gfx_info/gfx_rect/gfx_blit, kernel-side writes)` |
+
+### 12.2 安全模型没有放松
+
+帧缓冲**仍然是 supervisor-only**。变化在于：ring3 目录现在会镜像 LFB 所在的高 PDE，
+但所有 PTE 都是 `0x003`（P|RW，**无 US 位**），用户代码读写 VRAM 依旧触发 #PF。
+镜像的目的只是让「内核在调用者 CR3 上代写」不缺页（见问题清单 #84）。用户程序拿到的
+从来不是帧缓冲地址，而是：
+
+```
+gfx_rect_t { x,y,w,h,rgb }            -> SYS_GFX_RECT  -> copy_from_user -> gfx24_rect
+gfx_blit_t { src,w,h,x,y }            -> SYS_GFX_BLIT  -> 逐行 copy_from_user -> gfx24_blit
+```
+
+描述符而非 5 个标量参数，是因为 `generic_thunk()` 只转发 ebx/ecx/edx/esi 四个参数
+（**不转发 edi**）。扩展手写 thunk 字节风险更高，故把多字段压成一个指针，顺带让
+用户指针校验点集中。所有用户范围校验沿用 #78 的 `copy_from_user()` 模型。
+
+### 12.3 同意门不变
+
+`->gfx / ->vbe / ->vbe24` 自由；`->text` 仍强制物理 `Y`。`con_request_mode()` 的
+白名单加入 3，其余分支未改。CE 应用 `gfx24.ce` 在 inactive 时会自行调用
+`display_mode(3)`，这是允许的方向。
+
+### 12.4 取舍
+
+`be_vbe24.c` 不用硬件 pan（`VIRT_HEIGHT=600`，`scroll=NULL`，前端全量重绘）、
+不启用 MTRR-WC。理由与验证数据见 `docs/CatOS-内核问题清单.md` 13.2 / 13.3。
+像素级实机回归：`tests/gfx24_regress.py`（QEMU `-vga std`，解析 screendump PPM）。

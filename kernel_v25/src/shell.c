@@ -13,6 +13,7 @@
 #include "task.h"
 #include "hw.h"
 #include "snd.h"        /* v2.11 SB16 info / self-test commands */
+#include "gfx24.h"      /* v2.12 24bpp truecolour drawing surface */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -80,6 +81,7 @@ static void cmd_help(void) {
         "  -- display (front-end / back-ends) --\n"
         "  gfx          graphics mode (256-color styled text)\n"
         "  vbe          VBE 800x600x32 truecolour text terminal\n"
+        "  gfx24        800x600x24 truecolour + pixel demo (drawable)\n"
         "  text         switch back - needs a physical Y confirmation\n"
         "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
         "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
@@ -311,6 +313,22 @@ static void cmd_vbe(void) {
     vga_write("  type 'text' + confirm Y to leave\n\n");
 }
 
+/* v2.12: switch to the 24bpp back-end and paint the fixed diagnostic
+ * picture.  Order matters: con_request_mode() repaints the whole cell
+ * grid, and vga_clear() repaints it again, so the demo MUST come last.
+ * Only the shell's top-row prompt is allowed to overlay it afterwards --
+ * every pixel sampled by tests/gfx24_regress.py sits at y >= 120. */
+static void cmd_gfx24(void) {
+    int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
+    if (r == CON_ENODEV) {
+        vga_write("gfx24: no VBE/Bochs-dispi device found (try QEMU -vga std)\n");
+        return;
+    }
+    if (r != 0) { vga_write("gfx24: switch failed\n"); return; }
+    vga_clear();                 /* clears cells + resets cursor to (0,0) */
+    gfx24_demo();
+}
+
 static void cmd_gfx(void) {
     int r = con_request_mode(CON_MODE_GFX, CON_ORIGIN_CONSOLE);
     if (r != 0) { vga_write("gfx: switch failed\n"); return; }
@@ -376,8 +394,12 @@ static void cmd_display(void) {
         vga_write("n/a (only in VBE mode)");
     }
     vga_write("\nIME               : F2 toggles pinyin (shell + edit)");
-    vga_write("\nuser drawing API : NONE (framebuffers are supervisor-only)\n");
-    vga_write("switch policy    : ->gfx/vbe free; ->text needs physical Y\n");
+    vga_write("\nuser drawing API : ");
+    if (con_get_mode() == CON_MODE_VBE24)
+        vga_write("GFX24 (gfx_info/gfx_rect/gfx_blit, kernel-side writes)\n");
+    else
+        vga_write("vbe24 mode only (framebuffers stay supervisor-only)\n");
+    vga_write("switch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
 }
 
 static void cmd_about(void) {
@@ -1447,6 +1469,7 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
+        else if (!strcmp_(cmd, "gfx24"))      cmd_gfx24();
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);

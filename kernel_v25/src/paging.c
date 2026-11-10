@@ -33,6 +33,35 @@ extern char _bss_end[];             /* end of the flat kernel image     */
 /* ---- kernel directory: 16 PSE entries, identity map 0..64 MiB -------- */
 
 static uint32_t kdir[1024] __attribute__((aligned(4096)));
+
+/* ---- v2.12: VBE LFB PDE mirroring --------------------------------------
+ * A syscall executes on the CALLER's CR3, not kdir.  The VBE LFB lives
+ * in a high PDE (>= 16) that ring3 directories historically did not
+ * carry, so the kernel #PF'd (and triple-faulted) the moment it drew
+ * VRAM on behalf of a user task -- e.g. gfx_rect/gfx_blit, or even
+ * con_write() in graphics mode.  Mirror those PDEs into EVERY task
+ * directory.  The PTEs stay supervisor-only (0x003, no US bit), so ring3
+ * still cannot read or write the framebuffer; only the kernel can. */
+static uint32_t lfb_pde_first, lfb_pde_last;
+static int      lfb_pdes_ready;
+
+static int sync_lfb_pdes(uint32_t *d) {
+    if (!d || !lfb_pdes_ready || d == kdir) return 0;
+    int changed = 0;
+    for (uint32_t i = lfb_pde_first; i <= lfb_pde_last; i++) {
+        if (d[i] != kdir[i]) { d[i] = kdir[i]; changed = 1; }
+    }
+    return changed;
+}
+
+/* Called from isr_syscall() for ring3 callers: cheap no-op once the
+ * directory is in sync; flushes the ACTIVE directory only on a change. */
+void paging_sync_lfb_dir(uint32_t dir_phys) {
+    if (!dir_phys) return;
+    if (sync_lfb_pdes((uint32_t *)dir_phys))
+        cpu_cr3_write(dir_phys);
+}
+
 /* ---- frame allocator --------------------------------------------------- */
 
 static uint32_t frames_base;                  /* first managed frame   */
@@ -128,6 +157,8 @@ int  task_space_create(task_space_t *s) {
     for (int i = 0; i < 16; i++) d[i] = kdir[i];        /* kernel, supervisor */
     d[PDE_USER]     = s->pt  | 0x007u;                   /* P RW US */
     d[PDE_USER_EXT] = s->pt2 | 0x007u;                   /* P RW US */
+    /* New directory, not loaded yet: mirror but do NOT flush TLB. */
+    sync_lfb_pdes(d);
     return 0;
 }
 
@@ -200,10 +231,10 @@ void *kzalloc_frame(void) {
 
 /* ---- VBE linear framebuffer -------------------------------------------
  * The low 64 MiB is 16 PSE (4 MiB) pages.  A VBE LFB lives far above it
- * (typically PCI BAR2 at 0xE0000000 / 0x10000000), so it needs its own
- * 4 KiB page tables.  We refuse to touch PDEs 0..15: splitting one of
- * those would expose the framebuffer to every ring3 task, which would
- * break the "no user drawing API" policy. */
+ * (PCI BAR0 at 0xfd000000 on QEMU std VGA), so it needs its own 4 KiB
+ * page tables.  We never split PDEs 0..15.  Since v2.12 the high PDEs
+ * are mirrored into every task directory as SUPERVISOR-ONLY entries so
+ * the kernel can draw while running on a ring3 caller's CR3. */
 void *vbe_lfb_map(uint32_t phys, uint32_t size) {
     if (!phys || !size) return 0;
     uint32_t pa  = phys & ~0xFFFu;
@@ -225,6 +256,16 @@ void *vbe_lfb_map(uint32_t phys, uint32_t size) {
         uint32_t *t = (uint32_t *)(kdir[pa >> 22] & ~0xFFFu);
         t[(pa >> 12) & 0x3FFu] = pa | 0x003u;
     }
-    cpu_cr3_write((uint32_t)kdir);            /* flush TLB */
+    lfb_pde_first  = pde0;
+    lfb_pde_last   = pde1;
+    lfb_pdes_ready = 1;
+    /* Also fix up whichever directory is loaded RIGHT NOW.  A display
+     * mode switch can come from a ring3 syscall, in which case this is
+     * the caller's directory, not kdir -- and the very next instruction
+     * (clear/redraw) writes VRAM.  Never switch CR3 to kdir here: that
+     * would strand the syscall on the wrong address space. */
+    uint32_t cur = cpu_cr3_read();
+    sync_lfb_pdes((uint32_t *)cur);
+    cpu_cr3_write(cur);                       /* flush the ACTIVE dir */
     return (void *)phys;
 }

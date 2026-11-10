@@ -45,6 +45,8 @@ OPTIONAL = [
     ("/bin/sndtest.ce",  os.path.join(ROOT, "extapp", "bin", "sndtest.ce")),
     # Issue #78 cross-page user-buffer probe (tests/vprobe_regress.py).
     ("/bin/vprobe.ce",   os.path.join(ROOT, "extapp", "bin", "vprobe.ce")),
+    # v2.12 24bpp truecolour drawing probe (tests/gfx24_regress.py).
+    ("/bin/gfx24.ce",    os.path.join(ROOT, "extapp", "bin", "gfx24.ce")),
     ("/bin/TEST.JS",     os.path.join(ROOT, "node", "TEST.JS")),
     ("/appdevelop/HELLO.C",   os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
     # Go scripts: the interpreter's own regression corpus.  They are

@@ -112,14 +112,19 @@ static uint32_t find_lfb(void) {
         if (id == 0xFFFFFFFFu) continue;
         uint16_t vend = (uint16_t)(id & 0xFFFFu);
         uint16_t did  = (uint16_t)(id >> 16);
-        /* QEMU std VGA / QXL / Virtio GPU all expose an LFB in BAR2. */
+        /* QEMU std VGA / QXL / Virtio GPU expose the linear framebuffer
+         * in BAR0 (16 MiB prefetchable).  BAR2 is only the 4 KiB MMIO
+         * window holding the DISPI register mirror + QEMU extensions;
+         * using it as the LFB writes pixels past the MMIO aperture and
+         * the screen stays black.  Info: `info pci` on QEMU 11.1 shows
+         * BAR0 0xfd000000[0xfdffffff], BAR2 0xfebf0000[0xfebf0fff]. */
         if ((vend == 0x1234u && did == 0x1111u) ||
             (vend == 0x1B36u && did == 0x0100u) ||
             (vend == 0x1AF4u && did == 0x1050u)) {
-            uint32_t bar = pci_read32(0, dev, 0, 0x18);
+            uint32_t bar = pci_read32(0, dev, 0, 0x10);
             bar &= 0xFFFFFFF0u;             /* memory BAR */
             if (bar) {
-                uint32_t sz = pci_bar_size(0, dev, 0, 0x18);
+                uint32_t sz = pci_bar_size(0, dev, 0, 0x10);
                 if (sz) lfb_bar_bytes = sz;
                 return bar;
             }

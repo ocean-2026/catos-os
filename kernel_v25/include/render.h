@@ -20,8 +20,11 @@
  *                           dynamic 8x16 font slots
  *               be_gfx.c    Mode 13h, 40x12, 8bpp indexed, 256 colours
  *               be_vbe.c    VBE LFB 800x600x32, 100x37, truecolour
+ *               be_vbe24.c  VBE LFB 800x600x24, 100x37, truecolour + drawing
  *
- * Every back-end paints TEXT CELLS.  None exports a drawing API.
+ * Every back-end paints TEXT CELLS.  Since v2.12 be_vbe24.c ALSO exports
+ * the kernel-side gfx24_* drawing API (gfx24.h); the framebuffer itself
+ * stays supervisor-only and user programs never receive its address.
  */
 #include <stdint.h>
 
@@ -50,6 +53,7 @@ enum con_mode   {
     CON_MODE_TEXT = 0,
     CON_MODE_GFX  = 1,
     CON_MODE_VBE  = 2,
+    CON_MODE_VBE24 = 3,        /* 800x600x24, first user-drawable mode */
     CON_MODE_QUERY = -1
 };
 enum con_origin { CON_ORIGIN_KERNEL = 0, CON_ORIGIN_CONSOLE = 1,

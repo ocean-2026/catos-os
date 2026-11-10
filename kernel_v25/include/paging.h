@@ -103,9 +103,13 @@ int    vma_contains(const vma_t *list, uint32_t addr);
 /* ---- VBE linear framebuffer -------------------------------------------
  * Map a PCI MMIO framebuffer into the KERNEL page directory (identity,
  * supervisor-only, 4 KiB pages).  Returns the usable virtual address
- * (== phys) or 0 on failure.  Ring3 page directories copy only PDEs
- * 0..15, so a high LFB is never reachable from user mode -- this is what
- * keeps the "no user drawing API" guarantee in truecolour mode too. */
+ * (== phys) or 0 on failure.  The high PDEs are ALSO mirrored into
+ * every ring3 directory as supervisor-only entries, so the kernel can
+ * draw while running on a caller's CR3; user code still cannot reach
+ * VRAM (no US bit), which keeps the framebuffer supervisor-only. */
 void *vbe_lfb_map(uint32_t phys, uint32_t size);
+/* Keep one ring3 directory in sync with the LFB PDEs (called at the top
+ * of isr_syscall).  No-op once synchronised; flushes TLB on a change. */
+void paging_sync_lfb_dir(uint32_t dir_phys);
 
 #endif

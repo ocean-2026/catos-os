@@ -9,9 +9,9 @@
  * pushes it to hardware.  It owns NO console state (no cursor, no scroll
  * position, no current style, no UTF-8 state) -- all of that is render.c.
  *
- * There is still NO pixel/rectangle drawing API.  Graphics mode and VBE
- * mode are text terminals, not drawing surfaces.  Every framebuffer
- * primitive inside a back-end is `static`.
+ * Since v2.12 the 24bpp back-end ALSO exports kernel-side drawing calls
+ * (gfx24.h) reached through syscalls.  It is the only back-end that does
+ * so; the framebuffer stays supervisor-only on every mode.
  *
  * v2.9: ONE unified cell = 8 x 16 pixels on every back-end.  ASCII glyphs
  * are stretched 8x8 -> 8x16; a 16x16 hanzi occupies exactly 2 columns x
@@ -92,6 +92,7 @@ typedef struct render_be {
 extern render_be_t be_text;
 extern render_be_t be_gfx;
 extern render_be_t be_vbe;
+extern render_be_t be_vbe24;
 
 /* ---- shared fonts ------------------------------------------------------ */
 /* 8x8 ASCII (95 printable glyphs), 8 row bytes, MSB = left pixel.

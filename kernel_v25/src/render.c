@@ -607,6 +607,7 @@ const char *con_mode_name(int m) {
     if (m == CON_MODE_TEXT) return "text";
     if (m == CON_MODE_GFX)  return "graphics (8bpp indexed)";
     if (m == CON_MODE_VBE)  return "vbe (32bpp truecolour)";
+    if (m == CON_MODE_VBE24) return "vbe24 (24bpp truecolour, drawable)";
     return "unknown";
 }
 
@@ -635,13 +636,14 @@ int con_info(int what) {
 int con_request_mode(int mode, int origin) {
     (void)origin;                       /* consent is mandatory for all */
     if (mode != CON_MODE_TEXT && mode != CON_MODE_GFX &&
-        mode != CON_MODE_VBE) return CON_EINVAL;
+        mode != CON_MODE_VBE && mode != CON_MODE_VBE24) return CON_EINVAL;
     if (mode == be->mode) return 0;
     if (mode == CON_MODE_TEXT) {
         if (!con_ask_consent(origin)) return CON_EACCES;
         return switch_backend(&be_text);
     }
-    if (mode == CON_MODE_GFX) return switch_backend(&be_gfx);
+    if (mode == CON_MODE_GFX)   return switch_backend(&be_gfx);
+    if (mode == CON_MODE_VBE24) return switch_backend(&be_vbe24);
     return switch_backend(&be_vbe);
 }
 

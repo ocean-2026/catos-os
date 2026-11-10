@@ -21,8 +21,9 @@
  *   v2.8  slots 52..54   RGB style / palette set / palette query
  *   v2.10 slots 55..56   anonymous mmap / munmap
  *   v2.11 slots 57..60   SB16 PCM audio (info / play / stop / tone)
+ *   v2.12 slots 61..63   24bpp truecolour drawing (info/rect/blit)
  *
- * Total: 61 slots in v2.11 (the v2.7 header had 52).
+ * Total: 64 slots in v2.12 (the v2.7 header had 52).
  *
  * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
  * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
@@ -38,6 +39,34 @@
 #include <stdint.h>
 
 /* ---- image header (20 bytes, prepended by mkce.py) ---- */
+/* ---- v2.12: 24bpp drawing descriptors --------------------------------
+ * The generic syscall thunk passes at most FOUR arguments (ebx/ecx/edx/
+ * esi); edi is NOT forwarded.  Instead of extending the hand-packed
+ * thunk bytes, the two multi-argument drawing calls take ONE descriptor
+ * pointer.  The kernel copies the descriptor and the pixel data with
+ * copy_from_user(), so a ring3 caller never writes to VRAM directly.
+ * These types are mirrored verbatim in the kernel-side ce.h. */
+#ifndef CATOS_GFX_TYPES_H
+#define CATOS_GFX_TYPES_H
+typedef struct {
+    int32_t  x, y, w, h;
+    uint32_t rgb;               /* 0x00RRGGBB */
+} gfx_rect_t;
+typedef struct {
+    const uint8_t *src;         /* w*h*3 tightly packed RGB24 bytes */
+    int32_t  x, y, w, h;
+} gfx_blit_t;
+#endif
+
+/* gfx_info() selectors (user-visible mirror of gfx24.h). */
+#define GFX_INFO_ACTIVE    0   /* 1 = 24bpp LFB live                      */
+#define GFX_INFO_WIDTH     1
+#define GFX_INFO_HEIGHT    2
+#define GFX_INFO_BPP       3
+#define GFX_INFO_PITCH     4
+#define GFX_INFO_FB_BYTES  5
+#define GFX_INFO_LFB_PHYS  6
+
 typedef struct {
     uint8_t  magic[4];     /* "CE01" */
     uint32_t entry;        /* entry offset inside the image (0 = start) */
@@ -167,6 +196,23 @@ typedef struct catos_api {
     int     (*snd_tone)(int freq_hz, int ms);       /* 60
          Kernel-generated integer sine at 22050 Hz; asynchronous.
          0 ok, negative errno. */
+
+    /* ---- v2.12: 800x600x24 truecolour drawing (append-only) ----------
+     * Old binaries see NULL for these three slots: ALWAYS check
+     * api->gfx_info before calling them.  A kernel booted in text / 8bpp /
+     * 32bpp mode answers gfx_info(GFX_INFO_ACTIVE) == 0.  Switch to mode 3
+     * with api->display_mode(3) (or the shell's `gfx24`) first.  The LFB
+     * stays supervisor-only: all writes are performed by the kernel. */
+    int     (*gfx_info)(int what);                  /* 61
+         GFX_INFO_* selector.  0 when inactive; -8 unknown selector. */
+    int     (*gfx_rect)(const gfx_rect_t *r);      /* 62
+         Fill a clipped rectangle.  0 ok, -8 inactive, -14 EFAULT for a
+         bad descriptor pointer, -22 EINVAL for bad dimensions. */
+    int     (*gfx_blit)(const gfx_blit_t *b);      /* 63
+         Copy a tightly packed RGB24 bitmap.  The kernel reads the
+         descriptor and then one row at a time through copy_from_user(),
+         so a cross-page user buffer is validated page by page.
+         0 ok, -8 inactive, -14 EFAULT, -22 EINVAL. */
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
