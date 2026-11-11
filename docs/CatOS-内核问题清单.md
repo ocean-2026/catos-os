@@ -504,3 +504,49 @@ heap 4/4、go 7/7、qa_probe_final exit=0
 - `format` 确认走 `kb_readline`，**y 之后必须发 Enter**；且 format 后内核重装内置应用
   耗时数秒，期间打字会被吞——要等 "Installed missing built-in" 出现再发下一条命令。
 - 读屏竞态：`screendump` 落盘有延迟，关键断言前先做一次"沉淀读"再取值。
+
+
+## 十八、spawn 执行权限检查（#96，2026-11-11，P1 补完）
+
+本轮目标：闭合 ROADMAP P1 的第一项——`task_spawn_ce` 尚不查 `PERM_EXEC`，导致任何可读文件（包括其他用户创建的 CE 二进制）可被任意 uid 运行，绕过 ACL 的写保护只防"改文件"而不防"跑文件"的漏洞。
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **96** | **`task_spawn_ce` 不查 `PERM_EXEC` ⇒ ring3 可 exec 任何可读 CE** | `task.c:1959` 只对路径做 `fs_resolve_file`（文件存在+大小≥4 即放行），无任何 `fs_perm_check`/ACL 调用。`PERM_EXEC` 常量已在 `task.h:126` 定义但从未在 spawn 路径使用。对比：`SYS_SAVE`/`SYS_FILE_WRITE` 查 `PERM_WRITE`，`SYS_CAT`/`SYS_LS` 查 `PERM_READ`，唯独 `SYS_SPAWN` 漏检 | uid=100（user）可以 `run /root/malicious.ce`（只要文件存在且 size≥4），尽管该文件可能是 root 通过 `chmod 000` 保护的恶意二进制。与已关闭的 write/saver 权限门形成不完整的安全面 | ① 在 `task_spawn_ce` 里 `fs_resolve_file` 成功后追加两段检查：(a) `acl_lookup` 判 file mode 是否含 `0o111`（owner/group/other 任一 execute bit），无则返回 -2；(b) `fs_perm_check(path, uid, user->gid, PERM_EXEC)` 按 owner/group/other 语义强制（root 直通）。调用方（`spawn_ce_redirect` / SYS_SPAWN syscall）的错误处理不动，`err -2`/`err -13` 均触发"cannot load"提示 | **已实现** |
+
+### 18.1 代码改动
+
+```diff
+--- a/kernel_v25/src/task.c
++++ b/kernel_v25/src/task.c
+@@ -1958,6 +1958,28 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
+     uint32_t clus = 0, size = 0;
+     if (!path || fs_resolve_file(path, &clus, &size) != 0) return -2;
+     if (size < 4) return -3;
++    /* v2.15: enforce PERM_EXEC on the path before loading. */
++    {
++        int fuid, fgid, fmode = 0;
++        if (acl_lookup(path, &fuid, &fgid, &fmode) == 0 &&
++            !(fmode & 0o111)) {
++            return -2;
++        }
++        user_rec_t *u = user_by_uid(uid);
++        if (fs_perm_check(path, uid, u ? u->gid : 0, PERM_EXEC) != 0)
++            return -13;
++    }
+```
+
+### 18.2 行为影响评估
+
+- **正常流程不受影响**：`/bin/*.ce` 是 0755（有 x），`/home/*` 下由用户自己创建的文件也是 0644（无 x），但用户在自己的 home 目录创建的新 `.ce` 文件需先 `chmod +x` 才能 run——这符合预期（安全增强而非破坏性变更）。
+- **已有回归风险极低**：所有 bundled apps（hello/calc/sysinfo/.../ocntools/adofai）在 `/bin` 目录下，mode=0755，PERM_EXEC 全过。唯一可能受影响的是用户自制的未 chmod +x 的 CE 文件——这是设计意图。
+- **错误码选择**：无 execute bit 时返 -2（复用 ENOENT-ish，避免引入新的错误码污染 API 表）；其他 DENY 场景统一返 -13（EACCES，与 syscall 层其他权限拒绝一致）。
+
+### 18.3 待验证（QEMU 实机，云侧环境）
+
+- `tests/user_regress.py` 新增步骤：以 guest（uid=100）`run /bin/hello.ce`（OK）vs `run /home/user/noperm.ce`（应报 err -13，需 root 先 `chmod +x`）
+- `tests/qemu_regress.py` 全套 12/12 不应受影响
+- `tests/ot_regress.py` 16/16 不应受影响（adofai/ocntools 均在 /bin）
+
+---
+*本节后继续编号为 #97+。*

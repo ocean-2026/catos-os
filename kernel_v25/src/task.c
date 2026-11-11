@@ -1958,6 +1958,32 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     uint32_t clus = 0, size = 0;
     if (!path || fs_resolve_file(path, &clus, &size) != 0) return -2;
     if (size < 4) return -3;
+    /* v2.15: enforce PERM_EXEC on the path before loading.  Without this
+     * gate any read-accessible user could exec another user's CE binary –
+     * /bin/hello.ce for example is world-readable (0755 in /etc/acl), so
+     * uid=100 without EXEC bit would still be able to run it; setting the
+     * bit requires root/owner chmod which requires CAP_USERADM on the
+     * owning account.  Blocks one class of "I can't write you but I can
+     * run your stuff" escalation paths that the write/saver/sys calls
+     * already close. */
+    {
+        int fuid, fgid, fmode = 0;
+        if (acl_lookup(path, &fuid, &fgid, &fmode) == 0 &&
+            !(fmode & 0o111)) {
+            /* No execute bit at all (owner/group/other): deny spawn outright
+             * unless the resolver above returned an explicit match.  This
+             * covers both "file not readable by anyone" and "chmod 000". */
+            (void)clus; (void)size;
+            return -2;   /* reuse ENOENT-ish error; caller prints "err -2" */
+        }
+        /* Permission check via the existing ACL path (root bypass + owner/
+         * group/other semantics).  Returns 0 on allow, -13 EACCES otherwise.
+         * The -13 propagates as CE error -13 which matches all other syscall
+         * denials already in the tree. */
+        user_rec_t *u = user_by_uid(uid);
+        if (fs_perm_check(path, uid, u ? u->gid : 0, PERM_EXEC) != 0)
+            return -13;
+    }
 
     /* v2.5: read the first cluster, parse the 20-byte header there (no
      * big bounce buffer).  The image then walks the FAT chain into the
