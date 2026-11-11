@@ -13,6 +13,7 @@
 void ce_install_builtins(void) {
     if (!fs_fs_ready()) return;
     int n = (int)(sizeof(builtin_files) / sizeof(builtin_files[0]));
+    int installed = 0;
     for (int i = 0; i < n; i++) {
         uint32_t c = 0, s = 0;
         if (fs_resolve_file(builtin_files[i].path, &c, &s) == 0)
@@ -25,6 +26,9 @@ void ce_install_builtins(void) {
             vga_write(" (disk full?)\n");
             return;
         }
+        installed++;
     }
-    vga_write("Installed built-in apps & docs from kernel image.\n");
+    /* Quiet on the common path: boot must not claim it installed anything
+     * when /bin came from the disk.  Only report real work. */
+    if (installed) vga_write("Installed missing built-in app(s)/doc(s) from kernel image.\n");
 }

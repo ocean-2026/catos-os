@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "snd.h"        /* IRQ5 top half for the SB16 audio driver */
 #include "task.h"
+#include "diag.h"       /* last-fault record for the faultinfo command */
 
 /* ---- GDT -------------------------------------------------------------- */
 
@@ -142,11 +143,25 @@ void isr_exception(int_frame_t *f) {
         if (f->intno == 14) {
             if (task_page_fault(f) == 0) return;  /* fault handled, retry */
         }
+        fault_record(f->intno, f->err, f->eip, cpu_cr2_read(),
+                     f->cs, f->eflags);
         task_die_fault(f);
     }
-    /* ring0 kernel fault: dump and halt (no scheduler games in a broken kernel) */
+    /* ring0 kernel fault: record it, dump the frame, halt (no scheduler
+     * games in a broken kernel).  The record stays queryable in case a
+     * serial console or a second core ever inspects it. */
+    fault_record(f->intno, f->err, f->eip, cpu_cr2_read(), f->cs, f->eflags);
     __asm__ volatile ("cli");
     exc_dump(f);
+    if (f->intno == 14) {
+        vga_write("pf: ");
+        vga_write((f->err & 1) ? "present " : "not-present ");
+        vga_write((f->err & 2) ? "write " : "read ");
+        vga_write((f->err & 4) ? "user " : "supervisor ");
+        if (f->err & 8) vga_write("rsvd ");
+        if (f->err & 16) vga_write("instr-fetch ");
+        vga_write("\n");
+    }
     vga_write("ring0 kernel fault - system halted\n");
     for (;;) __asm__ volatile ("hlt");
 }

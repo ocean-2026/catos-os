@@ -26,8 +26,11 @@ from qemu_driver import (boot as _qemu_boot, find_qemu,  # noqa: E402
 
 REPO = os.path.dirname(HERE)
 MONITOR_PORT = 4461                 # this driver's own port; never 4444
-CASES = ["fr", "cat", "hw", "str", "strcpy"]
+CASES = ["fr", "cat", "hw", "str", "strcpy", "wr", "fw", "pw"]
 CRASH_MARKERS = ("page fault", "kernel fault", "system halted")
+# Extra on-screen evidence required before accepting a PASS verdict.
+# 'wr' must prove the kernel really copied the cross-page string.
+EXPECT = {"wr": "VPROBE-WR ABCDE"}
 
 
 def win_path(p):
@@ -48,6 +51,10 @@ def wait_verdict(sock, case, timeout=35.0):
             if marker in low:
                 return False, True, "kernel fault: %s" % last[-220:]
         if ok_line in last:
+            need = EXPECT.get(case)
+            if need and need not in last:
+                time.sleep(0.4)
+                continue
             return True, False, "verdict PASS"
         if bad_line in last:
             return False, False, "verdict FAIL: %s" % last[-220:]

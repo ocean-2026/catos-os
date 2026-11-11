@@ -78,4 +78,10 @@ uint32_t fat_alloc(void);
 int  fat_read_cluster(uint32_t clus, uint8_t *out);
 int  fat_write_cluster(uint32_t clus, const uint8_t *buf);
 
+/* crash-consistency: verify FAT #2 mirrors FAT #1, repair #2 from #1.
+ * returns sectors repaired, -1 on ATA error; fat_mirror_last keeps the
+ * last result for the shell's fsck command (-2 = not run yet). */
+extern int fat_mirror_last;
+int  fat_verify_mirror(void);
+
 #endif

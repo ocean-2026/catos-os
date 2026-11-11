@@ -359,3 +359,40 @@ PASS demo pixels still intact after the CE run
   未做逐像素回归；24bpp 是默认推荐的真彩模式。
 - `gfx_blit` 逐行 `copy_from_user`，内核行缓冲 2400 B；`w*h*3` 无总量上限但受 800x600 裁剪，
   一次全屏 blit = 600 次 syscall 内拷贝，属同步操作，不要在 int 0x80 里期望异步完成。
+
+
+## 十四、消除劣根性第一批：syscall 边界 / 诊断 / fsck / 应用单一来源（2026-11-11）
+
+本轮目标：上一轮架构评估中「不动设计假设就能增量解决」的四项。**以下 #86 是 12.2 遗留观察的闭环，
+#87 / #88 是可靠性补强，#89 是构建链路修复。**
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **86** | **SYS_WRITE / SYS_FILE_WRITE / SYS_PIPE_WRITE 仍是「校验后裸解引用」** | 12.2 遗留：`task.c` 三处——`s[total+i]`（SYS_WRITE）、`(const char*)a2` 直传 `fs_write_raw_mode`（SYS_FILE_WRITE，且 fs 层跑在调用者 CR3）、`ud[wrote+k]`（SYS_PIPE_WRITE，**管道满时 `task_sleep_ticks()` 会切任务，裸指针在别人的 CR3 下被解引用**）。此外 `validate_uaddr(t, a, 1)` 逐边界补页的模式靠人手维护，漏一处就是 #78 复发 | 与 #78 同级：ring3 可让内核 #PF 停机；PIPE_WRITE 还叠加 CR3 错位风险 | 三处全部改为 `copy_from_user()` 内核快照：SYS_WRITE 按「不超过当前页尾」分段快照（字符串可能恰好终结在页边界，多读一页会强求调用者没映射的页）；FILE_WRITE 4 KiB 分块、首块带原 mode、后续 append；PIPE_WRITE 一次性快照 `PIPE_BUF` 到 `pwb[]`。`vprobe.c` 新增 `wr`/`fw`/`pw` 三个跨页 case（wr 还校验屏幕上真的输出了跨页字符串），回归 10/10 | **已修复** |
+| **87** | **故障后零诊断信息（劣根性：崩溃即 halt / 单行 kill）** | ring0 fault 只有寄存器 dump + halt；ring3 任务死掉只留一行，事后 shell 完全查不到发生了什么 | 崩溃不可归因；教学内核最常见的"刚才谁崩了"无法回答 | 新增 `diag.c/diag.h`：异常分发器对**致命故障统一记录** `g_fault_last`（向量/ring/tid/任务名/eip/cr2/err/eflags/tick）；shell 新增 `faultinfo`（含 PF 错误码位解码，如实测 `crash.ce` → `err=0x7 present write user`，U/S 位是"访问来自 user mode"而非"页面归属"）；导出 `panic(msg)` 供子系统统一停机入口。`tests/diag_regress.py`（端口 4463）4/4 | **已实现** |
+| **88** | **FAT 双 FAT 镜像无任何一致性检查** | `fat_flush()` 同步写两份 FAT，但没有任何启动时校验；掉电/崩溃若撕裂镜像写，坏的那份会静默参与后续操作 | 静默数据损坏（劣根性：无 fsck） | `fat_verify_mirror()`：mount 时只对「FAT#1 缓存中含非零项的扇区」逐扇区读回 FAT#2 比较，不一致则以 FAT#1（分配器唯一对磁盘复核过的那份）修复 FAT#2 并打印；shell `fsck` 命令可手动重跑。`diag_regress` 的 `fsck` 步骤 + 开机自动检查 | **已实现** |
+| **89** | **应用清单在 build.sh 与 gen_builtin.py 双处硬编码** | `build.sh:47` 与 `gen_builtin.py` 的 FILES/OPTIONAL 必须同步改；历史教训（"改了不生效"）正源于此；且 `ce_install_builtins()` 每次启动都打印 "Installed ..."（即使什么都没装） | 新增应用要改两处，漏一处即静默丢应用 | 新增 `build/apps.list` 作为**单一来源**：build.sh 读它编译，gen_builtin.py 读它内嵌（特殊产物 hello.elf / node.ce / docs / *.GO 走显式 EXTRA 表）；新增 `tests/test_app_list.py` 守卫（20 个应用、源文件存在、生成表覆盖、build.sh 无硬编码残留）；安装器只在真正安装了文件时打印 | **已实现** |
+
+### 14.1 验证结果（同一 ISO）
+
+```
+宿主: test_mkce 48/0  test_cc 10/0  test_app_list PASS(20 apps)
+      ce_regress PASS=11 SKIP=13 FAIL=0
+实机: vprobe 10/10（新增 wr/fw/pw 跨页 case）
+      qemu_regress 12/12（help size 14565→15210 = 新增两行命令说明）
+      diag_regress 4/4（crash-killed / faultinfo / fsck，新套件）
+      heap 4/4  go 7/7  snd 6/6  gfx24 0 failed
+      qa_probe_final exit=0
+```
+
+### 14.2 本轮明确不做（与架构评估一致）
+
+- 取消恒等映射 / SMP / 内核抢占：属重写级（12+ 文件 / 147 处全局状态），依赖顺序见 2026-11-10 评估。
+- 内存动态化（COW / 换出 / 解除 512 KiB 硬上限）：重构级，`frame_alloc` 固定 64 MiB、每 arena 单页表，
+  需要单独一轮；本轮只消掉了它最危险的前置（#86 裸指针）。
+- 应用与内核**完全**解耦（应用不再编进 kernel.bin）：加载链路已就绪（`task_spawn_ce` + ELF32 +
+  PATH 查找），缺的是内核侧 ISO9660 / 预置磁盘途径；可行路径是 GRUB module 携带应用包 +
+  multiboot info 解析，留给下一轮。
+- 12.2 的「全任务共享 static 缓冲」观察依然成立：本轮新增的 `wbuf[4096]` / `pwb[4096]` 同样
+  靠 `g_in_syscall` 非抢占保证安全，将来允许 syscall 让出 CPU 时须一并改分槽。
+

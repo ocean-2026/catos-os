@@ -1036,26 +1036,36 @@ void isr_syscall(int_frame_t *f) {
     switch (nr) {
     case SYS_WRITE: {
         /* v2.9: no 512-byte cap any more.  Read the user string in 256 B
-         * chunks (64 KiB total cap), validate each page as we reach it,
-         * and keep the UTF-8 decoder alive between non-final chunks so a
+         * chunks (64 KiB total cap).  #86: each chunk now goes through
+         * copy_from_user(); no user pointer is dereferenced in ring0.
+         * Keep the UTF-8 decoder alive between non-final chunks so a
          * hanzi split across a chunk boundary still renders correctly. */
         static char b[257];
         const char *s = (const char *)a1;
         uint32_t total = 0;
         int done = 0, err = 0;
-        if (validate_uaddr(t, (uint32_t)s, 1) != 0) { ret = (uint32_t)-3; break; }
+        /* Issue #86: never dereference a user pointer from ring0.  Take a
+         * kernel snapshot through copy_from_user(), which validates and
+         * faults in the exact span.  Read at most to the end of the current
+         * page: a NUL-terminated string may end exactly at a page boundary,
+         * and reading past it would demand a page the caller never mapped. */
         while (total < SYS_WRITE_MAX && !done) {
             int i = 0;
             while (i < SYS_WRITE_CHUNK) {
                 uint32_t a = (uint32_t)s + total + i;
-                /* Validate on chunk start and on every 4 KiB boundary.
-                 * validate_uaddr() also faults in demand-paged VMAs. */
-                if (i == 0 || (a & 0xFFFu) == 0) {
-                    if (validate_uaddr(t, a, 1) != 0) { err = -3; break; }
+                uint32_t n = 4096u - (a & 0xFFFu);
+                uint32_t want = (uint32_t)(SYS_WRITE_CHUNK - i);
+                if (n > want) n = want;
+                if (copy_from_user(t, b + i, (const void *)a, n) != 0) {
+                    err = -3; break;
                 }
-                char c = s[total + i];
-                if (!c) { done = 1; break; }
-                b[i++] = c;
+                int k = 0;
+                while (k < (int)n) {
+                    if (!b[i + k]) { done = 1; break; }
+                    k++;
+                }
+                i += k;
+                if (done) break;
             }
             if (err || !i) break;
             /* v2.5 redirection: pipe target first, then file, else console */
@@ -1430,10 +1440,33 @@ void isr_syscall(int_frame_t *f) {
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         if (size < 0 || size > 16384) { ret = (uint32_t)-3; break; }
         if (mode != 0 && mode != 1) { ret = (uint32_t)-3; break; }
-        if (size > 0 && validate_uaddr(t, (uint32_t)a2, size) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
-        int r = fs_write_raw_mode(p, (const char *)a2, (uint32_t)size, mode);
-        ret = r == 0 ? 0 : (uint32_t)r;
+        /* Issue #86: fs_write_raw_mode() runs on the caller's CR3 and used to
+         * receive the raw user pointer.  Snapshot it into a small kernel
+         * buffer in chunks; mode 0 truncates on the first call, later
+         * chunks append. */
+        {
+            static char wbuf[4096];
+            uint32_t off = 0;
+            int r;
+            if (size == 0) {
+                r = fs_write_raw_mode(p, "", 0, mode);
+            } else {
+                r = 0;
+                while (off < (uint32_t)size) {
+                    uint32_t n = (uint32_t)size - off;
+                    if (n > sizeof(wbuf)) n = (uint32_t)sizeof(wbuf);
+                    if (copy_from_user(t, wbuf,
+                            (const void *)((uint32_t)a2 + off), n) != 0) {
+                        r = -3; break;
+                    }
+                    r = fs_write_raw_mode(p, wbuf, n, off ? 1 : mode);
+                    if (r != 0) break;
+                    off += n;
+                }
+            }
+            ret = r == 0 ? 0 : (uint32_t)r;
+        }
         break;
     }
     case SYS_FILE_DELETE: {
@@ -1460,8 +1493,14 @@ void isr_syscall(int_frame_t *f) {
         int len = (int)a3;
         if (!pp || len < 0 || len > PIPE_BUF) { ret = (uint32_t)-1; break; }
         if (len == 0) { ret = 0; break; }
-        const char *ud = (const char *)a2;
-        if (validate_uaddr(t, (uint32_t)ud, len) != 0) { ret = (uint32_t)-3; break; }
+        /* Issue #86: the pipe loop can sleep to wait for free space, which
+         * switches tasks (and therefore CR3).  A raw user pointer would then
+         * be dereferenced in the wrong address space.  Snapshot it first. */
+        static char pwb[PIPE_BUF];
+        if (copy_from_user(t, pwb, (const void *)a2, (uint32_t)len) != 0) {
+            ret = (uint32_t)-3; break;
+        }
+        const char *ud = pwb;
         int wrote = 0, perr = 0;
         while (wrote < len) {
             if (!pp->open_r) { perr = -1; break; }       /* reader gone */

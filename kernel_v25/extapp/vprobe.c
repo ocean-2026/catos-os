@@ -93,6 +93,58 @@ static int case_strcpy(void) {
     return (d[0] == 'A' && d[7] == 'H' && d[8] == 0) ? 1 : 0;
 }
 
+/* SYS_WRITE: a NUL-terminated string whose terminator sits in page 1.
+ * The kernel must snapshot through copy_from_user() and must not fault in
+ * the page after the NUL (or crash while reading it). */
+static int case_write(void) {
+    unsigned char *base = heap_page();
+    if (!base) return 0;
+    char *s = (char *)(base + PAGE - 6);
+    s[0] = 'A'; s[1] = 'B'; s[2] = 'C'; s[3] = 'D'; s[4] = 'E'; s[5] = 0;
+    puts_("VPROBE-WR ");
+    __ce_api->write(s);
+    puts_("\n");
+    return 1;                       /* surviving is the assertion */
+}
+
+/* SYS_FILE_WRITE: an 8 KiB user buffer crossing into page 1, taken by the
+ * kernel through a chunked copy_from_user() snapshot.  Read the head and
+ * tail back to prove the bytes actually reached the file. */
+static int case_file_write(void) {
+    unsigned char *base = heap_page();
+    if (!base) return 0;
+    char *buf = (char *)(base + PAGE - 8);
+    char chk[256];
+    int i;
+    for (i = 0; i < 8192; i++) buf[i] = (char)('a' + (i % 26));
+    if (__ce_api->file_write("/VPROBE.DAT", buf, 8192, 0) != 0) return 0;
+    if (__ce_api->file_read("/VPROBE.DAT", chk, 256, 0) != 256) return 0;
+    for (i = 0; i < 256; i++) if (chk[i] != buf[i]) return 0;
+    if (__ce_api->file_read("/VPROBE.DAT", chk, 256, 7936) != 256) return 0;
+    for (i = 0; i < 256; i++) if (chk[i] != buf[7936 + i]) return 0;
+    __ce_api->file_delete("/VPROBE.DAT");
+    return 1;
+}
+
+/* SYS_PIPE_WRITE: the pipe loop may sleep (task switch => different CR3),
+ * so a raw user pointer is especially dangerous here.  Use 2 KiB, small
+ * enough that the single writer never has to block on a full pipe. */
+static int case_pipe_write(void) {
+    unsigned char *base = heap_page();
+    if (!base) return 0;
+    char *buf = (char *)(base + PAGE - 8);
+    char chk[256];
+    int i, h;
+    for (i = 0; i < 2048; i++) buf[i] = (char)('A' + (i % 26));
+    h = __ce_api->pipe_create();
+    if (h < 0) return 0;
+    if (__ce_api->pipe_write(h, buf, 2048) != 0) return 0;
+    if (__ce_api->pipe_read(h, chk, 256) != 256) return 0;
+    for (i = 0; i < 256; i++) if (chk[i] != buf[i]) return 0;
+    __ce_api->pipe_close(h);
+    return 1;
+}
+
 struct probe_case {
     const char *name;
     int (*fn)(void);
@@ -104,6 +156,9 @@ static const struct probe_case CASES[] = {
     { "hw",     case_hw_str },
     { "str",    case_str },
     { "strcpy", case_strcpy },
+    { "wr",     case_write },
+    { "fw",     case_file_write },
+    { "pw",     case_pipe_write },
 };
 
 __attribute__((section(".text.ce_entry")))

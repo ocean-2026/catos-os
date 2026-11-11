@@ -8,6 +8,7 @@
 #include "fs.h"
 #include "ata.h"
 #include "fat.h"
+#include "diag.h"       /* faultinfo: last-fault record */
 #include "ce.h"
 #include "net.h"
 #include "task.h"
@@ -118,6 +119,8 @@ static void cmd_help(void) {
         "  mkdir PATH   create a directory\n"
         "  touch FILE   create an empty file\n"
         "  format       erase the FAT32 volume (y/n confirm)\n"
+        "  fsck         verify/repair FAT #2 against FAT #1 (crash check)\n"
+        "  faultinfo    show the last fatal fault (vector, CR2, PF bits)\n"
         "  edit FILE    nano-style full-screen editor\n"
         "               (arrows move, ^O save, ^X exit, ^K del line, ^U clear)\n"
     );
@@ -1537,6 +1540,16 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "dns"))         cmd_dns(arg);
         else if (!strcmp_(cmd, "udp"))         cmd_udp(arg);
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
+        else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
+        else if (!strcmp_(cmd, "fsck")) {
+            int r = fat_verify_mirror();
+            if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
+            else if (r == 0) vga_write("fsck: FAT mirror OK\n");
+            else {
+                vga_write("fsck: repaired "); print_int(r);
+                vga_write(" FAT sector(s) from mirror #1\n");
+            }
+        }
         else if (!strcmp_(cmd, "color")) {
             if (!*arg) {
                 vga_write("usage: color 0..255  (text mode maps to 16 colors)\n");

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """gen_builtin.py - embed the CE apps and developer docs into the kernel.
 
-Reads extapp/bin/*.ce and extapp/docs/*.txt and emits
-src/builtin_apps.inc: C arrays + a builtin_files[] table.  The kernel
-compiles this in and ce_install_builtins() copies the files onto the
-FAT32 volume (/bin, /appdevelop) after format or at boot.
+Reads build/apps.list (shared with build.sh), extapp/bin/*.ce and
+extapp/docs/*.txt and emits src/builtin_apps.inc: C arrays + a
+builtin_files[] table.  The kernel compiles this in and
+ce_install_builtins() copies the files onto the FAT32 volume
+(/bin, /appdevelop) after format or at boot.
 """
 import os
 import sys
@@ -12,54 +13,43 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "src", "builtin_apps.inc")
 
-FILES = [
-    ("/bin/hello.ce",    os.path.join(ROOT, "extapp", "bin", "hello.ce")),
-    ("/bin/calc.ce",     os.path.join(ROOT, "extapp", "bin", "calc.ce")),
-    ("/bin/sysinfo.ce",  os.path.join(ROOT, "extapp", "bin", "sysinfo.ce")),
-    ("/bin/demo.ce",     os.path.join(ROOT, "extapp", "bin", "demo.ce")),
-    ("/bin/curl.ce",     os.path.join(ROOT, "extapp", "bin", "curl.ce")),
-    ("/bin/netinfo.ce",  os.path.join(ROOT, "extapp", "bin", "netinfo.ce")),
-    ("/bin/spinner.ce",  os.path.join(ROOT, "extapp", "bin", "spinner.ce")),
-    ("/bin/crash.ce",    os.path.join(ROOT, "extapp", "bin", "crash.ce")),
-    ("/bin/perms.ce",    os.path.join(ROOT, "extapp", "bin", "perms.ce")),
-    ("/bin/hw.ce",       os.path.join(ROOT, "extapp", "bin", "hw.ce")),
-    ("/bin/gfxdemo.ce",  os.path.join(ROOT, "extapp", "bin", "gfxdemo.ce")),
-    ("/bin/zhdemo.ce",   os.path.join(ROOT, "extapp", "bin", "zhdemo.ce")),
-    ("/bin/hello.elf",    os.path.join(ROOT, "extapp", "bin", "hello.elf")),
-    ("/bin/mmaptest.ce",  os.path.join(ROOT, "extapp", "bin", "mmaptest.ce")),
-    ("/bin/allocprobe.ce", os.path.join(ROOT, "extapp", "bin", "allocprobe.ce")),
-    ("/bin/heaptest.ce",  os.path.join(ROOT, "extapp", "bin", "heaptest.ce")),
-    ("/bin/go.ce",        os.path.join(ROOT, "extapp", "bin", "go.ce")),
+LIST = os.path.join(ROOT, "build", "apps.list")
+
+
+def app_names():
+    """Single source of truth shared with build.sh."""
+    with open(LIST, "r") as fh:
+        for line in fh:
+            name = line.strip()
+            if name and not name.startswith("#"):
+                yield name
+
+
+# Compiled by build.sh from build/apps.list.  Adding an app no longer
+# requires editing this file as well.
+FILES = [("/bin/%s.ce" % name,
+          os.path.join(ROOT, "extapp", "bin", name + ".ce"))
+         for name in app_names()]
+
+# Files NOT produced from apps.list: a prebuilt ELF and developer docs.
+FILES += [
+    ("/bin/hello.elf",           os.path.join(ROOT, "extapp", "bin", "hello.elf")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]
 
-# Optional extras: embedded when the .ce exists, skipped (with a note)
-# otherwise.  Used for the target-one toolchain (cc.ce) and node.ce, so a
-# tree that has not built them yet still links.
+# Optional extras: embedded when the file exists, skipped (with a note)
+# otherwise.  node.ce is built separately in build.sh; the rest are
+# hand-written scripts/docs that a partial tree may not have.
 OPTIONAL = [
-    ("/bin/cc.ce",       os.path.join(ROOT, "extapp", "bin", "cc.ce")),
-    ("/bin/node.ce",     os.path.join(ROOT, "node", "node.ce")),
-    # SB16 audio probe (v2.11).  Optional so a tree that has not built it
-    # yet still links -- build.sh compiles it, so a normal build embeds it.
-    ("/bin/sndtest.ce",  os.path.join(ROOT, "extapp", "bin", "sndtest.ce")),
-    # Issue #78 cross-page user-buffer probe (tests/vprobe_regress.py).
-    ("/bin/vprobe.ce",   os.path.join(ROOT, "extapp", "bin", "vprobe.ce")),
-    # v2.12 24bpp truecolour drawing probe (tests/gfx24_regress.py).
-    ("/bin/gfx24.ce",    os.path.join(ROOT, "extapp", "bin", "gfx24.ce")),
-    ("/bin/TEST.JS",     os.path.join(ROOT, "node", "TEST.JS")),
-    ("/appdevelop/HELLO.C",   os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
-    # Go scripts: the interpreter's own regression corpus.  They are
-    # installed on the FAT volume as /bin/*.GO so that
-    # "run /bin/go.ce /BIN/TEST.GO" works on real hardware.  The FAT
-    # directory entries are 8.3 upper-case, and go.c looks the script up
-    # with the same upper-case path.  Optional so a tree without them
-    # still links.
-    ("/bin/DEMO.GO",     os.path.join(ROOT, "extapp", "cases", "DEMO.GO")),
-    ("/bin/TEST.GO",     os.path.join(ROOT, "extapp", "cases", "TEST.GO")),
-    ("/bin/MINI_GO.GO",  os.path.join(ROOT, "extapp", "cases", "MINI_GO.GO")),
-    ("/bin/MINI_IN.GO",  os.path.join(ROOT, "extapp", "cases", "MINI_IN.GO")),
-    ("/bin/SYN.GO",      os.path.join(ROOT, "extapp", "cases", "SYN.GO")),
+    ("/bin/node.ce",           os.path.join(ROOT, "node", "node.ce")),
+    ("/bin/TEST.JS",           os.path.join(ROOT, "node", "TEST.JS")),
+    ("/appdevelop/HELLO.C",    os.path.join(ROOT, "extapp", "docs", "hello_c.txt")),
+    ("/bin/DEMO.GO",           os.path.join(ROOT, "extapp", "cases", "DEMO.GO")),
+    ("/bin/TEST.GO",           os.path.join(ROOT, "extapp", "cases", "TEST.GO")),
+    ("/bin/MINI_GO.GO",        os.path.join(ROOT, "extapp", "cases", "MINI_GO.GO")),
+    ("/bin/MINI_IN.GO",        os.path.join(ROOT, "extapp", "cases", "MINI_IN.GO")),
+    ("/bin/SYN.GO",            os.path.join(ROOT, "extapp", "cases", "SYN.GO")),
 ]
 
 def c_ident(path):

@@ -2,6 +2,7 @@
 #include "rtc.h"
 #include "ata.h"
 #include "io.h"
+#include "vga.h"        /* boot-time fsck notice */
 
 /* ---------- fixed layout constants ---------- */
 #define PART_START    1u        /* partition starts right after the MBR */
@@ -544,6 +545,45 @@ fail:
 /* ---------- probe ---------- */
 uint32_t fat_root(void) { return root_clus; }
 
+/* Crash-consistency: FAT #2 must mirror FAT #1 everywhere the cached FAT #1
+ * holds a non-zero entry.  A mismatch is a torn write from a previous
+ * crash; FAT #1 is the copy fat_alloc() re-verifies against disk, so it is
+ * the authority and FAT #2 gets repaired from it.  Only sectors with live
+ * entries are read back, so the check is fast even on a large volume.
+ * Returns sectors repaired, -1 on ATA failure.  fat_mirror_last keeps the
+ * result for the shell's `fsck` command (-2 = not run yet). */
+int fat_mirror_last = -2;
+
+int fat_verify_mirror(void) {
+    int fixed = 0;
+    for (uint32_t sec = 0; sec < fat_sz; sec++) {
+        int dirty = 0;
+        for (uint32_t i = 0; i < 128; i++) {
+            uint32_t c = sec * 128u + i;
+            if (c >= max_clus) break;
+            const uint8_t *e = &fat_cache[c * 4];
+            if (e[0] | e[1] | e[2] | e[3]) { dirty = 1; break; }
+        }
+        if (!dirty) continue;
+        uint8_t d1[512], d2[512];
+        if (ata_read_sectors(part_start + RESERVED + sec, 1, d1) != 0) {
+            fat_mirror_last = -1; return -1;
+        }
+        if (ata_read_sectors(part_start + RESERVED + fat_sz + sec, 1, d2) != 0) {
+            fat_mirror_last = -1; return -1;
+        }
+        int same = 1;
+        for (int k = 0; k < 512; k++) if (d1[k] != d2[k]) { same = 0; break; }
+        if (same) continue;
+        if (ata_write_sectors(part_start + RESERVED + fat_sz + sec, 1, d1) != 0) {
+            fat_mirror_last = -1; return -1;
+        }
+        fixed++;
+    }
+    fat_mirror_last = fixed;
+    return fixed;
+}
+
 int fat_probe(void) {
     uint8_t mbr[512], dbr[512];
 
@@ -607,6 +647,12 @@ int fat_probe(void) {
     next_free = 3;
     for (uint32_t c = 3; c < max_clus; c++)
         if (fat_get(c) == 0) { next_free = c; break; }
+
+    /* mount-time crash check: a previous unclean shutdown may have torn
+     * the mirror write; repair FAT #2 from FAT #1 before anything else
+     * can allocate through the stale copy. */
+    if (fat_verify_mirror() > 0)
+        vga_write("fsck: FAT mirror was inconsistent, repaired from FAT #1\n");
     return 0;
 }
 

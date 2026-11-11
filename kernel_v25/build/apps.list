@@ -1,0 +1,28 @@
+# Single source of truth for CE applications.
+#
+# build.sh compiles <name>.c -> extapp/bin/<name>.ce for every line here.
+# build/gen_builtin.py embeds extapp/bin/<name>.ce as /bin/<name>.ce.
+# Adding an app now takes ONE edit instead of two hard-coded lists.
+#
+# node.ce lives in kernel_v25/node/ and is built separately in build.sh;
+# it is listed as an OPTIONAL extra in gen_builtin.py.
+hello
+calc
+sysinfo
+demo
+curl
+netinfo
+spinner
+crash
+perms
+hw
+gfxdemo
+zhdemo
+mmaptest
+allocprobe
+heaptest
+go
+cc
+sndtest
+vprobe
+gfx24
