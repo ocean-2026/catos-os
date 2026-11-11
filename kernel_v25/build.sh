@@ -4,13 +4,16 @@
 #   sh build.sh          -> build/kernel.bin + catos.iso
 #   sh build.sh kernel   -> build/kernel.bin only
 #   sh build.sh iso      -> kernel.bin + catos.iso
+#   sh build.sh disk     -> apps + catos_disk.img (pre-populated /bin,
+#                           the decoupled app source; kernel image is
+#                           only the embedded fallback)
 #
 # ISO: built by build/patch_work_iso.py, which appends kernel.bin to the
 # proven GRUB template build/catos_work.iso (El Torito no-emulation boot).
 #
 # Run the result with:
 #   qemu-system-i386 -kernel build/kernel.bin -m 256
-#   qemu-system-i386 -cdrom catos.iso -m 256
+#   qemu-system-i386 -cdrom catos.iso -m 256 -hda catos_disk.img
 set -e
 
 CC=gcc
@@ -39,6 +42,7 @@ fi
 
 mkdir -p build
 
+build_apps() {
 echo "== building CE apps (extapp) =="
 # 'cc' is the self-hosting C compiler.  It was NOT in this list until
 # now, which is why extapp/bin/cc.ce had been a stale artifact since
@@ -60,6 +64,23 @@ done
 # argument to build_ce.sh selects the output directory).
 echo "== building CE apps (node) =="
 sh extapp/build_ce.sh ../node/node.c ../node
+}
+
+build_disk() {
+    if [ -n "$PY" ]; then
+        "$PY" build/mkdisk.py -o catos_disk.img -m 64
+    else
+        echo "ERROR: no python found for mkdisk.py" >&2
+        exit 1
+    fi
+    echo "OK -> catos_disk.img (boot with: -hda catos_disk.img)"
+}
+
+# early dispatch: the disk target packages extapp/bin into a FAT32 image
+# and does NOT need the kernel compile below.
+case "$1" in
+    disk) build_apps; build_disk; exit 0 ;;
+esac
 
 echo "== generating built-in app blobs =="
 if [ -n "$PY" ]; then

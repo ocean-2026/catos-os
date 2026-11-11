@@ -390,9 +390,47 @@ PASS demo pixels still intact after the CE run
 - 取消恒等映射 / SMP / 内核抢占：属重写级（12+ 文件 / 147 处全局状态），依赖顺序见 2026-11-10 评估。
 - 内存动态化（COW / 换出 / 解除 512 KiB 硬上限）：重构级，`frame_alloc` 固定 64 MiB、每 arena 单页表，
   需要单独一轮；本轮只消掉了它最危险的前置（#86 裸指针）。
-- 应用与内核**完全**解耦（应用不再编进 kernel.bin）：加载链路已就绪（`task_spawn_ce` + ELF32 +
-  PATH 查找），缺的是内核侧 ISO9660 / 预置磁盘途径；可行路径是 GRUB module 携带应用包 +
-  multiboot info 解析，留给下一轮。
+- 应用与内核**完全**解耦：✅ 已完成（见 15 节 #90）。不需要 GRUB module 方案——
+  宿主侧 `build/mkdisk.py` 直接生成预装 /bin 的 FAT32 磁盘镜像，布局与内核
+  `fat_mkfs()` 逐字节同构，文件清单与 `gen_builtin.py` 同源；内核内嵌副本降级为 fallback。
 - 12.2 的「全任务共享 static 缓冲」观察依然成立：本轮新增的 `wbuf[4096]` / `pwb[4096]` 同样
   靠 `g_in_syscall` 非抢占保证安全，将来允许 syscall 让出 CPU 时须一并改分槽。
+
+## 十五、应用与内核解耦（#90，2026-11-11）
+
+### #90 应用不再绑死内核镜像 —— 已解决
+
+**背景**：`gen_builtin.py` 把全部 CE 应用编进 `builtin_apps.inc`（~1.5 万行）塞入
+kernel.bin，改一个应用要重编内核、重做 ISO——"通用 OS"不合格的一条劣根性。
+此前评估认为需要 GRUB module + multiboot info 解析，但本机无 GRUB 工具链。
+
+**实际方案**（比 GRUB module 简单得多）：磁盘才是应用的真实来源。
+- `kernel_v25/build/mkdisk.py`：宿主侧复刻 `fat.c:fat_mkfs()` 的**逐字节同构**布局——
+  MBR（0x0C 分区 @LBA1）+ DBR + 备份 DBR@7 + FSInfo@2 + 双 FAT + 根目录 + 15 个标准目录；
+  文件清单 import `gen_builtin.py` 的 FILES/OPTIONAL（单一来源，与内核内嵌完全一致）。
+  `fat_probe()` 只认 DBR 字段，所以内核**无需任何改动**即可挂载。
+- 内核侧 `ce_install_builtins()`（#89 已改）：文件已存在即跳过 → 预装盘启动时
+  内嵌副本一个都不装，kernel.bin 只剩 bootstrap fallback 语义。
+- `build.sh disk` 目标：编译应用 → `mkdisk.py -o catos_disk.img -m 64`；
+  启动 `qemu-system-i386 -cdrom catos.iso -m 256 -hda catos_disk.img`。
+- 与 `fat_mkfs()` 的唯一有意偏差：簇大小下限 8 扇区（4 KiB）而非小卷的 1 扇区——
+  1 扇区簇的根目录簇只有 16 项，装不下 2 点项 + 15 目录 + 文件；`fat_probe()` 从 DBR
+  读 spc，不关心 mkfs 惯例。`FAT_CLUSTER_SZ_MAX=32 KiB` 上限内合法。
+
+**坑（都在 mkdisk.py 里修掉）**：
+- bytearray 切片赋值会**自动扩容**：dots 底板误写 22 字节 → `d[0:11] = 22字节`
+  把 32 字节 dirent 撑成 43 字节。dent() 加 11 字节断言。
+- `pe = mbr[446:]` 是切片**拷贝**，分区表写进了副本，MBR 全零 → fat_probe 找不到分区。
+- FAT 表只在 write_metadata 落盘一次，alloc() 之后未回写 → 目录项指向的簇在 FAT
+  里全 0，`ls` 能看到文件但 `run` err -4。finalize 时回写双 FAT。
+- `verify()` 改为从**镜像字节**读 FAT 走链，内存镜像自洽但镜像未回写这类错才抓得住。
+
+**验证**：
+```
+build/mkdisk.py 宿主自检：MBR 分区项 / DBR / FAT 镜像 / 每文件链 EOC 终止
+disk_regress 5/5（端口 4464）：免 format 挂载 / ls /bin 30 项 / hello.ce
+  与 vprobe（跨页用户缓冲）从磁盘实跑 / fsck 镜像一致
+qemu_regress 12/12（内嵌 fallback 流程不受影响）  test_app_list PASS
+build.sh disk 与 iso 两条路径均 EXIT=0
+```
 
