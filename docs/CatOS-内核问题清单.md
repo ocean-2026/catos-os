@@ -472,3 +472,35 @@ qemu 12/12、diag 4/4、disk 5/5、vprobe 10/10、snd 6/6、gfx24 0 failed、
 heap 4/4、go 7/7、qa_probe_final exit=0
 宿主 test_mkce 48、test_cc 10、test_app_list 21 apps、ce_regress 11P/13S/0F
 ```
+
+## 十七、ot / adofai 老项目收编与 v2.14（2026-11-11）
+
+来源：`catos-ot-game-2026-11-11.zip`（下载目录）——ot（Ocean's Tools）与 adofai 音游两条
+2026-10 月的用户态线，当时内核功能不全，项目在用户态做了大量 workaround。本轮原则：
+**内核已有的从 ot 去掉；内核没有但有价值的在内核态实现。**
+
+| # | 问题 | 确认值 / 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **92** | **CE 无非阻塞按键 API，应用被迫在 ring0 玩 PIC 手术** | adofai 实测结论：getch（槽 22）阻塞无超时 → 游戏屏蔽 IRQ1（PIC IMR bit1）后直读 0x64/0x60 轮询。副作用：IRQ1 屏蔽期间系统其他键盘消费者全部没输入 | 用户态应用篡改中断控制器；键盘饿死 | CE ABI **v2.14**：追加 slot 64 `int (*pollkey)(void)`（`kb_getkey_timed(0)`：解码待处理扫描码，无键 -1，永不阻塞/让出）。adofai 已改用 pollkey，IMR/端口代码全删 | **已修复** |
+| **93** | **shell 缺 cat / rm / cp / mv**（ot 在用户态各写了一份） | ot 的 cat/cd/mkdir/touch/ls/echo/... 全是内核 shell 未提供的岁月产物；ot 的 cp/mv/rm 根本没进命令表（交接文档与实际不符），但诉求真实存在 | 基本文件操作要靠 134KB 用户态工具箱 | shell 新增 `cat`（≤64 KiB 文本打印）、`rm`（=fs_delete+PERM_WRITE）、`cp`（≤16 KiB 分块，创建者 uid/gid + 0644）、`mv`（cp+rm）。ot 命令表中 30 个与 shell 重复的命令全部移除 | **已修复** |
+| **94** | **ot 是游离在仓库外的 134KB 单文件 + 旧 ABI 自声明** | ocean_tools.c 自带 33 槽 v2.2 API 结构体、`static __ce_api`（nm 找不到符号）、ce_main 在 `.text.start` 段；打包内核还是 2026-10-27 版 | 无法随系统分发、无法回归 | 收编为 `kernel_v25/extapp/ocntools.c`（+fmgr_port/hexedit_port/CFG/DEMO）：`.text.ce_entry`、全局 `__ce_api`、NULL api 判断 bug 顺手修掉；进 `build/apps.list`（23 应用）→ `/bin/ocntools.ce`（89 KB）；保留独有价值：脚本引擎/fmgr/hexedit/sft/vcs/cedbg/alias/banner/cecheck；help/about 重写并注明"基础命令在内核 shell" | **已修复** |
+| **95** | **adofai 游戏无音效、依赖被打包内核的 ring0 特权** | 交接文档 §2.5 已知限制："无音效（无声卡）"——当时内核确实没有；IRQ1 hack 同 #92 | 游戏体验 + 特权依赖 | 收编为 `extapp/adofai.c` → `/bin/adofai.ce`（9 KB）：改用 ce_abi.h 真 ABI，节拍音效走 v2.11 `snd_tone`（Perfect 880/EPerfect 740/Early 520/Miss&Multipress 180；无声卡静音不报错）；关卡 `/bin/DEMO1.TAD`、`/bin/DEMO2.TAD` 随镜像 | **已修复** |
+
+### 17.1 验证结果
+
+```
+新套件 tests/ot_regress.py（端口 4466）16/16 ALL PASS：
+  help 列出 cat/rm/cp/mv / format / cp+cat 二进制谱面 / mv 改名 / rm 删除 /
+  ocntools（PATH 回退启动 → 工具 help → exit 回 shell）/
+  adofai（菜单渲染 → ESC 干净退出）/ faultinfo 全程无 fault
+全套无回归：qemu 12/12、user 15/15、diag 4/4、disk 5/5、vprobe 10/10、
+  snd 6/6、heap 4/4、go 7/7、gfx24 0 failed、qa exit=0
+宿主：test_mkce 48、test_cc 10、test_app_list 23 apps、ce_regress 11P/16S/0F
+```
+
+### 17.2 本轮教训（测试侧，非内核）
+
+- FAT `ls` 显示 **8.3 名的原创建大小写**（`C1.TAD` → `c1.tad`），断言必须不区分大小写。
+- `format` 确认走 `kb_readline`，**y 之后必须发 Enter**；且 format 后内核重装内置应用
+  耗时数秒，期间打字会被吞——要等 "Installed missing built-in" 出现再发下一条命令。
+- 读屏竞态：`screendump` 落盘有延迟，关键断言前先做一次"沉淀读"再取值。

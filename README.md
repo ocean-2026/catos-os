@@ -16,14 +16,14 @@
 | 图形 | VGA 文本 + 800x600x24 真彩（VBE LFB），用户态绘图 ABI（rect/blit） |
 | 音频 | Sound Blaster 16（ISA DMA）PCM 驱动 |
 | 网络 | 用户态网络栈（curl/netinfo 等应用，能力位门控） |
-| 应用 | 20+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback |
+| 应用 | 22+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、ocntools 工具箱（文件管理器/十六进制编辑/搜索/版本控制）、adofai 音游、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback |
 
 ## 文档索引
 
 - `docs/ROADMAP-通用操作系统.md` —— **通用化路线图（行动纲领，先读这个）**
 - `docs/PROGRESS.md` —— 最新进度汇报（滚动更新）
-- `docs/CatOS-内核问题清单.md` —— 已知缺陷与遗留问题追踪（编号至 #91）
-- `kernel_v25/extapp/docs/API.txt` —— CE ABI 系统调用表（v2.13）
+- `docs/CatOS-内核问题清单.md` —— 已知缺陷与遗留问题追踪（编号至 #95）
+- `kernel_v25/extapp/docs/API.txt` —— CE ABI 系统调用表（v2.14）
 - `docs/merge-harvest-PRD.md` —— 「现项目 × 原项目合并取精华」需求分析（合并期权威依据）
 - `docs/merge-harvest-assess.md` —— 合并期评估与执行结论
 - `docs/orig-archive/` —— 原项目（`Catos_Better_better`）文档归档，**不参与构建**
@@ -75,9 +75,10 @@ qemu-system-i386 -cdrom kernel_v25/catos.iso -m 256
 qemu-system-i386 -cdrom kernel_v25/catos.iso -m 256 -hda kernel_v25/catos_disk.img
 ```
 
-启动后即以 **root** 登录（提示符 `root@catos:/$`）。常用命令：`help` / `ls` / `run` /
-`whoami` / `caps` / `faultinfo` / `fsck`；用户管理：`useradd` / `su` / `login` / `passwd` /
-`chcaps` / `chmod` / `chown`。
+启动后即以 **root** 登录（提示符 `root@catos:/$`）。常用命令：`help` / `ls` / `cat` /
+`cp` / `mv` / `rm` / `run` / `whoami` / `caps` / `faultinfo` / `fsck`；用户管理：
+`useradd` / `su` / `login` / `passwd` / `chcaps` / `chmod` / `chown`；进阶工具：
+`ocntools`（文件管理器/十六进制编辑/搜索/版本控制）、`adofai`（音游）。
 
 ## 测试
 
@@ -86,7 +87,7 @@ python tests/test_mkce.py          # CE01 格式单元测试（48 例）
 python tests/ce_regress.py         # CE 应用回归（宿主模拟器）
 python tests/test_app_list.py      # apps.list 单一来源守卫
 python tests/qemu_regress.py kernel_v25/catos.iso --qemu 'C:\qemu-portable\qemu-system-i386.exe'
-# 其余实机回归：diag_regress / disk_regress / user_regress / vprobe_regress /
+# 其余实机回归：ot_regress / diag_regress / disk_regress / user_regress / vprobe_regress /
 #              snd_regress / gfx24_regress / heap_regress / go_regress（各自独立 monitor 端口）
 ```
 

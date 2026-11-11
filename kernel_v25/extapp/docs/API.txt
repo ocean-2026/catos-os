@@ -567,3 +567,34 @@ caps / login / su / useradd / userdel / passwd / chcaps / chmod / chown
 manage the persistent /etc/passwd and /etc/acl.  Probe: /bin/captest.ce
 prints raw return codes (root on a NIC-less machine: net_init=-1;
 a zero-capability user: net_init=-13 -- hardware absence vs. denial).
+
+v2.14 -- pollkey (slot 64): non-blocking key read (2026-11-11)
+=====================================================================
+
+Games, animations and any event-loop program need "read a key IF one is
+pending, never wait".  getch() (slot 22) blocks; polling ports 0x64/0x60
+from a CE was the old workaround -- and it required masking IRQ1 in the
+PIC, which starved every other keyboard consumer.  v2.14 does it
+properly, in the kernel:
+
+  int pollkey(void);                       /* slot 64 */
+
+  - Decodes pending scancodes exactly like getch() (modifiers, break
+    codes and 0xE0 prefixes are consumed silently) and returns ONE key:
+    an ASCII value, or a KB_* special key (all > 0xFF).
+  - Returns -1 when nothing is pending.  NEVER blocks, NEVER yields.
+  - Old binaries see NULL for this slot: check the pointer first.
+
+  if (api->pollkey) { int k = api->pollkey(); if (k == 27) quit(); }
+
+Reference apps: /bin/adofai.ce (rhythm game -- uses pollkey for taps,
+ESC handling and the menu, plus snd_tone for beat sounds) and the
+kernel shell itself.  On-metal regression: tests/ot_regress.py.
+
+Also in v2.14 (shell only, no new slots): the shell gained cat / rm /
+cp / mv builtins, imported from the retired ot (Ocean's Tools) user-mode
+REPL.  File permissions follow the standard ACL checks; cp creates the
+target owned by the caller with mode 0644.  ot itself lives on as
+/bin/ocntools.ce with its unique tools (file manager, hex editor,
+search, version control, image inspector) -- the duplicated commands
+are gone.

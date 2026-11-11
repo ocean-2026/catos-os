@@ -1,6 +1,6 @@
 ﻿# CatOS 进度汇报（2026-11-11）
 
-> 覆盖窗口：2026-11-07 合流之后至 2026-11-11 · 主线 `D:/CatOs` master
+> 覆盖窗口：2026-11-07 合流之后至 2026-11-11（含 v2.12~v2.14）· 主线 `D:/CatOs` master
 > 上一份汇报（2026-10-30 自举/JS 解释器轮）随 git 历史保留。
 > 行动纲领见 `docs/ROADMAP-通用操作系统.md`；问题明细见 `docs/CatOS-内核问题清单.md`。
 
@@ -17,6 +17,7 @@
 | 消除劣根性第一批：syscall 边界/诊断/fsck/单一来源（#86~#89） | ✅ 完成 | `62cd529` |
 | 应用与内核解耦（#90） | ✅ 完成 | `4fb3318` |
 | 多用户 + 能力权限 + 初始 root（#91） | ✅ 完成 | `febc9b8`（v2.13） |
+| ot / adofai 老项目收编 + pollkey + shell 文件四件套（#92~#95） | ✅ 完成 | `443c067`（v2.14） |
 | GitHub 推送 | ❌ 未做 | 全部提交仅本地 |
 
 ---
@@ -47,15 +48,29 @@
   提示符 `user@catos:/$`；`format`/`fsck` 要 CAP_FSADMIN，`sudo`/用户管理要 CAP_USERADM。
 - **零新增 syscall 槽**，64 槽 ABI 不动。`user_regress.py` 15/15（端口 4465）。
 
+### 2.4 #92~#95 ot / adofai 老项目收编（`443c067`，v2.14）
+- 下载目录的 `catos-ot-game-2026-11-11.zip`（ot 工具链 + adofai 音游，2026-10 用户态线）
+  按"内核已有的从 ot 去掉、没有但有价值的内核态实现"收编。
+- **#92**：CE ABI v2.14 追加 slot 64 `pollkey()`（非阻塞按键）；adofai 的
+  "屏蔽 IRQ1 + 直读 PS/2 端口" ring0 hack 全删。
+- **#93**：shell 新增 `cat`/`rm`/`cp`/`mv`（权限走 ACL，cp 归属创建者 0644）；
+  ot 命令表中 30 个与 shell 重复的命令移除。
+- **#94**：ot 收编为 `extapp/ocntools.c` → `/bin/ocntools.ce`（脚本引擎/文件管理器/
+  十六进制编辑/搜索/版本控制/镜像检查保留），修了 `.text.ce_entry`、全局 `__ce_api`、
+  NULL api 解引用三处遗留。
+- **#95**：adofai 收编为 `extapp/adofai.c` → `/bin/adofai.ce`，节拍音效走 v2.11
+  `snd_tone`（无声卡静音不报错）；关卡 DEMO1/DEMO2.TAD 随镜像。
+- 新回归套件 `tests/ot_regress.py` 16/16，全套无回归（见问题清单 17.1）。
+
 ---
 
-## 三、回归总账（#91 后同 ISO 全套）
+## 三、回归总账（#95 后同 ISO 全套）
 
 ```
-实机: user_regress 15/15  qemu_regress 12/12  diag_regress 4/4  disk_regress 5/5
-      vprobe_regress 10/10  snd_regress 6/6  gfx24_regress 0 failed
+实机: ot_regress 16/16  qemu_regress 12/12  user_regress 15/15  diag_regress 4/4
+      disk_regress 5/5  vprobe_regress 10/10  snd_regress 6/6  gfx24_regress 0 failed
       heap_regress 4/4  go_regress 7/7  qa_probe_final exit=0
-宿主: test_mkce 48  test_cc 10  test_app_list 21 apps  ce_regress 11P/13S/0F
+宿主: test_mkce 48  test_cc 10  test_app_list 23 apps  ce_regress 11P/16S/0F
 ```
 
 ## 四、已知遗留（详见问题清单）
