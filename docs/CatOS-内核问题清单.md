@@ -434,3 +434,41 @@ qemu_regress 12/12（内嵌 fallback 流程不受影响）  test_app_list PASS
 build.sh disk 与 iso 两条路径均 EXIT=0
 ```
 
+
+## 十六、用户机制与细粒度能力（#91，2026-11-11）
+
+**需求**：多用户账户、权限深度细粒度自定义、初始用户 root。
+
+**方案**（内核侧强制，shell 呈现；**零新增 CE syscall 槽**，64 槽 ABI 不动）：
+
+- 新模块 `src/user.c` + `include/user.h`：持久化 `/etc/passwd`（name:uid:gid:home:shell:caps:passhash）
+  与 `/etc/acl`（path:uid:gid:mode，12 位 Unix owner/group/other）。首次启动种子：
+  `root`（uid 0，CAP_ALL，初始用户）+ `user`（uid 100，CAP_NET|KILL|AUDIO|DEVICE，
+  等价旧 uid-100 行为）。djb2 口令哈希（教学内核无密码学，仅防窥视）。
+- `task_t` 增加 `gid`/`caps`；`task_spawn_ce()` 按 uid 查用户库注入；shell/idle 为 root。
+- `fs_perm_check(path, uid, gid, need)` 重写为标准 Unix 语义：owner→6-8 位、
+  组→3-5 位、other→0-2 位；root 直通；无 ACL 项时读/执行放行、写走 /home//tmp 白名单
+  （与旧 `perm_default_write` 行为一致）。旧编码（owner 位在 <<6、无组）废弃。
+  创建文件/目录写入创建者 uid/gid + 0644/0755，`chmod`/`chown` 改 `/etc/acl` 并落盘。
+- **能力位**：CAP_NET(0x1)/KILL(0x2)/FSADMIN(0x4)/AUDIO(0x8)/USERADM(0x10)/
+  DEVICE(0x20)/SYS(0x40)。内核 syscall 分发处强制：网络 25-32 槽、音频 57-60 槽
+  缺位返回 -13；`task_kill` 扩为 root|属主|CAP_KILL。shell 的 format/fsck 要
+  CAP_FSADMIN、sudo/useradd/userdel/passwd/chcaps 要 CAP_USERADM。
+- shell 新命令（ring0 直读用户库）：whoami/id/lsuser(users)/caps/login/su/useradd/
+  userdel/passwd/chcaps/chmod/chown；`login`/`su` 切换会话用户（root 可免密 su），
+  裸命令与 `run` 以会话用户执行，`sudo` 固定 root。提示符显示 `user@catos:/$`。
+- 启动 `shell_run()` 用 `user_db_init()`+`acl_init()` 替代 `fs_perm_seed()`（已删）。
+
+**行为注意**：无网卡的 root `net_init=-1`（真没硬件）、caps=0 的 guest `net_init=-13`
+（能力拒绝）——新增 `/bin/captest.ce` 探针区分两者。`perms.ce` 合同不变
+（guest 跑仍是 /bin、/etc EACCES + /home OK）。
+
+**验证**：
+```
+user_regress 15/15（端口 4465）：whoami=root / lsuser / useradd+持久化 / id /
+  login guest / sudo+format 拒绝 / perms as guest / captest root(-1) vs guest(-13) /
+  su / caps 图例 / 全程无 fault
+qemu 12/12、diag 4/4、disk 5/5、vprobe 10/10、snd 6/6、gfx24 0 failed、
+heap 4/4、go 7/7、qa_probe_final exit=0
+宿主 test_mkce 48、test_cc 10、test_app_list 21 apps、ce_regress 11P/13S/0F
+```

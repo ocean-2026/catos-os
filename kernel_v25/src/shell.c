@@ -100,6 +100,15 @@ static void cmd_help(void) {
         "  ps           list tasks (tid, uid, ring, state)\n"
         "  kill TID     terminate a task\n"
         "  sudo CMD     run a program as root (uid 0)\n"
+        "  -- users & permissions (v2.13, initial user: root) --\n"
+        "  whoami       current session user\n"
+        "  id [USER]    uid/gid/capabilities of a user\n"
+        "  lsuser       list accounts (/etc/passwd)\n"
+        "  caps         capability bit legend + session caps\n"
+        "  login U [PW] switch session user ('su' = alias)\n"
+        "  useradd N [UID [GID [CAPS]]]  add user (CAP_USERADM)\n"
+        "  userdel N | passwd N PW | chcaps HEX N\n"
+        "  chmod OCT PATH | chown UID[:GID] PATH  (persistent /etc/acl)\n"
         "  uptime       seconds since boot + task count\n"
         "  top          live task monitor (CPU% per task, any key quits)\n"
         "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
@@ -1400,13 +1409,289 @@ static void cmd_edit(const char *arg) {
     }
 }
 
+/* ---------- session user & capability commands (v2.13) --------------------
+ * The session starts as root (the initial user).  `login`/`su` switch it;
+ * `useradd`/`userdel`/`passwd`/`chcaps` edit the persistent /etc/passwd;
+ * `chmod`/`chown` edit the persistent /etc/acl.  Everything here runs in
+ * ring0 and talks to user.c directly -- no new syscall slots. */
+static int atoi_(const char *s) {
+    int v = 0, neg = 0;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+    return neg ? -v : v;
+}
+static uint32_t hex32_(const char *s) {
+    uint32_t v = 0;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    for (;;) {
+        int d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+        else break;
+        v = v * 16u + (uint32_t)d;
+        s++;
+    }
+    return v;
+}
+static uint32_t octal32_(const char *s) {
+    uint32_t v = 0;
+    while (*s >= '0' && *s <= '7') { v = v * 8u + (uint32_t)(*s++ - '0'); }
+    return v;
+}
+/* resolve a possibly-relative path against the cwd (fs_pwd gives cwd) */
+static void abs_path_(const char *in, char *out, int outlen) {
+    if (!in || !*in || in[0] == '/') {
+        int i = 0;
+        for (; in && in[i] && i < outlen - 1; i++) out[i] = in[i];
+        out[i] = 0;
+        return;
+    }
+    char pwd[FS_PATH_MAX];
+    fs_pwd(pwd, sizeof(pwd));
+    int o = 0;
+    for (int i = 0; pwd[i] && o < outlen - 1; i++) out[o++] = pwd[i];
+    if (o > 0 && out[o - 1] != '/' && o < outlen - 1) out[o++] = '/';
+    for (int i = 0; in[i] && o < outlen - 1; i++) out[o++] = in[i];
+    out[o] = 0;
+}
+
+static int      g_uid  = UID_ROOT;
+static int      g_gid  = 0;
+static uint32_t g_caps = CAP_ALL;
+
+static void session_apply(void) {
+    user_rec_t *u = user_by_uid(g_uid);
+    if (u) { g_gid = u->gid; g_caps = u->caps; }
+}
+
+static void print_caps(uint32_t caps) {
+    if (caps == CAP_ALL) { vga_write("all"); return; }
+    static const struct { uint32_t bit; const char *nm; } T[] = {
+        { CAP_NET, "net" },      { CAP_KILL, "kill" },
+        { CAP_FSADMIN, "fsadmin" }, { CAP_AUDIO, "audio" },
+        { CAP_USERADM, "useradm" }, { CAP_DEVICE, "device" },
+        { CAP_SYS, "sys" },
+    };
+    int first = 1;
+    for (unsigned i = 0; i < sizeof(T) / sizeof(T[0]); i++)
+        if (caps & T[i].bit) {
+            if (!first) vga_write(",");
+            vga_write(T[i].nm);
+            first = 0;
+        }
+    if (first) vga_write("none");
+}
+
+static int session_is_admin(void) {
+    return g_uid == UID_ROOT || (g_caps & CAP_USERADM);
+}
+static int session_is_fsadmin(void) {
+    return g_uid == UID_ROOT || (g_caps & CAP_FSADMIN);
+}
+
+static void cmd_whoami(void) {
+    user_rec_t *u = user_by_uid(g_uid);
+    vga_write(u ? u->name : "?");
+    vga_write("\n");
+}
+
+static void cmd_id(const char *name) {
+    user_rec_t *u = (name && *name) ? user_by_name(name) : user_by_uid(g_uid);
+    if (!u) { vga_write("id: no such user\n"); return; }
+    vga_write("uid=");    print_int(u->uid);
+    vga_write(" gid=");   print_int(u->gid);
+    vga_write(" name=");  vga_write(u->name);
+    vga_write(" home=");  vga_write(u->home);
+    vga_write("\ncaps=0x"); print_hex(u->caps);
+    vga_write(" ("); print_caps(u->caps); vga_write(")\n");
+    vga_write("pw="); vga_write(u->passhash ? "set" : "none");
+    vga_write(" shell="); vga_write(u->shell); vga_write("\n");
+}
+
+static void cmd_lsuser(void) {
+    vga_write("UID  GID  PW   CAPS       NAME\n");
+    for (int i = 0; i < MAX_USERS; i++) {
+        user_rec_t *u = user_at(i);
+        if (!u || !u->used) continue;
+        print_pad(u->uid, 4); vga_write(" ");
+        print_pad(u->gid, 4); vga_write(" ");
+        vga_write(u->passhash ? "yes  " : "no   ");
+        print_hex(u->caps);
+        vga_write("  ");
+        vga_write(u->name);
+        vga_write("\n");
+    }
+}
+
+static void cmd_caps_legend(void) {
+    vga_write("capability bits (per-user, /etc/passwd):\n");
+    vga_write("  0x0001 net      network: http/dns/udp/ping/ip\n");
+    vga_write("  0x0002 kill     kill tasks not owned by self\n");
+    vga_write("  0x0004 fsadmin  format / fsck\n");
+    vga_write("  0x0008 audio    SB16 PCM playback\n");
+    vga_write("  0x0010 useradm  useradd/userdel/passwd/chcaps/su\n");
+    vga_write("  0x0020 device   raw device + low-level hw info\n");
+    vga_write("  0x0040 sys      reserved\n");
+    vga_write("session: uid="); print_int(g_uid);
+    vga_write(" caps=0x"); print_hex(g_caps);
+    vga_write(" ("); print_caps(g_caps); vga_write(")\n");
+}
+
+/* login USER [PW]  /  su [USER [PW]] */
+static void cmd_login(char *arg, int as_su) {
+    char *argv[3];
+    int argc = split_words(arg, argv, 3);
+    const char *name = argc >= 1 ? argv[0] : "root";
+    const char *pw   = argc >= 2 ? argv[1] : "";
+    user_rec_t *u = user_by_name(name);
+    if (!u) { vga_write("login: no such user\n"); return; }
+    if (u->uid == g_uid) { vga_write("already session user\n"); return; }
+    int need_pw = u->passhash != 0;
+    if (as_su && g_uid == UID_ROOT) need_pw = 0;      /* root may su freely */
+    if (need_pw && user_check_pw(u, pw) != 0) {
+        vga_write("login: incorrect password\n");
+        return;
+    }
+    g_uid = u->uid;
+    session_apply();
+    vga_write("logged in as "); vga_write(u->name);
+    vga_write(" (uid "); print_int(g_uid);
+    vga_write(")\n");
+}
+
+/* useradd NAME [UID [GID [CAPS_HEX]]] */
+static void cmd_useradd(char *arg) {
+    if (!session_is_admin()) { vga_write("useradd: permission denied\n"); return; }
+    char *argv[5];
+    int argc = split_words(arg, argv, 5);
+    if (argc < 1) {
+        vga_write("usage: useradd NAME [UID [GID [CAPS_HEX]]]\n");
+        vga_write("       e.g. useradd guest 101 101 0   (no capabilities)\n");
+        return;
+    }
+    const char *name = argv[0];
+    int uid  = argc >= 2 ? atoi_(argv[1]) : 101;
+    int gid  = argc >= 3 ? atoi_(argv[2]) : uid;
+    uint32_t caps = argc >= 4 ? hex32_(argv[3]) : 0;
+    char home[48];
+    int o = 0;
+    for (const char *q = "/home/"; *q && o < 47; q++) home[o++] = *q;
+    for (const char *q = name; *q && o < 47; q++) home[o++] = *q;
+    home[o] = 0;
+    int r = user_add(name, uid, gid, home, "/bin/shell.ce", caps);
+    if (r == -5) { vga_write("useradd: name or uid already exists\n"); return; }
+    if (r != 0)  { vga_write("useradd: failed (table full?)\n"); return; }
+    if (user_save() != 0) vga_write("useradd: WARNING: could not persist /etc/passwd\n");
+    else vga_write("user added (persisted to /etc/passwd)\n");
+}
+
+static void cmd_userdel(char *arg) {
+    if (!session_is_admin()) { vga_write("userdel: permission denied\n"); return; }
+    char *argv[2];
+    if (split_words(arg, argv, 2) < 1) { vga_write("usage: userdel NAME\n"); return; }
+    if (!strcmp_(argv[0], "root")) { vga_write("userdel: root is undeletable\n"); return; }
+    if (atoi_(argv[0]) == 0 && argv[0][0] >= '0' && argv[0][0] <= '9') {
+        /* numeric arg: refuse deleting root by number too */
+    }
+    int r = user_del(argv[0]);
+    if (r == -1) { vga_write("userdel: no such user\n"); return; }
+    if (user_save() != 0) vga_write("userdel: WARNING: could not persist\n");
+    else vga_write("user deleted\n");
+}
+
+static void cmd_passwd(char *arg) {
+    char *argv[3];
+    int argc = split_words(arg, argv, 3);
+    const char *name = argc >= 1 ? argv[0] : (user_by_uid(g_uid) ? user_by_uid(g_uid)->name : 0);
+    if (!name) { vga_write("usage: passwd [NAME] NEWPW\n"); return; }
+    if (argc < 2) { vga_write("usage: passwd NAME NEWPW\n"); return; }
+    user_rec_t *u = user_by_name(name);
+    if (!u) { vga_write("passwd: no such user\n"); return; }
+    if (u->uid != g_uid && !session_is_admin()) {
+        vga_write("passwd: permission denied\n");
+        return;
+    }
+    user_set_pw(name, argv[1]);
+    if (user_save() != 0) vga_write("passwd: WARNING: could not persist\n");
+    else vga_write("password set\n");
+}
+
+static void cmd_chcaps(char *arg) {
+    if (!session_is_admin()) { vga_write("chcaps: permission denied\n"); return; }
+    char *argv[3];
+    if (split_words(arg, argv, 3) < 2) { vga_write("usage: chcaps CAPS_HEX NAME\n"); return; }
+    if (user_set_caps(argv[1], hex32_(argv[0])) != 0) {
+        vga_write("chcaps: no such user\n");
+        return;
+    }
+    if (user_save() != 0) vga_write("chcaps: WARNING: could not persist\n");
+    else vga_write("capabilities updated\n");
+    user_rec_t *tu = user_by_name(argv[1]);
+    if (tu && g_uid == tu->uid) session_apply();
+}
+
+/* chmod OCTAL PATH   (owner or root) */
+static void cmd_chmod(char *arg) {
+    char *argv[3];
+    if (split_words(arg, argv, 3) < 2) { vga_write("usage: chmod OCTAL PATH\n"); return; }
+    int mode = (int)octal32_(argv[0]);
+    char path[FS_PATH_MAX];
+    abs_path_(argv[1], path, sizeof(path));
+    int fuid, fgid, fmode;
+    if (acl_lookup(path, &fuid, &fgid, &fmode) != 0) {
+        /* default entry: root-owned 0644/0755 -- only root may chmod it */
+        fuid = UID_ROOT;
+    }
+    if (g_uid != UID_ROOT && g_uid != fuid) {
+        vga_write("chmod: not the owner\n");
+        return;
+    }
+    if (acl_set(path, fuid, fgid, mode) != 0) {
+        vga_write("chmod: acl table full\n");
+        return;
+    }
+    if (acl_save() != 0) vga_write("chmod: WARNING: could not persist\n");
+    else vga_write("mode updated\n");
+}
+
+/* chown UID[:GID] PATH   (root or CAP_FSADMIN) */
+static void cmd_chown(char *arg) {
+    if (!session_is_fsadmin()) { vga_write("chown: permission denied\n"); return; }
+    char *argv[3];
+    if (split_words(arg, argv, 3) < 2) { vga_write("usage: chown UID[:GID] PATH\n"); return; }
+    int uid = 0, gid = -1;
+    const char *spec = argv[0];
+    int i = 0;
+    for (; spec[i] && spec[i] != ':'; i++) ;
+    if (spec[i] == ':') {
+        char nb[12]; int j = 0;
+        for (int k = 0; k < i && j < 11; k++) nb[j++] = spec[k];
+        nb[j] = 0; uid = atoi_(nb);
+        j = 0;
+        for (int k = i + 1; spec[k] && j < 11; k++) nb[j++] = spec[k];
+        nb[j] = 0;
+        gid = spec[i + 1] ? atoi_(nb) : -1;
+    } else uid = atoi_(spec);
+    char path[FS_PATH_MAX];
+    abs_path_(argv[1], path, sizeof(path));
+    int fuid, fgid, fmode;
+    if (acl_lookup(path, &fuid, &fgid, &fmode) != 0) { fuid = UID_ROOT; fgid = 0; fmode = 0644; }
+    if (gid < 0) gid = fgid;
+    if (acl_set(path, uid, gid, fmode) != 0) { vga_write("chown: acl table full\n"); return; }
+    if (acl_save() != 0) vga_write("chown: WARNING: could not persist\n");
+    else vga_write("owner updated\n");
+}
+
 /* ---------- shell loop ---------- */
 static char input[256];
 
 static void prompt(void) {
     char pwd[160];
     fs_pwd(pwd, sizeof(pwd));
+    user_rec_t *u = user_by_uid(g_uid);
     vga_set_fg(VGA_LIGHT_GREEN);
+    if (u) { vga_write(u->name); vga_write("@"); }
     vga_write("catos");
     vga_set_fg(VGA_LIGHT_BLUE);
     vga_write(":");
@@ -1446,7 +1731,11 @@ void shell_run(void) {
     vga_clear();
     fs_init();
     ce_init();
-    fs_perm_seed();
+    /* v2.13: load the persistent user database + ACL (seeds root/user and
+     * the default owner/group/other table when the files are absent) */
+    user_db_init();
+    acl_init();
+    session_apply();                /* boot session = root (initial user) */
     cmd_about();
     net_boot_status();
     if (!fs_fs_ready())
@@ -1490,11 +1779,17 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
         else if (!strcmp_(cmd, "mkdir"))      cmd_mkdir(arg);
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
-        else if (!strcmp_(cmd, "format"))     cmd_format();
+        else if (!strcmp_(cmd, "format")) {
+            if (session_is_fsadmin()) cmd_format();
+            else vga_write("format: permission denied (need CAP_FSADMIN)\n");
+        }
         else if (!strcmp_(cmd, "edit"))      cmd_edit(arg);
-        else if (!strcmp_(cmd, "run"))        cmd_run(arg, UID_ROOT);
+        else if (!strcmp_(cmd, "run"))        cmd_run(arg, g_uid);
         else if (!strcmp_(cmd, "sudo")) {
-            /* sudo CMD ...: run as root (uid 0) */
+            /* sudo CMD ...: run as root; requires CAP_USERADM (or root) */
+            if (!session_is_admin()) {
+                vga_write("sudo: permission denied (need CAP_USERADM)\n");
+            } else {
             while (*arg == ' ') arg++;
             char *scmd = arg;
             char *sarg = arg;
@@ -1512,7 +1807,21 @@ void shell_run(void) {
                     vga_write(scmd); vga_write("\n");
                 }
             }
+            }
         }
+        else if (!strcmp_(cmd, "whoami"))      cmd_whoami();
+        else if (!strcmp_(cmd, "id"))          cmd_id(arg);
+        else if (!strcmp_(cmd, "lsuser") ||
+                 !strcmp_(cmd, "users"))       cmd_lsuser();
+        else if (!strcmp_(cmd, "caps"))        cmd_caps_legend();
+        else if (!strcmp_(cmd, "login"))       cmd_login(arg, 0);
+        else if (!strcmp_(cmd, "su"))          cmd_login(arg, 1);
+        else if (!strcmp_(cmd, "useradd"))     cmd_useradd(arg);
+        else if (!strcmp_(cmd, "userdel"))     cmd_userdel(arg);
+        else if (!strcmp_(cmd, "passwd"))      cmd_passwd(arg);
+        else if (!strcmp_(cmd, "chcaps"))      cmd_chcaps(arg);
+        else if (!strcmp_(cmd, "chmod"))       cmd_chmod(arg);
+        else if (!strcmp_(cmd, "chown"))       cmd_chown(arg);
         else if (!strcmp_(cmd, "ps"))          task_ps_print();
         else if (!strcmp_(cmd, "top"))         cmd_top();
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
@@ -1542,12 +1851,16 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
         else if (!strcmp_(cmd, "fsck")) {
+            if (!session_is_fsadmin()) {
+                vga_write("fsck: permission denied (need CAP_FSADMIN)\n");
+            } else {
             int r = fat_verify_mirror();
             if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
             else if (r == 0) vga_write("fsck: FAT mirror OK\n");
             else {
                 vga_write("fsck: repaired "); print_int(r);
                 vga_write(" FAT sector(s) from mirror #1\n");
+            }
             }
         }
         else if (!strcmp_(cmd, "color")) {
@@ -1611,15 +1924,15 @@ void shell_run(void) {
                     if (h < 0) { vga_write("run: no pipe slots\n"); }
                     else {
                         vga_clear();
-                        spawn_ce_redirect(p, argc, argv, 0, UID_USER, 0, 0, h, -1);
-                        spawn_ce_redirect(file2, argc2, argv2, 1, UID_USER, 0, 0, -1, h);
+                        spawn_ce_redirect(p, argc, argv, 0, g_uid, 0, 0, h, -1);
+                        spawn_ce_redirect(file2, argc2, argv2, 1, g_uid, 0, 0, -1, h);
                     }
                 } else {
                     vga_clear();
-                    spawn_ce_redirect(p, argc, argv, !bg, UID_USER,
+                    spawn_ce_redirect(p, argc, argv, !bg, g_uid,
                                       out_redir, append, -1, -1);
                 }
-            } else if (run_from_path(cmd, argv, argc, bg, UID_USER) != 0) {
+            } else if (run_from_path(cmd, argv, argc, bg, g_uid) != 0) {
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
             }

@@ -60,16 +60,6 @@ static void wdec(int v) {
     o[j] = 0; w(o);
 }
 
-static int kstreq(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return *a == *b;
-}
-
-static int kstrneq(const char *a, const char *b, int n) {
-    for (int i = 0; i < n; i++) { if (a[i] != b[i]) return 0; if (!a[i]) return 1; }
-    return 1;
-}
-
 
 /* ---- task table -------------------------------------------------------- */
 
@@ -111,6 +101,8 @@ void tasks_init(void) {
     tasks[0].tid = 0;
     tasks[0].state = T_RUNNING;
     tasks[0].uid = UID_ROOT;
+    tasks[0].gid = 0;
+    tasks[0].caps = CAP_ALL;    /* boot shell = root, all capabilities */
     tasks[0].ring0 = 1;
     tasks[0].resume_frame = 0;
     tasks[0].parent = 0;
@@ -127,6 +119,8 @@ void tasks_init(void) {
     idle_task_v.tid = -1;
     idle_task_v.state = T_READY;
     idle_task_v.uid = UID_ROOT;
+    idle_task_v.gid = 0;
+    idle_task_v.caps = CAP_ALL;
     idle_task_v.ring0 = 1;
     idle_task_v.resume_frame = 0;
     idle_task_v.kstack_top = (uint32_t)idle_stack + sizeof(idle_stack);
@@ -355,7 +349,9 @@ void task_exit_current(int code) {
 int task_kill(int tid, int by_uid) {
     task_t *t = task_by_tid(tid);
     if (!t || t == cur_task) return -1;
-    if (by_uid != UID_ROOT && t->uid != by_uid) return -2;  /* not yours */
+    /* v2.13: root, the owner, or a caller with CAP_KILL */
+    if (by_uid != UID_ROOT && t->uid != by_uid &&
+        !(user_caps_of(by_uid) & CAP_KILL)) return -2;  /* not yours */
     if (t->state == T_ZOMBIE) return 0;
     task_cleanup(t);                      /* switches cr3 to the kernel dir */
     t->exit_code = -9;
@@ -620,60 +616,10 @@ static void build_vsyscall_page(uint8_t *page) {
     for (int i = 0; i < SYS_COUNT; i++) e32(&e, taddr[i]);
 }
 
-/* ---- permissions (security pillar) -------------------------------------- */
-
-#define PERM_MAX 96
-typedef struct { char path[FS_PATH_MAX]; uint16_t uid; uint16_t mode; } perm_t;
-static perm_t perm_tab[PERM_MAX];
-static int    perm_n;
-
-void fs_perm_set(const char *path, int uid, int mode) {
-    for (int i = 0; i < perm_n; i++)
-        if (kstreq(perm_tab[i].path, path)) {
-            perm_tab[i].uid = (uint16_t)uid; perm_tab[i].mode = (uint16_t)mode;
-            return;
-        }
-    if (perm_n >= PERM_MAX) return;
-    int i;
-    for (i = 0; path[i] && i < FS_PATH_MAX - 1; i++) perm_tab[perm_n].path[i] = path[i];
-    perm_tab[perm_n].path[i] = 0;
-    perm_tab[perm_n].uid = (uint16_t)uid;
-    perm_tab[perm_n].mode = (uint16_t)mode;
-    perm_n++;
-}
-
-static int perm_default_write(const char *path) {
-    /* unwritten files/dirs are root-owned 0644/0755; the world-writable
-     * scratch areas are whitelisted here */
-    if (!kstrneq(path, "/home/", 6) && !kstreq(path, "/home") &&
-        !kstrneq(path, "/tmp/", 5) && !kstreq(path, "/tmp")) return 0;
-    return 1;
-}
-
-int fs_perm_check(const char *path, int uid, int need) {
-    /* v2.5: need is a bitmask of PERM_READ/PERM_WRITE/PERM_EXEC.
-     * owner bits live in the mode's 6-7-8 positions, others in 0-1-2. */
-    if (uid == UID_ROOT) return 0;
-    for (int i = 0; i < perm_n; i++) {
-        if (kstreq(perm_tab[i].path, path)) {
-            if (perm_tab[i].uid == (uint16_t)uid)
-                return (perm_tab[i].mode & (need << 6)) ? 0 : -1;
-            return (perm_tab[i].mode & need) ? 0 : -1;
-        }
-    }
-    /* no explicit entry: read/exec default allowed (0644/0755 semantics),
-     * writes go through the world-writable whitelist */
-    if (need == PERM_WRITE) return perm_default_write(path) ? 0 : -1;
-    return 0;
-}
-
-void fs_perm_seed(void) {
-    fs_perm_set("/home", UID_ROOT, 0777);
-    fs_perm_set("/tmp", UID_ROOT, 0777);
-    fs_perm_set("/bin", UID_ROOT, 0755);
-    fs_perm_set("/appdevelop", UID_ROOT, 0755);
-    fs_perm_set("/etc", UID_ROOT, 0755);
-}
+/* ---- permissions (security pillar) --------------------------------------
+ * Moved to user.c (v2.13): the persistent /etc/passwd user database, the
+ * /etc/acl owner/group/other table and the capability bitmask live there.
+ * fs_perm_check(path, uid, gid, need) is declared in task.h. */
 
 /* ---- user memory helpers ------------------------------------------------ */
 
@@ -959,27 +905,28 @@ void kpipe_assign_in(int tid, int h) {
 
 /* ---- the syscall dispatcher ---------------------------------------------- */
 
-static int sys_touch_uid(const char *upath, int uid) {
+static int sys_touch_uid(const char *upath, int uid, int gid) {
     char p[FS_PATH_MAX];
     if (u2k_str(p, upath, sizeof(p)) != 0) return -3;
-    if (fs_perm_check(p, uid, PERM_WRITE) != 0) return -13;           /* EACCES */
+    if (fs_perm_check(p, uid, gid, PERM_WRITE) != 0) return -13;      /* EACCES */
     uint32_t c, s;
     int existed = fs_resolve_file(p, &c, &s) == 0;
     int r = fs_touch(p);
-    if (r == FS_OK && !existed) fs_perm_set(p, uid, 0644);
+    if (r == FS_OK && !existed) acl_set(p, uid, gid, 0644);
     return r;
 }
 
-static int sys_mkdir_uid(const char *upath, int uid) {
+static int sys_mkdir_uid(const char *upath, int uid, int gid) {
     char p[FS_PATH_MAX];
     if (u2k_str(p, upath, sizeof(p)) != 0) return -3;
-    if (fs_perm_check(p, uid, PERM_WRITE) != 0) return -13;
+    if (fs_perm_check(p, uid, gid, PERM_WRITE) != 0) return -13;
     int r = fs_mkdir(p);
-    if (r == FS_OK) fs_perm_set(p, uid, 0755);
+    if (r == FS_OK) acl_set(p, uid, gid, 0755);
     return r;
 }
 
-static int sys_save_uid(const char *upath, const char *udata, uint32_t size, int uid) {
+static int sys_save_uid(const char *upath, const char *udata, uint32_t size,
+                        int uid, int gid) {
     char p[FS_PATH_MAX];
     static char buf[FS_DATA_MAX];
     if (size > FS_DATA_MAX) return -7;
@@ -987,11 +934,11 @@ static int sys_save_uid(const char *upath, const char *udata, uint32_t size, int
     /* Issue #78: copy through the task's page tables.  copy_from_user()
      * validates and faults in every page of [udata, udata+size). */
     if (copy_from_user(task_current(), buf, udata, size) != 0) return -3;
-    if (fs_perm_check(p, uid, PERM_WRITE) != 0) return -13;
+    if (fs_perm_check(p, uid, gid, PERM_WRITE) != 0) return -13;
     uint32_t c, s;
     int existed = fs_resolve_file(p, &c, &s) == 0;
     int r = fs_write_text(p, buf, size);
-    if (r == FS_OK && !existed) fs_perm_set(p, uid, 0644);
+    if (r == FS_OK && !existed) acl_set(p, uid, gid, 0644);
     return r;
 }
 
@@ -1024,6 +971,11 @@ void isr_syscall(int_frame_t *f) {
      * ring3 context does not #PF (see paging.c).  Cheap no-op otherwise. */
     if (!t->ring0 && t->space.dir) paging_sync_lfb_dir(t->space.dir);
     int uid = t->uid;
+    int gid = t->gid;
+    uint32_t caps = t->caps;
+    /* capability gates for the privileged syscall families (v2.13) */
+    int net_ok  = (uid == UID_ROOT) || (caps & CAP_NET);
+    int aud_ok  = (uid == UID_ROOT) || (caps & CAP_AUDIO);
     uint32_t ret = (uint32_t)-8;               /* ENOSYS */
     /* v2.5 fix: a fresh trap means our execution context now lives in the
      * frame on this kernel stack.  The spawn-time/first-entry frame and any
@@ -1087,7 +1039,7 @@ void isr_syscall(int_frame_t *f) {
                 }
                 if (err) break;
             } else if (t->out_file[0]) {
-                if (fs_perm_check(t->out_file, uid, PERM_WRITE) != 0) {
+                if (fs_perm_check(t->out_file, uid, gid, PERM_WRITE) != 0) {
                     err = -13; break;
                 }
                 /* first chunk honours truncate/append, later ones append */
@@ -1163,7 +1115,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_LS: {
         char p[FS_PATH_MAX];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+        if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
         /* snapshot the whole listing into this task's buffer */
         struct ls_fill lf; lf.ents = ls_buf[t->tid]; lf.n = 0;
         if (fs_foreach(p, ls_fill_cb, &lf) != 0) { ret = (uint32_t)-1; break; }
@@ -1172,8 +1124,8 @@ void isr_syscall(int_frame_t *f) {
         ret = 0;                           /* handle 0 (one ls at a time) */
         break;
     }
-    case SYS_TOUCH: ret = (uint32_t)sys_touch_uid((const char *)a1, uid); break;
-    case SYS_MKDIR: ret = (uint32_t)sys_mkdir_uid((const char *)a1, uid); break;
+    case SYS_TOUCH: ret = (uint32_t)sys_touch_uid((const char *)a1, uid, gid); break;
+    case SYS_MKDIR: ret = (uint32_t)sys_mkdir_uid((const char *)a1, uid, gid); break;
     case SYS_CAT: {
         char p[FS_PATH_MAX];
         static char b[4096];
@@ -1185,7 +1137,7 @@ void isr_syscall(int_frame_t *f) {
          * storing n bytes used to kill the kernel on a ring3 buffer whose
          * second page was still not-present. */
         if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
-        if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+        if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
         int n = fs_read_text(p, b, max);
         if (n > 0 && copy_to_user(t, (char *)a2, b, (uint32_t)n) != 0) {
             ret = (uint32_t)-3; break;
@@ -1193,7 +1145,7 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)n;
         break;
     }
-    case SYS_SAVE: ret = (uint32_t)sys_save_uid((const char *)a1, (const char *)a2, a3, uid); break;
+    case SYS_SAVE: ret = (uint32_t)sys_save_uid((const char *)a1, (const char *)a2, a3, uid, gid); break;
     case SYS_ALLOC: ret = (uint32_t)sys_alloc(t, a1); break;
     case SYS_FREE:  sys_free(t, (void *)a1); ret = 0; break;
     case SYS_EXIT:  task_exit_current((int)a1);
@@ -1268,9 +1220,14 @@ void isr_syscall(int_frame_t *f) {
         ret = s;
         break;
     }
-    case SYS_NET_INIT: ret = net_init() < 0 ? (uint32_t)-1 : 0; break;
-    case SYS_NET_UP:   ret = net_up(); break;
+    case SYS_NET_INIT:
+        if (!net_ok) { ret = (uint32_t)-13; break; }   /* CAP_NET */
+        ret = net_init() < 0 ? (uint32_t)-1 : 0; break;
+    case SYS_NET_UP:
+        if (!net_ok) { ret = (uint32_t)-13; break; }
+        ret = net_up(); break;
     case SYS_HTTP_GET: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         char url[160];
         static char b[8192];
         if (u2k_str(url, (const char *)a1, sizeof(url)) != 0) { ret = (uint32_t)-1; break; }
@@ -1287,6 +1244,7 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_NET_DNS: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         char host[128];
         if (u2k_str(host, (const char *)a1, sizeof(host)) != 0) { ret = (uint32_t)-1; break; }
         uint8_t ip[4];
@@ -1308,6 +1266,7 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_NET_UDP_SEND: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         char ip[128];
         static char b[1400];
         if (u2k_str(ip, (const char *)a1, sizeof(ip)) != 0) { ret = (uint32_t)-1; break; }
@@ -1321,6 +1280,7 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_NET_UDP_RECV: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         /* blocking receive with ~2 s timeout; polls the NIC while waiting
          * (also fixes the old "udp: no reply" bug - the RX path never
          * polled the card) */
@@ -1357,12 +1317,14 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_NET_PING: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         char ip[128];
         if (u2k_str(ip, (const char *)a1, sizeof(ip)) != 0) { ret = (uint32_t)-1; break; }
         ret = (uint32_t)net_ping(ip);
         break;
     }
     case SYS_NET_IP: {
+        if (!net_ok) { ret = (uint32_t)-13; break; }
         char o[16];
         int oi = 0;
         for (int i = 0; i < 4; i++) {
@@ -1425,7 +1387,7 @@ void isr_syscall(int_frame_t *f) {
          * A 16 KiB read spans five lazily-mapped heap pages; validate the
          * full span, then copy through the task's page tables. */
         if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
-        if (fs_perm_check(p, uid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+        if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
         int n = fs_read_at(p, fbuf, off, max);
         if (n < 0) { ret = (uint32_t)-1; break; }
         if (n > 0 && copy_to_user(t, (char *)a2, fbuf, (uint32_t)n) != 0) {
@@ -1440,7 +1402,7 @@ void isr_syscall(int_frame_t *f) {
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         if (size < 0 || size > 16384) { ret = (uint32_t)-3; break; }
         if (mode != 0 && mode != 1) { ret = (uint32_t)-3; break; }
-        if (fs_perm_check(p, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
+        if (fs_perm_check(p, uid, gid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
         /* Issue #86: fs_write_raw_mode() runs on the caller's CR3 and used to
          * receive the raw user pointer.  Snapshot it into a small kernel
          * buffer in chunks; mode 0 truncates on the first call, later
@@ -1472,7 +1434,7 @@ void isr_syscall(int_frame_t *f) {
     case SYS_FILE_DELETE: {
         char p[FS_PATH_MAX];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
-        if (fs_perm_check(p, uid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
+        if (fs_perm_check(p, uid, gid, PERM_WRITE) != 0) { ret = (uint32_t)-13; break; }
         ret = (uint32_t)fs_delete(p);
         break;
     }
@@ -1681,9 +1643,11 @@ void isr_syscall(int_frame_t *f) {
      * a ring3 task can never make the kernel read arbitrary physical
      * memory or write outside the DMA window. */
     case SYS_SND_INFO:
+        if (!aud_ok) { ret = (uint32_t)-13; break; }   /* CAP_AUDIO */
         ret = (uint32_t)snd_info((int)a1);
         break;
     case SYS_SND_PLAY: {
+        if (!aud_ok) { ret = (uint32_t)-13; break; }
         int len = (int)a2;
         if (a1 == 0 || len <= 0 || len > (int)SND_DMA_BUF_SZ) {
             ret = (uint32_t)-22;                       /* EINVAL */
@@ -1698,9 +1662,11 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_SND_STOP:
+        if (!aud_ok) { ret = (uint32_t)-13; break; }
         ret = (uint32_t)snd_stop();
         break;
     case SYS_SND_TONE:
+        if (!aud_ok) { ret = (uint32_t)-13; break; }
         ret = (uint32_t)snd_tone(a1, a2);
         break;
     /* ---- v2.12: 24bpp truecolour drawing ----------------------------
@@ -2164,6 +2130,11 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
 
     t->tid = slot;
     t->uid = uid;
+    /* v2.13: derive group + capabilities from the user record; an
+     * unknown uid falls back to a no-capability shadow identity. */
+    user_rec_t *u = user_by_uid(uid);
+    t->gid  = u ? (int)u->gid  : uid;
+    t->caps = u ? u->caps : (uid == UID_ROOT ? CAP_ALL : 0);
     t->ring0 = 0;
     t->state = T_READY;
     t->kstack_top = ks_top;

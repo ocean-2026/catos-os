@@ -15,13 +15,16 @@
  *     0x2080000 containing int 0x80 thunks; the CE api-pointer table in
  *     that page has the exact shape of catos_api_t, so UNMODIFIED old
  *     .ce binaries run in ring3
- *   - security: every task has a uid; file writes are checked against an
- *     in-memory ownership overlay (root-owned system files are protected)
+ *   - security: every task carries uid/gid/caps from its user record
+ *     (/etc/passwd); file access is checked against a persistent unix
+ *     owner/group/other ACL (/etc/acl) and privileged syscalls against
+ *     the user's capability bitmask (see user.h)
  */
 
 #include <stdint.h>
 #include "cpu.h"
 #include "paging.h"
+#include "user.h"
 
 typedef enum {
     T_UNUSED = 0,
@@ -42,6 +45,8 @@ typedef struct task {
     int         tid;
     int         state;
     int         uid;
+    int         gid;            /* group of the spawning user (/etc/passwd) */
+    uint32_t    caps;           /* capability bitmask of the spawning user  */
     int         ring0;          /* shell / idle run in ring0           */
     char        name[16];
     uint32_t    kstack_top;     /* kernel stack (ring0: boot stack)    */
@@ -115,13 +120,12 @@ int      validate_uaddr(task_t *t, uint32_t addr, uint32_t len);
 int      copy_to_user(task_t *t, void *dst, const void *src, uint32_t len);
 int      copy_from_user(task_t *t, void *dst, const void *src, uint32_t len);
 
-/* ---- file permissions (implemented in task.c) ------------------------- */
+/* ---- file permissions (implemented in user.c) -------------------------- */
 #define PERM_READ  0x1
 #define PERM_WRITE 0x2
 #define PERM_EXEC  0x4
-void     fs_perm_seed(void);
-void     fs_perm_set(const char *path, int uid, int mode);
-int      fs_perm_check(const char *path, int uid, int need);   /* need = PERM_* bits */
+int      fs_perm_check(const char *path, int uid, int gid,
+                      int need);                 /* need = PERM_* bits */
 
 /* ---- console input ownership ------------------------------------------ */
 int      console_try_own(void);

@@ -95,7 +95,7 @@ $CC -m32 -c boot/boot.s -o build/boot.o
 echo "== compiling cpu.s =="
 $CC -m32 -c src/cpu.s -o build/cpu.o
 
-for src in src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/stubs.c src/ime.c src/keyboard.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c; do
+for src in src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/stubs.c src/ime.c src/keyboard.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c src/user.c; do
     obj="build/$(basename $src .c).o"
     echo "== compiling $src =="
     $CC $CFLAGS -c $src -o $obj
@@ -108,7 +108,7 @@ echo "== linking (PE/COFF) =="
 # Do NOT add --image-base 0x100000: it makes objcopy emit a 1 MB zero
 # gap at the start of kernel.bin, which breaks the multiboot image.
 $LD -m i386pe -T pe.ld -o build/kernel.pe \
-    build/boot.o build/cpu.o build/kernel.o build/vga.o build/render.o build/render_font.o build/be_text.o build/be_gfx.o build/be_vbe.o build/be_vbe24.o build/stubs.o build/ime.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o build/snd.o build/diag.o
+    build/boot.o build/cpu.o build/kernel.o build/vga.o build/render.o build/render_font.o build/be_text.o build/be_gfx.o build/be_vbe.o build/be_vbe24.o build/stubs.o build/ime.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o build/snd.o build/diag.o build/user.o
 
 echo "== extracting flat binary =="
 $OBJCOPY -O binary build/kernel.pe build/kernel.bin

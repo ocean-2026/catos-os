@@ -549,3 +549,21 @@ Shell: `gfx24` switches to mode 3 and paints a fixed diagnostic picture
 now reports the drawing API; `vdiag` prints the LFB / BAR details.
 Reference app: /bin/gfx24.ce.  Pixel-exact on-metal regression:
 tests/gfx24_regress.py (QEMU -vga std, parses screendump PPM).
+
+v2.13 -- users & capabilities (no new slots; existing calls may now
+return -13 EACCES when the session user lacks the capability):
+
+  net_init/net_up/http_get/net_dns/net_udp_send/net_udp_recv/net_ping
+      -> -13 unless the user has CAP_NET.
+  snd_info/snd_play/snd_stop/snd_tone
+      -> -13 unless the user has CAP_AUDIO.
+  kill -> allowed for root, the task's owner, or CAP_KILL holders.
+  File syscalls check the unix owner/group/other ACL (/etc/acl):
+  -13 on denial.  Unwritten paths: read/exec open, write only in
+  /home and /tmp.
+
+Shell session starts as root (the initial user).  whoami / id / lsuser /
+caps / login / su / useradd / userdel / passwd / chcaps / chmod / chown
+manage the persistent /etc/passwd and /etc/acl.  Probe: /bin/captest.ce
+prints raw return codes (root on a NIC-less machine: net_init=-1;
+a zero-capability user: net_init=-13 -- hardware absence vs. denial).
