@@ -49,3 +49,8 @@
 - [CatOS/QEMU][易错点] `-soundhw` 在 QEMU 7.1 已移除，SB16 只能 `-device sb16,...,audiodev=snd0` + `-audiodev wav,id=snd0,path=<Windows 绝对路径>`；wav 输出的 RIFF/data 长度字段不可信（`quit` 不保证触发 `wav_fini_out` 回填），解析时自己 patch 长度再用 `wave` 模块复验
 - [CatOS/内核][易错点] **syscall 跑在调用者 CR3 不是 kdir**：任何高 PDE 内核映射（如 VBE LFB）必须镜像进每个任务页目录，否则只在 ring0 上下文测试通过、ring3 一跑就 triple fault；VBE LFB 的 PTE 保持无 US 位即可不破坏"用户不可访问 VRAM"
 - [CatOS/内核][易错点] `validate_uaddr(t, addr, 1)` 后按 n 字节裸写用户指针是 P0 惯犯模式（#78/#86 同根因）：第 2 页未映射时 ring0 #PF 直接停机；统一做法是按真实上界校验 + `copy_to_user()`/`copy_from_user()` 页表拷贝，未知长度字符串走 `u2k_str()` 内核快照
+- [CatOS/v2.14 ocntools][易错点] 老 zip 里的 CE 应用三处时代残留缺一不可全修：入口必须在 `.text.ce_entry` 段（新构建链按段找入口）、API 指针必须是**全局** `__ce_api`（nm 提取要求 [DR] 符号，`static` 会丢）、`if (!api) { api->write(...) }` 是 NULL 解引用（正确写法是打印常量后 return -1）
+- [CatOS/v2.14 回归][易错点] shell `format` 的确认输入走 `kb_readline`——**发 y 之后必须发 Enter**，否则确认读不完、后续所有键入被吞（表现为"format 后内核卡死"，实际是测试驱动没发回车）
+- [CatOS/v2.14 回归][易错点] format 成功后内核要**重装内置应用到磁盘**，耗时数秒；期间键入全部丢失——必须轮询屏幕出现 "Installed missing built-in" 再发下一条命令，固定 sleep 2.5s 不够
+- [CatOS/v2.14 回归][易错点] FAT `ls` 显示的是 8.3 目录项里**原创建时的大小写**（写 `C1.TAD` 删后显示 `c1.tad`，大小写转换取决于创建路径），文件名断言必须做大小写不敏感匹配
+- [CatOS/v2.14 回归][易错点] HMP `screendump` 异步落盘 + 读屏折叠空格，关键断言前先做一次"沉淀读"（读屏只为触发等待）再取值断言；否则偶发读到半更新屏造成 flaky

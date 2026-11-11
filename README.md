@@ -3,7 +3,7 @@
 一个面向 32 位 x86 的实验性操作系统内核，目标是向**可通用命令行操作系统**挺进
 （路线图见 `docs/ROADMAP-通用操作系统.md`）。内核以 GRUB El Torito no-emulation ISO
 引导启动，用户态 CE（CatOS Executable）应用通过一组**只增不改（append-only）** 的
-64 槽系统调用表与内核通信。
+65 槽系统调用表（v2.14，0..64）与内核通信。
 
 ## 能力一览
 
