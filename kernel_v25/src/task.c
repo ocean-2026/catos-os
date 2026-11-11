@@ -492,6 +492,9 @@ enum {
      * multi-field descriptors are copied from user space by the kernel
      * (the generic thunk only forwards ebx/ecx/edx/esi, not edi). */
     SYS_GFX_INFO, SYS_GFX_RECT, SYS_GFX_BLIT,
+    /* v2.14: non-blocking keyboard poll.  Append-only; 65 thunks still
+     * fit in the 2 KiB thunk area.  Takes 0 arguments; never blocks. */
+    SYS_POLLKEY,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -559,6 +562,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*55*/4, /*56*/2,                       /* mmap / munmap */
         /*57*/1, /*58*/3, /*59*/0, /*60*/2,     /* snd_info/play/stop/tone */
         /*61*/1, /*62*/1, /*63*/1,               /* gfx_info/rect/blit */
+        /*64*/0,                                 /* pollkey */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -1203,6 +1207,14 @@ void isr_syscall(int_frame_t *f) {
         }
         int k = kb_getkey();
         ret = (uint32_t)k;
+        break;
+    }
+    case SYS_POLLKEY: {
+        /* v2.14: strictly non-blocking key read for games/animations.
+         * kb_getkey_timed(0) decodes any pending scancodes and returns
+         * -1 the moment the queue runs dry; with 0 ticks it can never
+         * reach task_sleep_ticks(), so the call never yields the CPU. */
+        ret = (uint32_t)kb_getkey_timed(0);
         break;
     }
     case SYS_FILE_EXISTS: {

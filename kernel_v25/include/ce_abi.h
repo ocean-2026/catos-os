@@ -22,8 +22,9 @@
  *   v2.10 slots 55..56   anonymous mmap / munmap
  *   v2.11 slots 57..60   SB16 PCM audio (info / play / stop / tone)
  *   v2.12 slots 61..63   24bpp truecolour drawing (info/rect/blit)
+ *   v2.14 slot  64       pollkey (non-blocking key read; games/animations)
  *
- * Total: 64 slots in v2.12 (the v2.7 header had 52).
+ * Total: 65 slots in v2.14 (the v2.7 header had 52).
  *
  * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
  * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
@@ -213,6 +214,15 @@ typedef struct catos_api {
          descriptor and then one row at a time through copy_from_user(),
          so a cross-page user buffer is validated page by page.
          0 ok, -8 inactive, -14 EFAULT, -22 EINVAL. */
+
+    /* ---- v2.14: non-blocking keyboard (append-only) -------------------
+     * Old binaries see NULL for this slot: ALWAYS check for NULL before
+     * calling it.  Answers the classic game/animation need: read a key
+     * IF one is pending, never wait.  The blocking twin is getch(). */
+    int     (*pollkey)(void);                      /* 64
+         Decode and return one pending key (ASCII or KB_* >0xFF),
+         or -1 when nothing is pending.  Modifier presses/releases and
+         break codes are consumed silently.  Never blocks, never yields. */
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

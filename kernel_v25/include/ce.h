@@ -177,6 +177,9 @@ typedef struct catos_api {
     int      (*gfx_info)(int what);
     int      (*gfx_rect)(const gfx_rect_t *r);
     int      (*gfx_blit)(const gfx_blit_t *b);
+    /* ---- v2.14: non-blocking keyboard (append-only).  Keep in
+     * lockstep with ce_abi.h slot 64; old binaries see NULL. */
+    int      (*pollkey)(void);
 } catos_api_t;
 
 /* install the API (called once at boot) */

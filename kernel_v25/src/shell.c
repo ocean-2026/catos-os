@@ -127,6 +127,10 @@ static void cmd_help(void) {
         "  cd [PATH]    change directory (use .. or /)\n"
         "  mkdir PATH   create a directory\n"
         "  touch FILE   create an empty file\n"
+        "  cat FILE     print a file (text, up to 64 KiB)\n"
+        "  rm FILE      delete a file\n"
+        "  cp SRC DST   copy a file\n"
+        "  mv SRC DST   move a file (copy + delete)\n"
         "  format       erase the FAT32 volume (y/n confirm)\n"
         "  fsck         verify/repair FAT #2 against FAT #1 (crash check)\n"
         "  faultinfo    show the last fatal fault (vector, CR2, PF bits)\n"
@@ -1683,6 +1687,121 @@ static void cmd_chown(char *arg) {
     else vga_write("owner updated\n");
 }
 
+/* ---------- file utilities: cat / rm / cp / mv (v2.14) ------------------
+ * Imported from the retired "ot" (Ocean's Tools) user-mode tool REPL:
+ * every one of these existed only because the kernel shell lacked them.
+ * The kernel side is the right home (consistent permissions, no user-space
+ * re-implementation of fs internals).  ot keeps its unique value:
+ * csc scripting, fmgr, hexedit, grep, vcs, alias, banner, cecheck. */
+
+#define CAT_MAX_PRINT 65536u      /* cat: stop printing after 64 KiB */
+
+static void cmd_cat(const char *arg) {
+    if (!*arg) { vga_write("usage: cat FILE\n"); return; }
+    uint32_t c, s;
+    if (fs_resolve_file(arg, &c, &s) != 0) { vga_write("cat: no such file\n"); return; }
+    if (fs_perm_check(arg, g_uid, g_gid, PERM_READ) != 0) {
+        vga_write("cat: permission denied\n"); return;
+    }
+    static char buf[512];         /* ring0 single shell: no reentry */
+    uint32_t off = 0;
+    while (off < s) {
+        uint32_t want = s - off;
+        if (want > sizeof(buf) - 1) want = sizeof(buf) - 1;
+        int r = fs_read_at(arg, buf, (int)off, (int)want);
+        if (r <= 0) { vga_write("cat: read error\n"); return; }
+        buf[r] = 0;
+        vga_write(buf);
+        off += (uint32_t)r;
+        if (off >= CAT_MAX_PRINT && off < s) {
+            vga_write("\n[cat: output truncated at 64 KiB]\n");
+            return;
+        }
+    }
+    if (off) vga_write("\n");
+}
+
+static void cmd_rm(const char *arg) {
+    if (!*arg) { vga_write("usage: rm FILE\n"); return; }
+    if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("rm: permission denied\n"); return;
+    }
+    int r = fs_delete(arg);
+    if (r == 0) return;
+    vga_write("rm: no such file (directories cannot be rm'd)\n");
+}
+
+/* shared copy core for cp / mv: read src in <=16 KiB chunks, append to a
+ * freshly truncated dst.  Returns 0 ok, negative error code. */
+static int fs_copy_file(const char *src, const char *dst) {
+    uint32_t c, s;
+    if (fs_resolve_file(src, &c, &s) != 0) return -1;
+    if (fs_perm_check(src, g_uid, g_gid, PERM_READ) != 0) return -13;
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
+    static char chunk[16384];     /* ring0 single shell: no reentry */
+    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
+    acl_set(dst, g_uid, g_gid, 0644);                       /* creator owns it */
+    uint32_t off = 0;
+    while (off < s) {
+        uint32_t want = s - off;
+        if (want > sizeof(chunk)) want = sizeof(chunk);
+        int r = fs_read_at(src, chunk, (int)off, (int)want);
+        if (r <= 0) return -3;
+        if (fs_write_raw_mode(dst, chunk, (uint32_t)r, 1) != 0) return -4;
+        off += (uint32_t)r;
+    }
+    return 0;
+}
+
+static void cmd_cp(char *arg) {
+    while (*arg == ' ') arg++;
+    char *src = arg;
+    while (*arg && *arg != ' ') arg++;
+    if (!*arg) { vga_write("usage: cp SRC DST\n"); return; }
+    *arg++ = 0;
+    while (*arg == ' ') arg++;
+    char *dst = arg;
+    while (*arg && *arg != ' ') arg++;
+    *arg = 0;
+    if (!*src || !*dst) { vga_write("usage: cp SRC DST\n"); return; }
+    int r = fs_copy_file(src, dst);
+    if (r == 0) return;
+    if (r == -13) vga_write("cp: permission denied\n");
+    else if (r == -1) vga_write("cp: no such file\n");
+    else if (r == -2) vga_write("cp: cannot create target\n");
+    else              vga_write("cp: copy failed mid-way\n");
+}
+
+static void cmd_mv(char *arg) {
+    while (*arg == ' ') arg++;
+    char *src = arg;
+    while (*arg && *arg != ' ') arg++;
+    if (!*arg) { vga_write("usage: mv SRC DST\n"); return; }
+    *arg++ = 0;
+    while (*arg == ' ') arg++;
+    char *dst = arg;
+    while (*arg && *arg != ' ') arg++;
+    *arg = 0;
+    if (!*src || !*dst) { vga_write("usage: mv SRC DST\n"); return; }
+    int r = fs_copy_file(src, dst);
+    if (r == 0) {
+        /* copy complete -> remove the source (write perm on it) */
+        if (fs_perm_check(src, g_uid, g_gid, PERM_WRITE) != 0) {
+            vga_write("mv: copied but cannot delete source (permission)\n");
+            return;
+        }
+        if (fs_delete(src) != 0) {
+            vga_write("mv: copied but could not delete source\n");
+            return;
+        }
+        return;
+    }
+    if (r == -13) vga_write("mv: permission denied\n");
+    else if (r == -1) vga_write("mv: no such file\n");
+    else if (r == -2) vga_write("mv: cannot create target\n");
+    else              vga_write("mv: move failed mid-way\n");
+}
+
 /* ---------- shell loop ---------- */
 static char input[256];
 
@@ -1779,6 +1898,10 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
         else if (!strcmp_(cmd, "mkdir"))      cmd_mkdir(arg);
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
+        else if (!strcmp_(cmd, "cat"))        cmd_cat(arg);
+        else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);
+        else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
+        else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
         else if (!strcmp_(cmd, "format")) {
             if (session_is_fsadmin()) cmd_format();
             else vga_write("format: permission denied (need CAP_FSADMIN)\n");
