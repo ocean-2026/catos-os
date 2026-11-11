@@ -38,3 +38,14 @@
 - [ot内核v2.5/工具链][易错点] 本机跑 MinGW 构建脚本须显式给工具链 PATH 与 `PYTHON`（`PATH=/c/msys64/mingw32/bin:/usr/bin:/bin PYTHON=<python> sh tests/build_ce.sh ...`）；只设 PATH 会因 python 不在 PATH 报 `ERROR: no python found`，不设 PATH 则 gcc 以 127 失败
 - [ot内核v2.5/工具链][易错点] **回退值与头文件恰好相等会让测试变假阳性**：`load_limits()` 找不到 ce.h 时回退内置 256 KiB，而 ce.h 当前也是 256 KiB，只断言「脚本读到的上限 == 头文件上限」在相对路径完全失效时照样全绿；必须连第三个返回值 `source`（是否指向真实 ce.h 路径）一起断言
 - [ot内核v2.5/工具链][易错点] 失败用例复用同一个输出文件路径时，「拒绝后不应产出文件」的断言会被上一次成功用例的残留文件误伤；每个拒绝用例运行前先删除输出文件，再判 `not os.path.exists(out)`
+- [CatOS/合流后][易错点] **构建必须 `(cd /d/CatOs/kernel_v25; env -i ... sh build.sh iso)` 子 shell**：会话工作目录可能停在旧工作树（`master-87a3e1a0`），直接跑会在旧代码上构建出旧 ISO，症状是"改了不生效"且不报错；cwd 永远显式声明
+- [CatOS/合流后][易错点] MinGW 不在 PATH 时 gcc **静默 exit 1 且零输出**（不报 command not found 也不报编译错）；构建命令必须显式 `PATH=/d/msys/mingw32/bin:/usr/bin:/bin`，失败时先查退出码再查输出
+- [CatOS/合流后][易错点] git ignore 规则是 **last-match-wins**：`*.iso` 的否定规则必须放在 `*.iso` **之后**；且 `git check-ignore` 对**已跟踪**文件不做检查，必须加 `--no-index` 才能验跟踪文件的 ignore 状态
+- [CatOS/合流后][易错点] Python heredoc（`python - <<'EOF'`）做多行字符串替换在本机不可靠（替换静默不生效）；文本替换一律用编辑工具精确匹配，批量同构替换才用 python 脚本文件
+- [CatOS/#90 mkdisk][易错点] bytearray 切片赋值会**自动扩容**：`d[0:11] = 22字节` 把 32 字节目录项撑成 43 字节且不报错；dent() 必须加 11 字节长度断言
+- [CatOS/#90 mkdisk][易错点] `pe = mbr[446:]` 是切片**拷贝**不是视图——往 pe 写分区表等于写进副本，MBR 全零；要么用内存视图要么回写
+- [CatOS/#90 mkdisk][易错点] FAT 表只在 write_metadata 落盘一次、alloc() 后未回写 → 目录项指向的簇在 FAT 里全 0，`ls` 能看到文件但 `run` err -4（"文件系统看着正常"的假象）；verify() 必须从**镜像字节**读 FAT 走链，不能信内存镜像
+- [CatOS/共享机器][易错点] `taskkill /F /IM qemu-system-i386.exe` 会杀掉全机器所有人的 guest；只能按 PID 杀（`tests/qemu_driver.py` 的 `kill_qemu(proc)`），每个回归驱动用自己的 monitor 端口
+- [CatOS/QEMU][易错点] `-soundhw` 在 QEMU 7.1 已移除，SB16 只能 `-device sb16,...,audiodev=snd0` + `-audiodev wav,id=snd0,path=<Windows 绝对路径>`；wav 输出的 RIFF/data 长度字段不可信（`quit` 不保证触发 `wav_fini_out` 回填），解析时自己 patch 长度再用 `wave` 模块复验
+- [CatOS/内核][易错点] **syscall 跑在调用者 CR3 不是 kdir**：任何高 PDE 内核映射（如 VBE LFB）必须镜像进每个任务页目录，否则只在 ring0 上下文测试通过、ring3 一跑就 triple fault；VBE LFB 的 PTE 保持无 US 位即可不破坏"用户不可访问 VRAM"
+- [CatOS/内核][易错点] `validate_uaddr(t, addr, 1)` 后按 n 字节裸写用户指针是 P0 惯犯模式（#78/#86 同根因）：第 2 页未映射时 ring0 #PF 直接停机；统一做法是按真实上界校验 + `copy_to_user()`/`copy_from_user()` 页表拷贝，未知长度字符串走 `u2k_str()` 内核快照
