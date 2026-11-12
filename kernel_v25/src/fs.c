@@ -43,37 +43,9 @@ static void print_int(int v) {
 
 /* ---------- path helpers ---------- */
 
-/* FAT 8.3 without LFN: a component longer than 8 chars before the dot or
- * 3 after silently truncated to a colliding 8.3 name (two long names
- * then collided as "already exists").  Reject them explicitly instead. */
-static int name_too_long83(const char *comp) {
-    int body = 0, ext = 0, seen_dot = 0;
-    for (const char *p = comp; *p; p++) {
-        if (*p == '.') {
-            if (seen_dot) return 1;
-            seen_dot = 1;
-            continue;
-        }
-        if (!seen_dot) body++; else ext++;
-    }
-    return body > 8 || ext > 3;
-}
-
-/* check every component of an absolute path; 0 = fine, -1 = too long */
-static int path_has_long_names(const char *abs) {
-    const char *p = abs;
-    char comp[FS_NAME_MAX + 8];
-    while (*p) {
-        while (*p == '/') p++;
-        if (!*p) break;
-        int l = 0;
-        while (*p && *p != '/' && l < (int)sizeof(comp) - 1) comp[l++] = *p++;
-        while (*p && *p != '/') p++;
-        comp[l] = 0;
-        if (name_too_long83(comp)) return -1;
-    }
-    return 0;
-}
+/* v2.18: components may exceed 8.3 (VFAT LFN entries carry the long
+ * name; the fat layer generates a unique BODY~N.EXT short alias).
+ * name_too_long83()/path_has_long_names() are gone. */
 /* normalise "/a/./b/../c" -> "/a/c"; result always starts with '/' */
 static void path_norm(const char *in, char *out) {
     char stack[FS_PATH_MAX / 2][FS_NAME_MAX];
@@ -144,9 +116,8 @@ static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
         name[i] = 0;
 
         uint8_t n83[11];
-        fat_name83(name, n83);
         fat_dirent_t e;
-        if (fat_lookup(cur, n83, &e) != 0) return 0;
+        if (fat_lookup_name(cur, name, &e, n83) != 0) return 0;
         cur = e.cluster;
         if (out) { *out = e; filled = 1; }
     }
@@ -220,20 +191,20 @@ static int create_path(const char *path, uint8_t type) {
     for (const char *q = leaf; *q; q++)
         if (*q == '/' || *q < 32) return FS_ERR_INVAL;
 
-    uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t tmp;
-    if (fat_lookup(pclus, n83, &tmp) == 0) return FS_ERR_EXIST;
+    uint8_t rn[11];
+    if (fat_lookup_name(pclus, leaf, &tmp, rn) == 0) return FS_ERR_EXIST;
 
-    int rc = (type == FS_DIR) ? fat_mkdir(pclus, n83) : fat_mkfile(pclus, n83);
+    int rc = (type == FS_DIR) ? fat_mkdir_name(pclus, leaf)
+                              : fat_mkfile_name(pclus, leaf);
     return rc == 0 ? FS_OK : FS_ERR_FULL;
 }
 
 int fs_mkdir(const char *path) {
-    if (path_has_long_names(path)) return FS_ERR_INVAL; return create_path(path, FS_DIR); }
+    return create_path(path, FS_DIR);
+}
 
 int fs_touch(const char *path) {
-    if (path_has_long_names(path)) return FS_ERR_INVAL;
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
     abs_path(path, abs);
@@ -247,12 +218,24 @@ int fs_touch(const char *path) {
 
 /* ---------- list / pwd / enum ---------- */
 
-/* Enumerate regular-file entries of a directory (same walk as fs_list,
- * but collects names instead of printing).  No LFN / volume labels /
- * subdirectories are returned; names are 8.3 upper-case, NUL-padded.
- * Returns the number of names written, or -1 if the path is not an
+/* Enumerate regular-file entries of a directory.  Names are display
+ * names: the VFAT long name when present, else 8.3 lower-case.
+ * Returns the number of names found, or -1 if the path is not an
  * existing directory (e.g. the volume is not mounted). */
-int fs_enum_files(const char *path, char out[][13], int maxn) {
+struct enumf_ud { char (*out)[FS_NAME_MAX]; int maxn; int count; };
+static void enumf_cb(const char *name, uint8_t attr,
+                     uint32_t clus, uint32_t size, void *ud) {
+    struct enumf_ud *u = (struct enumf_ud *)ud;
+    if (attr & FAT_ATTR_DIR) return;
+    if (u->count < u->maxn) {
+        int k;
+        for (k = 0; name[k] && k < FS_NAME_MAX - 1; k++) u->out[u->count][k] = name[k];
+        u->out[u->count][k] = 0;
+    }
+    u->count++;
+}
+
+int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
     abs_path(path, abs);
@@ -260,35 +243,30 @@ int fs_enum_files(const char *path, char out[][13], int maxn) {
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
 
-    int count = 0;
-    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
-    uint32_t c = clus;
-    char shown[16];
-    while (c >= 2 && c < 0x0FFFFFF0) {
-        if (fat_read_cluster(c, buf) != 0) break;
-        int ended = 0;
-        for (int i = 0; i < (int)(fat_cluster_size() / 32); i++) {
-            uint8_t *en = buf + i * 32;
-            if (en[0] == 0x00) { ended = 1; break; }  /* end of dir */
-            if (en[0] == 0xE5) continue;             /* deleted */
-            if (en[11] == 0x0F) continue;            /* LFN */
-            if (en[11] & 0x08) continue;             /* volume label */
-            if (en[11] & FAT_ATTR_DIR) continue;     /* only files */
-            fat_name_show(en, shown);
-            if (count < maxn) {
-                int k;
-                for (k = 0; shown[k] && k < 12; k++)
-                    out[count][k] = shown[k];
-                out[count][k] = 0;
-            }
-            count++;
-        }
-        if (ended) break;
-        uint32_t n = fat_get(c);
-        if (n == FAT_EOC) break;
-        c = n;
+    struct enumf_ud u = { out, maxn, 0 };
+    fat_list_dir(clus, enumf_cb, &u);
+    return u.count;
+}
+
+struct list_ud { int count; };
+static void list_cb(const char *name, uint8_t attr,
+                    uint32_t clus, uint32_t size, void *ud) {
+    struct list_ud *u = (struct list_ud *)ud;
+    if (attr & FAT_ATTR_DIR) {
+        vga_set_fg(VGA_LIGHT_CYAN);
+        vga_write("[DIR ] ");
+        vga_write(name);
+        vga_write("/\n");
+    } else {
+        vga_set_fg(VGA_LIGHT_GREY);
+        vga_write("[FILE] ");
+        vga_write(name);
+        vga_set_fg(VGA_WHITE);
+        vga_write("  (");
+        print_int((int)size);
+        vga_write(" bytes)\n");
     }
-    return count;
+    u->count++;
 }
 
 void fs_list(const char *path) {
@@ -303,49 +281,12 @@ void fs_list(const char *path) {
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
     if (!(e.attr & FAT_ATTR_DIR)) { vga_write("catos: dir: not a directory\n"); return; }
 
-    int count = 0;
-    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
-    uint32_t c = clus;
-    char shown[16];
-    while (c >= 2 && c < 0x0FFFFFF0) {
-        if (fat_read_cluster(c, buf) != 0) break;
-        int ended = 0;
-        for (int i = 0; i < (int)(fat_cluster_size() / 32); i++) {
-            uint8_t *en = buf + i * 32;
-            if (en[0] == 0x00) { ended = 1; break; }  /* end of dir */
-            if (en[0] == 0xE5) continue;             /* deleted */
-            if (en[11] == 0x0F) continue;            /* LFN */
-            if (en[11] & 0x08) continue;             /* volume label */
-            fat_name_show(en, shown);
-            if (en[11] & FAT_ATTR_DIR) {
-                vga_set_fg(VGA_LIGHT_CYAN);
-                vga_write("[DIR ] ");
-                vga_write(shown);
-                vga_write("/\n");
-            } else {
-                vga_set_fg(VGA_LIGHT_GREY);
-                vga_write("[FILE] ");
-                vga_write(shown);
-                vga_set_fg(VGA_WHITE);
-                vga_write("  (");
-                uint32_t sz = (uint32_t)en[28]
-                            | ((uint32_t)en[29] << 8)
-                            | ((uint32_t)en[30] << 16)
-                            | ((uint32_t)en[31] << 24);
-                print_int((int)sz);
-                vga_write(" bytes)\n");
-            }
-            count++;
-        }
-        if (ended) break;
-        uint32_t n = fat_get(c);
-        if (n == FAT_EOC) break;
-        c = n;
-    }
+    struct list_ud u = { 0 };
+    fat_list_dir(clus, list_cb, &u);
     vga_set_fg(VGA_WHITE);
     vga_write("--- ");
-    print_int(count);
-    vga_write(count == 1 ? " entry ---\n" : " entries ---\n");
+    print_int(u.count);
+    vga_write(u.count == 1 ? " entry ---\n" : " entries ---\n");
 }
 
 void fs_pwd(char *out, int outlen) {
@@ -395,9 +336,8 @@ fs_entry_t *fs_open_file(const char *path) {
     if (!pclus) return 0;
 
     uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t e;
-    if (fat_lookup(pclus, n83, &e) != 0) return 0;
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return 0;
     if (e.attr & FAT_ATTR_DIR) return 0;
 
     memz(&g_ent, sizeof(g_ent));
@@ -518,14 +458,19 @@ int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     uint32_t pclus = resolve_path(ppath, &pe);
     if (!pclus) return -1;
 
-    uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t e;
-    if (fat_lookup(pclus, n83, &e) != 0) return -1;
+    if (fat_lookup_name(pclus, leaf, &e, 0) != 0) return -1;
     if (e.attr & FAT_ATTR_DIR) return -1;
     if (cluster) *cluster = e.cluster;
     if (size)    *size = e.size;
     return 0;
+}
+
+struct fe_ud { fs_foreach_cb cb; void *ud; };
+static void fe_cb(const char *name, uint8_t attr,
+                  uint32_t clus, uint32_t size, void *ud) {
+    struct fe_ud *u = (struct fe_ud *)ud;
+    u->cb((attr & FAT_ATTR_DIR) ? 1 : 0, name, size, u->ud);
 }
 
 int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
@@ -537,30 +482,8 @@ int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
     if (!clus) return -1;
     if (!(e.attr & FAT_ATTR_DIR)) { fs_dbg2("[F5]",0); return -1; }
 
-    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
-    char shown[16];
-    uint32_t c = clus;
-    while (c >= 2 && c < 0x0FFFFFF0) {
-        if (fat_read_cluster(c, buf) != 0) break;
-        int ended = 0;
-        for (int i = 0; i < (int)(fat_cluster_size() / 32); i++) {
-            uint8_t *en = buf + i * 32;
-            if (en[0] == 0x00) { ended = 1; break; }   /* end of dir */
-            if (en[0] == 0xE5) continue;               /* deleted */
-            if (en[11] == 0x0F) continue;              /* LFN */
-            if (en[11] & 0x08) continue;               /* volume label */
-            fat_name_show(en, shown);
-            uint32_t sz = (uint32_t)en[28]
-                        | ((uint32_t)en[29] << 8)
-                        | ((uint32_t)en[30] << 16)
-                        | ((uint32_t)en[31] << 24);
-            cb((en[11] & FAT_ATTR_DIR) ? 1 : 0, shown, sz, ud);
-        }
-        if (ended) break;
-        uint32_t n = fat_get(c);
-        if (n == FAT_EOC) break;
-        c = n;
-    }
+    struct fe_ud fe = { cb, ud };
+    fat_list_dir(clus, fe_cb, &fe);
     return 0;
 }
 
@@ -608,15 +531,14 @@ int fs_write_raw(const char *path, const char *data, uint32_t size) {
     }
 
     uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t e;
     uint32_t pclus = resolve_path(parent, &e);
     if (!pclus) { fs_dbg2("[F4]",0); return -1; }
     if (!(e.attr & FAT_ATTR_DIR)) { fs_dbg2("[F5]",0); return -1; }
-    if (fat_lookup(pclus, n83, &e) == 0) return 0;      /* already installed */
+    if (fat_lookup_name(pclus, leaf, &e, n83) == 0) return 0;  /* already installed */
 
-    if (fat_mkfile(pclus, n83) != 0) return -1;
-    if (fat_lookup(pclus, n83, &e) != 0) return -1;
+    if (fat_mkfile_name(pclus, leaf) != 0) return -1;
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (fat_write_file(e.cluster, data, size) != 0) return -1;
     return fat_update_entry(pclus, n83, e.cluster, size);
 }
@@ -682,14 +604,13 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     }
 
     uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t e;
     uint32_t pclus = resolve_path(parent, &e);
     if (!pclus) { fs_dbg2("[F4]",0); return -1; }
     if (!(e.attr & FAT_ATTR_DIR)) { fs_dbg2("[F5]",0); return -1; }
-    if (fat_lookup(pclus, n83, &e) != 0) {
-        if (fat_mkfile(pclus, n83) != 0) { fs_dbg2("[F6]",0); return -1; }
-        if (fat_lookup(pclus, n83, &e) != 0) { fs_dbg2("[F7]",0); return -1; }
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) {
+        if (fat_mkfile_name(pclus, leaf) != 0) { fs_dbg2("[F6]",0); return -1; }
+        if (fat_lookup_name(pclus, leaf, &e, n83) != 0) { fs_dbg2("[F7]",0); return -1; }
     }
     fs_dbg2("[F8 c=", e.cluster); fs_dbg2("F9 sz=", e.size);
     if (mode == 1) {
@@ -724,12 +645,11 @@ int fs_delete(const char *path) {
     }
 
     uint8_t n83[11];
-    fat_name83(leaf, n83);
     fat_dirent_t e;
     uint32_t pclus = resolve_path(parent, &e);
     if (!pclus) { fs_dbg2("[F4]",0); return -1; }
-    if (fat_lookup(pclus, n83, &e) != 0) return -1;
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (e.attr & FAT_ATTR_DIR) return -1;
     fat_free_chain(e.cluster);
-    return fat_delete_entry(pclus, n83);
+    return fat_delete_name(pclus, leaf);
 }

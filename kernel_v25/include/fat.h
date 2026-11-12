@@ -19,8 +19,10 @@
  *   ...            FAT #2
  *   ...            data area, cluster 2 = root directory
  *
- * Only 8.3 short names are supported (stored upper-case); LFN entries
- * are skipped when reading.
+ * v2.18: VFAT long file names are supported for reading and writing;
+ * names that survive the 8.3 conversion losslessly stay plain short
+ * entries (byte-identical layout to pre-v2.18 volumes).  Long names
+ * get a unique BODY~N.EXT alias plus a run of LFN entries.
  */
 
 #define FAT_CLUSTER_SZ_MAX (64u * 512u)        /* 32 KiB, max with SPC=64 */
@@ -52,6 +54,25 @@ uint32_t fat_disk_sectors(void);            /* total sectors on the drive */
 void fat_name83(const char *name, uint8_t out[11]);
 /* render an 8.3 name back to a human string (lower-case) */
 void fat_name_show(const uint8_t *n83, char *out);
+
+/* ---- v2.18 long-name API ---- */
+#ifndef FS_LFN_MAX
+#define FS_LFN_MAX     96      /* max long-name bytes (UTF-8, incl NUL) */
+#endif
+
+/* lookup by full name (exact 8.3 first, then VFAT LFN, case-insensitive);
+ * on success fills out and the actual 11-byte short name of the entry */
+int  fat_lookup_name(uint32_t dirclus, const char *name,
+                     fat_dirent_t *out, uint8_t out_n83[11]);
+/* create dir/file by full name (LFN + BODY~N.EXT alias when needed) */
+int  fat_mkdir_name(uint32_t parent, const char *name);   /* 0 ok */
+int  fat_mkfile_name(uint32_t parent, const char *name);  /* 0 ok */
+/* delete by full name (wipes the short entry + preceding LFN run) */
+int  fat_delete_name(uint32_t dirclus, const char *name);
+/* enumerate entries with display names (long name if present) */
+void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
+                  uint8_t attr, uint32_t clus, uint32_t size, void *ud),
+                  void *ud);
 
 /* directory ops */
 int  fat_lookup(uint32_t dirclus, const uint8_t *name83, fat_dirent_t *out);

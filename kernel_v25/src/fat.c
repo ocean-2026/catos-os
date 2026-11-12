@@ -394,6 +394,476 @@ static void dent_init(struct dent *d, const uint8_t *name83,
     d->wrt_time = d->crt_time;
 }
 
+/* ====================================================================
+ * v2.18 VFAT long file names (LFN)
+ *
+ * Read side: LFN directory entries (attr 0x0F) directly precede their
+ * short-name entry; each carries 13 UCS-2 characters plus a checksum
+ * of the short name.  Write side: names that do not survive the 8.3
+ * conversion without loss (stem >8, ext >3, multiple dots, non-ASCII)
+ * get a unique "BODY~N.EXT" alias plus a run of LFN entries.
+ * Lossless names (banner.sh, README.TXT, ...) stay plain 8.3, so the
+ * on-disk layout of everything created before v2.18 is untouched.
+ * ==================================================================== */
+
+#define LFN_MAX_CHARS  240
+
+static uint8_t lfn_checksum(const uint8_t *n83) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++)
+        sum = (uint8_t)(((sum & 1) ? 0x80u : 0u) + (sum >> 1) + n83[i]);
+    return sum;
+}
+
+/* UTF-8 -> UTF-16 (BMP only; 4-byte sequences become '?').  Returns
+ * the number of units written. */
+static int utf8_to_u16(const char *s, uint16_t *out, int maxn) {
+    int n = 0;
+    while (*s && n < maxn) {
+        unsigned char c = (unsigned char)*s++;
+        if (c < 0x80) { out[n++] = c; }
+        else if ((c & 0xE0) == 0xC0 && (*s & 0xC0) == 0x80) {
+            out[n++] = (uint16_t)(((c & 0x1F) << 6) | (*s++ & 0x3F));
+        } else if ((c & 0xF0) == 0xE0 && (s[0] & 0xC0) == 0x80
+                                        && (s[1] & 0xC0) == 0x80) {
+            out[n++] = (uint16_t)(((c & 0x0F) << 12) | ((s[0] & 0x3F) << 6)
+                                  | (s[1] & 0x3F));
+            s += 2;
+        } else {
+            out[n++] = '?';
+        }
+    }
+    return n;
+}
+
+static uint16_t u16_fold(uint16_t u) {
+    if (u >= 'a' && u <= 'z') return (uint16_t)(u - 32);
+    return u;
+}
+
+/* case-insensitive compare of an UTF-8 name against the collected
+ * UCS-2 long name (truncated at the 0x0000 terminator) */
+static int name_ieq_u16(const char *name, const uint16_t *u, int ulen) {
+    uint16_t want[LFN_MAX_CHARS];
+    int wn = utf8_to_u16(name, want, LFN_MAX_CHARS);
+    /* strip 0xFFFF padding / stop at terminator */
+    int eff = 0;
+    while (eff < ulen && u[eff] != 0x0000 && u[eff] != 0xFFFF) eff++;
+    if (eff != wn) return 0;
+    for (int i = 0; i < eff; i++)
+        if (u16_fold(u[i]) != u16_fold(want[i])) return 0;
+    return 1;
+}
+
+/* does the component survive fat_name83() without information loss?
+ * (length/charset only -- case folding is fine, display lowercases) */
+static int name_lossless83(const char *name) {
+    int body = 0, ext = 0, seen_dot = 0;
+    for (const char *p = name; *p; p++) {
+        if (*p == '.') {
+            if (seen_dot) return 0;
+            seen_dot = 1;
+            continue;
+        }
+        if ((unsigned char)*p < 32 || (unsigned char)*p >= 127) return 0;
+        if (!seen_dot) { if (++body > 8) return 0; }
+        else           { if (++ext  > 3) return 0; }
+    }
+    return 1;
+}
+
+/* long-name accumulator fed with raw directory entries */
+struct lfn_acc {
+    uint16_t ucs[LFN_MAX_CHARS + 16];
+    int      expect;      /* next expected sequence number, 0 = idle */
+    uint8_t  sum;
+    int      len;
+};
+
+static void lfn_acc_reset(struct lfn_acc *L) { L->expect = 0; L->len = 0; }
+
+/* feed one attr==0x0F entry (raw 32 bytes); keeps the window valid */
+static void lfn_acc_feed(struct lfn_acc *L, const uint8_t *b) {
+    int seq = b[0] & 0x1F;
+    if (seq == 0 || seq > 20) { lfn_acc_reset(L); return; }
+    if (b[0] & 0x40) {                        /* last physical part: restart */
+        L->len = 0;
+        L->sum = b[13];
+        L->expect = seq;
+    } else if (seq != L->expect) {
+        lfn_acc_reset(L);
+        return;
+    }
+    if (L->expect) {
+        int base = (seq - 1) * 13;
+        static const int slot_of[13] = { 1,3,5,7,9, 14,16,18,20,22,24, 28,30 };
+        for (int k = 0; k < 13; k++) {
+            int o = base + k;
+            if (o < LFN_MAX_CHARS)
+                L->ucs[o] = (uint16_t)(b[slot_of[k]] | (b[slot_of[k] + 1] << 8));
+        }
+        if (base + 13 > L->len) L->len = base + 13;
+        L->expect = seq - 1;
+    }
+}
+
+/* extract the long name of the entry at raw bytes b (short entry) into
+ * out (UTF-8, outn bytes); 0 = no valid LFN precedes it */
+static int lfn_of_short(const struct lfn_acc *L, const uint8_t *b,
+                        char *out, int outn) {
+    if (L->expect != 0) return 0;
+    if (lfn_checksum(b) != L->sum || L->len == 0) return 0;
+    int o = 0;
+    for (int i = 0; i < L->len && o < outn - 1; i++) {
+        uint16_t u = L->ucs[i];
+        if (u == 0x0000) break;
+        if (u == 0xFFFF) break;
+        if (u < 0x80) out[o++] = (char)u;
+        else if (u < 0x800) {
+            if (o > outn - 3) break;
+            out[o++] = (char)(0xC0 | (u >> 6));
+            out[o++] = (char)(0x80 | (u & 0x3F));
+        } else {
+            if (o > outn - 4) break;
+            out[o++] = (char)(0xE0 | (u >> 12));
+            out[o++] = (char)(0x80 | ((u >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (u & 0x3F));
+        }
+    }
+    out[o] = 0;
+    return o > 0;
+}
+
+/* full-name lookup: exact 8.3 first (legacy layout), then LFN match.
+ * On success fills out and the *actual* 11-byte short name of the hit. */
+int fat_lookup_name(uint32_t dirclus, const char *name,
+                    fat_dirent_t *out, uint8_t out_n83[11]) {
+    uint8_t n83[11];
+    fat_name83(name, n83);
+    fat_dirent_t e;
+    if (fat_lookup(dirclus, n83, &e) == 0) {
+        if (out) *out = e;
+        if (out_n83) memcpy_(out_n83, n83, 11);
+        return 0;
+    }
+    /* LFN walk: single pass, accumulate attr-0x0F windows */
+    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+    struct lfn_acc L;
+    lfn_acc_reset(&L);
+    int per = (int)(spc * 512 / DENT_SIZE);
+    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+        if (fat_read_cluster(c, buf) != 0) break;
+        for (int i = 0; i < per; i++) {
+            uint8_t *b = buf + i * DENT_SIZE;
+            if (b[0] == 0x00) goto notfound;
+            if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
+            if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
+            if (b[11] & 0x08) continue;               /* volume label */
+            /* short entry: does the accumulated LFN match? */
+            char lfn[FS_LFN_MAX];
+            if (lfn_of_short(&L, b, lfn, sizeof(lfn)) &&
+                name_ieq_u16(name, L.ucs, L.len)) {
+                lfn_acc_reset(&L);
+                if (out) {
+                    out->attr = b[11];
+                    /* clus_hi @20..21 (LE u16), clus_lo @26..27 */
+                    out->cluster = ((uint32_t)b[20] << 16)
+                                 | ((uint32_t)b[21] << 24)
+                                 | (uint32_t)b[26]
+                                 | ((uint32_t)b[27] << 8);
+                    out->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
+                              | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
+                }
+                if (out_n83) memcpy_(out_n83, b, 11);
+                return 0;
+            }
+            lfn_acc_reset(&L);
+        }
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) break;
+        c = n;
+    }
+notfound:
+    return -1;
+}
+
+/* unique BODY~N.EXT alias for a name that needs an LFN */
+static int make_alias83(uint32_t parent, const char *name, uint8_t out[11]) {
+    for (int i = 0; i < 11; i++) out[i] = ' ';
+    const char *dot = 0;
+    for (const char *p = name; *p; p++) if (*p == '.') dot = p;
+    int nlen = dot ? (int)(dot - name) : slen_(name);
+    if (nlen > 6) nlen = 6;
+    int blen = 0;
+    for (int i = 0; i < nlen; i++) {
+        char c = name[i];
+        if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
+        out[blen++] = (uint8_t)upper_(c);
+    }
+    if (blen == 0) { out[0] = 'N'; out[1] = 'E'; out[2] = 'W'; blen = 3; }
+    if (dot) {
+        int el = 0;
+        for (const char *p = dot + 1; *p && el < 3; p++, el++) {
+            char c = *p;
+            if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
+            out[8 + el] = (uint8_t)upper_(c);
+        }
+    }
+    fat_dirent_t tmp;
+    for (int n = 1; n <= 99; n++) {
+        out[blen] = '~';
+        if (n < 10) {
+            out[blen + 1] = (uint8_t)('0' + n);
+            out[blen + 2] = ' ';
+        } else {
+            out[blen + 1] = (uint8_t)('0' + n / 10);
+            out[blen + 2] = (uint8_t)('0' + n % 10);
+        }
+        if (fat_lookup(parent, out, &tmp) != 0) return 0;
+    }
+    return -1;                                  /* 99 aliases taken */
+}
+
+/* write one LFN part into raw 32 bytes (13 UCS-2 chars at base) */
+static void lfn_fill_part(uint8_t *b, const uint16_t *u, int total, int base) {
+    static const int slot_of[13] = { 1,3,5,7,9, 14,16,18,20,22,24, 28,30 };
+    for (int k = 0; k < 13; k++) {
+        uint16_t v = 0xFFFF;
+        if (base + k < total) v = u[base + k];
+        else if (base + k == total) v = 0x0000;
+        b[slot_of[k]] = (uint8_t)(v & 0xFF);
+        b[slot_of[k] + 1] = (uint8_t)(v >> 8);
+    }
+}
+
+/* write the LFN run + short entry at a (start_c, start_i) position that
+ * may span directory clusters; every touched cluster is written back */
+static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
+                       int n, int nent, const uint8_t *alias, uint8_t attr,
+                       uint32_t clus, uint32_t size) {
+    static uint8_t wbuf[FAT_CLUSTER_SZ_MAX];
+    int per = (int)(spc * 512 / DENT_SIZE);
+    uint32_t wc = start_c;
+    int wi = start_i;
+    int loaded = 0, dirty = 0, rc = 0;
+    uint8_t sum = lfn_checksum(alias);
+    for (int k = 0; k <= nent; k++) {
+        if (!loaded) {
+            if (fat_read_cluster(wc, wbuf) != 0) return -1;
+            loaded = 1; dirty = 0;
+        }
+        uint8_t *b = wbuf + wi * DENT_SIZE;
+        if (k < nent) {
+            int seq = nent - k;                 /* descending on disk */
+            memz(b, DENT_SIZE);
+            b[0] = (uint8_t)((seq == nent ? 0x40 : 0) | seq);
+            b[11] = 0x0F;
+            b[12] = 0;
+            b[13] = sum;
+            lfn_fill_part(b, ucs, n, (seq - 1) * 13);
+        } else {
+            struct dent *se = (struct dent *)b;
+            dent_init(se, alias, attr, clus, size);
+        }
+        dirty = 1;
+        wi++;
+        if (wi >= per) {
+            if (fat_write_cluster(wc, wbuf) != 0) return -1;
+            loaded = 0; dirty = 0;
+            uint32_t nx = fat_get(wc);
+            if (nx < 2 || nx >= 0x0FFFFFF0) return -1;  /* run overran */
+            wc = nx; wi = 0;
+        }
+    }
+    if (dirty && fat_write_cluster(wc, wbuf) != 0) return -1;
+    return rc;
+}
+
+/* write alias + its LFN run into the first contiguous free window of
+ * the directory (0x00 and 0xE5 slots are both usable; the window may
+ * span cluster boundaries).  Extends the chain with zeroed clusters
+ * when no window fits, so no 0x00 end marker is left mid-chain. */
+static int dir_write_lfn(uint32_t dirclus, const char *name,
+                         const uint8_t *alias, uint8_t attr,
+                         uint32_t clus, uint32_t size) {
+    static uint8_t zbuf[FAT_CLUSTER_SZ_MAX];
+    uint16_t ucs[LFN_MAX_CHARS];
+    int n = utf8_to_u16(name, ucs, LFN_MAX_CHARS);
+    int nent = (n + 12) / 13;
+    if (nent < 1) nent = 1;
+    int total = nent + 1;
+    int per = (int)(spc * 512 / DENT_SIZE);
+
+    uint32_t start_c = 0;
+    int start_i = 0;
+    int run = 0;
+    uint32_t c = dirclus;
+    int guard = 0;
+    while (c >= 2 && c < max_clus && guard++ < 65536) {
+        if (fat_read_cluster(c, zbuf) != 0) return -1;
+        for (int i = 0; i < per; i++) {
+            uint8_t *en = zbuf + i * DENT_SIZE;
+            if (en[0] == 0x00 || en[0] == 0xE5) {
+                if (run == 0) { start_c = c; start_i = i; }
+                if (++run == total)
+                    return dir_put_run(start_c, start_i, ucs, n, nent,
+                                       alias, attr, clus, size);
+            } else run = 0;
+        }
+        uint32_t nx = fat_get(c);
+        if (nx < 2 || nx >= 0x0FFFFFF0) {
+            /* chain exhausted: append a zeroed cluster (all slots free)
+             * and keep counting the run into it */
+            uint32_t nc = fat_alloc();
+            if (!nc) return -1;
+            fat_set(c, nc);
+            memz(zbuf, sizeof(zbuf));
+            if (fat_write_cluster(nc, zbuf) != 0) return -1;
+            if (run == 0) { start_c = nc; start_i = 0; }
+            c = nc;
+            continue;
+        }
+        c = nx;
+    }
+    return -1;
+}
+
+/* shared create (file or dir) with full name; 0 = ok */
+static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
+    fat_dirent_t tmp;
+    uint8_t rn[11];
+    if (fat_lookup_name(parent, name, &tmp, rn) == 0) return -1;  /* exists */
+
+    if (name_lossless83(name)) {
+        uint8_t n83[11];
+        fat_name83(name, n83);
+        if (attr == FAT_ATTR_DIR) return fat_mkdir(parent, n83);
+        return fat_mkfile(parent, n83);
+    }
+
+    uint8_t alias[11];
+    if (make_alias83(parent, name, alias) != 0) return -1;
+
+    uint32_t nc = fat_alloc();
+    if (!nc) return -1;
+    static uint8_t zbuf[FAT_CLUSTER_SZ_MAX];
+    if (attr == FAT_ATTR_DIR) {
+        memz(zbuf, sizeof(zbuf));
+        uint8_t dotname[11], dotdotname[11];
+        for (int i = 0; i < 11; i++) { dotname[i] = ' '; dotdotname[i] = ' '; }
+        dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
+        struct dent *d0 = (struct dent *)zbuf;
+        struct dent *d1 = (struct dent *)(zbuf + DENT_SIZE);
+        dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
+        dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0);
+        if (fat_write_cluster(nc, zbuf) != 0) return -1;
+    } else {
+        memz(zbuf, sizeof(zbuf));
+        if (fat_write_cluster(nc, zbuf) != 0) { fat_free_chain(nc); return -1; }
+    }
+    if (dir_write_lfn(parent, name, alias, attr, nc, 0) != 0) {
+        fat_free_chain(nc);
+        return -1;
+    }
+    fat_flush();
+    return 0;
+}
+
+int fat_mkdir_name(uint32_t parent, const char *name) {
+    return fat_create_nl(parent, name, FAT_ATTR_DIR);
+}
+
+int fat_mkfile_name(uint32_t parent, const char *name) {
+    return fat_create_nl(parent, name, FAT_ATTR_FILE);
+}
+
+/* delete by full name: marks the short entry 0xE5 and any immediately
+ * preceding LFN run with the same checksum */
+int fat_delete_name(uint32_t dirclus, const char *name) {
+    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+    uint8_t n83[11];
+    fat_name83(name, n83);
+    struct lfn_acc L;
+    lfn_acc_reset(&L);
+    int per = (int)(spc * 512 / DENT_SIZE);
+    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+        if (fat_read_cluster(c, buf) != 0) return -1;
+        int hit = -1;
+        for (int i = 0; i < per; i++) {
+            uint8_t *b = buf + i * DENT_SIZE;
+            if (b[0] == 0x00) break;
+            if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
+            if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
+            if (b[11] & 0x08) continue;
+            int match = 0;
+            if (name83_eq(b, n83)) match = 1;
+            else {
+                char lfn[FS_LFN_MAX];
+                if (lfn_of_short(&L, b, lfn, sizeof(lfn)) &&
+                    name_ieq_u16(name, L.ucs, L.len)) match = 1;
+            }
+            if (match) { hit = i; break; }
+            lfn_acc_reset(&L);
+        }
+        if (hit >= 0) {
+            uint8_t *b = buf + hit * DENT_SIZE;
+            b[0] = 0xE5;
+            uint8_t sum = lfn_checksum(b);
+            for (int i = hit - 1; i >= 0; i--) {
+                uint8_t *p = buf + i * DENT_SIZE;
+                if (p[11] != 0x0F || p[13] != sum) break;
+                p[0] = 0xE5;
+            }
+            fat_write_cluster(c, buf);
+            fat_flush();
+            return 0;
+        }
+        lfn_acc_reset(&L);
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) break;
+        c = n;
+    }
+    return -1;
+}
+
+/* enumerate a directory calling cb for every entry with its display
+ * name (long name when present, else 8.3 lower-case) */
+void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
+                  uint8_t attr, uint32_t clus, uint32_t size, void *ud),
+                  void *ud) {
+    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+    struct lfn_acc L;
+    lfn_acc_reset(&L);
+    int per = (int)(spc * 512 / DENT_SIZE);
+    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+        if (fat_read_cluster(c, buf) != 0) return;
+        for (int i = 0; i < per; i++) {
+            uint8_t *b = buf + i * DENT_SIZE;
+            if (b[0] == 0x00) return;
+            if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
+            if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
+            if (b[11] & 0x08) continue;
+            char lfn[FS_LFN_MAX];
+            const char *shown = 0;
+            if (lfn_of_short(&L, b, lfn, sizeof(lfn))) shown = lfn;
+            lfn_acc_reset(&L);
+            char s83[16];
+            if (!shown) {
+                fat_name_show(b, s83);
+                shown = s83;
+            }
+            uint32_t cl = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
+                        | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
+            uint32_t sz = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
+                        | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
+            cb(shown, b[11], cl, sz, ud);
+        }
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) return;
+        c = n;
+    }
+}
+
 int fat_mkdir(uint32_t parent, const uint8_t *name83) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;   /* exists */

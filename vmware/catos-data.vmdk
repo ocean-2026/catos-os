@@ -1,18 +1,19 @@
 # Disk DescriptorFile
 version=1
 encoding="windows-1252"
-CID=fffffffe
+CID=99a1fd54
 parentCID=ffffffff
 createType="twoGbMaxExtentFlat"
 
 # Extent description
 RW 131072 FLAT "..\kernel_v25\catos_disk.img" 0
 
-# The Disk Data Base
+# The Disk Data Base 
 #DDB
 
-ddb.virtualHWVersion = "16"
+ddb.adapterType = "ide"
 ddb.geometry.cylinders = "131"
 ddb.geometry.heads = "16"
 ddb.geometry.sectors = "63"
-ddb.adapterType = "ide"
+ddb.longContentID = "19515b0668128a42f2547e3999a1fd54"
+ddb.virtualHWVersion = "16"

@@ -9,7 +9,7 @@
  * the nano editor; no on-disk structures leak through.
  */
 
-#define FS_NAME_MAX     24      /* max path component incl. NUL */
+#define FS_NAME_MAX     48      /* max path component incl. NUL (LFN) */
 #define FS_DATA_MAX     4096    /* max file size supported by the editor */
 #define FS_PATH_MAX     160     /* max absolute path length */
 
@@ -45,7 +45,7 @@ int        fs_chdir(const char *path);    /* empty path = root */
 int        fs_mkdir(const char *path);
 int        fs_touch(const char *path);    /* create empty file if absent */
 void       fs_list(const char *path);     /* NULL = current dir */
-int        fs_enum_files(const char *path, char out[][13], int maxn);
+int        fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn);
 void       fs_pwd(char *out, int outlen); /* absolute path of cwd */
 /* Canonical absolute path: abs_path() + ASCII lowercase folding.  FAT32
  * is case-insensitive, so security lookups (ACL) MUST compare this form

@@ -1523,15 +1523,22 @@ static void cmd_id(const char *name) {
     vga_write(" shell="); vga_write(u->shell); vga_write("\n");
 }
 
+static void print_hex8(uint32_t v) {
+    char b[9];
+    for (int i = 7; i >= 0; i--) { b[i] = "0123456789ABCDEF"[v & 0xF]; v >>= 4; }
+    b[8] = 0;
+    vga_write(b);
+}
+
 static void cmd_lsuser(void) {
-    vga_write("UID  GID  PW   CAPS       NAME\n");
+    vga_write("UID  GID  PW   CAPS      NAME\n");
     for (int i = 0; i < MAX_USERS; i++) {
         user_rec_t *u = user_at(i);
         if (!u || !u->used) continue;
         print_pad(u->uid, 4); vga_write(" ");
         print_pad(u->gid, 4); vga_write(" ");
         vga_write(u->passhash ? "yes  " : "no   ");
-        print_hex(u->caps);
+        print_hex8(u->caps);
         vga_write("  ");
         vga_write(u->name);
         vga_write("\n");
@@ -2112,11 +2119,11 @@ static void boot_autostart(void) {
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
 
-    char names[8][13];
+    char names[8][FS_NAME_MAX];
     int n = fs_enum_files(AUTOSTART_DIR, names, 8);
     if (n <= 0) return;
     for (int i = 0; i < n && i < 8; i++) {
-        char path[40];              /* 15 dir + 1 '/' + 12 name + NUL */
+        char path[FS_PATH_MAX];
         int k = 0;
         const char *s;
         for (s = AUTOSTART_DIR; *s && k < (int)sizeof(path) - 1; s++)
