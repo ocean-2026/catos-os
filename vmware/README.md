@@ -57,3 +57,15 @@ IDE 0:0，`bios.bootOrder = "hdd"`。VMware BIOS 会先试 IDE 0:0（数据盘
   提示 NOT FOUND，不影响其他功能。
 - 若 VMware 版本较老（硬件版本 <16），把 `virtualHW.version` 与
   `ddb.virtualHWVersion` 调低到对应数字即可。
+
+## 实测记录（2026-11-12）
+
+- 本机 VMware Workstation Pro 17.6.1（安装于 D:/mine/，vmrun/vmcli 同目录）。
+- VM 已注册进库存（inventory.vmls，vmlist4 槽位，displayName "CatOS"），
+  `vmrun list` 显示 running，vmware.log 确认 720x400（80x25 文本模式）MKS
+  窗口创建 —— 引导链 El Torito → GRUB → CatOS shell 工作正常。
+- 旧 VM（CatOS / CatOS_Clear / catos_clear）已从库存注销并删除目录；
+  D:/CatOS.vhd 已删；kali VM 未动。库存备份：
+  %APPDATA%\VMware\inventory.vmls.bak-20261112
+- 注意：catos_clear 的 vmdk 曾直接引用仓库 tests/qemu_disk_user.img，
+  因此删除用 unregister+手动删目录，未用 vmrun deleteVM，仓库文件无损。
