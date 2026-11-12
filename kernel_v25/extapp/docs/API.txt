@@ -631,3 +631,22 @@ Reference app: /bin/punctest.ce prints the fullwidth punctuation table
 wide-character decision is now "font lookup succeeded" rather than a
 hardcoded codepoint range, which also fixes out-of-bounds font reads
 for cp 0x80-0xFF.
+
+v2.17 -- boot autostart scripts (/etc/autoexec) + new logo (2026-11-12)
+=====================================================================
+
+The hardcoded boot banner is gone.  At boot the shell now executes
+every file in /etc/autoexec (in directory order), one shell command
+per line; '#' comments and blank lines are skipped.  A fresh volume
+gets a seeded banner.sh with echo lines reproducing the old banner.
+Edit /etc/autoexec/banner.sh or add more scripts (8.3 names only --
+the volume has no LFN support) to change what boot prints.  The
+'autostart' shell command re-runs the directory on demand.
+
+Shell changes: cmd dispatch was factored into shell_exec() so script
+lines run through the exact same builtin/PATH lookup as typed input.
+cmd_about() keeps the new block-style CatOS logo ('about' command).
+
+Also fixed: be_text painted blanked cells (cp==0, produced by
+backspace) as '?' -- every backspace left ghost marks.  Blank cells
+now paint as spaces (issue #103).

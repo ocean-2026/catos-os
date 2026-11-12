@@ -24,6 +24,13 @@ static int strcmp_(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
+
+/* forward decls: the shared command dispatcher and the boot autostart
+ * runner (/etc/autostart scripts, v2.17) */
+static void shell_exec(char *cmd, char *arg);
+static void boot_autostart(void);
+
 static void itoa(int v, char *out, int width) {
     char tmp[12]; int i = 0, neg = 0;
     if (v < 0) { neg = 1; v = -v; }
@@ -75,6 +82,7 @@ static void cmd_help(void) {
         "  clear        clear the screen\n"
         "  echo TEXT    print text back\n"
         "  about        system info banner\n"
+        "  autostart    re-run /etc/autostart scripts\n"
         "  uname        print OS name\n"
         "  date         show RTC date/time\n"
         "  mem          show RAM size (multiboot)\n"
@@ -422,12 +430,13 @@ static void cmd_display(void) {
 static void cmd_about(void) {
     vga_set_fg(VGA_LIGHT_CYAN);
     vga_write(
-        "   _____      _        ____   _____ \n"
-        "  / ____|    | |      / __ \\ / ____|\n"
-        " | |     __ _| |_  ___| |  | | (___  \n"
-        " | |    / _` | __|/ _ \\ |  | |\\___ \\ \n"
-        " | |___| (_| | |_  __/ |__| |____) |\n"
-        "  \\_____\\__,_|\\__|\\___|\\____/|_____/ \n"
+        "###          ##    ####   #####\n"
+        "##             ##   ##  ## ##\n"
+        "##      ####  ###### ##  ## ##\n"
+        "#          ##   ##   ##  ##  ####\n"
+        "##      #####   ##   ##  ##     ##\n"
+        "##    ##  ##   ##   ##  ##     ##\n"
+        "###  #####    ###  ####  #####\n"
     );
     vga_set_fg(VGA_LIGHT_GREY);
     vga_write("  A tiny Unix-like OS on GRUB Multiboot\n");
@@ -1859,13 +1868,15 @@ void shell_run(void) {
     user_db_init();
     acl_init();
     session_apply();                /* boot session = root (initial user) */
-    cmd_about();
-    net_boot_status();
     if (!fs_fs_ready())
         vga_write("\n[!] No FAT32 volume on IDE drive.  Type 'format' first.\n");
-    else
+    else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
-    vga_write("\nType 'help' for a list of commands.\n\n");
+        /* v2.17: boot output now comes from /etc/autostart scripts
+         * (echo lines) instead of a hardcoded banner.  Falls back to a
+         * seeded default script on a fresh volume. */
+        boot_autostart();
+    }
 
     while (1) {
         prompt();
@@ -1879,7 +1890,14 @@ void shell_run(void) {
         if (*arg) { *arg = 0; arg++; while (*arg == ' ') arg++; }
 
         if (!*cmd) continue;
+        shell_exec(cmd, arg);
+    }
+}
 
+/* Execute one parsed command line: builtins first, then current-dir
+ * program and /bin PATH lookup.  Shared by the interactive loop and the
+ * /etc/autostart script runner (identical semantics for both). */
+static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
@@ -1893,6 +1911,7 @@ void shell_run(void) {
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();
+        else if (!strcmp_(cmd, "autostart"))  boot_autostart();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
         else if (!strcmp_(cmd, "date"))       cmd_date();
         else if (!strcmp_(cmd, "mem"))        cmd_mem();
@@ -2064,5 +2083,77 @@ void shell_run(void) {
                 vga_write(cmd); vga_write("\n");
             }
         }
+}
+
+/* ---------- v2.17 boot autostart (/etc/autoexec) ---------- */
+
+/* 8.3 names only: the volume has no LFN support, so "autostart" (9-char
+ * stem) is rejected by path_has_long_names() -- hence "autoexec". */
+#define AUTOSTART_DIR "/etc/autoexec"
+
+/* Seeded on a fresh volume so the boot banner still works out of the
+ * box; the user may edit or delete it and add more scripts. */
+static const char *const AUTOSTART_DEFAULT =
+    "# CatOS boot scripts live in /etc/autoexec\n"
+    "# (one shell command per line, '#' comments and blank lines skipped,\n"
+    "#  8.3 file names -- the volume has no long-name support).\n"
+    "echo CatOS 0.3 -- A tiny Unix-like OS on GRUB Multiboot\n"
+    "echo Architecture : i386 (32-bit x86)\n"
+    "echo Bootloader   : GRUB 2 (ISO9660 / El Torito)\n"
+    "echo Filesystem   : FAT32 on IDE (persistent)\n"
+    "echo Display      : front-end + text/gfx back-ends\n"
+    "echo Runs on      : QEMU / VMware / Bochs / real PC\n"
+    "echo Type 'help' for a list of commands.\n";
+
+static void boot_autostart(void) {
+    if (!fs_fs_ready()) return;
+    /* seed dir + default banner (fs_write_raw skips an existing file) */
+    fs_mkdir(AUTOSTART_DIR);
+    fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
+                 (uint32_t)slen_(AUTOSTART_DEFAULT));
+
+    char names[8][13];
+    int n = fs_enum_files(AUTOSTART_DIR, names, 8);
+    if (n <= 0) return;
+    for (int i = 0; i < n && i < 8; i++) {
+        char path[40];              /* 15 dir + 1 '/' + 12 name + NUL */
+        int k = 0;
+        const char *s;
+        for (s = AUTOSTART_DIR; *s && k < (int)sizeof(path) - 1; s++)
+            path[k++] = *s;
+        if (k < (int)sizeof(path) - 1) path[k++] = '/';
+        for (s = names[i]; *s && k < (int)sizeof(path) - 1; s++)
+            path[k++] = *s;
+        path[k] = 0;
+
+        static char buf[2048];
+        int len = fs_read_text(path, buf, (int)sizeof(buf) - 1);
+        if (len <= 0) continue;
+        buf[len] = 0;
+
+        vga_write("autostart: ");
+        vga_write(names[i]);
+        vga_write("\n");
+        char *p = buf;
+        while (*p) {
+            char *line = p;
+            while (*p && *p != '\n') p++;
+            if (*p) *p++ = 0;
+            char *e = line + slen_(line);
+            if (e > line && e[-1] == '\r') e[-1] = 0;   /* CRLF safety */
+
+            char *lcmd = line;
+            while (*lcmd == ' ' || *lcmd == '\t') lcmd++;
+            if (!*lcmd || *lcmd == '#') continue;
+            char *larg = lcmd;
+            while (*larg && *larg != ' ' && *larg != '\t') larg++;
+            if (*larg) {
+                *larg = 0; larg++;
+                while (*larg == ' ' || *larg == '\t') larg++;
+            }
+            shell_exec(lcmd, larg);
+        }
     }
+    net_boot_status();              /* keep the one-line NIC status at boot */
+    vga_write("\n");
 }

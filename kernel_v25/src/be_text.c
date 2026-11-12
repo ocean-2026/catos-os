@@ -139,8 +139,11 @@ static void text_draw_cell(int gx, int gy, const con_cell_t *c) {
                 (uint16_t)(0x81 + 2 * (int)s) | ((uint16_t)a << 8);
         return;
     }
-    unsigned char ch = (c->cp && c->cp <= 0x7F) ? (unsigned char)c->cp :
-                       (c->cp <= 0xFF ? '?' : ' ');
+    /* printable ASCII only; anything else (blanked cells from '\b',
+     * control codepoints, >0xFF) paints as a space -- cp==0 used to
+     * paint '?' and every backspace left ghost marks (#103). */
+    unsigned char ch = (c->cp >= 0x20 && c->cp <= 0x7F)
+                     ? (unsigned char)c->cp : ' ';
     word = (uint16_t)ch | ((uint16_t)a << 8);
     vram[gy * 80 + gx] = word;
 }

@@ -121,3 +121,18 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 - 口令哈希 djb2（非密码学）、单 gid 无多组（ROADMAP P1 不变）。
 - VMware 为 SeaBIOS 同源验证 + 配置工件，未经 VMware Workstation 本机实测
   （本机未装）；待用户在 VMware 里按 vmware/README.md 验证。
+
+## 七、开机体验轮（2026-11-12，v2.17）
+
+- **#103（bug）** 退格 `?` 残影：be_text 把空格子（cp==0）画成 '?'。
+  改为仅可打印 ASCII 显示原字符、其余画空格。QEMU 复现→修复→验证
+  （输 cba + 3 次退格屏幕干净，tests/qemu_shots/bs2.png）。
+- **自启动目录（特性）**：开机不再打印硬编码 banner，改为顺序执行
+  `/etc/autoexec/` 下脚本（每行一条 shell 命令，# 注释/空行跳过）；
+  空卷自动播种 banner.sh（echo 行复刻原 banner）。新命令
+  `autostart` 可随时重跑。shell 分发链重构为 shell_exec() 供交互与
+  脚本共用。**注意 8.3 命名限制**：目录名用 autoexec 而非 autostart
+  （9 字符 stem 被无 LFN 的 fs_mkdir 拒绝——曾因此静默失效）。
+- **新开机 logo**：about 的 ASCII 大字换成块状 CatOS。
+- 回归：security 17/17、user 15/15、qemu 12/12（autostart 实测截图
+  tests/qemu_shots/fin0.png）。

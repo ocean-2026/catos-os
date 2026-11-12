@@ -245,7 +245,52 @@ int fs_touch(const char *path) {
     return create_path(path, FS_FILE);
 }
 
-/* ---------- list / pwd ---------- */
+/* ---------- list / pwd / enum ---------- */
+
+/* Enumerate regular-file entries of a directory (same walk as fs_list,
+ * but collects names instead of printing).  No LFN / volume labels /
+ * subdirectories are returned; names are 8.3 upper-case, NUL-padded.
+ * Returns the number of names written, or -1 if the path is not an
+ * existing directory (e.g. the volume is not mounted). */
+int fs_enum_files(const char *path, char out[][13], int maxn) {
+    if (!fs_ready || !path || maxn < 1) return -1;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
+
+    int count = 0;
+    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+    uint32_t c = clus;
+    char shown[16];
+    while (c >= 2 && c < 0x0FFFFFF0) {
+        if (fat_read_cluster(c, buf) != 0) break;
+        int ended = 0;
+        for (int i = 0; i < (int)(fat_cluster_size() / 32); i++) {
+            uint8_t *en = buf + i * 32;
+            if (en[0] == 0x00) { ended = 1; break; }  /* end of dir */
+            if (en[0] == 0xE5) continue;             /* deleted */
+            if (en[11] == 0x0F) continue;            /* LFN */
+            if (en[11] & 0x08) continue;             /* volume label */
+            if (en[11] & FAT_ATTR_DIR) continue;     /* only files */
+            fat_name_show(en, shown);
+            if (count < maxn) {
+                int k;
+                for (k = 0; shown[k] && k < 12; k++)
+                    out[count][k] = shown[k];
+                out[count][k] = 0;
+            }
+            count++;
+        }
+        if (ended) break;
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) break;
+        c = n;
+    }
+    return count;
+}
+
 void fs_list(const char *path) {
     if (!fs_ready) {
         vga_write("catos: no FAT32 volume. Run 'format' first.\n");
