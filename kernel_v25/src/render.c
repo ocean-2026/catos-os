@@ -277,10 +277,14 @@ static void cell_put_cp(uint32_t cp) {
     }
     default: {
         int wide = 0;
-        if (cp >= 0x1100) {
-            if (be->cjk && render_font_hz(cp)) wide = 1;
-            else cp = '?';              /* uncovered codepoint */
-        } else if (cp > 0xFF) cp = '?';
+        /* v2.16: "is there a 16x16 glyph for this codepoint" is the sole
+         * criterion for a double-width cell.  The old hardcoded
+         * cp >= 0x1100 excluded CJK punctuation/symbols outside that
+         * range and degraded them all to '?'.  It also let 0x80..0xFF
+         * fall through to render_font_glyph(), whose basic table covers
+         * only 0x20..0x7E -- an out-of-bounds read. */
+        if (cp >= 0x80 && be->cjk && render_font_hz(cp)) wide = 1;
+        else if (cp > 0x7E || cp < 0x20) cp = '?';
         ensure_room(wide);
         break_block(cur_x, cur_y);
         if (wide && cur_x + 1 < cols) break_block(cur_x + 1, cur_y);
@@ -549,10 +553,9 @@ void con_write_at_utf8(uint8_t x, uint8_t y, const char *s) {
         int used = utf8_one(s, &cp);
         s += used;
         int wide = 0;
-        if (cp >= 0x1100) {
-            if (be->cjk && render_font_hz(cp)) wide = 1;
-            else cp = '?';
-        } else if (cp > 0xFF) cp = '?';
+        /* v2.16: glyph-table driven, see cell_put_cp() above. */
+        if (cp >= 0x80 && be->cjk && render_font_hz(cp)) wide = 1;
+        else if (cp > 0x7E || cp < 0x20) cp = '?';
         int w = wide ? 2 : 1;
         if (cx + w > cols) break;
         break_block(cx, cy);

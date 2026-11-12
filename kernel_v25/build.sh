@@ -76,10 +76,18 @@ build_disk() {
     echo "OK -> catos_disk.img (boot with: -hda catos_disk.img)"
 }
 
+# Every target consumes the CE images that gen_builtin.py / mkdisk.py
+# embed, so build them before ANY of those run.  Previously only the
+# "disk" target did this: after adding an app, `build.sh iso` either died
+# with "missing extapp/bin/<app>.ce" or silently embedded a stale image
+# left over from an older build.  Rebuilding all apps costs a few seconds
+# and keeps build/apps.list a genuine single source of truth.
+build_apps
+
 # early dispatch: the disk target packages extapp/bin into a FAT32 image
 # and does NOT need the kernel compile below.
 case "$1" in
-    disk) build_apps; build_disk; exit 0 ;;
+    disk) build_disk; exit 0 ;;
 esac
 
 echo "== generating built-in app blobs =="

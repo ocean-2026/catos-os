@@ -366,17 +366,27 @@ static void text_diag(void) {
         con_write("  "); con_write(buf);
     }
     con_write("\nattrpal:");
-    (void)inb(0x3DA);
-    for (int i = 0; i < 8; i++) {
-        outb(0x3C0, (uint8_t)(i | 0x20)); con_write(" ");
-        unsigned v = inb(0x3C1);
-        buf[0] = "0123456789ABCDEF"[v >> 4];
-        buf[1] = "0123456789ABCDEF"[v & 15];
-        buf[2] = 0;
-        con_write(buf);
+    /* #100: the AC index/data flip-flop must be reset to INDEX state
+     * before EVERY 0x3C0 write.  The old code did inb(0x3DA) once before
+     * the loop, so from i=1 onward each outb(0x3C0, i|0x20) was taken as
+     * DATA and silently rewrote palette registers -- `vdiag` turned the
+     * black background purple.  Also collect first, restore video, then
+     * print: con_write() must never run mid-AC-sequence. */
+    {
+        char pal[8][3];
+        for (int i = 0; i < 8; i++) {
+            (void)inb(0x3DA);
+            outb(0x3C0, (uint8_t)(i | 0x20));   /* PAS=1 => palette read */
+            unsigned v = inb(0x3C1);
+            vga_reg_dump[113 + i] = (uint8_t)v;
+            pal[i][0] = "0123456789ABCDEF"[v >> 4];
+            pal[i][1] = "0123456789ABCDEF"[v & 15];
+            pal[i][2] = 0;
+        }
+        (void)inb(0x3DA);
+        outb(0x3C0, 0x20);                    /* re-enable video */
+        for (int i = 0; i < 8; i++) { con_write(" "); con_write(pal[i]); }
     }
-    (void)inb(0x3DA);
-    outb(0x3C0, 0x20);                    /* re-enable video, index 0 */
     con_write("\ndac0-2:");
     outb(0x3C7, 0);
     for (int i = 0; i < 3; i++) {
@@ -386,20 +396,22 @@ static void text_diag(void) {
         buf[2] = 0;
         con_write(" "); con_write(buf);
     }
-    con_set_cursor(0, 3);
-    con_write("glyphA: ");
-    outb(0x3CE, 0x05); outb(0x3CF, 0x00);
+    /* #100: the 'A' glyph was already captured into vga_reg_dump[72..79]
+     * by the plane-2 readback above.  The old code re-entered the font
+     * window, called con_write() while GC05/GC04 were reconfigured, and
+     * used con_set_cursor(0,3)/(0,5) -- that overwrote row 3 of the
+     * user's screen (the "????????" artifact on the syn.go ls line) and
+     * left the cursor somewhere unrelated.  Now: no register writes, no
+     * cursor moves, just append to the normal output stream. */
+    con_write("\nglyphA: ");
     for (int i = 0; i < 8; i++) {
-        outb(0x3CE, 0x04); outb(0x3CF, 0x02);
-        unsigned v = fontwin[65 * 32 + i];
+        unsigned v = vga_reg_dump[72 + i];
         buf[0] = "0123456789ABCDEF"[v >> 4];
         buf[1] = "0123456789ABCDEF"[v & 15];
         buf[2] = 0;
         con_write(buf);
     }
-    outb(0x3CE, 0x04); outb(0x3CF, 0x00);
-    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
-    con_set_cursor(0, 5);
+    con_write("\n");
 }
 
 render_be_t be_text = {

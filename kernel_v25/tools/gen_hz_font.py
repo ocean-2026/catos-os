@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-gen_hz_font.py -- regenerate src/font_hz.inc from the committed Unifont subset.
+gen_hz_font.py -- regenerate src/font_hz.inc from the committed Unifont subsets.
 
-The kernel ships 16x16 1bpp bitmaps for all 6763 GB2312 hanzi.  The source
-of those bitmaps is GNU Unifont 16.0.01, dual-licensed under
+The kernel ships 16x16 1bpp bitmaps for all 6763 GB2312 hanzi PLUS the CJK
+punctuation / fullwidth / symbol subset (GB2312 rows A1 + A3 and common
+modern Chinese punctuation).  The bitmaps come from GNU Unifont 16.0.01,
+dual-licensed under
 
     GPLv2+ with the GNU Font Embedding Exception  OR  SIL OFL 1.1
 
@@ -13,10 +15,9 @@ from a proprietary Windows font; those were replaced precisely because
 their EULA made redistribution of the kernel image questionable.
 Full license texts: tools/UNIFONT-LICENSE.txt and tools/OFL-1.1.txt.
 
-The subset file `unifont-gb2312.hex` is committed, so regeneration needs
-NO network, NO Pillow, NO installed CJK font and NO third-party code.
-The kernel build itself needs nothing at all -- it just compiles the
-committed .inc.
+Both subset .hex files are committed, so regeneration needs NO network,
+NO Pillow, NO installed CJK font and NO third-party code.  The kernel
+build itself needs nothing at all -- it just compiles the committed .inc.
 
 Format of the .hex lines (GNU Unifont convention):
     4E2D:01000100010001003FF82108...   (16 rows x 16 bits = 64 hex digits)
@@ -38,6 +39,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SUBSET = os.path.join(HERE, "unifont-gb2312.hex")
+PUNCT = os.path.join(HERE, "unifont-cjk-punct.hex")
 OUT = os.path.join(ROOT, "src", "font_hz.inc")
 
 HEADER = """\
@@ -51,7 +53,13 @@ HEADER = """\
  *          or SIL Open Font License 1.1.  Embedding these bitmaps in a
  *          kernel image is permitted, including in non-free software.
  *          Full texts: tools/UNIFONT-LICENSE.txt, tools/OFL-1.1.txt
- * INPUT  : tools/unifont-gb2312.hex (committed; offline, no dependencies)
+ * INPUT  : tools/unifont-gb2312.hex      (6763 GB2312 hanzi, committed)
+ *          tools/unifont-cjk-punct.hex   (CJK punctuation / fullwidth /
+ *          symbols, committed; fixes '?' for Chinese punctuation)
+ *
+ * Both inputs are offline and dependency-free.  Each glyph is identified
+ * by its Unicode codepoint; the renderer treats "glyph present" as the
+ * sole criterion for a double-width cell (see render.c).
  *
  * Regenerate with: python kernel_v25/tools/gen_hz_font.py
  * The kernel build depends on neither Python nor any font file.
@@ -74,6 +82,21 @@ def gb2312_codepoints():
     return out
 
 
+def punct_codepoints():
+    """Codepoints committed in the CJK punctuation subset (single source)."""
+    out = set()
+    with open(PUNCT, encoding="ascii") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            try:
+                out.add(int(line.split(":", 1)[0], 16))
+            except ValueError:
+                pass
+    return out
+
+
 def read_hex(path):
     glyphs = {}
     with open(path, encoding="ascii") as fh:
@@ -87,7 +110,14 @@ def read_hex(path):
             except ValueError:
                 continue
             if len(hx) == 32:          # 8x16 halfwidth: pad to 16x16
-                hx = "".join(hx[i * 4:i * 4 + 4] + "0000" for i in range(8))
+                # A halfwidth glyph is 16 rows x 1 byte; a 16x16 glyph
+                # is 16 rows x 2 bytes.  Pad EACH ROW with a zero byte.
+                # The old code took 4 hex digits per step (two source
+                # rows) and produced 8 x 32-bit "rows", which scrambled
+                # every halfwidth glyph.  It never mattered while the
+                # only input was all-16x16 hanzi; the punctuation subset
+                # contains 8x16 glyphs (e.g. U+201C), so this is fixed.
+                hx = "".join(hx[i * 2:i * 2 + 2] + "00" for i in range(16))
             if len(hx) != 64:
                 continue
             glyphs[cp] = bytes.fromhex(hx)
@@ -123,7 +153,8 @@ def main():
         print("rebuilt subset from", args[1])
 
     glyphs = read_hex(SUBSET)
-    wanted = gb2312_codepoints()
+    glyphs.update(read_hex(PUNCT))
+    wanted = gb2312_codepoints() | punct_codepoints()
     missing = [c for c in sorted(wanted) if c not in glyphs]
     if missing:
         sys.exit("ERROR: subset lacks U+%04X and %d more; "

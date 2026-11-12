@@ -598,3 +598,36 @@ target owned by the caller with mode 0644.  ot itself lives on as
 /bin/ocntools.ce with its unique tools (file manager, hex editor,
 search, version control, image inspector) -- the duplicated commands
 are gone.
+
+v2.15 -- spawn PERM_EXEC + ACL path canonicalization (2026-11-12)
+=====================================================================
+
+spawn/run now enforce PERM_EXEC before loading a CE image:
+
+  - task_spawn_ce() rejects a path whose file mode has no execute bit
+    (returns -2) and any path that fs_perm_check(uid, gid, PERM_EXEC)
+    denies (returns -13).  /bin/*.ce is 0755 and unaffected; a user's
+    own .ce file must be chmod +x before it can run.
+  - All ACL lookups (acl_lookup/acl_set/fs_perm_check and the spawn
+    check) canonicalize the path first (fs_canon_path) and compare
+    case-insensitively.  FAT directory names are case-insensitive, so
+    "/BIN/XTEST.CE", "./xtest.CE" and "/bin/xtest.ce" are one file and
+    one ACL entry -- the old byte-wise comparison let any spelling
+    bypass chmod 000.
+  - Probe: /bin/captest.ce (chmod 000 then run under uid 100: err -13
+    on every spelling variant).
+
+v2.16 -- CJK fullwidth punctuation glyphs (2026-11-12)
+=====================================================================
+
+font_hz.inc grew from 6763 to 6961 glyphs: the GB2312 punctuation rows
+(A1/A3) plus common fullwidth marks are now rendered wide instead of
+"?".  Sources: tools/unifont-cjk-punct.hex (GNU Unifont 16.0.01,
+GPLv2 + font embedding exception / OFL 1.1) merged by tools/gen_hz_font.py.
+Regenerate offline: python tools/gen_hz_font.py.
+
+Reference app: /bin/punctest.ce prints the fullwidth punctuation table
+(text mode) -- asserted by tests/security_regress.py.  The render.c
+wide-character decision is now "font lookup succeeded" rather than a
+hardcoded codepoint range, which also fixes out-of-bounds font reads
+for cp 0x80-0xFF.

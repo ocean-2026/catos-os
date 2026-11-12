@@ -1967,14 +1967,19 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * run your stuff" escalation paths that the write/saver/sys calls
      * already close. */
     {
-        int fuid, fgid, fmode = 0;
+        int fuid = 0, fgid = 0, fmode = 0;
         if (acl_lookup(path, &fuid, &fgid, &fmode) == 0 &&
             !(fmode & 0o111)) {
             /* No execute bit at all (owner/group/other): deny spawn outright
              * unless the resolver above returned an explicit match.  This
              * covers both "file not readable by anyone" and "chmod 000". */
             (void)clus; (void)size;
-            return -2;   /* reuse ENOENT-ish error; caller prints "err -2" */
+            /* #99: -13 EACCES, not -2 ENOENT.  -2 is what a genuinely
+             * missing file returns, so the old code made "permission
+             * denied" indistinguishable from "file not found" -- the
+             * reason the screenshot tests looked like a passing perm
+             * check when they were really just typos. */
+            return -13;
         }
         /* Permission check via the existing ACL path (root bypass + owner/
          * group/other semantics).  Returns 0 on allow, -13 EACCES otherwise.

@@ -1,10 +1,40 @@
 import os
+import sys
 import struct
 B = 2048
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'build', 'catos_work.iso')
 KERNEL = os.path.join(ROOT, 'build', 'kernel.bin')
 OUT = os.path.join(ROOT, 'catos.iso')
+
+# #99 guard: this script only PATCHES the prebuilt kernel.bin into the
+# GRUB template -- it never compiles anything.  Running it directly after
+# editing src/ silently produces an ISO with OLD code, which is exactly
+# how the #96 PERM_EXEC tests "passed" against a kernel that did not
+# contain the check at all (build/task.o was an hour older than task.c).
+# Refuse to package a stale kernel unless the caller says --force.
+def assert_kernel_fresh():
+    kmt = os.path.getmtime(KERNEL)
+    newer = []
+    for sub in ('src', 'include'):
+        d = os.path.join(ROOT, sub)
+        for fn in os.listdir(d):
+            if fn.endswith(('.c', '.h', '.inc')):
+                p = os.path.join(d, fn)
+                if os.path.getmtime(p) > kmt + 1:
+                    newer.append(os.path.relpath(p, ROOT))
+    if not newer or '--force' in sys.argv:
+        return
+    print('ERROR: build/kernel.bin is OLDER than %d source file(s):' % len(newer))
+    for p in sorted(newer)[:10]:
+        print('   ', p)
+    if len(newer) > 10:
+        print('    ... and %d more' % (len(newer) - 10))
+    print('Run `sh build.sh iso` (full rebuild) first.  Only pass --force')
+    print('if you deliberately want to package the stale kernel.')
+    raise SystemExit(2)
+
+assert_kernel_fresh()
 
 w = open(SRC, 'rb').read()
 kernel = open(KERNEL, 'rb').read()

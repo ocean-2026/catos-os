@@ -70,3 +70,4 @@ __pycache__/
 
 # ---- WorkBuddy workspace memory (project-local notes, not source) ----
 .workbuddy/
+trash

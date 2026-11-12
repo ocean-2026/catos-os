@@ -1,0 +1,33 @@
+config.version = "8"
+virtualHW.version = "16"
+displayName = "CatOS"
+guestOS = "other"
+memsize = "256"
+
+# ---- IDE 0:0 : FAT32 data disk (primary master) ----
+# Kernel ata_identify() takes the first IDENTIFY-able drive, so the
+# FAT32 volume MUST be primary master (same as QEMU if=ide).
+ide0:0.present = "TRUE"
+ide0:0.fileName = "catos-data.vmdk"
+
+# ---- IDE 1:0 : boot volume as virtual CD (secondary master) ----
+# catos.iso is a GRUB isohybrid image: it carries BOTH an El Torito
+# catalog (CD boot) and an isohybrid MBR (HD boot).  El Torito is the
+# standard VMware path.
+ide1:0.present = "TRUE"
+ide1:0.deviceType = "cdrom-image"
+ide1:0.fileName = "..\kernel_v25\catos.iso"
+ide1:0.startConnected = "TRUE"
+
+# ---- boot order: CD first ----
+bios.bootOrder = "cdrom"
+
+floppy0.present = "FALSE"
+serial0.present = "FALSE"
+parallel0.present = "FALSE"
+usb.present = "FALSE"
+sound.present = "FALSE"
+ethernet0.present = "FALSE"
+
+# Make the window usable; CatOS is text-mode VGA.
+svga.autodetect = "TRUE"

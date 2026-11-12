@@ -88,3 +88,36 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 ---
 
 *本文件随每轮交付滚动更新；历史汇报见 git 历史（`git log -- docs/PROGRESS.md`）。*
+
+---
+
+## 六、截图审计轮（#97~#102，2026-11-12）
+
+12 张 QEMU 实机截图审计出 6 个问题，全部修复（详见问题清单第十九节）：
+
+- **#97（P0）** ACL 路径大小写绕过：`fs_canon_path()` 规范化 + 大小写不敏感比较，
+  `/BIN/X.CE`、`./x.CE` 等变体不再绕过 chmod。
+- **#98** `cmd_chmod`/spawn 未初始化变量（栈垃圾写入 ACL）。
+- **#99（P0，流程）** 构建链骗测：patch_work_iso.py 拒绝打包陈旧 kernel；
+  `build.sh iso` 补 `build_apps` 依赖。
+- **#100** vdiag 残影/调色板污染（glyphA 一次性输出 + AC 重触发）。
+- **#101** CJK 全角标点字形 6961 个（Unifont A1/A3 行 + punctest.ce 探针）。
+- **#102** build.sh iso 目标依赖修复。
+- **澄清（非 bug）**：磁盘镜像 MBR 无引导代码，引导介质是 catos.iso
+  （GRUB isohybrid 双格式）。VMware 引导工件见 `vmware/`（vmx + vmdk
+  描述符 + README），isohybrid 当 IDE 硬盘引导已实测到 shell。
+
+### 回归总账（2026-11-12 同 ISO 全套）
+
+```
+宿主: test_mkce 48  test_cc 10  test_app_list 24 apps  ce_regress 11P/17S/0F
+实机: qemu_regress 12/12  user_regress 15/15  ot_regress ALL  diag_regress 4/4
+      disk_regress 5/5  heap_regress 4/4  go_regress 7/7  vprobe_regress 10/10
+      snd_regress 6/6  gfx24_regress 0 failed  security_regress 17/17
+```
+
+### 已知遗留
+
+- 口令哈希 djb2（非密码学）、单 gid 无多组（ROADMAP P1 不变）。
+- VMware 为 SeaBIOS 同源验证 + 配置工件，未经 VMware Workstation 本机实测
+  （本机未装）；待用户在 VMware 里按 vmware/README.md 验证。

@@ -239,10 +239,21 @@ void user_db_init(void) {
 static acl_entry_t acl_tab[ACL_MAX];
 static int acl_dirty;
 
+/* ACL keys are CANONICAL paths (absolute, dot/dotdot/slash normalised,
+ * ASCII-lowercased).  FAT32 resolves "/BIN/X.CE", "/bin//x.ce" and
+ * "/bin/../bin/x.ce" to the same file, but a raw-string comparison used
+ * to treat them as different ACL keys -- a trivial chmod 000 bypass
+ * (#97).  Store and look up canonically so one file == one entry. */
+static void acl_key(const char *path, char *out) {
+    fs_canon_path(path, out, FS_PATH_MAX);
+}
+
 int acl_lookup(const char *path, int *uid, int *gid, int *mode) {
     if (!path) return -1;
+    char key[FS_PATH_MAX];
+    acl_key(path, key);
     for (int i = 0; i < ACL_MAX; i++) {
-        if (acl_tab[i].used && useq(acl_tab[i].path, path)) {
+        if (acl_tab[i].used && useq(acl_tab[i].path, key)) {
             if (uid) *uid = acl_tab[i].uid;
             if (gid) *gid = acl_tab[i].gid;
             if (mode) *mode = acl_tab[i].mode;
@@ -254,13 +265,15 @@ int acl_lookup(const char *path, int *uid, int *gid, int *mode) {
 
 int acl_set(const char *path, int uid, int gid, int mode) {
     if (!path || !*path) return -3;
+    char key[FS_PATH_MAX];
+    acl_key(path, key);
     acl_entry_t *slot = 0;
     for (int i = 0; i < ACL_MAX; i++) {
-        if (acl_tab[i].used && useq(acl_tab[i].path, path)) { slot = &acl_tab[i]; break; }
+        if (acl_tab[i].used && useq(acl_tab[i].path, key)) { slot = &acl_tab[i]; break; }
         if (!slot && !acl_tab[i].used) slot = &acl_tab[i];
     }
     if (!slot) return -4;
-    ucopy(slot->path, path, 160);
+    ucopy(slot->path, key, 160);
     slot->uid = (uint16_t)uid;
     slot->gid = (uint16_t)gid;
     slot->mode = (uint16_t)(mode & 0xFFF);
@@ -350,8 +363,13 @@ int fs_perm_check(const char *path, int uid, int gid, int need) {
     /* need is a bitmask of PERM_READ/WRITE/EXEC.  mode is the standard
      * 12-bit unix layout: owner bits 6-8, group 3-5, other 0-2. */
     if (uid == UID_ROOT) return 0;
+    /* #97: canonicalise BOTH the ACL lookup and the scratch whitelist.
+     * Without this, "/TMP/x" misses "/tmp/" and, worse, a case variant
+     * of an ACL entry falls into "no entry -> read/exec allowed". */
+    char key[FS_PATH_MAX];
+    fs_canon_path(path, key, sizeof(key));
     int fuid, fgid, mode;
-    if (acl_lookup(path, &fuid, &fgid, &mode) == 0) {
+    if (acl_lookup(key, &fuid, &fgid, &mode) == 0) {
         int have;
         if (uid == fuid)            have = (mode >> 6) & 7;   /* owner */
         else if (gid == fgid)       have = (mode >> 3) & 7;   /* group */
@@ -361,8 +379,8 @@ int fs_perm_check(const char *path, int uid, int gid, int need) {
     /* no ACL entry: read/exec default allowed (0644/0755 semantics);
      * writes go through the world-writable scratch whitelist */
     if (need & PERM_WRITE) {
-        int scratch = (uprefix(path, "/home/") || useq(path, "/home") ||
-                       uprefix(path, "/tmp/") || useq(path, "/tmp"));
+        int scratch = (uprefix(key, "/home/") || useq(key, "/home") ||
+                       uprefix(key, "/tmp/") || useq(key, "/tmp"));
         if (!scratch) return -13;
     }
     return 0;

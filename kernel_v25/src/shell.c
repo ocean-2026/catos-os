@@ -121,7 +121,8 @@ static void cmd_help(void) {
         "  dns NAME     resolve a hostname\n"
         "  udp IP PORT TEXT  send one UDP datagram and wait for a reply\n"
         "  netdiag      dump NIC/driver state\n"
-        "  Program lookup: builtin -> current dir .ce -> /bin .ce (PATH)\n"
+        "  Bare NAME is looked up in cwd then /bin (PATH); 'run FILE' uses\n"
+        "  the path verbatim with NO lookup (a bare NAME there is cwd-only).\n"
         "  -- filesystem (FAT32 on IDE, persistent) --\n"
         "  dir [PATH]   list a directory\n"
         "  cd [PATH]    change directory (use .. or /)\n"
@@ -1642,10 +1643,13 @@ static void cmd_chmod(char *arg) {
     int mode = (int)octal32_(argv[0]);
     char path[FS_PATH_MAX];
     abs_path_(argv[1], path, sizeof(path));
-    int fuid, fgid, fmode;
+    /* #98: acl_lookup() leaves its out-params untouched on a miss.  All
+     * three MUST be initialised here -- the old code passed uninitialised
+     * fgid/fmode straight into acl_set() and persisted stack garbage. */
+    int fuid = UID_ROOT, fgid = 0, fmode = 0644;
     if (acl_lookup(path, &fuid, &fgid, &fmode) != 0) {
-        /* default entry: root-owned 0644/0755 -- only root may chmod it */
-        fuid = UID_ROOT;
+        /* default entry: root-owned 0644 -- only root may chmod it */
+        fuid = UID_ROOT; fgid = 0; fmode = 0644;
     }
     if (g_uid != UID_ROOT && g_uid != fuid) {
         vga_write("chmod: not the owner\n");

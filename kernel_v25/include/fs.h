@@ -46,6 +46,11 @@ int        fs_mkdir(const char *path);
 int        fs_touch(const char *path);    /* create empty file if absent */
 void       fs_list(const char *path);     /* NULL = current dir */
 void       fs_pwd(char *out, int outlen); /* absolute path of cwd */
+/* Canonical absolute path: abs_path() + ASCII lowercase folding.  FAT32
+ * is case-insensitive, so security lookups (ACL) MUST compare this form
+ * and never the raw user spelling -- "/BIN/X.CE" and "/bin/x.ce" are the
+ * same file on disk but were different keys in the old ACL table. */
+void       fs_canon_path(const char *in, char *out, int outlen);
 
 /* editor helpers: operate on a resolved file entry */
 fs_entry_t *fs_open_file(const char *path); /* resolves; NULL if absent/not file */

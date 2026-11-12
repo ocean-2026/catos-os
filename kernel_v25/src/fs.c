@@ -312,6 +312,22 @@ void fs_pwd(char *out, int outlen) {
     out[n] = 0;
 }
 
+/* See fs.h: absolute + dot/dotdot/slash normalisation (reusing abs_path)
+ * followed by ASCII lowercase folding.  Used by the ACL layer so that
+ * every path variant FAT resolves to one file maps to exactly one key.
+ * NOTE: this is deliberately ASCII-only; FAT names here are 8.3 ASCII. */
+void fs_canon_path(const char *in, char *out, int outlen) {
+    char abs[FS_PATH_MAX];
+    if (!out || outlen < 1) return;
+    abs_path(in, abs);
+    int i = 0;
+    for (; abs[i] && i < outlen - 1; i++) {
+        char c = abs[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+    }
+    out[i] = 0;
+}
+
 /* ---------- editor helpers ---------- */
 fs_entry_t *fs_open_file(const char *path) {
     if (!fs_ready) return 0;

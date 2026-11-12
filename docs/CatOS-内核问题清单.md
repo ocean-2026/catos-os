@@ -548,5 +548,47 @@ heap 4/4、go 7/7、qa_probe_final exit=0
 - `tests/qemu_regress.py` 全套 12/12 不应受影响
 - `tests/ot_regress.py` 16/16 不应受影响（adofai/ocntools 均在 /bin）
 
+## 十九、截图审计轮：构建链、ACL 绕过、显示与字体（#97~#102，2026-11-12）
+
+用户送来 12 张 QEMU 实机截图要求"检查是否有 bug"。逐张诊断出 6 个独立问题，
+全部修复并以 `tests/security_regress.py`（17 用例，端口 4474）锁死回归。
+
+| # | 问题 | 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **97** | **ACL 路径大小写绕过（P0）** | `acl_lookup`/`fs_perm_check` 逐字节比较路径；FAT 目录名实际大小写不敏感，`run /BIN/XTEST.CE`、`run ./xtest.CE` 均能绕过 `chmod 000` | 权限模型被路径拼写击穿 | `fs.c` 新增 `fs_canon_path()`（复用 cwd/path_norm 语义输出规范化绝对路径），`user.c` 的 `acl_lookup`/`acl_set`/`fs_perm_check` 与 spawn 检查统一先规范化再大小写不敏感比较；点号/斜杠变体回归锁死 | **已修复** |
+| **98** | **`cmd_chmod` 未初始化变量** | `shell.c` 的 `fuid/fgid/fmode` 未初始化；`acl_lookup` 失败路径下把栈垃圾写进 ACL | chmod 失败仍可能污染 /etc/acl | 三变量显式初始化（fmode=0644, fgid=0）；`task_spawn_ce` 内 `fuid/fgid` 同修 | **已修复** |
+| **99** | **构建链骗测（P0，流程性）** | 只跑 `patch_work_iso.py` 重打包、未重编译 ⇒ task.o 里根本没有 #96 检查，测试"通过"了个旧内核。`nm build/task.o` 查符号 + kernel.bin md5 与 ISO 内嵌比对可复现 | 一切"已修复"结论不可信 | `patch_work_iso.py` 增加陈旧 kernel 拒绝打包（比对 src/include mtime，`--force` 可越权）；`build.sh iso` 目标补 `build_apps` 依赖（缺 CE 产物曾直接构建失败） | **已修复** |
+| **100** | **vdiag 显示残影/调色板污染** | ① text_diag 的 glyphA hex 输出逐字符 con_write，中途切页把已打印内容顶走（截图误判为字符残影，实为 `con_set_cursor(0,3)` 覆盖）；② attrpal 循环写 index 前未重触发 AC（`inb(0x3BA)`），首个字节把调色板写成黑→紫，像素 diff 65.85% | 诊断工具自身破坏被诊断状态 | ① hex 先收进局部 `char hex[17]`，恢复 VGA 状态后一次性输出；② 每次 `(void)inb(0x3DA)` 重触发 AC 再写 index。vdiag 前后 ls 输出像素一致 + attrpal 恢复 `00 01 02 03…` 由 security_regress 断言 | **已修复** |
+| **101** | **CJK 全角标点缺字形（`、。！？` 等显示 `?`）** | `font_hz.inc` 只含 GB2312 汉字子集（SUBSET.hex），标点区（A1/A3 行）无字形；`render.c` 宽字符判定硬编码 `cp>=0x1100` 且 0x80-0xFF 越界读字体表 | 中文标点全部变 `?`，CJK 排版不完整 | ① 新增 `tools/unifont-cjk-punct.hex`（198 个标点字形，GNU Unifont 16.0.01，GB2312 A1/A3 行 + 常用全角标点），`tools/gen_hz_font.py` 合并两份 hex（并修 8x16 半宽 pad），产出 6961 字形的 `font_hz.inc`；② `render.c` 判定改为 `if (be->cjk && render_font_hz(cp)) wide=1; else cp='?'`。字形许可：Unifont GPLv2+ 字体嵌入例外/OFL 1.1，可离线再生成 | **已修复** |
+| **102** | **`build.sh iso` 缺 `build_apps` 依赖** | `iso` 目标直接调 patch_work_iso.py；CE 应用未编译时（干净树/新 clone）构建中途失败 | 构建不可重现 | `build.sh` 的 `iso` 目标先调 `build_apps` | **已修复** |
+
+### 19.1 回归与验证（2026-11-12）
+
+- `tests/security_regress.py`（新增）：17 用例 —— chmod 000 正反断言、
+  大小写/点号/斜杠路径变体拒绝、`err -13` 语义、vdiag 前后背景像素比较、
+  glyphA 内联、faultinfo。17/17 PASS。
+- 全套回归（同 ISO `catos.iso`，2026-11-12 构建）：
+
+```
+宿主: test_mkce 48  test_cc 10  test_app_list 24 apps  ce_regress 11P/17S/0F
+实机: qemu_regress 12/12  user_regress 15/15  ot_regress ALL  diag_regress 4/4
+      disk_regress 5/5  heap_regress 4/4  go_regress 7/7  vprobe_regress 10/10
+      snd_regress 6/6  gfx24_regress 0 failed  security_regress 17/17
+```
+
+### 19.2 澄清：磁盘镜像与 VMware 引导（非 bug）
+
+诊断过程中确认的事实（详见 `vmware/README.md`）：
+
+- `tests/qemu_disk_*.img` / `catos_disk.img` 是**纯数据盘**：MBR 引导区全零
+  （mkdisk.py 只写分区表 + 0x55AA），不含任何引导代码。拿它引导在任何机器
+  （含 QEMU）都会卡死，与"CatOS 自定义 bootloader"无关。
+- 引导介质一直是 `catos.iso`：GRUB isohybrid 双格式（扇区 0 有 isohybrid
+  MBR `eb 63 90` + El Torito 引导目录）。已实测当 IDE 硬盘 `-boot order=c`
+  引导到 `root@catos:/$`（截图 tests/qemu_shots/hdbootA/B.png）。
+- VMware 无需 grub-mkrescue：`vmware/CatOS.vmx` + 两个 raw vmdk 描述符
+  （catos-boot.vmdk / catos-data.vmdk）即可启动；推荐光驱 El Torito 引导 +
+  数据盘挂 IDE 0:0（内核 ata_identify 取第一个可 IDENTIFY 盘挂 FAT32）。
+
 ---
-*本节后继续编号为 #97+。*
+*本节后继续编号为 #103+。*
