@@ -56,7 +56,11 @@ int ce_main(void) {
     puts_("gfx24: "); putdec(w); puts_("x"); putdec(h);
     puts_("x"); putdec(bpp); puts_(" pitch="); putdec(pitch);
     puts_("\n");
-    if (w != 800 || h != 600 || bpp != 24 || pitch != 2400) {
+    /* The ABI is a LOGICAL 800x600 RGB24 surface.  Pitch is a physical
+     * property of the device: 2400 (3 B/px) on Bochs dispi, 3200
+     * (4 B/px XRGB) on VMware SVGA II.  Do not hard-code 2400 or the
+     * probe would refuse to draw on a perfectly valid framebuffer. */
+    if (w != 800 || h != 600 || bpp != 24 || pitch < w * 3) {
         puts_("GFX24 CE FAIL (bad info)\n");
         return 1;
     }

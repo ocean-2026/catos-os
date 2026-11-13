@@ -650,3 +650,57 @@ cmd_about() keeps the new block-style CatOS logo ('about' command).
 Also fixed: be_text painted blanked cells (cp==0, produced by
 backspace) as '?' -- every backspace left ghost marks.  Blank cells
 now paint as spaces (issue #103).
+
+v2.18 -- VFAT long file names (2026-11-12)
+=====================================================================
+
+No syscall / slot change.  fs_* now accept names longer than 8.3 via
+VFAT LFN entries (UTF-8 <-> UTF-16, short-name checksum, BODY~N.EXT
+aliases).  FS_NAME_MAX 24 -> 48.  resolve_path / create_path / open /
+write / unlink / list / foreach / enum_files all use the long-name
+FAT helpers.  /etc/autoexec stays 8.3 by convention, not limitation.
+
+v2.19 -- cloud round: SYS_GOTOXY + background jobs (2026-11-13)
+=====================================================================
+
+Append-only slot 65:
+
+  int (*gotoxy)(int x, int y);   /* 0 ok, -3 outside the screen */
+
+Old CE binaries see a NULL pointer there (their API table is shorter),
+which adofai.ce uses as a feature gate: it falls back to full-screen
+repaints when the kernel has no line addressing.  Also in this round:
+masked password prompts, interactive useradd capability wizard,
+jobs / log / log -f for background output, net probe honesty,
+graphics glyph spacing + block cursor, adofai countdown and hit error.
+
+v2.20 -- VMware SVGA II graphics (2026-11-13)
+=====================================================================
+
+No new slots.  The 24-bit RGB drawing ABI (slots 61..63) now works on
+BOTH framebuffer families:
+
+  Bochs/QEMU -vga std : 800x600, 24bpp BGR,  pitch 2400, stride 3
+  VMware SVGA II      : 800x600, 32bpp XRGB, pitch 3200, stride 4
+                        (DEPTH reads 24; BPP is 32 -- the extra byte
+                         is opaque 0xFF and carries no colour data)
+
+  GFX_INFO_BPP stays 24: applications hand over tightly packed RGB24
+  and the kernel repacks it into the device's native pixel format.
+  PITCH is device-specific -- do NOT hard-code 2400.  /bin/gfx24.ce
+  was fixed to accept pitch >= width*3.
+
+New append-only gfx_info selectors (mirrored in ce_abi.h):
+
+  GFX_INFO_BACKEND  7   0 = Bochs dispi, 1 = VMware SVGA II
+  GFX_INFO_HW_BPP   8   24 or 32 (physical framebuffer depth)
+  GFX_INFO_STRIDE   9   bytes per pixel: 3 or 4
+
+The SVGA command FIFO is refreshed from the 100 Hz PIT IRQ (25 Hz
+full-screen SVGA_CMD_UPDATE) because the host stops VGA dirty
+tracking once the FIFO is enabled.  Kernel-side writes only: ring3
+still cannot map the framebuffer (supervisor-only PTEs).
+
+Shell: `vbe`, `vbe24` (new alias), `gfx24` all work on VMware;
+`svgainfo` dumps ID/CAPS/BARs/update count; `display` reports the
+graphics HW.  Regression: tests/svga24_regress.py (QEMU -vga vmware).

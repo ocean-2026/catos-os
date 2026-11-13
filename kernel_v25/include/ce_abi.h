@@ -67,6 +67,10 @@ typedef struct {
 #define GFX_INFO_PITCH     4
 #define GFX_INFO_FB_BYTES  5
 #define GFX_INFO_LFB_PHYS  6
+/* v2.20 append-only: physical device behind the RGB24 surface. */
+#define GFX_INFO_BACKEND   7   /* 0 = Bochs dispi, 1 = VMware SVGA II     */
+#define GFX_INFO_HW_BPP    8   /* 24 (Bochs) or 32 (SVGA XRGB)            */
+#define GFX_INFO_STRIDE    9   /* bytes per pixel: 3 or 4                  */
 
 typedef struct {
     uint8_t  magic[4];     /* "CE01" */
@@ -224,7 +228,7 @@ typedef struct catos_api {
          or -1 when nothing is pending.  Modifier presses/releases and
          break codes are consumed silently.  Never blocks, never yields. */
 
-    /* ---- #60 (v2.21): line addressing (append-only) -------------------
+    /* ---- #60 (v2.19): line addressing (append-only) -------------------
      * Old binaries see NULL here.  Move the console cursor to (x, y) so a
      * TUI can rewrite one line in place -- the alternative, cls() plus a
      * full repaint, shows the blank frame in between ("flicker"). */

@@ -30,13 +30,15 @@
  *    write-only full re-render (still no VRAM reads, unlike the old
  *    framebuffer memmove).
  *
- * RUNNING STATUS: compiled and linked, NOT verified on QEMU (this host
- * has no qemu-system-i386).  If the hardware probe fails, enter()
- * returns a negative value and con_request_mode(VBE) reports -19
- * without changing the active mode.
+ * v2.20: on VMware (and QEMU -vga vmware) there is no dispi interface,
+ * so vbe_enter() falls back to the SVGA II LFB.  Panning/MTRR are
+ * disabled there; svga_tick() pushes FIFO UPDATE commands from IRQ0.
+ * If neither device is present, enter() returns a negative value and
+ * con_request_mode(VBE) reports CON_ENODEV without changing the mode.
  */
 #include "render.h"
 #include "render_be.h"
+#include "svga.h"
 #include "io.h"
 #include "paging.h"
 
@@ -61,6 +63,8 @@ enum {
 
 static volatile uint32_t *lfb;
 static uint32_t lfb_phys;
+static uint32_t pitch_px = VBE_W;      /* dwords per scanline (v2.20) */
+static int      svga_backend;          /* 1 = VMware SVGA II supplies LFB */
 static uint32_t lfb_mapped;             /* bytes actually mapped */
 static int      pan_rows;               /* total physical lines (0 = no panning) */
 static int      pan_off;                /* current viewport offset in lines */
@@ -216,10 +220,38 @@ static int mtrr_set_wc(uint32_t base, uint32_t size) {
     return 0;
 }
 
-static int vbe_enter(void) {
-    uint16_t id = dispi_read(DISPI_ID);
-    if (id < 0xB0C0u || id > 0xB0C5u) return -1;   /* no VBE hardware */
+/* v2.20: VMware SVGA II has no Bochs dispi ports.  It does provide a
+ * 32bpp XRGB LFB with the same B,G,R,x byte order, so this 32-bit-cell
+ * painter works unchanged once pitch_px comes from the device.  No
+ * hardware panning and no MTRR on this path: both are dispi-specific. */
+static int vbe_enter_svga(void) {
+    if (!svga_probe()) return -1;
+    svga_surface_t s;
+    if (svga_mode_set(VBE_W, VBE_H, &s) != 0) return -2;
+    if (s.stride != 4u || s.off_b != 0 || s.off_g != 1 || s.off_r != 2) {
+        svga_mode_off();                 /* unknown pixel layout */
+        return -3;
+    }
+    lfb_phys      = s.phys;
+    lfb_bar_bytes = s.bytes;
+    lfb_mapped    = s.pitch * VBE_H;
+    lfb           = (volatile uint32_t *)s.phys;
+    pitch_px      = s.pitch / 4u;
+    pan_rows      = 0;
+    pan_off       = 0;
+    wc_enabled    = 0;
+    svga_backend  = 1;
+    be_vbe.wc_mode   = 0;
+    be_vbe.hw_scroll = 0;
+    return 0;
+}
 
+static int vbe_enter_bochs(void) {
+    uint16_t id = dispi_read(DISPI_ID);
+    if (id < 0xB0C0u || id > 0xB0C5u) return -1;
+
+    svga_backend = 0;
+    pitch_px     = VBE_W;
     lfb_phys = find_lfb();
 
     /* Virtual height for hardware scrolling: as many 16-px lines as the
@@ -279,9 +311,23 @@ static int vbe_enter(void) {
     return 0;
 }
 
+/* PCI identity decides: QEMU -vga vmware answers the dispi ID port too,
+ * but its LFB lives in the SVGA II BAR1.  SVGA wins whenever present. */
+static int vbe_enter(void) {
+    if (svga_probe()) {
+        if (vbe_enter_svga() == 0) return 0;
+        svga_mode_off();
+        svga_backend = 0;
+        pitch_px = VBE_W;
+    }
+    return vbe_enter_bochs();
+}
+
 static void vbe_leave(void) {
-    dispi_write(DISPI_ENABLE, 0);
+    if (svga_backend) { svga_mode_off(); svga_backend = 0; }
+    else              dispi_write(DISPI_ENABLE, 0);
     pan_off = 0;
+    pitch_px = VBE_W;
 }
 
 /* ---- private framebuffer primitives (never exported) -------------------
@@ -292,7 +338,9 @@ static void px_abs(int x, int y, uint32_t c) {
     if (x < 0 || x >= VBE_W || y < 0) return;
     uint32_t limit = (uint32_t)(pan_rows ? pan_rows : (VBE_H / 16)) * 16u;
     if ((uint32_t)y >= limit) return;
-    lfb[y * VBE_W + x] = c;
+    /* SVGA XRGB: force the unused high byte opaque.  QEMU's x8r8g8b8
+     * ignores it; VMware's ARGB path would otherwise drop the pixel. */
+    lfb[y * pitch_px + x] = svga_backend ? (c | 0xFF000000u) : c;
 }
 static void fill_abs(int x, int y, int w, int h, uint32_t c) {
     for (int j = 0; j < h; j++)
@@ -408,18 +456,23 @@ static void vbe_set_palette(uint8_t idx, uint32_t rgb) {
 }
 
 static void vbe_diag(void) {
-    con_write("vbe backend: 800x600x32bpp LFB, 100x37 8x16 text cells\n");
-    con_write("truecolour RGB per cell; LFB supervisor-only, no draw API\n");
-    con_write("dispi id=0x");
+    con_write(svga_backend
+        ? "vbe backend: VMware SVGA II 800x600x32 XRGB, FIFO UPDATE @25Hz\n"
+        : "vbe backend: Bochs dispi 800x600x32bpp LFB\n");
+    con_write("100x37 8x16 text cells; truecolour RGB per cell, no draw API\n");
     char b[6];
-    unsigned v = dispi_read(DISPI_ID);
-    b[0] = "0123456789ABCDEF"[(v >> 12) & 15];
-    b[1] = "0123456789ABCDEF"[(v >> 8) & 15];
-    b[2] = "0123456789ABCDEF"[(v >> 4) & 15];
-    b[3] = "0123456789ABCDEF"[v & 15];
-    b[4] = 0;
-    con_write(b);
-    con_write(" lfb=0x");
+    if (!svga_backend) {
+        con_write("dispi id=0x");
+        unsigned v = dispi_read(DISPI_ID);
+        b[0] = "0123456789ABCDEF"[(v >> 12) & 15];
+        b[1] = "0123456789ABCDEF"[(v >> 8) & 15];
+        b[2] = "0123456789ABCDEF"[(v >> 4) & 15];
+        b[3] = "0123456789ABCDEF"[v & 15];
+        b[4] = 0;
+        con_write(b);
+        con_write(" ");
+    }
+    con_write("lfb=0x");
     for (int i = 7; i >= 0; i--) {
         b[0] = "0123456789ABCDEF"[(lfb_phys >> (i * 4)) & 15];
         b[1] = 0;

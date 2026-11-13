@@ -136,3 +136,43 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 - **新开机 logo**：about 的 ASCII 大字换成块状 CatOS。
 - 回归：security 17/17、user 15/15、qemu 12/12（autostart 实测截图
   tests/qemu_shots/fin0.png）。
+
+## 八、v2.19 回流 + v2.20 VMware SVGA II 24 位真彩（2026-11-13）
+
+### 8.1 v2.19 反向同步
+
+云主机（Linux `vm`）完成的 #54 / #57 / #58 / #59 / T52 / #60 与
+`SYS_GOTOXY`（槽 65），经下载文件夹两个 zip 反向同步回 `D:\CatOs`，
+提交 `3ed5cad`（源码 + 文档 + kernel.bin + 全部 .ce 产物）。
+覆盖前原文件备份在 `D:\_v219_backup\`。详见
+`docs/TODO-2026-11-12-VMware反馈轮.md` §五/§六。
+
+### 8.2 v2.20 新增
+
+- **VMware SVGA II 驱动**（`src/svga.c` / `include/svga.h`）：PCI `15AD:0405`
+  探测、BAR0 索引/数据端口、BAR1 LFB、BAR2 FIFO、模式设置、
+  25 Hz `SVGA_CMD_UPDATE`（IRQ0 钩子）、`svgainfo` 诊断命令。
+- **双后端**：`be_vbe` / `be_vbe24` 按 PCI 身份在 Bochs dispi 与 SVGA II
+  之间选择。SVGA II 是 32bpp XRGB，但 CatOS 的 RGB24 绘图 ABI 不变，
+  pitch / 每像素字节数 / 通道字节序全部运行时决定。
+- **命令**：`vbe`、`vbe24`（新别名）、`gfx24` 在 VMware 显卡上全部可用；
+  `display` 增加 `graphics HW` / `last gfx24 hw` / `hw_bpp` / `stride`。
+- **修复 #104~#106**：无图形、`vbe24` 不存在、QEMU `-vga vmware` 因
+  dispi 端口误判导致黑屏。详见问题清单第二十一节。
+- **连带**：`paging.c` LFB PDE 区间取并集；`extapp/gfx24.c` 不再硬编码
+  `pitch==2400`；`gfx_info` 追加 BACKEND/HW_BPP/STRIDE 选择器（append-only）。
+
+### 8.3 回归总账（2026-11-13 同 ISO）
+
+```
+宿主: test_mkce 48  test_cc 10  test_app_list 24 apps  ce_regress 11P/17S/0F
+实机(-vga std): qemu 12/12  user 15/15  security 17/17  disk 5/5
+                gfx24_regress 0 failed
+实机(-vga vmware): svga24_regress 34/34 PASS
+                   (gfx24/vbe24 逐像素 + ring3 rect/blit + vbe 真彩文本
+                    + FIFO UPDATE + text 往返)
+```
+
+真实 VMware Workstation 17.6.1 尚需用户开机复测；本机 VM 当前未运行，
+`vmware/CatOS.vmx` 光驱已指向新 `kernel_v25/catos.iso`，数据盘上的
+`/bin/gfx24.ce` 已原地更新（改前备份 `catos_disk.img.bak-v219`）。

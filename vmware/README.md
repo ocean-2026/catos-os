@@ -55,6 +55,11 @@ IDE 0:0，`bios.bootOrder = "hdd"`。VMware BIOS 会先试 IDE 0:0（数据盘
 - `qemu_disk_*.img`（tests/ 下）是回归用一次性数据盘，别拿去当引导盘。
 - VMware 虚拟网卡与 QEMU pcnet 不同；CatOS 目前网络栈探测不到网卡只会
   提示 NOT FOUND，不影响其他功能。
+- **显卡（v2.20 起）**：VMware 默认 SVGA II（`15AD:0405`）已支持，
+  `vbe` / `vbe24` / `gfx24` 都能进 800x600 真彩；`svgainfo` 可查
+  ID / BAR / FIFO 刷新计数。旧版报 `no VBE/Bochs-dispi` 属内核版本过旧。
+  本仓库的自动验证在 QEMU `-vga vmware`（同一 PCI 设备）上逐像素通过；
+  真实 Workstation 请开机按 `docs/CatOS-系统内测试文档.md` §3.4 复测。
 - 若 VMware 版本较老（硬件版本 <16），把 `virtualHW.version` 与
   `ddb.virtualHWVersion` 调低到对应数字即可。
 

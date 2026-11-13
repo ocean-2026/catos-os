@@ -21,15 +21,24 @@
  *     it with userspace-driven pixel writes needs more care than this
  *     first implementation should carry.  1.44 MB of UC writes is fine.
  *
- * The LFB is taken from PCI BAR0 (16 MiB prefetchable on QEMU std VGA,
+ * The Bochs LFB is taken from PCI BAR0 (16 MiB prefetchable on QEMU std VGA,
  * 0xfd000000).  BAR2 is the 4 KiB MMIO window -- using it as the LFB is
  * the bug that kept the 32bpp path black until v2.12 (issue #83).
  * vbe_lfb_map() installs SUPERVISOR-ONLY PTEs, so ring3 still cannot see
  * the framebuffer; every user draw is copied and performed by the kernel.
+ *
+ * v2.20 -- VMware SVGA II (15AD:0405) fallback:
+ *   VMware has no dispi ports, so `gfx24` / `vbe24` used to fail there.
+ *   When the Bochs probe fails, svga_mode_set() supplies an 800x600
+ *   32bpp XRGB framebuffer instead.  The RGB24 public API is unchanged;
+ *   a runtime pitch / pixel stride / channel-offset table absorbs the
+ *   3-byte (Bochs BGR) vs 4-byte (SVGA BGRX) difference.  svga_tick()
+ *   keeps the host screen in sync through the SVGA command FIFO.
  */
 #include "render.h"
 #include "render_be.h"
 #include "gfx24.h"
+#include "svga.h"
 #include "io.h"
 #include "paging.h"
 
@@ -49,6 +58,13 @@ static volatile uint8_t *lfb;
 static uint32_t lfb_phys;
 static uint32_t lfb_bar_bytes = 16u * 1024u * 1024u;
 static int      active;
+static int      svga_backend;
+
+/* Runtime pixel layout.  Bochs dispi: pitch 2400, 3-byte BGR.
+ * VMware SVGA II: pitch from the device (3200 on QEMU), 4-byte BGRX. */
+static uint32_t g_pitch  = GFX24_PITCH;
+static uint8_t  g_stride = 3;
+static uint8_t  g_r = 2, g_g = 1, g_b = 0, g_x = 3;
 
 static void dispi_write(uint16_t idx, uint16_t val) {
     outw(DISPI_INDEX_PORT, idx);
@@ -106,12 +122,17 @@ static uint32_t find_lfb(void) {
 }
 
 /* ---- pixel primitives -------------------------------------------------
- * LFB byte order is B,G,R.  rgb arguments are always 0x00RRGGBB. */
+ * Logical colour is always 0x00RRGGBB.  The physical byte order comes
+ * from the active device: BGR (Bochs 24bpp) or BGRX (SVGA II 32bpp).
+ * The 4th byte is forced opaque: QEMU's x8r8g8b8 ignores it, real
+ * VMware's ARGB path would otherwise treat the pixel as transparent. */
 static inline void put3(int x, int y, uint32_t c) {
-    volatile uint8_t *p = lfb + (uint32_t)y * GFX24_PITCH + (uint32_t)x * 3u;
-    p[0] = (uint8_t)(c);               /* blue  */
-    p[1] = (uint8_t)(c >> 8);          /* green */
-    p[2] = (uint8_t)(c >> 16);         /* red   */
+    volatile uint8_t *p = lfb + (uint32_t)y * g_pitch
+                              + (uint32_t)x * g_stride;
+    p[g_b] = (uint8_t)(c);
+    p[g_g] = (uint8_t)(c >> 8);
+    p[g_r] = (uint8_t)(c >> 16);
+    if (g_stride == 4u) p[g_x] = 0xFFu;
 }
 
 static int clip(int *x, int *y, int *w, int *h) {
@@ -126,10 +147,12 @@ static void fill(int x, int y, int w, int h, uint32_t c) {
     if (!lfb || !clip(&x, &y, &w, &h)) return;
     uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
     for (int j = 0; j < h; j++) {
-        volatile uint8_t *p = lfb + (uint32_t)(y + j) * GFX24_PITCH
-                                  + (uint32_t)x * 3u;
+        volatile uint8_t *p = lfb + (uint32_t)(y + j) * g_pitch
+                                  + (uint32_t)x * g_stride;
         for (int i = 0; i < w; i++) {
-            p[i * 3] = b; p[i * 3 + 1] = g; p[i * 3 + 2] = r;
+            volatile uint8_t *q = p + (uint32_t)i * g_stride;
+            q[g_b] = b; q[g_g] = g; q[g_r] = r;
+            if (g_stride == 4u) q[g_x] = 0xFFu;
         }
     }
 }
@@ -143,10 +166,15 @@ int gfx24_info(int what) {
     case GFX_INFO_ACTIVE:   return active;
     case GFX_INFO_WIDTH:    return GFX24_W;
     case GFX_INFO_HEIGHT:   return GFX24_H;
-    case GFX_INFO_BPP:      return GFX24_BPP;
-    case GFX_INFO_PITCH:    return GFX24_PITCH;
-    case GFX_INFO_FB_BYTES: return GFX24_FB_BYTES;
+    case GFX_INFO_BPP:      return GFX24_BPP;  /* logical RGB24 colour */
+    case GFX_INFO_PITCH:    return (int)g_pitch;
+    case GFX_INFO_FB_BYTES: return (int)(g_pitch * GFX24_H);
     case GFX_INFO_LFB_PHYS: return (int)lfb_phys;
+    /* v2.20 append-only selectors (see gfx24.h). */
+    case GFX_INFO_BACKEND:  return svga_backend ? 1 : 0;
+    case GFX_INFO_HW_BPP:   return svga_backend ? (int)svga_info(SVGA_INFO_BPP)
+                                                : GFX24_BPP;
+    case GFX_INFO_STRIDE:   return g_stride;
     default:                return -8;          /* ENOSYS */
     }
 }
@@ -167,9 +195,10 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
             if (dx < 0 || dx >= GFX24_W) continue;
             const uint8_t *s = src +
                 ((uint32_t)j * (uint32_t)w + (uint32_t)i) * 3u;
-            volatile uint8_t *p = lfb + (uint32_t)dy * GFX24_PITCH
-                                      + (uint32_t)dx * 3u;
-            p[0] = s[2]; p[1] = s[1]; p[2] = s[0];   /* RGB -> BGR */
+            volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                      + (uint32_t)dx * g_stride;
+            p[g_r] = s[0]; p[g_g] = s[1]; p[g_b] = s[2];
+            if (g_stride == 4u) p[g_x] = 0xFFu;   /* RGB24 -> device */
         }
     }
 }
@@ -198,41 +227,89 @@ void gfx24_demo(void) {
 }
 
 /* ---- render back-end (text cells) -------------------------------------- */
-static int v24_enter(void) {
+static void bochs_layout(void) {
+    g_pitch = GFX24_PITCH;
+    g_stride = 3;
+    g_b = 0; g_g = 1; g_r = 2; g_x = 3;
+    svga_backend = 0;
+}
+
+/* QEMU's -vga vmware is built on the common VGA core and STILL answers
+ * the Bochs dispi ID port, but its LFB is in BAR1, not at the legacy
+ * 0xE0000000 fallback.  Choose by PCI identity first: if a VMware SVGA II
+ * function exists it wins, otherwise dispi (QEMU -vga std / Bochs). */
+static int v24_enter_bochs(void) {
     uint16_t id = dispi_read(DISPI_ID);
-    if (id < 0xB0C0u || id > 0xB0C5u) return -1;   /* no VBE hardware */
 
-    lfb_phys = find_lfb();
-    if (lfb_bar_bytes < GFX24_FB_BYTES) return -2;
-    if (!vbe_lfb_map(lfb_phys, GFX24_FB_BYTES)) return -2;
-    lfb = (volatile uint8_t *)lfb_phys;
+    if (id >= 0xB0C0u && id <= 0xB0C5u) {
+        /* QEMU -vga std / Bochs: native 24bpp BGR LFB. */
+        bochs_layout();
+        lfb_phys = find_lfb();
+        if (lfb_bar_bytes < GFX24_FB_BYTES) return -2;
+        if (!vbe_lfb_map(lfb_phys, GFX24_FB_BYTES)) return -2;
+        lfb = (volatile uint8_t *)lfb_phys;
 
-    dispi_write(DISPI_ENABLE, 0);
-    dispi_write(DISPI_XRES, GFX24_W);
-    dispi_write(DISPI_YRES, GFX24_H);
-    dispi_write(DISPI_BPP, 24);
-    dispi_write(DISPI_VIRT_WIDTH, GFX24_W);
-    dispi_write(DISPI_VIRT_HEIGHT, GFX24_H);
-    dispi_write(DISPI_X_OFFSET, 0);
-    dispi_write(DISPI_Y_OFFSET, 0);
-    dispi_write(DISPI_ENABLE,
-                DISPI_ENABLED | DISPI_LFB_ENABLED | DISPI_NOCLEARMEM);
-
-    if (dispi_read(DISPI_XRES) != GFX24_W ||
-        dispi_read(DISPI_YRES) != GFX24_H ||
-        dispi_read(DISPI_BPP) != 24) {
         dispi_write(DISPI_ENABLE, 0);
-        return -3;
+        dispi_write(DISPI_XRES, GFX24_W);
+        dispi_write(DISPI_YRES, GFX24_H);
+        dispi_write(DISPI_BPP, 24);
+        dispi_write(DISPI_VIRT_WIDTH, GFX24_W);
+        dispi_write(DISPI_VIRT_HEIGHT, GFX24_H);
+        dispi_write(DISPI_X_OFFSET, 0);
+        dispi_write(DISPI_Y_OFFSET, 0);
+        dispi_write(DISPI_ENABLE,
+                    DISPI_ENABLED | DISPI_LFB_ENABLED | DISPI_NOCLEARMEM);
+
+        if (dispi_read(DISPI_XRES) != GFX24_W ||
+            dispi_read(DISPI_YRES) != GFX24_H ||
+            dispi_read(DISPI_BPP) != 24) {
+            dispi_write(DISPI_ENABLE, 0);
+            return -3;
+        }
+        active = 1;
+        gfx24_clear(0x000000);
+        return 0;
     }
+    return -1;
+}
+
+/* VMware Workstation / QEMU -vga vmware: SVGA II, 32bpp XRGB.
+ * The RGB24 drawing API is unchanged; only the pixel layout differs. */
+static int v24_enter_svga(void) {
+    svga_surface_t s;
+    if (svga_mode_set(GFX24_W, GFX24_H, &s) != 0) return -2;
+    lfb_phys      = s.phys;
+    lfb_bar_bytes = s.bytes;
+    lfb           = (volatile uint8_t *)s.phys;
+    g_pitch   = s.pitch;
+    g_stride  = s.stride;
+    g_r = s.off_r; g_g = s.off_g; g_b = s.off_b; g_x = s.off_x;
+    svga_backend = 1;
     active = 1;
     gfx24_clear(0x000000);
+    svga_flush();
     return 0;
 }
 
+static int v24_enter(void) {
+    /* PCI identity decides.  On a VMware guest the dispi ID port also
+     * answers, but its LFB is NOT at the legacy Bochs address. */
+    if (svga_probe()) {
+        if (v24_enter_svga() == 0) return 0;
+        svga_mode_off();
+        bochs_layout();
+    }
+    return v24_enter_bochs();
+}
+
 static void v24_leave(void) {
-    dispi_write(DISPI_ENABLE, 0);
+    if (svga_backend) svga_mode_off();
+    else              dispi_write(DISPI_ENABLE, 0);
     active = 0;
     lfb = (volatile uint8_t *)0;
+    /* Keep the last pixel layout: `display` and gfx_info(BACKEND) can
+     * still tell the user which device supplied the surface.  enter()
+     * always resets the layout before the next switch. */
 }
 
 static void v24_clear(uint32_t bg_rgb) { fill(0, 0, GFX24_W, GFX24_H, bg_rgb); }
@@ -314,11 +391,24 @@ static void v24_set_palette(uint8_t idx, uint32_t rgb) {
 }
 
 static void v24_diag(void) {
-    con_write("vbe24 backend: 800x600x24bpp LFB, 100x37 8x16 text cells\n");
-    con_write("pitch=2400 fb=1440000 B, BGR triples, no pan / no MTRR\n");
-    con_write("user drawing API: gfx_info / gfx_rect / gfx_blit (kernel-side writes)\n");
-    con_write("lfb=0x");
+    if (svga_backend)
+        con_write("vbe24 backend: VMware SVGA II 800x600 32bpp XRGB (RGB24 API)\n"
+                  "4 B/px, host FIFO UPDATE at 25 Hz, no pan / no MTRR\n");
+    else
+        con_write("vbe24 backend: Bochs dispi 800x600x24bpp LFB\n"
+                  "3 B/px BGR, pitch=2400 fb=1440000 B, no pan / no MTRR\n");
+    con_write("100x37 8x16 text cells; gfx_info/gfx_rect/gfx_blit (kernel writes)\n");
+    con_write("pitch=0x");
     char b[2];
+    for (int i = 7; i >= 0; i--) {
+        b[0] = "0123456789ABCDEF"[(g_pitch >> (i * 4)) & 15];
+        b[1] = 0;
+        con_write(b);
+    }
+    con_write(" stride=");
+    b[0] = (char)('0' + g_stride); b[1] = 0;
+    con_write(b);
+    con_write("\nlfb=0x");
     for (int i = 7; i >= 0; i--) {
         b[0] = "0123456789ABCDEF"[(lfb_phys >> (i * 4)) & 15];
         b[1] = 0;

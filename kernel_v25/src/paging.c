@@ -256,9 +256,17 @@ void *vbe_lfb_map(uint32_t phys, uint32_t size) {
         uint32_t *t = (uint32_t *)(kdir[pa >> 22] & ~0xFFFu);
         t[(pa >> 12) & 0x3FFu] = pa | 0x003u;
     }
-    lfb_pde_first  = pde0;
-    lfb_pde_last   = pde1;
-    lfb_pdes_ready = 1;
+    /* v2.20: the VMware SVGA II driver maps TWO separate PCI BARs (the
+     * framebuffer and the command FIFO).  Keep the union of all mapped
+     * high PDEs so both survive in every ring3 directory. */
+    if (!lfb_pdes_ready) {
+        lfb_pde_first = pde0;
+        lfb_pde_last  = pde1;
+        lfb_pdes_ready = 1;
+    } else {
+        if (pde0 < lfb_pde_first) lfb_pde_first = pde0;
+        if (pde1 > lfb_pde_last)  lfb_pde_last  = pde1;
+    }
     /* Also fix up whichever directory is loaded RIGHT NOW.  A display
      * mode switch can come from a ring3 syscall, in which case this is
      * the caller's directory, not kdir -- and the very next instruction

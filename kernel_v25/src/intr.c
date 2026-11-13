@@ -14,6 +14,7 @@
 #include "render.h"
 #include "keyboard.h"
 #include "snd.h"        /* IRQ5 top half for the SB16 audio driver */
+#include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
 #include "task.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
 
@@ -181,6 +182,7 @@ void isr_irq(int_frame_t *f) {
     switch (irq) {
     case 0:
         timer_ticks++;
+        svga_tick();                         /* SVGA II FIFO UPDATE (25 Hz) */
         con_tick();                          /* BLINK phase + software cursor */
         task_tick_wake();                    /* wake sleepers, set need_resched */
         break;

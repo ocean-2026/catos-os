@@ -1,6 +1,6 @@
 # CatOS 系统内测试文档
 
-> 适用版本：v2.16（内核 ABI 64 slots，`8753f8c` 及以后）
+> 适用版本：v2.20（CE ABI 66 槽，含 VMware SVGA II 图形后端；`3ed5cad` v2.19 及以后）
 > 测试介质：`kernel_v25/catos.iso`（GRUB isohybrid，光驱或硬盘引导均可）
 > 数据盘：`kernel_v25/catos_disk.img`（FAT32，预装 24 个 CE 应用）
 > 配套自动化回归：`tests/`（本手册只覆盖**引导后的系统内手动测试**）
@@ -84,13 +84,21 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 
 | 命令 | 预期 |
 |---|---|
-| `text` | 回到 80x25 文本模式 |
-| `gfx` / `vbe` | 模式列表与 VBE 信息（VMware/QEMU std 均应列出模式） |
-| `gfx24` | 切到 800x600x24 并绘制诊断图（红/白/青块） |
-| `gfx24` 后 `text` | 无残影回到文本（#100 修复验证点） |
+| `text` | 回到 80x25 文本模式（退出图形需按 `Y` 确认） |
+| `gfx` / `vbe` | 模式列表与真彩文本终端（QEMU std / QEMU vmware / VMware 均可用） |
+| `gfx24` / `vbe24` | 切到 800x600 并绘制诊断图（红/绿/蓝/白块 + 256 级渐变 + 8 色条）；`vbe24` 是 v2.20 新增别名 |
+| `svgainfo` | VMware 上显示 `SVGA II adapter : present`、`id : 0x90000002`、FB/FIFO BAR、`updates>0`（图形模式退出后仍可查）；QEMU std 上提示无该设备 |
+| `display` | `graphics HW : VMware SVGA II (15AD:0405)` 或 Bochs；`last gfx24 hw` / `hw_bpp` / `stride` |
+| `gfx24` 后 `text` | 无残影回到文本（#57/#100 修复验证点） |
 | `vdiag` | 诊断输出 **不破坏**之前 `ls` 的显示内容（#100）；`glyphA` 十六进制一行内联完整（#100） |
 | `palette 4` / `rgb` / `style` / `color` | 文本颜色/属性即时生效，恢复用 `text` |
-| `display` | 当前显示模式信息 |
+
+**VMware 显卡专项（v2.20）**：在 VMware Workstation 里依次执行
+`svgainfo` → `vbe` → `text` + Y → `vbe24` → `text` + Y → `gfx24`。
+四条都应进入 800x600 真彩且显示完整（不是黑屏）；
+`svgainfo` 的 `updates` 必须大于 0（FIFO 刷新在工作）。
+若 `vbe24` 报 unknown command 或 `gfx24` 报 no VBE/Bochs-dispi，说明
+镜像仍是 v2.19 或更早。
 
 ### 3.5 中文与 CJK 字形（#101）
 
@@ -146,7 +154,7 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 
 - **PASS**：实际输出包含第 3 节所列要点；无 ring0 fault banner；提示符恢复。
 - **FAIL**：输出与预期不符、出现 `page-fault` / triple fault / 死机、或命令无响应超过 10 秒。
-- FAIL 时记录：命令、完整屏幕输出、`faultinfo` 输出、引导介质与数据盘来源、VMware/QEMU 版本。提交到 `docs/CatOS-内核问题清单.md`（新问题续编号 #103+）。
+- FAIL 时记录：命令、完整屏幕输出、`faultinfo` 输出、引导介质与数据盘来源、VMware/QEMU 版本。提交到 `docs/CatOS-内核问题清单.md`（新问题续编号 #107+）。
 
 ## 5. 已知非缺陷项（勿报 bug）
 
@@ -167,15 +175,17 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 实机: qemu_regress 12/12  user_regress 15/15  ot_regress ALL  diag_regress 4/4
       disk_regress 5/5  heap_regress 4/4  go_regress 7/7  vprobe_regress 10/10
       snd_regress 6/6  gfx24_regress 0 failed  security_regress 17/17
+实机(-vga vmware): svga24_regress 34/34 PASS（v2.20，端口 4467）
 ```
 
 | 手动测试项 | 对应回归脚本 |
 |---|---|
-| 3.2 权限/大小写变体 | tests/security_regress.py（17 用例，端口 4474） |
+| 3.2 权限/大小写变体 | tests/security_regress.py（17 用例，端口 4476） |
 | 3.3 faultinfo/隔离 | tests/diag_regress.py（4463） |
 | 3.5 punctest | tests/security_regress.py（glyph-count-6961） |
 | 3.6 音频 | tests/snd_regress.py（4460） |
-| 3.4 24bpp 逐像素 | tests/gfx24_regress.py（4462） |
+| 3.4 24bpp 逐像素（Bochs） | tests/gfx24_regress.py（4462） |
+| 3.4 VMware SVGA II 专项 | tests/svga24_regress.py（4467，`-vga vmware`） |
 | 3.7 vprobe | tests/vprobe_regress.py（4461） |
 | 3.1 文件系统 | tests/disk_regress.py |
 | 3.2 用户全套 | tests/user_regress.py |

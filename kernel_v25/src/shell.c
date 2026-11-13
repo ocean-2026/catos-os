@@ -15,6 +15,7 @@
 #include "hw.h"
 #include "snd.h"        /* v2.11 SB16 info / self-test commands */
 #include "gfx24.h"      /* v2.12 24bpp truecolour drawing surface */
+#include "svga.h"       /* v2.20 VMware SVGA II framebuffer driver */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -89,8 +90,9 @@ static void cmd_help(void) {
         "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
         "  -- display (front-end / back-ends) --\n"
         "  gfx          graphics mode (256-color styled text)\n"
-        "  vbe          VBE 800x600x32 truecolour text terminal\n"
-        "  gfx24        800x600x24 truecolour + pixel demo (drawable)\n"
+        "  vbe          800x600x32 truecolour text (Bochs VBE / VMware SVGA)\n"
+        "  gfx24|vbe24 800x600 24-bit-colour drawing surface + pixel demo\n"
+        "  svgainfo     VMware SVGA II PCI/FIFO register dump\n"
         "  text         switch back - needs a physical Y confirmation\n"
         "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
         "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
@@ -327,7 +329,8 @@ static void cmd_rgb(const char *arg) {
 static void cmd_vbe(void) {
     int r = con_request_mode(CON_MODE_VBE, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
-        vga_write("vbe: no VBE/Bochs-dispi device found (try QEMU -vga std)\n");
+        vga_write("vbe: no Bochs-VBE or VMware-SVGA framebuffer found\n"
+                  "     (QEMU: -vga std or -vga vmware)\n");
         return;
     }
     if (r != 0) { vga_write("vbe: switch failed\n"); return; }
@@ -349,7 +352,8 @@ static void cmd_vbe(void) {
 static void cmd_gfx24(void) {
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
-        vga_write("gfx24: no VBE/Bochs-dispi device found (try QEMU -vga std)\n");
+        vga_write("gfx24: no Bochs-VBE or VMware-SVGA framebuffer found\n"
+                  "       (QEMU: -vga std or -vga vmware)\n");
         return;
     }
     if (r != 0) { vga_write("gfx24: switch failed\n"); return; }
@@ -432,8 +436,39 @@ static void cmd_display(void) {
     if (con_get_mode() == CON_MODE_VBE24)
         vga_write("GFX24 (gfx_info/gfx_rect/gfx_blit, kernel-side writes)\n");
     else
-        vga_write("vbe24 mode only (framebuffers stay supervisor-only)\n");
-    vga_write("switch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
+        vga_write("inactive (framebuffers stay supervisor-only)\n");
+    vga_write("graphics HW      : ");
+    vga_write(svga_probe() ? "VMware SVGA II (15AD:0405)" : "Bochs/QEMU VBE dispi");
+    vga_write(" | last gfx24 hw=");
+    vga_write(gfx24_info(GFX_INFO_BACKEND) == 1 ? "SVGA-II" : "Bochs");
+    vga_write(" hw_bpp="); print_int(gfx24_info(GFX_INFO_HW_BPP));
+    vga_write(" stride="); print_int(gfx24_info(GFX_INFO_STRIDE));
+    vga_write("\nswitch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
+}
+
+/* v2.20: raw SVGA II register dump.  Useful when a VMware guest shows a
+ * black screen: `id` must be 0x9000000x, `active` 1 after vbe/gfx24. */
+static void cmd_svgainfo(void) {
+    if (!svga_probe()) {
+        vga_write("svgainfo: no VMware SVGA II device (15AD:0405) on the PCI bus\n");
+        vga_write("          QEMU std VGA uses Bochs dispi instead; use 'vdiag'\n");
+        return;
+    }
+    vga_write("SVGA II adapter  : present\n");
+    vga_write("id               : 0x"); print_hex(svga_info(SVGA_INFO_ID));
+    vga_write("  caps=0x"); print_hex(svga_info(SVGA_INFO_CAPS));
+    vga_write("  io=0x"); print_hex(svga_info(SVGA_INFO_IO_BASE));
+    vga_write("\nactive           : "); print_int(svga_info(SVGA_INFO_ACTIVE));
+    vga_write("  mode "); print_int(svga_info(SVGA_INFO_WIDTH));
+    vga_write("x"); print_int(svga_info(SVGA_INFO_HEIGHT));
+    vga_write("x"); print_int(svga_info(SVGA_INFO_BPP));
+    vga_write("bpp  pitch="); print_int(svga_info(SVGA_INFO_PITCH));
+    vga_write("\nframebuffer      : 0x"); print_hex(svga_info(SVGA_INFO_FB_PHYS));
+    vga_write(" size="); print_int(svga_info(SVGA_INFO_FB_BYTES));
+    vga_write("\nFIFO             : 0x"); print_hex(svga_info(SVGA_INFO_FIFO_PHYS));
+    vga_write(" size="); print_int(svga_info(SVGA_INFO_FIFO_BYTES));
+    vga_write(" updates="); print_int(svga_info(SVGA_INFO_FLUSHES));
+    vga_write("\n");
 }
 
 static void cmd_about(void) {
@@ -2088,7 +2123,9 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
-        else if (!strcmp_(cmd, "gfx24"))      cmd_gfx24();
+        else if (!strcmp_(cmd, "gfx24") ||
+                 !strcmp_(cmd, "vbe24"))      cmd_gfx24();
+        else if (!strcmp_(cmd, "svgainfo"))   cmd_svgainfo();
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);

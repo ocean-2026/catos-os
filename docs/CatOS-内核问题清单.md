@@ -599,4 +599,36 @@ heap 4/4、go 7/7、qa_probe_final exit=0
 **根因教训**：`cell_blank()` 与 `text_draw_cell()` 对"空格子"的约定不一致（blank 认为空=可重画，draw 把空画成 ?）。渲染层的 cp==0 语义在三个后端应统一为空格。
 
 ---
-*本节后继续编号为 #104+。*
+*上一节后继续编号为 #104+。*
+
+## 二十一、VMware 图形轮：v2.20 SVGA II 24 位真彩（#104~#106，2026-11-13）
+
+来源：用户 2026-11-13「下载文件夹有最新版。顺便做 VMware 24 色真彩支持。
+我输入 vbe 和 vbe24 都不行」。同时把云主机 v2.19 反向同步回 `D:\CatOs`
+（提交 `3ed5cad`，覆盖前备份 `D:\_v219_backup\`）。
+
+| # | 问题 | 根因 | 影响 | 处置 | 状态 |
+|---|---|---|---|---|---|
+| **104** | **VMware 下 `vbe` / `gfx24` 报 "no VBE/Bochs-dispi device found"，完全无图形** | 图形后端只识别 QEMU/Bochs 的 0x01CE dispi 端口；VMware 显卡是 PCI `15AD:0405` SVGA II（BAR0 索引/数据端口、BAR1 LFB、BAR2 FIFO），两者协议完全不同 | VMware 用户无法进入任何 800x600 真彩模式 | 新增 `src/svga.c` / `include/svga.h`：PCI 身份优先选后端、寄存器模式设置、FIFO `SVGA_CMD_UPDATE` 25 Hz 刷新、运行时 pitch/stride/通道偏移。`be_vbe24`/`be_vbe` 双后端共用 | **已修复** |
+| **105** | **`vbe24` 命令不存在**（用户输入后无反应/未知命令） | shell 分发链只注册了 `gfx24`，文档与 `cmd_display` 的 "->vbe24" 文案却暗示存在 | 用户按文档输入无效，误以为显卡驱动坏了 | `gfx24` / `vbe24` 双别名指向同一 `cmd_gfx24()`；help 与测试文档同步 | **已修复** |
+| **106** | **QEMU `-vga vmware` 模拟的 SVGA II 上屏幕全黑** | QEMU 的 vmware-svga 复用通用 VGA 核，**仍应答 dispi ID**；旧代码优先走 Bochs 路径，`find_lfb()` 找不到 `1234:1111` 就退回硬编码 `0xE0000000`，像素写进不存在的地址 | 用 QEMU 同族设备无法验证 VMware 路径，且会误判为"驱动已坏" | 后端选择改为 **PCI 身份优先**：探测到 `15AD:0405` 就走 SVGA，dispi 仅兜底；`svgainfo` 命令可直接核对 ID/FB/FIFO/UPDATE 计数 | **已修复** |
+
+**连带修正（非缺陷）**：
+
+- `paging.c::vbe_lfb_map()` 原样覆盖 `lfb_pde_first/last`，第二个 BAR 映射会让
+  第一个从 ring3 目录镜像中掉出去；改为取区间并集（#84 的 supervisor-only PTE 不变）。
+- `extapp/gfx24.c` 原硬断言 `pitch==2400`；SVGA 是 3200，ring3 探针会打印
+  `GFX24 CE FAIL (bad info)` 且不绘图。改为 `pitch >= w*3`，逻辑 RGB24 契约不变。
+- `gfx_info` 追加只读选择器 `BACKEND(7)` / `HW_BPP(8)` / `STRIDE(9)`
+  （append-only，不新增 syscall 槽），`ce_abi.h` 与 `gfx24.h` 同步。
+
+**验证**：`tests/svga24_regress.py`（QEMU 11.1 `-vga vmware`，monitor 4467）
+34 项全绿；`gfx24_regress`（`-vga std`）0 failed；qemu 12/12、user 15/15、
+security 17/17、disk 5/5、宿主 test_mkce 48 / test_cc 10 / ce_regress 11P /
+test_app_list 24 全绿。**真实 VMware Workstation 需用户开机复测**。
+
+**根因教训**：设备能力判定不能只靠"某个 I/O 端口有没有回应"——QEMU 的
+VGA 兼容层会让不同显卡都应答同一组端口。PCI vendor/device 才是身份事实。
+
+---
+*本节后继续编号为 #107+。*

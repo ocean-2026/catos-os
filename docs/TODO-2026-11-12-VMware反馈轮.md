@@ -45,10 +45,11 @@ autostart 脚本输出 banner（CatOS 0.3 / 架构 / 引导器 / 文件系统）
 DAC 调色板/AC 控制器后未恢复 VGA 文本调色板。修法与 #100（vdiag 调色板）同类：
 退出序列里重载标准 16 色 DAC + AC 重触发 + 清屏。
 
-### 5. gfx24 报 no VBE/Bochs-dispi —— 已定性（预期行为）→ 待办 #58 后续
+### 5. gfx24 报 no VBE/Bochs-dispi —— ✅ v2.20 已解决（见 §六）
 VMware 没有 Bochs VBE dispi 设备（那是 QEMU -vga std 专属）；PCI 列表里的
-`15AD:0405` 是 VMware SVGA II。要 VMware 图形需新写 SVGA II 驱动（MMIO + FIFO），
-列入 P2（先网络/音频后图形）。
+`15AD:0405` 是 VMware SVGA II。原判定「先网络/音频后图形」被用户 2026-11-13
+直接点名推翻：已实现 SVGA II 驱动（BAR0 索引/数据端口 + BAR1 LFB + BAR2 FIFO），
+`vbe` / `vbe24` / `gfx24` 三条命令在 VMware 显卡上全部可用。
 
 ### 6. 声卡 "no SB16 detected" —— 已定性（预期行为）→ 拆为任务 #56
 VMware 默认声卡是 ES1371（Ensoniq AudioPCI，PCI 列表里 `1274:1371`），不是 SB16
@@ -93,6 +94,7 @@ P3  #58 VMware SVGA II 图形驱动；#60 adofai 打磨
 ```
 
 2026-11-13 执行后：**P0 两项（#54 / T52）已完成**；**#57 / #59 / #58 / #60 已完成**；
+**VMware SVGA II 图形驱动（原 #5 / P3）由 v2.20 提前完成**；
 剩余 **#55 / #56 / T51 / T50** 未开始，其中 #55 是"完备网络"的关键路径。
 
 
@@ -100,7 +102,7 @@ P3  #58 VMware SVGA II 图形驱动；#60 adofai 打磨
 
 | 设备 | QEMU | VMware 17.6.1 | CatOS 现状 |
 |---|---|---|---|
-| 显卡 | Bochs VBE dispi（-vga std） | VMware SVGA II（15AD:0405） | 仅 VBE → VMware 无图形 |
+| 显卡 | Bochs VBE dispi（-vga std） | VMware SVGA II（15AD:0405） | ✅ v2.20 双后端：Bochs 24bpp / SVGA II 32bpp XRGB 承载 RGB24 |
 | 声卡 | SB16（ISA） | ES1371（1274:1371，PCI） | 仅 SB16 → VMware 无声 |
 | 网卡 | pcnet（1022:2000） | e1000/vmxnet3（15AD:*） | 仅 pcnet → VMware 无网 |
 | 磁盘 | IDE | IDE（vmdk 描述符） | ✅ 可用 |
@@ -157,6 +159,46 @@ QEMU 启动实测（云主机，QEMU 5.2.0）：
 3. **T51 Shell 交互**：行编辑器（↑↓ 历史、←→ 光标编辑、Ctrl+↑↓ 回看、语法高亮）；块状光标闪烁已在 #58 就位，可直接复用。
 4. **T50 lang**：`/etc/lang` 持久化 + `lang` 命令 + 关键消息翻译表。
 5. **回归复跑**：`tests/qemu_regress.py`（需 `-L` wrapper 注入与 `--disk` 副本绕 write lock）、`user_regress.py`、`disk_regress.py`、`security_regress.py` 全绿，并补 `CJK=2×ASCII` 逐像素断言。
-6. **反向同步**：云主机改动尚未回写 `D:\CatOs`（`FileBatchUpload` → Windows 下载路径已验证可用）。
-7. **VMware 实机项**（#55/#56/#58-SVGA II）只能在 QEMU 同族设备上验证，VMware 真机行为需用户复测。
+6. ~~**反向同步**：云主机改动尚未回写 `D:\CatOs`~~ → **2026-11-13 已完成**：
+   `CatOs-v2.19-源码与文档.zip` + `CatOs-v2.19-镜像产物.zip` 从下载文件夹反向同步，
+   提交 `3ed5cad`（v2.19 基线）；覆盖前的原文件备份在 `D:\_v219_backup\`。
+7. **VMware 实机项**（#55/#56）只能在 QEMU 同族设备上验证，VMware 真机行为需用户复测；
+   SVGA II 图形已在 QEMU `-vga vmware`（同 15AD:0405）逐像素验证，见 §六。
+
+---
+
+## 六、2026-11-13 Windows 侧：v2.20 VMware SVGA II 24 位真彩
+
+用户反馈「下载文件夹有最新版。顺便做 VMware 24 色真彩支持。我输入 vbe 和 vbe24
+都不行」。两条都是真问题：
+
+| 症状 | 根因 | 处理 |
+|---|---|---|
+| `vbe24` 不识别 | shell 只注册了 `gfx24`，没有 `vbe24` 别名 | 分发链加 `vbe24` 别名 + help 文案 |
+| `vbe` / `gfx24` 报 no VBE/Bochs-dispi | VMware 显卡是 `15AD:0405` SVGA II，没有 0x01CE dispi 端口；后端只有 Bochs 一条路 | 新增 `src/svga.c` + `include/svga.h`，按 PCI 身份选择后端 |
+| QEMU `-vga vmware` 实测黑屏 | QEMU 的 vmware-svga 复用通用 VGA 核，**仍会应答 dispi ID**，旧代码因此走 Bochs 路径把像素写到不存在的 `0xE0000000` | 改为「PCI 上发现 SVGA II 就优先 SVGA」，dispi 只作兜底 |
+
+实现要点：
+
+- BAR0 I/O（index=base+0 / value=base+1）、BAR1 LFB、BAR2 FIFO；
+  寄存器号对齐 VMware `svga_reg.h` / QEMU `vmware_vga.c`。
+- SVGA II 是 32bpp XRGB 设备（DEPTH 读回 24，BPP 只有 32）。CatOS 保持
+  **RGB24 公共绘图 ABI 不变**，按设备给的 `BYTES_PER_LINE` 与颜色掩码在
+  运行时决定 pitch / 每像素字节数 / 通道偏移，第 4 字节写 0xFF。
+- 启用 FIFO 后宿主停止 VGA dirty tracking，直写显存不会自动上屏；
+  IRQ0 的 `svga_tick()` 以 25 Hz 推送全屏 `SVGA_CMD_UPDATE` 并写 SYNC。
+- `paging.c::vbe_lfb_map()` 改为累积 PDE 区间，让 FB 与 FIFO 两个 BAR
+  同时镜像进每个任务页目录（PTE 仍是 supervisor-only，#84 不破）。
+- `extapp/gfx24.c` 不再硬编码 `pitch==2400`（改为 `pitch >= w*3`），
+  否则 ring3 探针在 SVGA 上会拒绝绘图。
+- 新命令 `svgainfo`；`display` 增 `graphics HW` / `last gfx24 hw` / `hw_bpp` / `stride`；
+  `gfx_info` 追加三个只读选择器（BACKEND / HW_BPP / STRIDE，ABI append-only）。
+
+验证（`tests/svga24_regress.py`，QEMU 11.1 `-vga vmware`，monitor 4467）：
+**34 项全绿**，含 gfx24/vbe24 演示图逐像素（红/绿/蓝/白/渐变/8 色条）、
+ring3 `gfx_rect`/`gfx_blit`、FIFO UPDATE 计数、`vbe` 真彩文本 RGB 断言。
+QEMU `-vga std` 老路径 `gfx24_regress` 仍 0 failed；qemu 12/12、user 15/15、
+security 17/17、disk 5/5、宿主 test_mkce 48 / test_cc 10 / ce_regress 11P /
+test_app_list 24 全绿。
+**真实 VMware Workstation 尚需用户开 VM 复测**（本机 VM 当前未运行）。
 

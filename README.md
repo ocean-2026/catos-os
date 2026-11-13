@@ -13,7 +13,7 @@
 | 文件系统 | FAT32（双 FAT、脏扇区增量写、mount 时镜像自检 + `fsck`）、Unix 式 uid/gid/mode ACL |
 | 用户 | 多用户账户（`/etc/passwd`）、7 位能力位（CAP_NET/KILL/FSADMIN/AUDIO/USERADM/DEVICE/SYS）、初始用户 root、`su`/`login`/`useradd`/`chmod`/`chown` |
 | 诊断 | 致命故障记录（向量/ring/任务/eip/CR2）+ `faultinfo` 命令、`panic()` 统一入口 |
-| 图形 | VGA 文本 + 800x600x24 真彩（VBE LFB），用户态绘图 ABI（rect/blit） |
+| 图形 | VGA 文本 + 800x600 24 位真彩，双后端（QEMU/Bochs VBE dispi 24bpp、VMware SVGA II 32bpp XRGB 承载 RGB24），用户态绘图 ABI（gfx_info/rect/blit）；`vbe` / `vbe24` / `gfx24` / `svgainfo` |
 | 音频 | Sound Blaster 16（ISA DMA）PCM 驱动 |
 | 网络 | 用户态网络栈（curl/netinfo 等应用，能力位门控） |
 | 应用 | 22+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、ocntools 工具箱（文件管理器/十六进制编辑/搜索/版本控制）、adofai 音游、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback |
@@ -88,7 +88,8 @@ python tests/ce_regress.py         # CE 应用回归（宿主模拟器）
 python tests/test_app_list.py      # apps.list 单一来源守卫
 python tests/qemu_regress.py kernel_v25/catos.iso --qemu 'C:\qemu-portable\qemu-system-i386.exe'
 # 其余实机回归：ot_regress / diag_regress / disk_regress / user_regress / vprobe_regress /
-#              snd_regress / gfx24_regress / heap_regress / go_regress（各自独立 monitor 端口）
+#              snd_regress / gfx24_regress / svga24_regress（-vga vmware）/ heap_regress /
+#              go_regress（各自独立 monitor 端口）
 ```
 
 ## 许可

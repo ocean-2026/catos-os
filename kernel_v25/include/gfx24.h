@@ -35,8 +35,12 @@ enum {
     GFX_INFO_HEIGHT,       /* 600                                       */
     GFX_INFO_BPP,          /* 24                                        */
     GFX_INFO_PITCH,        /* 2400 bytes between rows                    */
-    GFX_INFO_FB_BYTES,     /* 1440000                                   */
-    GFX_INFO_LFB_PHYS      /* PCI BAR0 physical address (supervisor)     */
+    GFX_INFO_FB_BYTES,     /* 1440000 on Bochs; pitch*600 on SVGA      */
+    GFX_INFO_LFB_PHYS,     /* PCI BAR0/1 physical address (supervisor)  */
+    /* v2.20 append-only: which device supplies the RGB24 surface. */
+    GFX_INFO_BACKEND,      /* 0 = Bochs dispi, 1 = VMware SVGA II      */
+    GFX_INFO_HW_BPP,       /* 24 (Bochs) or 32 (SVGA XRGB)             */
+    GFX_INFO_STRIDE        /* bytes per pixel: 3 or 4                  */
 };
 
 int      gfx24_active(void);
