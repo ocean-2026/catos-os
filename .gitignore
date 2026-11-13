@@ -74,7 +74,7 @@ vmware/*.lck/
 # ---- one-off sync / backup artifacts ----
 _src_hashes.txt
 _sync_v218.tar.gz
-*.img.bak-v219
+*.img.bak*
 # Windows "nul" placeholder accidentally created by a shell redirect
 /nul
 
