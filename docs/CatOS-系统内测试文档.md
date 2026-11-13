@@ -92,6 +92,7 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 | `gfx24` 后 `text` | 无残影回到文本（#57/#100 修复验证点） |
 | `vdiag` | 诊断输出 **不破坏**之前 `ls` 的显示内容（#100）；`glyphA` 十六进制一行内联完整（#100） |
 | `palette 4` / `rgb` / `style` / `color` | 文本颜色/属性即时生效，恢复用 `text` |
+| 图形模式光标 | 当前格**无字符**⇒ 格子末行 1 px **下划线**；当前格**有字符**⇒ 该格 **背景反色**；光标**闪烁**（0.5 s 半周期）；换行/编辑后**不留残光标**（#109/#110） |
 
 **VMware 显卡专项（v2.20）**：在 VMware Workstation 里依次执行
 `svgainfo` → `vbe` → `text` + Y → `vbe24` → `text` + Y → `gfx24`。
@@ -100,12 +101,24 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 若 `vbe24` 报 unknown command 或 `gfx24` 报 no VBE/Bochs-dispi，说明
 镜像仍是 v2.19 或更早。
 
+> **v2.21 补充（#107/#108）**：VMware 上 `vbe` 黑屏的根因是显存映射**可缓存**
+> （设备读不到 CPU 的写回缓存）与 **IRQ0 从不调用 `svga_tick()`**（FIFO 拿不到
+> `UPDATE` 命令）。两者都已修：`paging.c` 的 LFB 映射加了 PCD 位，
+> `sched_timer_tick()` 直接驱动 `svga_tick()` + `con_tick()`。
+> 若 `svgainfo` 的 `updates` 恒为 0，说明镜像早于 v2.21。
+
 ### 3.5 中文与 CJK 字形（#101）
 
 | 命令 | 预期 |
 |---|---|
 | `run /bin/punctest.ce` | 打印全角标点表；首行含 **`glyphs=6961`**；`、。！？`等渲染为**全角宽字形**，无 `?` |
 | `run /bin/zhdemo.ce` | 中文段落逐行显示，汉字+标点均正常 |
+
+**等宽逐像素断言**（v2.21 新增 `tests/cjk_width_regress.py`，monitor 4493）：
+CJK 字形步进必须是 ASCII 的 **2 倍**。用 `vbe` 欢迎行的下划线连续段当尺子——
+纯 ASCII 行 49 格 ⇒ **392 px**（8 px/格）；混排行 12 ASCII + 14 CJK ⇒
+**320 px** ⇒ CJK 步进 = (320−12×8)/14 = **16 px = 2×ASCII**。
+若退化成 1 格宽该行会是 224 px、3 格宽 416 px，都会被判失败。
 
 ### 3.6 音频（SB16）
 
@@ -175,7 +188,9 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 实机: qemu_regress 12/12  user_regress 15/15  ot_regress ALL  diag_regress 4/4
       disk_regress 5/5  heap_regress 4/4  go_regress 7/7  vprobe_regress 10/10
       snd_regress 6/6  gfx24_regress 0 failed  security_regress 17/17
+      e1000_regress 0 failed  es1371_regress 0 failed
 实机(-vga vmware): svga24_regress 34/34 PASS（v2.20，端口 4467）
+实机(-vga std):    cjk_width_regress 0 failed（v2.21，端口 4493）
 ```
 
 | 手动测试项 | 对应回归脚本 |
@@ -183,6 +198,7 @@ root 拒绝例外：root 仅在文件无 execute bit 时被 -2 拒绝；ACL 明�
 | 3.2 权限/大小写变体 | tests/security_regress.py（17 用例，端口 4476） |
 | 3.3 faultinfo/隔离 | tests/diag_regress.py（4463） |
 | 3.5 punctest | tests/security_regress.py（glyph-count-6961） |
+| 3.5 CJK=2×ASCII 等宽 | tests/cjk_width_regress.py（4493，逐像素） |
 | 3.6 音频 | tests/snd_regress.py（4460） |
 | 3.4 24bpp 逐像素（Bochs） | tests/gfx24_regress.py（4462） |
 | 3.4 VMware SVGA II 专项 | tests/svga24_regress.py（4467，`-vga vmware`） |

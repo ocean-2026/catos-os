@@ -249,12 +249,17 @@ void *vbe_lfb_map(uint32_t phys, uint32_t size) {
             if (!pt) return 0;
             uint32_t *t = (uint32_t *)pt;
             for (int i = 0; i < 1024; i++) t[i] = 0;
-            kdir[pde] = pt | 0x003u;         /* P | RW, supervisor-only */
+            /* P | RW | PCD(=UC): PCI MMIO/framebuffer must be uncacheable.
+             * QEMU ignores the cache bit, but real VMware SVGA/e1000 present
+             * the framebuffer (and answer MMIO) only when the guest's writes
+             * actually reach physical memory -- a write-back mapping makes
+             * the device read stale/zero memory, i.e. a black screen. */
+            kdir[pde] = pt | 0x013u;         /* P | RW | PCD, supervisor-only */
         }
     }
     for (; pa < end; pa += 4096) {
         uint32_t *t = (uint32_t *)(kdir[pa >> 22] & ~0xFFFu);
-        t[(pa >> 12) & 0x3FFu] = pa | 0x003u;
+        t[(pa >> 12) & 0x3FFu] = pa | 0x013u;  /* UC, so device sees CPU writes */
     }
     /* v2.20: the VMware SVGA II driver maps TWO separate PCI BARs (the
      * framebuffer and the command FIFO).  Keep the union of all mapped

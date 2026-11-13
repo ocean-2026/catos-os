@@ -62,9 +62,13 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
      *   -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
      * (QEMU >= 7.1 removed -soundhw; -device is the only form now.) */
     if (snd_init() == 0) {
-        vga_write("snd: Sound Blaster 16 ready (0x220 irq5 dma1)\n");
+        int be = snd_info(SND_INFO_BACKEND);
+        if (be == 2)
+            vga_write("snd: ES1370/1371 (PCI) ready\n");
+        else
+            vga_write("snd: Sound Blaster 16 ready (0x220 irq5 dma1)\n");
     } else {
-        vga_write("snd: no SB16 detected (audio disabled)\n");
+        vga_write("snd: no audio device detected (audio disabled)\n");
     }
 
     if (net_init() < 0) {

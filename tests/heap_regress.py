@@ -164,13 +164,15 @@ def main():
         clear()
         do("ls /bin", 2.0)
         txt = screen_text(s)
-        # The FAT volume stores 8.3 names and the shell prints them back
-        # through fat_name_show(): the base is truncated to 8 characters
-        # and lower-cased.  "allocprobe.ce" therefore shows up as
-        # "allocpro.ce" -- matching the long spelling would be wrong.
-        ok = "allocpro.ce" in txt and "heaptest.ce" in txt
-        return ok, "allocpro.ce=%s heaptest.ce=%s" % (
-            "allocpro.ce" in txt, "heaptest.ce" in txt)
+        # v2.18 added VFAT long-file-name (LFN) support to fat.c, so the
+        # volume now stores the FULL name and `ls` prints it verbatim:
+        # "[FILE] allocprobe.ce".  Before v2.18 the FAT volume was 8.3
+        # only and the shell showed the truncated "allocpro.ce" -- that
+        # spelling is what this test used to assert, which broke as soon
+        # as LFN landed.  Match the long name.
+        ok = "allocprobe.ce" in txt and "heaptest.ce" in txt
+        return ok, "allocprobe.ce=%s heaptest.ce=%s" % (
+            "allocprobe.ce" in txt, "heaptest.ce" in txt)
 
     def run_app(argv_line, expect, wait=6.0):
         clear()

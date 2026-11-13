@@ -198,9 +198,10 @@ static void gfx_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void gfx_set_cursor(int x, int y) { (void)x; (void)y; }
 static void gfx_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    /* #58: a block cursor (lower half of the cell), not a 1 px underline;
-     * render.c flips it on/off with the 0.5 s blink phase. */
-    fill_rect(x * 8, y * CON_CELL_H + 8, 8, 8, render_quantize(fg_rgb));
+    /* v2.21: EMPTY cell -> 1 px UNDERLINE on the cell's last scanline
+     * (not the old #58 8x8 block).  render.c draws a glyph cell as
+     * reverse video instead, and blinks this underline every 0.5 s. */
+    hline(x * 8, y * CON_CELL_H + CON_CELL_H - 1, 8, render_quantize(fg_rgb));
 }
 
 static void gfx_diag(void) {

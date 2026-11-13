@@ -15,6 +15,7 @@
 #include "io.h"
 #include "vga.h"
 #include "render.h"      /* v2.7 display front-end (mode policy + styles) */
+#include "svga.h"       /* VMware SVGA II FIFO refresh (svga_tick) */
 #include "keyboard.h"
 #include "fs.h"
 #include "fat.h"
@@ -288,6 +289,16 @@ uint32_t sched_timer_tick(int_frame_t *f) {
      * -> stack death spiral) */
     outb(0x20, 0x20);                    /* master EOI for IRQ0 */
     timer_ticks++;
+    /* IRQ0 is routed here (cpu.s _irq_0), NOT through isr_irq, so the
+     * per-tick hooks that live in isr_irq's case 0 must be driven from
+     * here instead -- otherwise they are silently dead code:
+     *   svga_tick():  VMware SVGA II FIFO UPDATE (25 Hz, self-throttled);
+     *                 without it the SVGA framebuffer never refreshes.
+     *   con_tick():   BLINK phase toggle + software-cursor repaint; without
+     *                 it the cursor never blinks and blink-attr text is
+     *                 frozen.  (#108 v2.21) */
+    svga_tick();
+    con_tick();
     /* CPU accounting for `top`: every tick is charged to whoever is on
      * the CPU when it fires (the idle pseudo-task absorbs idle time) */
     if (cur_task && cur_task != &idle_task_v) cur_task->cpu_ticks++;

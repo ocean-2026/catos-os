@@ -1,6 +1,12 @@
-/* snd.h -- Sound Blaster 16 (ISA) PCM audio driver, CE ABI v2.11.
+/* snd.h -- 8-bit unsigned MONO PCM audio facade, CE ABI v2.11.
+ * v2.21: snd.c is now a two-backend DISPATCHER.  The public ABI is
+ * unchanged: callers always hand over 8-bit unsigned mono PCM and get an
+ * asynchronous play.  Backend 1 is SB16 (ISA); backend 2 is the Ensoniq
+ * ES1370/ES1371 PCI card (see es1371.h), which widens the samples to
+ * 16-bit stereo internally.  Selection happens once in snd_init():
+ * SB16 first, ES1371 as fallback.  No new syscall slots were added.
  *
- * Why SB16 and not a PCI card: CatOS has raw 0xCF8/0xCFC config-space
+ * Why SB16 was historically chosen and not a PCI card: CatOS has raw 0xCF8/0xCFC config-space
  * access (hw.c / net.c / be_vbe.c) but no generic PCI driver layer and no
  * PCI interrupt routing.  Its only IRQ hook is a hard-coded switch in
  * intr.c, and intr_enable() unmasks just IRQ0/1/2.  SB16 is an ISA device
@@ -48,6 +54,11 @@
 #define SND_INFO_RATE     6   /* sample rate of the last play request      */
 #define SND_INFO_IRQSET   7   /* mixer 0x80 IRQ bitmap (diagnostic)        */
 #define SND_INFO_DMASET   8   /* mixer 0x81 DMA bitmap (diagnostic)        */
+/* v2.21 #56: backend selectors (append-only, old slots unchanged) */
+#define SND_INFO_BACKEND  9   /* 0=none 1=SB16(ISA) 2=ES1370/1371(PCI)   */
+#define SND_INFO_DEVICE  10   /* PCI device id for backend 2, else 0      */
+
+const char *snd_backend_name(void);
 
 /* Probe + init.  Must be called AFTER intr_enable() (it unmasks IRQ5) and
  * BEFORE shell_run() (which never returns).  0 = ready, negative = absent.

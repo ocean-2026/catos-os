@@ -122,6 +122,9 @@ uint32_t    con_palette(uint8_t idx);
 
 void        con_move_cursor(void);
 void        con_set_cursor(uint8_t x, uint8_t y);
+/* v2.21 T51: the shell line editor needs the live cursor position as the
+ * anchor for in-place redraw after history / cursor-key edits. */
+void        con_get_cursor(int *x, int *y);
 void        con_putc_at(uint8_t x, uint8_t y, char c);
 void        con_write_at(uint8_t x, uint8_t y, const char *s);
 /* UTF-8 aware positioned write (hanzi consume two columns). */
@@ -152,5 +155,15 @@ const char *con_mode_name(int mode);
 int         con_request_mode(int mode, int origin);
 int         con_force_text(void);   /* kernel-only emergency, no syscall */
 void        con_diag(void);
+
+/* ---- v2.21 T51: console scrollback (Ctrl+Up / Ctrl+Down) ---------------
+ * scroll_one() archives every row that scrolls off the top.  con_scrollback()
+ * paints an archived window WITHOUT changing the live grid (a full copy is
+ * kept in render.c), so returning to the live view restores the prompt and
+ * the partially typed line verbatim.  delta > 0 = older, < 0 = newer.
+ * Returns the current scroll offset; 0 means "live screen". */
+int         con_scrollback(int delta);
+int         con_scrollback_view(void);
+void        con_scrollback_reset(void);
 
 #endif /* RENDER_H */

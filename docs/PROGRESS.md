@@ -176,3 +176,56 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 真实 VMware Workstation 17.6.1 尚需用户开机复测；本机 VM 当前未运行，
 `vmware/CatOS.vmx` 光驱已指向新 `kernel_v25/catos.iso`，数据盘上的
 `/bin/gfx24.ce` 已原地更新（改前备份 `catos_disk.img.bak-v219`）。
+
+## 九、v2.21 外设与交互 + 光标/黑屏修复轮（2026-11-13）
+
+### 9.1 v2.21 新增
+
+- **e1000 网卡驱动**（`src/e1000.c`）：PCI 探测 → BAR0 MMIO → RX/TX 描述符环
+  → 中断 → 接 `net_send/net_recv`；`netdiag` 可核对后端与收发计数。
+- **ES1371 声卡驱动**（`src/es1371.c`）：PCI BAR + DMA 环形缓冲 + 采样率寄存器
+  → 接 `snd_play()`；与 SB16 并存，探测时按 PCI 身份择一（`sndinfo` 可查）。
+- **T51 shell 行编辑器**（`src/keyboard.c`）：↑↓ 历史、←→ 光标编辑、Ctrl+↑↓
+  回看滚动、语法高亮；`render.h` 增 `con_get_cursor()` 与滚动回看接口。
+- **lang 命令**（`src/lang.c`）：`/etc/lang` 持久化 + 关键消息翻译表。
+- **CE ABI**：`ce_abi.h` / `intr.h` / `keyboard.h` / `net.h` / `snd.h` 同步扩口。
+
+### 9.2 本轮修的缺陷（#107~#111，详见问题清单第二十二节）
+
+- **#107 VMware `vbe` 黑屏**：`paging.c` LFB/MMIO 映射加 **PCD（不可缓存）**位。
+- **#108 光标不闪 + SVGA 不刷新**：`cpu.s` 把 IRQ0 单独接到 `sched_timer_tick`，
+  `con_tick()` / `svga_tick()` 挂在 `isr_irq` 上等于**死代码**；改为在
+  `sched_timer_tick()` 里直接调用。光标恢复闪烁，SVGA FIFO 真的在推 `UPDATE`。
+- **#109 光标样式**：三个图形后端由 8×8 实心块改为**格子末行 1 px 下划线**；
+  有字格子由 `render.c::paint()` 画**背景反色**；文本模式硬件光标 13–14 → 14–15。
+- **#110 残光标**：`con_set_cursor()` 保留 `dcx/dcy`；`scroll_one()` 滚动前先擦光标。
+- **#111 回归断言过期**：`heap_regress` 的 `ls /bin` 改断言 LFN 长名。
+
+### 9.3 新增逐像素回归 `tests/cjk_width_regress.py`（monitor 4493）
+
+CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺）：
+
+| 对象 | 组成 | 期望 | 实测 |
+|---|---|---|---|
+| 纯 ASCII 行 | 49 格 × 8 px | 392 px | 392 px ✅ |
+| 混排行 | 12 ASCII × 8 + 14 CJK × 16 | 320 px | 320 px ✅ |
+
+⇒ ASCII 步进 8 px，CJK 步进 **16 px = 2×ASCII**（1 格宽会是 224 px，3 格宽 416 px，
+两者都会判失败）。补齐 TODO 轮 §5.4 的"CJK=2×ASCII 逐像素断言"。
+
+### 9.4 回归总账（2026-11-13 同 ISO，LF 归一后重跑）
+
+```
+宿主: test_mkce 48  test_cc 10  test_app_list 24  ce_regress 11P/17S/0F
+实机(-vga std): qemu 12/12  user 15/15  security 17/17  disk 5/5  diag 4/4
+                heap 4/4  go 7/7  snd 6/6  e1000 0F  es1371 0F
+                gfx24_regress 0F  svga24_regress 0F  cjk_width_regress 0F
+```
+
+**行尾归一**：v2.19 反向同步带进来一批 CRLF 文件，`core.autocrlf=false` 下
+会把整文件改写成 CRLF blob。本轮把 7 个"工作区 CRLF / HEAD LF"的文件归一回 LF
+（`render.h` `be_gfx.c` `be_vbe.c` `intr.c` `keyboard.c` `render.c` `heap_regress.py`），
+提交差异从 ~2900 行降到 **689 插入 / 109 删除**，且归一前后 `kernel.bin`
+大小完全一致（6,662,308 字节）。
+
+**真实 VMware Workstation 仍需用户开机复测**（#107 黑屏、#108 刷新、#109/#110 光标）。

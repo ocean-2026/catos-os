@@ -448,8 +448,13 @@ static void vbe_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void vbe_set_cursor(int x, int y) { (void)x; (void)y; }
 static void vbe_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    /* #58: block cursor (lower half); render.c blinks it every 0.5 s */
-    fill_abs(x * 8, (y + pan_off) * 16 + 8, 8, 8, fg_rgb & 0x00FFFFFFu);
+    /* v2.21: render.c only calls draw_cursor for an EMPTY cell (a cell
+     * that holds a glyph is drawn as reverse video instead), so the
+     * cursor must be a 1 px UNDERLINE on the cell's last scanline --
+     * not the old #58 8x8 block.  render.c blinks it every 0.5 s.
+     * Absolute LFB pixels: with panning, logical row y lives at
+     * physical pixels (y + pan_off) * 16. */
+    hline_abs(x * 8, (y + pan_off) * 16 + 15, 8, fg_rgb & 0x00FFFFFFu);
 }
 static void vbe_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;      /* truecolour: no CLUT in hardware */

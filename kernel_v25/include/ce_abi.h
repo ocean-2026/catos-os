@@ -247,6 +247,10 @@ typedef struct catos_api {
 #define SND_INFO_RATE     6   /* sample rate of the last play request      */
 #define SND_INFO_IRQSET   7   /* mixer 0x80 IRQ bitmap (diagnostic)        */
 #define SND_INFO_DMASET   8   /* mixer 0x81 DMA bitmap (diagnostic)        */
+/* v2.21 #56: append-only selector, no new syscall slot.  0=none,
+ * 1=SB16(ISA), 2=ES1370/1371(PCI).  Old kernels return -8 (ENOSYS) and
+ * callers must fall back to the IRQ-count completion check. */
+#define SND_INFO_BACKEND  9
 
 extern catos_api_t *__ce_api;
 

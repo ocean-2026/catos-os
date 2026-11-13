@@ -14,6 +14,8 @@
 #include "render.h"
 #include "keyboard.h"
 #include "snd.h"        /* IRQ5 top half for the SB16 audio driver */
+#include "es1371.h"     /* v2.21 #56: ES1370/1371 PCI audio IRQ top half */
+#include "e1000.h"      /* v2.21 #55: Intel e1000 PCI NIC IRQ top half */
 #include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
 #include "task.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
@@ -82,6 +84,17 @@ void intr_timer_init(uint32_t hz) {
 void intr_enable(void) {
     outb(0x21, (uint8_t)~(1 << 0 | 1 << 1 | 1 << 2));  /* timer + kbd + cascade */
     __asm__ volatile ("sti");
+}
+
+void intr_unmask_irq(int irq) {
+    if (irq < 0 || irq > 15) return;
+    if (irq < 8) {
+        outb(0x21, (uint8_t)(inb(0x21) & ~(uint8_t)(1u << irq)));
+    } else {
+        /* slave PIC lines 8..15 also need the master cascade (IRQ2) open */
+        outb(0x21, (uint8_t)(inb(0x21) & ~(uint8_t)(1u << 2)));
+        outb(0xA1, (uint8_t)(inb(0xA1) & ~(uint8_t)(1u << (irq - 8))));
+    }
 }
 
 /* ---- ticks ------------------------------------------------------------ */
@@ -191,6 +204,15 @@ void isr_irq(int_frame_t *f) {
         break;
     case 5:
         snd_irq();                           /* SB16 8-bit DMA block done */
+        es1371_irq();                        /* may share IRQ5 (VMware) */
+        e1000_irq();
+        break;
+    /* v2.21: PCI IRQ lines.  Both handlers inspect their own status
+     * register and return immediately for a foreign source, so sharing a
+     * line is safe.  intr_unmask_irq() is called by the driver at probe. */
+    case 9: case 10: case 11: case 12: case 13: case 14: case 15:
+        es1371_irq();
+        e1000_irq();
         break;
     default:
         break;

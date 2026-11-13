@@ -16,6 +16,9 @@
 #include "snd.h"        /* v2.11 SB16 info / self-test commands */
 #include "gfx24.h"      /* v2.12 24bpp truecolour drawing surface */
 #include "svga.h"       /* v2.20 VMware SVGA II framebuffer driver */
+#include "e1000.h"       /* v2.21 #55 e1000 NIC state for netdiag */
+#include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
+#include "lang.h"       /* v2.21 T50: en/zh user-visible messages      */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -81,6 +84,9 @@ static void cmd_help(void) {
         "CatOS v0.3 (five-pillar kernel) - commands:\n"
         "  help         show this message\n"
         "  clear        clear the screen\n"
+        "  lang [en|zh] show/set UI language (default en, /etc/lang)\n"
+        "  Up/Down history | Left/Right/Home/End edit the line\n"
+        "  Ctrl+Up/Down   scroll back console output (any key returns)\n"
         "  echo TEXT    print text back\n"
         "  about        system info banner\n"
         "  autostart    re-run /etc/autostart scripts\n"
@@ -160,9 +166,43 @@ static void cmd_help(void) {
  *   -audiodev wav,id=snd0,path=snd.wav
  *   -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
  * ---------------------------------------------------------------------- */
+/* ---------- T50: language setting --------------------------------------- */
+static void cmd_lang(const char *arg) {
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        vga_write("lang: "); vga_write(lang_name());
+        vga_write("   (usage: lang [en|zh])\n");
+        return;
+    }
+    int l;
+    if (arg[0] == 'e' && arg[1] == 'n' && (arg[2] == 0 || arg[2] == ' ')) l = LANG_EN;
+    else if (arg[0] == 'z' && arg[1] == 'h' && (arg[2] == 0 || arg[2] == ' ')) l = LANG_ZH;
+    else { vga_write(tr(L_LANG_USAGE)); return; }
+
+    int r = lang_set(l);
+    vga_write(tr(L_LANG_SET)); vga_write(lang_name()); vga_write("\n");
+    if (r == -2) vga_write(tr(L_LANG_PERSIST_FAIL));
+}
+
 static void cmd_sndinfo(void) {
     if (!snd_info(SND_INFO_READY)) {
-        vga_write("snd: no SB16 detected (add -device sb16,audiodev=snd0)\n");
+        vga_write(tr(L_SND_NONE));
+        return;
+    }
+    int be = snd_info(SND_INFO_BACKEND);
+    if (be == 2) {
+        /* v2.21 #56: PCI backend.  Keep the SB16 output below byte-for-byte
+         * unchanged -- tests/snd_regress.py asserts on that text. */
+        vga_write("snd: "); vga_write(snd_backend_name()); vga_write(" ready\n");
+        vga_write("snd: pci dev=0x"); print_hex((uint32_t)snd_info(SND_INFO_DEVICE));
+        vga_write(" iobase=0x");     print_hex((uint32_t)snd_info(SND_INFO_DMASET));
+        vga_write(" irq=");          print_int(snd_info(SND_INFO_IRQSET));
+        vga_write(" dsp(dev)=0x");  print_hex((uint32_t)snd_info(SND_INFO_VERSION));
+        vga_write(" rate=");        print_int(snd_info(SND_INFO_RATE));
+        vga_write(" irqs=");        print_int(snd_info(SND_INFO_IRQS));
+        vga_write("\n");
+        vga_write("snd: pcm buffer "); print_int(snd_info(SND_INFO_BUFSZ));
+        vga_write(" bytes (widened to 16-bit stereo in device DMA)\n");
         return;
     }
     vga_write("snd: SB16 ready iobase=");
@@ -229,7 +269,12 @@ static void cmd_sndtest(const char *arg) {
     vga_write("snd: irqs="); print_int(after - before);
     vga_write(" busy=");     print_int(snd_info(SND_INFO_PLAYING));
     vga_write("\n");
-    if (after > before && !snd_info(SND_INFO_PLAYING))
+    /* v2.21 #56: QEMU's ES1370 has no working DAC interrupt (STATUS is
+     * read-only there), so completion is a software timeout driven by
+     * timer_ticks.  Requiring an IRQ delta would fail an otherwise
+     * perfectly played tone.  SB16 keeps the strict IRQ check. */
+    int completed = (snd_info(SND_INFO_BACKEND) == 2) ? 1 : (after > before);
+    if (completed && !snd_info(SND_INFO_PLAYING))
         vga_write("SNDTEST PASS\n");
     else
         vga_write("SNDTEST FAIL (no DMA completion IRQ)\n");
@@ -329,8 +374,8 @@ static void cmd_rgb(const char *arg) {
 static void cmd_vbe(void) {
     int r = con_request_mode(CON_MODE_VBE, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
-        vga_write("vbe: no Bochs-VBE or VMware-SVGA framebuffer found\n"
-                  "     (QEMU: -vga std or -vga vmware)\n");
+        vga_write("vbe: "); vga_write(tr(L_GFX_NONE));
+        vga_write("     (QEMU: -vga std or -vga vmware)\n");
         return;
     }
     if (r != 0) { vga_write("vbe: switch failed\n"); return; }
@@ -352,8 +397,8 @@ static void cmd_vbe(void) {
 static void cmd_gfx24(void) {
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
-        vga_write("gfx24: no Bochs-VBE or VMware-SVGA framebuffer found\n"
-                  "       (QEMU: -vga std or -vga vmware)\n");
+        vga_write("gfx24: "); vga_write(tr(L_GFX_NONE));
+        vga_write("       (QEMU: -vga std or -vga vmware)\n");
         return;
     }
     if (r != 0) { vga_write("gfx24: switch failed\n"); return; }
@@ -985,7 +1030,7 @@ static void cmd_jobs(void) {
         vga_write("  "); print_int(task_log_pending(t));
         vga_write("B\n");
     }
-    if (!found) vga_write("no background jobs\n");
+    if (!found) vga_write(tr(L_JOBS_NONE));
 }
 
 /* log TID      : dump everything the job has printed since the last drain
@@ -1005,7 +1050,7 @@ static void cmd_log(char *arg) {
     int tid = 0;
     while (*arg >= '0' && *arg <= '9') tid = tid * 10 + (*arg++ - '0');
     task_t *t = task_by_tid(tid);
-    if (!t || t->state == T_UNUSED) { vga_write("log: no such task\n"); return; }
+    if (!t || t->state == T_UNUSED) { vga_write(tr(L_LOG_NOJOB)); return; }
     if (!t->bg_mode) {
         vga_write("log: task "); print_int(tid);
         vga_write(" is not a background job (its output went to the console)\n");
@@ -1062,6 +1107,16 @@ static void cmd_netdiag(const char *arg) {
     vga_write("net_ready="); print_int(net_ready); vga_write("  io_base=0x");
     print_hex((uint32_t)netdbg_io_base);
     vga_write("  width="); print_int(netdbg_io_width); vga_write("-bit\n");
+    vga_write("backend="); vga_write(net_backend_name());
+    if (e1000_up()) {
+        vga_write("  e1000 up="); print_int(e1000_up());
+        vga_write("  tx="); print_int(e1000_info(E1000_INFO_TX_FRAMES));
+        vga_write("  rx="); print_int(e1000_info(E1000_INFO_RX_FRAMES));
+        vga_write("  irq="); print_int(e1000_irq_line());
+        vga_write("\n");
+    } else {
+        vga_write("\n");
+    }
     vga_write("fail="); print_int(net_fail_code);
     vga_write(" (0=ok 1=no-dev 2=bus-FF 3=mac 4=init)  env=");
     vga_write(net_env_vmware() ? "VMware" : "QEMU/PC");
@@ -1119,7 +1174,7 @@ static void net_why_down(void) {
     if (net_env_vmware())
         vga_write("; VMware guest -> set the VM network adapter to Intel E1000\n");
     else
-        vga_write("; QEMU -> -device pcnet,netdev=n0\n");
+        vga_write("; QEMU -> -device e1000,netdev=n0 or -device pcnet,netdev=n0\n");
 }
 
 /* ---------- curl: one-shot HTTP GET ---------- */
@@ -1247,7 +1302,7 @@ static void cmd_udp(const char *arg) {
     vga_write("udp: no reply\n");
 }
 
-static void cmd_format(void) {    vga_write("Format FAT32 volume?  This erases ALL files.\n");
+static void cmd_format(void) {    vga_write(tr(L_FORMAT_CONFIRM));
     vga_write("Disk: ");
     uint32_t tot = 0;
     ata_identify(&tot);
@@ -1262,12 +1317,12 @@ static void cmd_format(void) {    vga_write("Format FAT32 volume?  This erases A
     kb_readline(ans, sizeof(ans));
     if (ans[0] == 'y' || ans[0] == 'Y') {
         fs_format();
-        vga_write("FAT32 volume formatted.\n");
+        vga_write(tr(L_FORMAT_DONE));
         vga_write("Top-level dirs: /dev /etc /bin /sbin /lib /usr /home\n");
         vga_write("                /root /tmp /var /proc /sys /mnt /boot\n");
         ce_install_builtins();      /* put /bin apps + /appdevelop docs on disk */
     } else {
-        vga_write("Aborted.\n");
+        vga_write(tr(L_FORMAT_CANCEL));
     }
 }
 
@@ -1718,7 +1773,7 @@ static void cmd_login(char *arg, int as_su) {
      * interactively and echo '*' per keystroke instead of the characters. */
     char typed[64];
     if (need_pw && !pw) {
-        vga_write("Password: ");
+        vga_write(tr(L_PASSWD_PROMPT));
         kb_readline_masked(typed, sizeof(typed));
         pw = typed;
     }
@@ -1829,7 +1884,7 @@ static void cmd_passwd(char *arg) {
         vga_write("Retype new password: ");
         kb_readline_masked(p2, sizeof(p2));
         if (!p1[0]) { vga_write("passwd: empty password rejected\n"); return; }
-        if (strcmp_(p1, p2) != 0) { vga_write("passwd: passwords differ\n"); return; }
+        if (strcmp_(p1, p2) != 0) { vga_write(tr(L_PASSWD_MISMATCH)); return; }
         pw = p1;
     }
     user_set_pw(name, pw);
@@ -2083,6 +2138,7 @@ void shell_run(void) {
 
     vga_clear();
     fs_init();
+    lang_init();              /* v2.21 T50: load /etc/lang, default en */
     ce_init();
     /* v2.13: load the persistent user database + ACL (seeds root/user and
      * the default owner/group/other table when the files are absent) */
@@ -2090,7 +2146,7 @@ void shell_run(void) {
     acl_init();
     session_apply();                /* boot session = root (initial user) */
     if (!fs_fs_ready())
-        vga_write("\n[!] No FAT32 volume on IDE drive.  Type 'format' first.\n");
+        vga_write(tr(L_NO_FAT32));
     else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
         /* v2.17: boot output now comes from /etc/autostart scripts
@@ -2120,6 +2176,7 @@ void shell_run(void) {
  * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
+        else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();

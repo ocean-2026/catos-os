@@ -29,6 +29,16 @@
 #define KB_F10     0x119
 #define KB_F11     0x11A
 #define KB_F12     0x11B
+/* v2.21 T51: Ctrl+E0-arrow combinations.  Plain arrows drive history and
+ * cursor movement in the line editor; Ctrl+Up/Down drive console
+ * scrollback.  They are distinct codes so no modifier state leaks out of
+ * kb_getkey() into callers. */
+#define KB_CTRL_UP    0x120
+#define KB_CTRL_DOWN  0x121
+#define KB_CTRL_LEFT  0x122
+#define KB_CTRL_RIGHT 0x123
+#define KB_CTRL_PGUP  0x124
+#define KB_CTRL_PGDN  0x125
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */

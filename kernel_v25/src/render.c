@@ -32,6 +32,15 @@ static con_cell_t tmp_cells[CON_MAX_ROWS][CON_MAX_COLS];
 static render_be_t *be;
 static int cols, rows, cur_x, cur_y;
 
+/* v2.21 T51: console scrollback.  Every row that scrolls off the top is
+ * archived here.  sb_head is the next write slot, so sb[sb_head-1] is the
+ * most recently archived row.  sb_live keeps a verbatim copy of the live
+ * grid while the user is looking at history. */
+#define CON_SB_ROWS 96
+static con_cell_t sb[CON_SB_ROWS][CON_MAX_COLS];
+static int sb_head, sb_count, sb_view;
+static con_cell_t sb_live[CON_MAX_ROWS][CON_MAX_COLS];
+
 /* current style */
 static uint32_t s_fg_rgb, s_bg_rgb, clear_bg;
 static uint8_t  s_fg_idx, s_bg_idx, s_attrs;
@@ -118,16 +127,29 @@ static void paint(int x, int y) {
     if (x < 0 || x >= cols || y < 0 || y >= rows) return;
     con_cell_t *c = &cells[y][x];
     if (c->flags == CELL_F_WIDE_R) return;
+    int is_cur = (be->draw_cursor && x == cur_x && y == cur_y);
+    int show_cur = is_cur && !blink_phase;   /* dark half of the blink */
     render_busy++;
     con_cell_t t = *c;
     if (be->sw_blink && (t.attrs & CON_ATTR_BLINK) && !blink_phase)
         t.attrs |= CON_ATTR_HIDDEN;      /* software blink: hide text */
-    be->draw_cell(x, y, &t);
-    /* #58: the block cursor blinks with the same phase as the BLINK
-     * attribute -- the whole cell is repainted on every phase flip, so the
-     * cursor disappears and reappears without leaving a trail. */
-    if (be->draw_cursor && x == cur_x && y == cur_y && !blink_phase)
-        be->draw_cursor(x, y, t.fg);
+    if (show_cur) {
+        /* Desired terminal cursor: a cell with no glyph shows an UNDERLINE;
+         * a cell that already holds a glyph shows a BACKGROUND-INVERSE
+         * (reverse-video) overlay.  Both blink with the BLINK phase so a
+         * stale overlay never lingers (the old #58 block trail is gone). */
+        if (t.cp == 0) {
+            be->draw_cell(x, y, &t);
+            be->draw_cursor(x, y, t.fg);          /* underline (empty cell) */
+        } else {
+            con_cell_t inv = t;                    /* swap fg/bg = inverse */
+            uint32_t f = t.fg, b = t.bg;
+            inv.fg = b; inv.bg = f;
+            be->draw_cell(x, y, &inv);             /* reverse video (filled) */
+        }
+    } else {
+        be->draw_cell(x, y, &t);
+    }
     render_busy--;
 }
 
@@ -220,10 +242,22 @@ static void render_flush(void) {
 /* ONE row at a time.  Because a hanzi is 2x1 (not 2x2), a scroll can
  * never cut a glyph in half -- no even-row invariant is needed. */
 static void scroll_one(void) {
+    /* Archive the row we are about to discard BEFORE shifting the grid. */
+    if (sb_view == 0) {
+        for (int x = 0; x < cols && x < CON_MAX_COLS; x++)
+            sb[sb_head][x] = cells[0][x];
+        sb_head = (sb_head + 1) % CON_SB_ROWS;
+        if (sb_count < CON_SB_ROWS) sb_count++;
+    }
     for (int y = 1; y < rows; y++)
         for (int x = 0; x < cols; x++) cells[y - 1][x] = cells[y][x];
     for (int x = 0; x < cols; x++) cell_blank(&cells[rows - 1][x]);
     cur_y--; if (cur_y < 0) cur_y = 0;
+    /* Erase a software cursor drawn into the LFB BEFORE the pan moves the
+     * framebuffer; otherwise its pixels scroll with the viewport and leave
+     * a ghost one line higher (QEMU -vga std with hardware panning, seen
+     * as a stray cursor after a newline). */
+    if (be->draw_cursor && dcx >= 0) paint(dcx, dcy);
     if (be->scroll && be->scroll(1, s_bg_rgb) == 0) {
         /* Backend moved the pixels itself (VBE hardware panning). */
         clear_bg = s_bg_rgb;
@@ -533,8 +567,16 @@ void con_set_cursor(uint8_t x, uint8_t y) {
     if ((int)x >= cols) x = (uint8_t)(cols - 1);
     if ((int)y >= rows) y = (uint8_t)(rows - 1);
     cur_x = x; cur_y = y;
-    dcx = dcy = -1;
+    /* Keep dcx/dcy so sync_cursor() erases the OLD cursor position.
+     * Resetting them to -1 left the previous cursor painted on screen --
+     * the T51 line editor hit this as a stray cursor after every edit and
+     * after each newline. */
     sync_cursor(1);
+}
+
+void con_get_cursor(int *x, int *y) {
+    if (x) *x = cur_x;
+    if (y) *y = cur_y;
 }
 
 void con_putc_at(uint8_t x, uint8_t y, char c) {
@@ -603,6 +645,61 @@ void con_status_bar_off(void) {
     if (be->mode == CON_MODE_TEXT) redraw_all();  /* reassign font slots */
     else for (int x = 0; x < cols; x++) paint(x, row);
     sync_cursor(1);
+}
+
+/* ---- v2.21 T51: scrollback viewer --------------------------------------
+ * The archived rows are only ever PAINTED; the live grid is restored from
+ * sb_live when the offset returns to 0.  No output is produced while the
+ * viewer is active, so scroll_one() cannot corrupt the archive. */
+static void sb_repaint(void) {
+    if (be->mode == CON_MODE_TEXT) redraw_all();   /* rebuild CJK slots */
+    else for (int y = 0; y < rows; y++)
+             for (int x = 0; x < cols; x++) paint(x, y);
+    sync_cursor(1);
+}
+
+int con_scrollback(int delta) {
+    int want = sb_view + delta;
+    if (want < 0) want = 0;
+    if (want > sb_count) want = sb_count;
+    if (want == sb_view) return sb_view;
+
+    if (sb_view == 0 && want > 0)
+        for (int y = 0; y < rows; y++)
+            for (int x = 0; x < cols; x++) sb_live[y][x] = cells[y][x];
+
+    sb_view = want;
+    if (sb_view == 0) {
+        for (int y = 0; y < rows; y++)
+            for (int x = 0; x < cols; x++) cells[y][x] = sb_live[y][x];
+        sb_repaint();
+        return 0;
+    }
+
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) cell_blank(&cells[y][x]);
+
+    /* Row 0 carries the hint; history occupies the bottom rows, newest at
+     * the bottom.  sb[sb_head-1-j] is the j-th most recent archived row. */
+    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
+    for (int i = 0; i < show; i++) {
+        int j = show - 1 - i;
+        int k = (sb_head - 1 - j + CON_SB_ROWS * 2) % CON_SB_ROWS;
+        int y = rows - show + i;
+        for (int x = 0; x < cols; x++) cells[y][x] = sb[k][x];
+    }
+    uint8_t old_attrs = s_attrs;
+    s_attrs |= CON_ATTR_INVERSE;
+    for (int x = 0; x < cols; x++) cell_blank(&cells[0][x]);
+    con_write_at_utf8(0, 0, "-- scrollback: Ctrl+Up/Down, any other key returns --");
+    s_attrs = old_attrs;
+    sb_repaint();
+    return sb_view;
+}
+
+int  con_scrollback_view(void) { return sb_view; }
+void con_scrollback_reset(void) {
+    if (sb_view) con_scrollback(-sb_view);
 }
 
 int con_get_mode(void) { return be->mode; }

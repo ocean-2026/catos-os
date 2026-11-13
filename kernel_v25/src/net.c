@@ -25,6 +25,7 @@
 #include "net.h"
 #include "task.h"
 #include "io.h"
+#include "e1000.h"      /* v2.21 #55: Intel PRO/1000 (e1000) PCI backend */
 
 /* ---- PCI ---- */
 static uint32_t pci_cfg_read(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off) {
@@ -347,6 +348,17 @@ uint16_t netdbg_init_xmtrl = 0;
 
 int net_up(void) { return net_ready; }
 
+/* v2.21 #55: active NIC backend.  0 = legacy PCnet/LANCE, 1 = e1000. */
+static int net_backend = 0;
+
+const char *net_backend_name(void) {
+    if (net_backend == 1) return "e1000";
+    if (net_backend == 0 && net_ready) return "pcnet";
+    return "none";
+}
+
+
+
 /* Environment probe (2026-11-12, #54): VMware Workstation guests expose at
  * least one of
  *   15AD:0405  SVGA II graphics
@@ -404,6 +416,20 @@ int net_init(void) {
     com1_init();
     com1_str("\n[net] init begin\n");
     pci_scan_summary();               /* record bus devices for netdiag */
+
+    /* v2.21 #55: prefer the PCI e1000 NIC when present (QEMU
+     * -device e1000, VMware virtual "e1000").  It is polling-first and
+     * needs no IRQ, so a missing card is a fast no-op here. */
+    if (e1000_probe() && e1000_init() == 0) {
+        net_backend = 1;
+        net_ready   = 1;
+        e1000_mac(net_mac);
+        com1_str("[net] e1000 up, MAC=");
+        for (int i = 0; i < 6; i++) { com1_hex(net_mac[i]); if (i < 5) com1_str(":"); }
+        com1_str("\n");
+        return 1;
+    }
+
     if (!pci_find_pcnet()) {
         net_fail_code = NET_FAIL_NO_DEV;
         com1_str("[net] FAIL: no PCnet; PCI bus has ");
@@ -582,6 +608,7 @@ int net_init(void) {
 }
 
 int net_send(const uint8_t *frame, uint32_t len) {
+    if (net_backend == 1) return e1000_send(frame, len);
     netdbg_tx_calls++;
     if (!net_ready || !frame || len == 0 || len > NET_BUF_SZ) { netdbg_tx_last = -1; return -1; }
     uint32_t own = pnet_own_mask();
@@ -619,6 +646,7 @@ int net_send(const uint8_t *frame, uint32_t len) {
 }
 
 int net_recv(uint8_t *frame, uint32_t max) {
+    if (net_backend == 1) return e1000_recv(frame, max);
     if (!net_ready) return -1;
     uint32_t own = pnet_own_mask();
     for (int k = 0; k < NET_RX_RING; k++) {
@@ -647,6 +675,7 @@ int net_recv(uint8_t *frame, uint32_t max) {
 }
 
 void net_poll(void) {
+    if (net_backend == 1) { e1000_poll(); return; }
     pnet_rcsr(0);                        /* kick QEMU: runs pcnet_poll_timer,
                                             which drains pending RX into our ring */
     uint8_t f[NET_BUF_SZ];

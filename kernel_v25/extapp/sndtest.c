@@ -70,13 +70,19 @@ int ce_main(void) {
 
     int after = api->snd_info(SND_INFO_IRQS);
     int busy  = api->snd_info(SND_INFO_PLAYING);
+    /* v2.21 #56: the ES1370 PCI backend completes by a software timeout
+     * (QEMU has no working DAC interrupt), so an IRQ delta is not part of
+     * its contract.  Unknown selector on an old kernel returns -8, which
+     * keeps the strict SB16 check. */
+    int backend   = api->snd_info(SND_INFO_BACKEND);
+    int completed = (backend == 2) ? 1 : (after > before);
     puts_("snd: ce irqs=");
     putdec(after - before);
     puts_(" busy=");
     putdec(busy);
     puts_("\n");
 
-    if (after > before && !busy) {
+    if (completed && !busy) {
         puts_("SND CE PASS\n");
         return 0;
     }

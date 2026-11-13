@@ -383,8 +383,10 @@ static void v24_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void v24_set_cursor(int x, int y) { (void)x; (void)y; }
 static void v24_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    /* #58: block cursor, lower half; render.c blinks it every 0.5 s */
-    fill(x * 8, y * 16 + 8, 8, 8, fg_rgb & 0x00FFFFFFu);
+    /* v2.21: EMPTY cell -> 1 px UNDERLINE on the cell's last scanline
+     * (not the old #58 8x8 block).  render.c draws a glyph cell as
+     * reverse video instead, and blinks this underline every 0.5 s. */
+    fill(x * 8, y * 16 + 15, 8, 1, fg_rgb & 0x00FFFFFFu);
 }
 static void v24_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;          /* truecolour: no hardware CLUT */

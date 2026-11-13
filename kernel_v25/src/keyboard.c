@@ -27,7 +27,7 @@ static const char sc_shift[128] = {
 };
 
 static char line[KB_BUF];
-static int  line_pos = 0;
+static int  line_len = 0, line_cur = 0;   /* bytes: total length / cursor */
 static int  shift = 0, caps = 0, ctrl = 0;
 static int  got_e0 = 0;          /* an 0xE0 prefix was just seen */
 
@@ -59,7 +59,7 @@ static int scq_pop(void) {
 int kb_peek(void) { return scq_tail != scq_head; }
 
 void kb_init(void) {
-    line_pos = 0;
+    line_len = line_cur = 0;
     shift = 0; caps = 0; ctrl = 0; got_e0 = 0;
     scq_head = scq_tail = 0;
     /* Flush any pending data */
@@ -96,6 +96,22 @@ static int sc_to_key(uint8_t sc) {
     }
 }
 
+/* v2.21 T51: fold the Ctrl modifier into E0-prefixed special keys.
+ * Without this, Ctrl+Up is indistinguishable from plain Up, so the shell
+ * cannot offer both history and scrollback on the arrow cluster. */
+static int e0_map(int k, int ctrl_held) {
+    if (!ctrl_held) return k;
+    switch (k) {
+    case KB_UP:    return KB_CTRL_UP;
+    case KB_DOWN:  return KB_CTRL_DOWN;
+    case KB_LEFT:  return KB_CTRL_LEFT;
+    case KB_RIGHT: return KB_CTRL_RIGHT;
+    case KB_PGUP:  return KB_CTRL_PGUP;
+    case KB_PGDN:  return KB_CTRL_PGDN;
+    default:       return k;
+    }
+}
+
 /* blocking: waits for the next scancode (yields the CPU while waiting) */
 static int kb_next_scancode(void) {
     for (;;) {
@@ -129,10 +145,11 @@ int kb_getkey_timed(uint32_t ticks) {
 
         if (got_e0) {
             got_e0 = 0;
-            if (sc & 0x80) continue;
-            if (sc == 0x1D) continue;
+            if (sc == 0x1D) { ctrl = 1; continue; }   /* right ctrl down */
+            if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
+            if (sc & 0x80) continue;                   /* other E0 breaks */
             int k = sc_to_key(sc);
-            if (k) return k;
+            if (k) return e0_map(k, ctrl);
             continue;
         }
         if (sc == 0xE0) { got_e0 = 1; continue; }
@@ -145,7 +162,7 @@ int kb_getkey_timed(uint32_t ticks) {
         if (sc & 0x80) continue;
 
         int k = sc_to_key(sc);
-        if (k) return k;
+        if (k) return e0_map(k, ctrl);
         if (sc == 0x0E) return 8;           /* backspace */
         if (sc == 0x1C) return 10;          /* newline   */
 
@@ -172,10 +189,11 @@ int kb_getkey(void) {
 
         if (got_e0) {
             got_e0 = 0;
+            if (sc == 0x1D) { ctrl = 1; continue; }   /* right ctrl down */
+            if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
             if (sc & 0x80) continue;           /* E0 break codes: ignore */
-            if (sc == 0x1D) continue;          /* right ctrl: ignore */
             int k = sc_to_key(sc);
-            if (k) return k;
+            if (k) return e0_map(k, ctrl);
             continue;
         }
         if (sc == 0xE0) { got_e0 = 1; continue; }
@@ -190,7 +208,7 @@ int kb_getkey(void) {
 
         /* cursor / function keys (rare on PS/2 without E0, keep both) */
         int k = sc_to_key(sc);
-        if (k) return k;
+        if (k) return e0_map(k, ctrl);
         if (sc == 0x0E) return '\b';
         if (sc == 0x1C) return '\n';
 
@@ -210,56 +228,261 @@ int kb_getkey(void) {
     }
 }
 
+/* ---- v2.21 T51: interactive line editor --------------------------------
+ * Up/Down      : command history (16 entries, consecutive duplicates folded)
+ * Left/Right   : move the insertion point, UTF-8 aware
+ * Home/End     : start / end of line
+ * Backspace/Del: delete a whole UTF-8 sequence, not one byte
+ * Ctrl+Up/Down : console scrollback (Ctrl+PgUp/PgDn = half a screen)
+ * Typing       : syntax highlighting (command / option / number / string)
+ *
+ * All redraw is done with absolute cell writes from the anchor position
+ * captured at entry, so the prompt is never re-printed and the cursor can
+ * sit in the middle of the line.  con_write_at_utf8() keeps CJK at exactly
+ * 2xASCII, which is the invariant the graphics back-ends rely on. */
+#define RL_HIST 16
+static char rl_hist[RL_HIST][KB_BUF];
+static int  rl_hist_head, rl_hist_count;
+
+static void rl_hist_push(const char *s) {
+    if (!s || !*s) return;
+    if (rl_hist_count) {
+        int last = (rl_hist_head - 1 + RL_HIST) % RL_HIST;
+        int same = 1, i = 0;
+        for (; s[i] && i < KB_BUF - 1; i++)
+            if (rl_hist[last][i] != s[i]) { same = 0; break; }
+        if (same && !rl_hist[last][i]) return;
+    }
+    int j = 0;
+    for (; s[j] && j < KB_BUF - 1; j++) rl_hist[rl_hist_head][j] = s[j];
+    rl_hist[rl_hist_head][j] = 0;
+    rl_hist_head = (rl_hist_head + 1) % RL_HIST;
+    if (rl_hist_count < RL_HIST) rl_hist_count++;
+}
+/* pos 0 = newest, pos 1 = older ... */
+static const char *rl_hist_get(int pos) {
+    if (pos < 0 || pos >= rl_hist_count) return 0;
+    int k = (rl_hist_head - 1 - pos + RL_HIST * 2) % RL_HIST;
+    return rl_hist[k];
+}
+
+static int rl_is_cont(unsigned char c) { return (c & 0xC0u) == 0x80u; }
+
+/* Display columns consumed by the first n bytes (CJK = 2 cells). */
+static int rl_width(const char *s, int n) {
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (rl_is_cont(c)) continue;
+        w += (c >= 0x80u) ? 2 : 1;
+    }
+    return w;
+}
+static int rl_prev(int p) {
+    if (p <= 0) return 0;
+    int q = p - 1;
+    while (q > 0 && rl_is_cont((unsigned char)line[q])) q--;
+    return q;
+}
+static int rl_next(int p) {
+    if (p >= line_len) return line_len;
+    int q = p + 1;
+    while (q < line_len && rl_is_cont((unsigned char)line[q])) q++;
+    return q;
+}
+static void rl_insert(const char *s, int n) {
+    if (n <= 0 || line_len + n >= KB_BUF - 1) return;
+    for (int i = line_len; i > line_cur; i--) line[i + n - 1] = line[i - 1];
+    for (int i = 0; i < n; i++) line[line_cur + i] = s[i];
+    line_len += n; line_cur += n; line[line_len] = 0;
+}
+static void rl_erase(int from, int to) {
+    if (from < 0 || to > line_len || from >= to) return;
+    int n = to - from;
+    for (int i = to; i < line_len; i++) line[i - n] = line[i];
+    line_len -= n;
+    if (line_cur > to) line_cur -= n;
+    else if (line_cur > from) line_cur = from;
+    line[line_len] = 0;
+}
+
+/* Colour for one whitespace-delimited token. */
+static uint8_t rl_tok_color(const char *tok, int n, int index, uint8_t base) {
+    if (n <= 0) return base;
+    if (tok[0] == '"' || tok[0] == '\'') return CON_YELLOW;
+    if (tok[0] == '-')                   return CON_LIGHT_MAGENTA;
+    if (index == 0)                      return CON_LIGHT_CYAN;
+    int digits = 1;
+    for (int i = 0; i < n; i++)
+        if (tok[i] < '0' || tok[i] > '9') { digits = 0; break; }
+    if (digits) return CON_LIGHT_GREEN;
+    return base;
+}
+
+static void rl_redraw(int x0, int y0, uint8_t base) {
+    int cols = con_cols();
+    if (x0 >= cols) x0 = cols - 1;
+    /* wipe the rest of the input row with the original foreground */
+    con_set_fg(base);
+    char pad[128];
+    int room = cols - x0;
+    if (room > 120) room = 120;
+    for (int i = 0; i < room; i++) pad[i] = ' ';
+    pad[room] = 0;
+    con_write_at((uint8_t)x0, (uint8_t)y0, pad);
+
+    char seg[KB_BUF];
+    int i = 0, cx = x0, tok = 0;
+    while (i < line_len && cx < cols) {
+        if (line[i] == ' ') {                 /* plain separator */
+            seg[0] = ' '; seg[1] = 0;
+            con_set_fg(base);
+            con_write_at_utf8((uint8_t)cx, (uint8_t)y0, seg);
+            cx++; i++;
+            continue;
+        }
+        int e = i;
+        if (line[i] == '"' || line[i] == '\'') {
+            char q = line[i]; e++;
+            while (e < line_len && line[e] != q) e++;
+            if (e < line_len) e++;
+        } else {
+            while (e < line_len && line[e] != ' ') e++;
+        }
+        int n = e - i;
+        if (n > KB_BUF - 1) n = KB_BUF - 1;
+        for (int j = 0; j < n; j++) seg[j] = line[i + j];
+        seg[n] = 0;
+        con_set_fg(rl_tok_color(seg, n, tok, base));
+        con_write_at_utf8((uint8_t)cx, (uint8_t)y0, seg);
+        cx += rl_width(seg, n);
+        tok++;
+        i = e;
+    }
+    con_set_fg(base);
+    int cur_col = x0 + rl_width(line, line_cur);
+    if (cur_col >= cols) cur_col = cols - 1;
+    con_set_cursor((uint8_t)cur_col, (uint8_t)y0);
+}
+
 int kb_readline(char *buf, int len) {
+    if (len <= 0) return 0;
+    int x0 = 0, y0 = 0;
+    con_get_cursor(&x0, &y0);
+    uint8_t base = con_get_fg();
+    int cols = con_cols();
+    int hist_pos = -1;                  /* -1 = the draft line being typed */
+    char draft[KB_BUF];
+    line_len = line_cur = 0; line[0] = 0;
+
     while (1) {
         int k = kb_getkey();
 
-        /* v2.9 pinyin IME: F2 toggles; letters/digits may be intercepted.
-         * A committed candidate is a 3-byte UTF-8 hanzi. */
+        /* Leaving scrollback: any non-scroll key restores the live grid
+         * (including the partly typed line) and is then handled normally. */
+        if (con_scrollback_view() &&
+            k != KB_CTRL_UP && k != KB_CTRL_DOWN &&
+            k != KB_CTRL_PGUP && k != KB_CTRL_PGDN)
+            con_scrollback_reset();
+
+        if (k == KB_CTRL_UP   || k == KB_CTRL_DOWN ||
+            k == KB_CTRL_PGUP || k == KB_CTRL_PGDN) {
+            int d = (k == KB_CTRL_UP || k == KB_CTRL_PGUP) ? 1 : -1;
+            if (k == KB_CTRL_PGUP || k == KB_CTRL_PGDN)
+                d *= (con_rows() > 2 ? (con_rows() - 1) / 2 : 1);
+            con_scrollback(d);
+            continue;
+        }
+
+        /* v2.9 pinyin IME: F2 toggles; a committed candidate is a 3-byte
+         * UTF-8 hanzi, inserted at the cursor (not blindly appended). */
         {
             char han[5];
             int r = ime_feed(k, han);
             if (r == IME_CONSUME) continue;
             if (r == IME_COMMIT) {
-                for (int i = 0; han[i]; i++) {
-                    if (line_pos >= KB_BUF - 1 || line_pos >= len - 1) break;
-                    line[line_pos++] = han[i];
+                int n = 0;
+                while (han[n]) n++;
+                if (rl_width(line, line_len) + rl_width(han, n) < cols - x0) {
+                    rl_insert(han, n);
+                    rl_redraw(x0, y0, base);
                 }
-                vga_write(han);
                 continue;
             }
         }
 
-        if (k == '\n') {                        /* Enter */
-            int n = line_pos;
+        if (k == '\n') {
+            int n = line_len;
             if (n >= len) n = len - 1;
             for (int i = 0; i < n; i++) buf[i] = line[i];
             buf[n] = 0;
-            vga_putc('\n');
-            line_pos = 0;
-            line[0] = 0;
+            rl_hist_push(line);
+            con_set_fg(base);
+            int end_col = x0 + rl_width(line, line_len);
+            if (end_col >= cols) end_col = cols - 1;
+            con_set_cursor((uint8_t)end_col, (uint8_t)y0);
+            con_putc('\n');
+            line_len = line_cur = 0; line[0] = 0;
             return 1;
         }
-        if (k == '\b' || k == KB_DEL) {         /* erase one character */
-            if (line_pos > 0) {
-                /* UTF-8 aware: drop the whole sequence, erase once --
-                 * a hanzi occupies two cells and one '\b' clears both. */
-                int nb = 1;
-                while (nb < 4 && line_pos - nb > 0 &&
-                       ((unsigned char)line[line_pos - nb] & 0xC0) == 0x80)
-                    nb++;
-                line_pos -= nb;
-                vga_putc('\b');
+        if (k == KB_UP || k == KB_DOWN) {
+            if (!rl_hist_count) continue;
+            if (hist_pos < 0) {
+                int j = 0;
+                for (; j < line_len && j < KB_BUF - 1; j++) draft[j] = line[j];
+                draft[j] = 0;
+            }
+            int np;
+            if (k == KB_UP) np = (hist_pos < 0) ? 0 : hist_pos + 1;
+            else            np = (hist_pos <= 0) ? -1 : hist_pos - 1;
+            if (np >= rl_hist_count) np = rl_hist_count - 1;
+            hist_pos = np;
+            const char *h = (np < 0) ? draft : rl_hist_get(np);
+            int j = 0;
+            for (; h && h[j] && j < KB_BUF - 1; j++) line[j] = h[j];
+            line_len = line_cur = j; line[j] = 0;
+            rl_redraw(x0, y0, base);
+            continue;
+        }
+        if (k == KB_LEFT)  { line_cur = rl_prev(line_cur); rl_redraw(x0, y0, base); continue; }
+        if (k == KB_RIGHT) { line_cur = rl_next(line_cur); rl_redraw(x0, y0, base); continue; }
+        if (k == KB_HOME)  { line_cur = 0;        rl_redraw(x0, y0, base); continue; }
+        if (k == KB_END)   { line_cur = line_len; rl_redraw(x0, y0, base); continue; }
+        if (k == KB_CTRL_LEFT || k == KB_CTRL_RIGHT) {
+            if (k == KB_CTRL_LEFT) {
+                while (line_cur > 0 && line[line_cur - 1] == ' ') line_cur--;
+                while (line_cur > 0 && line[line_cur - 1] != ' ') line_cur--;
+            } else {
+                while (line_cur < line_len && line[line_cur] != ' ') line_cur++;
+                while (line_cur < line_len && line[line_cur] == ' ') line_cur++;
+            }
+            rl_redraw(x0, y0, base);
+            continue;
+        }
+        if (k == '\b') {                    /* delete BEFORE the cursor */
+            if (line_cur > 0) {
+                int s = rl_prev(line_cur);
+                rl_erase(s, line_cur);
+                rl_redraw(x0, y0, base);
             }
             continue;
         }
-        if (k >= 32 && k < 256) {               /* printable char */
-            if (line_pos < KB_BUF - 1 && line_pos < len - 1) {
-                line[line_pos++] = (char)k;
-                vga_putc((char)k);
+        if (k == KB_DEL) {                  /* delete AT the cursor */
+            if (line_cur < line_len) {
+                int e = rl_next(line_cur);
+                rl_erase(line_cur, e);
+                rl_redraw(x0, y0, base);
+            }
+            continue;
+        }
+        if (k >= 32 && k < 256) {           /* printable, insert anywhere */
+            char c = (char)k;
+            if (rl_width(line, line_len) + 1 < cols - x0) {
+                rl_insert(&c, 1);
+                rl_redraw(x0, y0, base);
             }
         }
-        /* arrow / function keys: ignored in line mode */
+        /* other function keys are ignored in line mode */
     }
 }
 

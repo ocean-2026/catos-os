@@ -25,6 +25,8 @@
 
 #include "snd.h"
 #include "io.h"
+#include "intr.h"      /* intr_unmask_irq() for the PCI audio IRQ line */
+#include "es1371.h"    /* v2.21 #56: VMware / QEMU ES1370 PCI backend  */
 
 /* ---- DSP / mixer ports (base 0x220) ----------------------------------- */
 #define DSP_RESET    (SND_IOBASE + 0x06)
@@ -58,10 +60,19 @@
  * directly usable kernel pointer. */
 static uint8_t *const snd_buf = (uint8_t *)SND_DMA_PHYS;
 
-static volatile int      snd_up;         /* probe succeeded                */
+static volatile int      snd_up;         /* any backend ready             */
 static volatile int      snd_busy;       /* DMA block in flight            */
 static volatile uint32_t snd_irq_count;  /* acknowledged DMA completions   */
 static volatile int      snd_last_err;   /* last error code, 0 = none      */
+/* v2.21: 0 = none, 1 = SB16 (ISA), 2 = ES1370/1371 (PCI). */
+static int snd_backend;
+static const char *const snd_backend_names[3] = {
+    "none", "SB16 (ISA)", "ES1370/1371 (PCI)"
+};
+
+const char *snd_backend_name(void) {
+    return snd_backend_names[snd_backend >= 0 && snd_backend <= 2 ? snd_backend : 0];
+}
 static uint16_t          snd_version;
 static uint32_t          snd_rate = SND_RATE_DEFAULT;
 static uint8_t           snd_irq_map;    /* mixer 0x80                    */
@@ -130,7 +141,8 @@ static void dma8_mask(void) { outb(DMA_MASK_ALL, DMA_MASK_CH1); }
 
 /* ---- public API -------------------------------------------------------- */
 
-int snd_init(void) {
+/* ---- backend 1: Sound Blaster 16 (ISA) -------------------------------- */
+static int sb16_init(void) {
     uint8_t b = 0, lo = 0, hi = 0;
 
     snd_up = 0;
@@ -177,8 +189,39 @@ int snd_init(void) {
     return 0;
 }
 
+/* ---- v2.21: pick a backend once, at boot -------------------------------
+ * SB16 first (all existing QEMU audio regressions use it).  If the ISA
+ * DSP does not answer, fall back to the ES1370/ES1371 PCI card that VMware
+ * exposes.  A machine with neither card must fail fast so boot continues
+ * with sound simply disabled. */
+int snd_init(void) {
+    snd_backend = 0;
+    snd_up = 0;
+    snd_busy = 0;
+    snd_last_err = 0;
+    snd_irq_count = 0;
+
+    if (sb16_init() == 0) {
+        snd_backend = 1;
+        return 0;
+    }
+    if (es1371_probe() && es1371_init() == 0) {
+        snd_backend = 2;
+        snd_up = 1;
+        snd_rate = SND_RATE_DEFAULT;
+        snd_last_err = 0;
+        int irq = es1371_irq_line();
+        if (irq >= 0) intr_unmask_irq(irq);
+        return 0;
+    }
+    return -1;
+}
+
 void snd_irq(void) {
-    if (!snd_up) return;
+    /* Only the SB16 backend owns IRQ5's DSP ack.  The ES1371 backend is
+     * serviced directly by es1371_irq() from intr.c (it checks STATUS
+     * itself), so a shared PCI line never clears a bogus SB16 busy flag. */
+    if (snd_backend != 1 || !snd_up) return;
     /* Reading the status port acks mixer 0x82 bit0 and lowers the PIC line
      * on QEMU; on real hardware it is the documented 8-bit DMA ack. */
     (void)inb(DSP_ACK8);
@@ -187,6 +230,25 @@ void snd_irq(void) {
 }
 
 int snd_info(int what) {
+    if (what == SND_INFO_BACKEND) return snd_backend;
+    if (what == SND_INFO_DEVICE)
+        return snd_backend == 2 ? es1371_info(ES1371_INFO_DEVICE) : 0;
+    if (snd_backend == 2) {
+        switch (what) {
+        case SND_INFO_READY:   return es1371_ready();
+        case SND_INFO_VERSION: return es1371_info(ES1371_INFO_DEVICE);
+        case SND_INFO_PLAYING: return es1371_playing();
+        case SND_INFO_IRQS:    return es1371_info(ES1371_INFO_IRQS);
+        case SND_INFO_ERROR:   return es1371_info(ES1371_INFO_ERROR);
+        /* Callers size their 8-bit mono buffer from this; the PCI card
+         * needs 4 bytes per sample after widening, so advertise samples. */
+        case SND_INFO_BUFSZ:   return (int)(ES1371_DMA_BUF_SZ / 4u);
+        case SND_INFO_RATE:    return es1371_info(ES1371_INFO_RATE);
+        case SND_INFO_IRQSET:  return es1371_info(ES1371_INFO_IRQ);
+        case SND_INFO_DMASET:  return (int)es1371_info(ES1371_INFO_IOBASE);
+        default:               return -8;
+        }
+    }
     switch (what) {
     case SND_INFO_READY:   return snd_up ? 1 : 0;
     case SND_INFO_VERSION: return (int)snd_version;
@@ -204,6 +266,12 @@ int snd_info(int what) {
 uint8_t *snd_dma_buffer(void) { return snd_buf; }
 
 int snd_play(const uint8_t *pcm, uint32_t len, uint32_t rate) {
+    if (snd_backend == 2) {
+        if (!pcm || !len) return -22;
+        int r = es1371_play(pcm, len, rate);
+        if (r == 0) snd_rate = rate;
+        return r;
+    }
     if (!snd_up)        return -8;    /* ENOSYS: no SB16 */
     if (!pcm || !len)   return -22;   /* EINVAL */
     if (len > SND_DMA_BUF_SZ) return -22;
@@ -237,6 +305,7 @@ int snd_play(const uint8_t *pcm, uint32_t len, uint32_t rate) {
 }
 
 int snd_stop(void) {
+    if (snd_backend == 2) return es1371_stop();
     if (!snd_up) return -8;
     dsp_write(0xD0);                       /* halt 8-bit DMA */
     dma8_mask();
@@ -245,6 +314,7 @@ int snd_stop(void) {
 }
 
 int snd_tone(uint32_t freq_hz, uint32_t ms) {
+    if (snd_backend == 2) return es1371_tone(freq_hz, ms);
     if (!snd_up) return -8;
     if (freq_hz == 0 || freq_hz > 20000u || ms == 0) return -22;
 

@@ -23,6 +23,7 @@ int  net_send(const uint8_t *frame, uint32_t len);    /* raw Ethernet frame */
 int  net_recv(uint8_t *frame, uint32_t max);          /* 0 = nothing yet */
 void net_poll(void);                                  /* service incoming frames */
 void net_rx_dispatch(const uint8_t *frame, uint32_t len);  /* protocol demux */
+const char *net_backend_name(void);                    /* "e1000" / "pcnet" / "none" */
 
 /* debug hooks for the `netdiag` shell command */
 extern int      netdbg_tx_calls;

@@ -154,16 +154,33 @@ QEMU 启动实测（云主机，QEMU 5.2.0）：
 
 ### 5.4 本轮遗留（下一轮直接接手）
 
-1. **#55 e1000 驱动**：PCI 探测 → BAR0 MMIO → RX/TX 描述符环 → 中断 → 接 `net_send/net_recv`；QEMU `-device e1000,netdev=n0` 验证（云主机无 `efi-e1000.rom`，需 `-netdev user -device e1000` 走非 UEFI 路径）。
-2. **#56 ES1371**：`1274:1371` → PCI BAR → DMA 环形缓冲 + 采样率寄存器 → 接 `snd_play()`；QEMU `-device es1370` 同族验证；SB16 路径保留。
-3. **T51 Shell 交互**：行编辑器（↑↓ 历史、←→ 光标编辑、Ctrl+↑↓ 回看、语法高亮）；块状光标闪烁已在 #58 就位，可直接复用。
-4. **T50 lang**：`/etc/lang` 持久化 + `lang` 命令 + 关键消息翻译表。
-5. **回归复跑**：`tests/qemu_regress.py`（需 `-L` wrapper 注入与 `--disk` 副本绕 write lock）、`user_regress.py`、`disk_regress.py`、`security_regress.py` 全绿，并补 `CJK=2×ASCII` 逐像素断言。
+> **2026-11-13 收口**：1~5 项全部完成，见下方逐项标注；第 7 项（VMware 真机复测）
+> 仍需用户开机确认（连同本轮 #107~#110 的黑屏/刷新/光标三项）。
+
+1. ~~**#55 e1000 驱动**~~ → **已完成（v2.21）**：`src/e1000.c`；QEMU `-device e1000`
+   + `-netdev user` 同族验证（`tests/e1000_regress.py`：后端=e1000、ping 10.0.2.2 有回包、
+   tx/rx 计数非零）。PCI 探测 → BAR0 MMIO → RX/TX 描述符环 → 中断 → 接
+   `net_send/net_recv`。
+2. ~~**#56 ES1371**~~ → **已完成（v2.21）**：`src/es1371.c`（`1274:1371` → PCI BAR →
+   DMA 环形缓冲 + 采样率寄存器 → 接 `snd_play()`）；QEMU `-device es1370` 同族验证
+   （`tests/es1371_regress.py` 0 failed）；SB16 路径保留并按 PCI 身份择一。
+3. ~~**T51 Shell 交互**~~ → **已完成（v2.21）**：行编辑器（↑↓ 历史、←→ 光标编辑、
+   Ctrl+↑↓ 回看、语法高亮）。块状光标闪烁在 #58 就位；**本轮 #109 又把图形后端
+   的方块光标改成 1 px 下划线**（有字格子走背景反色）。
+4. ~~**T50 lang**~~ → **已完成（v2.21）**：`src/lang.c`，`/etc/lang` 持久化 +
+   `lang` 命令 + 关键消息翻译表。
+5. ~~**回归复跑**~~ → **已完成**：`qemu_regress` 12/12、`user_regress` 15/15、
+   `disk_regress` 5/5、`security_regress` 17/17（另加 diag 4/4、heap 4/4、go 7/7、
+   snd 6/6、e1000/es1371 0 failed、gfx24/svga24 0 failed）；
+   **`CJK=2×ASCII` 逐像素断言已补**：新增 `tests/cjk_width_regress.py`
+   （monitor 4493）—— ASCII 行 49 格 ⇒ **392 px**，混排行 12 ASCII + 14 CJK ⇒
+   **320 px** ⇒ CJK 步进 **16 px = 2×ASCII**。
 6. ~~**反向同步**：云主机改动尚未回写 `D:\CatOs`~~ → **2026-11-13 已完成**：
    `CatOs-v2.19-源码与文档.zip` + `CatOs-v2.19-镜像产物.zip` 从下载文件夹反向同步，
    提交 `3ed5cad`（v2.19 基线）；覆盖前的原文件备份在 `D:\_v219_backup\`。
-7. **VMware 实机项**（#55/#56）只能在 QEMU 同族设备上验证，VMware 真机行为需用户复测；
-   SVGA II 图形已在 QEMU `-vga vmware`（同 15AD:0405）逐像素验证，见 §六。
+7. **VMware 实机项**（#55/#56、#107~#110）只能在 QEMU 同族设备上验证，**VMware 真机
+   行为需用户复测**；SVGA II 图形已在 QEMU `-vga vmware`（同 15AD:0405）逐像素验证，
+   见 §六。
 
 ---
 
