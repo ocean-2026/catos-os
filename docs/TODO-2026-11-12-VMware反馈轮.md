@@ -187,6 +187,10 @@ QEMU 启动实测（云主机，QEMU 5.2.0）：
   运行时决定 pitch / 每像素字节数 / 通道偏移，第 4 字节写 0xFF。
 - 启用 FIFO 后宿主停止 VGA dirty tracking，直写显存不会自动上屏；
   IRQ0 的 `svga_tick()` 以 25 Hz 推送全屏 `SVGA_CMD_UPDATE` 并写 SYNC。
+  `fifo_init()` **只初始化 guest-owned 的 MIN/MAX/NEXT/STOP**；CAPABILITIES /
+  FLAGS 是 host-owned advertisement words，真实 VMware 可能在其中发布 RESERVE，
+  guest 清零会破坏协商。CatOS 用 legacy plain ring（写 NEXT + SYNC），
+  不需要任何 capability 协商，因此保持这两字原样。
 - `paging.c::vbe_lfb_map()` 改为累积 PDE 区间，让 FB 与 FIFO 两个 BAR
   同时镜像进每个任务页目录（PTE 仍是 supervisor-only，#84 不破）。
 - `extapp/gfx24.c` 不再硬编码 `pitch==2400`（改为 `pitch >= w*3`），
@@ -201,4 +205,9 @@ QEMU `-vga std` 老路径 `gfx24_regress` 仍 0 failed；qemu 12/12、user 15/15
 security 17/17、disk 5/5、宿主 test_mkce 48 / test_cc 10 / ce_regress 11P /
 test_app_list 24 全绿。
 **真实 VMware Workstation 尚需用户开 VM 复测**（本机 VM 当前未运行）。
+开机后依次执行 `svgainfo` → `vbe` → `text` + `Y` → `vbe24` → `text` + `Y`
+→ `gfx24` → `text` + `Y` → `display`。四条图形命令都应进入 800x600 真彩
+且画面完整（不是黑屏）；`svgainfo` 应报 `SVGA II adapter : present` /
+`0x90000002` 且 `updates > 0`（FIFO 刷新在工作）。若真机黑屏但 `updates`
+在涨，优先怀疑 32bpp 通道序与 `fifo_sync()` 的 BUSY 轮询时序。
 

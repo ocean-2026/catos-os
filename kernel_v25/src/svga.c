@@ -144,8 +144,10 @@ static void fifo_init(void) {
     fifo[FIFO_MAX_WORD]   = fifo_max;
     fifo[FIFO_NEXT_WORD]  = fifo_min;
     fifo[FIFO_STOP_WORD]  = fifo_min;
-    fifo[FIFO_CAPS_WORD]  = 0;       /* no RESERVE capability: plain ring */
-    fifo[FIFO_FLAGS_WORD] = 0;
+    /* CAPABILITIES / FLAGS are host-owned advertisement words.  Do NOT
+     * zero them: real VMware may publish RESERVE there and expects the
+     * guest to leave them alone.  We deliberately use the legacy plain
+     * ring (write NEXT + SYNC), which needs no capability negotiation. */
 }
 
 static void fifo_sync(void) {
