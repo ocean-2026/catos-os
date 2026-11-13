@@ -54,6 +54,13 @@ static void pci_cfg_write(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off, uin
                                           QEMU 11 gate (bus_master_enable_region);
                                           without it PCI DMA reads return 0 */
 
+/* net_ready == 0 reasons (net_fail_code) */
+#define NET_FAIL_NONE     0
+#define NET_FAIL_NO_DEV   1   /* no 1022:2000 on bus 0 / behind any bridge */
+#define NET_FAIL_BUS_FF   2   /* CSR reads back 0xFFFF/0x0000 -> no real chip */
+#define NET_FAIL_MAC      3   /* MAC register unreadable (all FF/00) */
+#define NET_FAIL_INIT     4   /* INIT never latched IDON, or START didn't stick */
+
 static uint16_t pci_io_base;
 static int pnet_bus, pnet_dev, pnet_fn;   /* where PCnet was found */
 
@@ -207,6 +214,10 @@ static int try_width(int w) {
     int ok = 0;
     for (int i = 0; i < 1000; i++) {
         uint16_t c0 = pnet_rcsr(0);
+        /* An empty/absent device reads back all ones (or all zeros): that is
+         * not a chip in STOP state, it is a dead bus.  Reject it here so
+         * net_init() can report NET_FAIL_BUS_FF instead of a fake ready. */
+        if (c0 == 0xFFFFu || c0 == 0x0000u) return 0;
         if (c0 & csr0_stopbit()) { ok = 1; break; }
     }
     if (!ok) return 0;
@@ -313,6 +324,12 @@ static volatile uint16_t *pnet_bd_w2(int i, int tx) { return (volatile uint16_t 
 
 uint8_t  net_mac[6];
 int      net_ready = 0;
+/* Why net_ready is 0 -- reported by netdiag and by the "not ready" hints.
+ * (2026-11-12, TODO #54: "net_ready=1 mac=FF:FF:FF:FF" was a false-positive:
+ * reading the CSR register of an empty PCI slot returns 0xFFFF, and
+ * 0xFFFF & CSR0_STOP looks exactly like a successful STOP.  Every probe
+ * below now treats an all-FF / all-00 read as a dead bus.) */
+int      net_fail_code = NET_FAIL_NONE;
 static int      net_tx_head = 0;
 static int      net_rx_head = 0;
 
@@ -329,6 +346,23 @@ uint16_t netdbg_init_rcvrl = 0;   /* RCVRL read right after INIT (0=unknown) */
 uint16_t netdbg_init_xmtrl = 0;
 
 int net_up(void) { return net_ready; }
+
+/* Environment probe (2026-11-12, #54): VMware Workstation guests expose at
+ * least one of
+ *   15AD:0405  SVGA II graphics
+ *   15AD:0790  PCI-PCI bridge (vlance sits behind it)
+ *   15AD:07B0  vmxnet3
+ *   1274:1371  ES1371 audio (Ensoniq AudioPCI)
+ * The shell uses this to give VM-appropriate advice instead of QEMU flags. */
+int net_env_vmware(void) {
+    for (int i = 0; i < netdbg_pci_count; i++) {
+        uint16_t v = netdbg_pci_vend[i], d = netdbg_pci_dev[i];
+        if (v == 0x15AD && (d == 0x0405 || d == 0x0790 || d == 0x07B0 || d == 0x0740))
+            return 1;
+        if (v == 0x1274 && d == 0x1371) return 1;
+    }
+    return 0;
+}
 
 /* debug: current TX descriptor 0 and RX descriptor 0 words (for netdiag) */
 uint32_t netdbg_desc_tx0(void) { return pnet_bd(0, 1)[0]; }
@@ -366,10 +400,12 @@ static void com1_num(int v) {
 
 int net_init(void) {
     if (net_ready) return 1;
+    net_fail_code = NET_FAIL_NONE;
     com1_init();
     com1_str("\n[net] init begin\n");
     pci_scan_summary();               /* record bus devices for netdiag */
     if (!pci_find_pcnet()) {
+        net_fail_code = NET_FAIL_NO_DEV;
         com1_str("[net] FAIL: no PCnet; PCI bus has ");
         com1_num(netdbg_pci_count); com1_str(" dev(s):");
         for (int i = 0; i < netdbg_pci_count; i++) {
@@ -385,7 +421,11 @@ int net_init(void) {
 
     /* pick 16-bit or 32-bit (DWIO) CSR access -- see the register notes */
     pnet_width = pnet_probe_width();
-    if (pnet_width == 0) { com1_str("[net] FAIL: no CSR access\n"); return -1; }
+    if (pnet_width == 0) {
+        net_fail_code = NET_FAIL_BUS_FF;
+        com1_str("[net] FAIL: no CSR access (dead bus)\n");
+        return -1;
+    }
     netdbg_io_width = pnet_width;
     com1_str("[net] io_base="); com1_hex(pci_io_base);
     com1_str(" width="); com1_num(pnet_width); com1_str("-bit");
@@ -403,6 +443,16 @@ int net_init(void) {
     net_mac[0] = (uint8_t)(lo & 0xFF);     net_mac[1] = (uint8_t)(lo >> 8);
     net_mac[2] = (uint8_t)(mid & 0xFF);    net_mac[3] = (uint8_t)(mid >> 8);
     net_mac[4] = (uint8_t)(hi & 0xFF);     net_mac[5] = (uint8_t)(hi >> 8);
+    /* An all-ones MAC means the register returned an open-bus pattern:
+     * there is no chip listening at this I/O BAR (VMware with an E1000 or
+     * vmxnet3 NIC, or a stale PCnet id in the config space).  Never adopt
+     * FF:FF:FF:FF:FF:FF as a working MAC. */
+    if (net_mac[0]==0xFF && net_mac[1]==0xFF && net_mac[2]==0xFF &&
+        net_mac[3]==0xFF && net_mac[4]==0xFF && net_mac[5]==0xFF) {
+        net_fail_code = NET_FAIL_MAC;
+        com1_str("[net] FAIL: MAC reads FF:FF:FF:FF:FF:FF (no chip at io_base)\n");
+        return -1;
+    }
     if (net_mac[0]==0 && net_mac[1]==0 && net_mac[2]==0 &&
         net_mac[3]==0 && net_mac[4]==0 && net_mac[5]==0) {
         if (!pnet_layout) {
@@ -483,6 +533,11 @@ int net_init(void) {
     pnet_wcsr(0, csr0_init());
     for (int i = 0; i < 2000000; i++) {
         uint16_t c0 = pnet_rcsr(0);
+        if (c0 == 0xFFFFu) {                 /* open bus mid-init */
+            net_fail_code = NET_FAIL_INIT;
+            com1_str("[net] FAIL: CSR0 open-bus during INIT\n");
+            return -1;
+        }
         if (c0 & csr0_idon()) break;
         if (c0 & 0x0200) break;          /* data-sheet bit9 too */
     }
@@ -491,6 +546,14 @@ int net_init(void) {
 
     /* START */
     pnet_wcsr(0, csr0_start());
+    {
+        uint16_t c0s = pnet_rcsr(0);
+        if (c0s == 0xFFFFu) {                /* device vanished: not ready */
+            net_fail_code = NET_FAIL_INIT;
+            com1_str("[net] FAIL: CSR0 open-bus after START\n");
+            return -1;
+        }
+    }
     net_ready = 1;
     netdbg_csr0 = pnet_rcsr(0);
     if (!pnet_layout) {

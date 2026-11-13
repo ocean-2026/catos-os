@@ -16,6 +16,8 @@ uint32_t multiboot_flags = 0;
 extern int      netdbg_pci_count;
 extern uint16_t netdbg_pci_vend[8];
 extern uint16_t netdbg_pci_dev[8];
+extern int      net_fail_code;
+extern int      net_env_vmware(void);
 
 static void print_hex4(uint16_t v) {
     static const char *hex = "0123456789abcdef";
@@ -66,8 +68,12 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     }
 
     if (net_init() < 0) {
-        vga_write("net: AMD PCnet-PCI (1022:2000) NOT found\n");
-        vga_write("PCI devices on bus 0: ");
+        vga_write("net: no usable NIC");
+        if (net_fail_code == 1) vga_write(" (no 1022:2000 in PCI)");
+        else if (net_fail_code == 2) vga_write(" (open bus, no chip answering)");
+        else if (net_fail_code == 3) vga_write(" (MAC unreadable)");
+        else if (net_fail_code == 4) vga_write(" (INIT/START failed)");
+        vga_write("\nPCI devices on bus 0: ");
         if (netdbg_pci_count == 0) {
             vga_write("none\n");
         } else {
@@ -79,9 +85,14 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
             }
             vga_write("\n");
         }
-        vga_write("add to QEMU:  -netdev user,id=n0  -device pcnet,netdev=n0\n");
+        if (net_env_vmware())
+            vga_write("VMware guest: set the VM network adapter to Intel E1000\n"
+                      "  (e1000 driver is on the roadmap; PCnet only works if\n"
+                      "   the adapter is switched to 'AMD PCnet')\n");
+        else
+            vga_write("QEMU: -netdev user,id=n0 -device pcnet,netdev=n0\n");
     } else {
-        vga_write("net: AMD PCnet-PCI up (10.0.2.15)\n");
+        vga_write("net: AMD PCnet-PCI up\n");
     }
 
     shell_run();

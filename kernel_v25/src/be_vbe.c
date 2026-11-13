@@ -350,21 +350,22 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
     fill_abs(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 16; j++) {
+        /* #58: 7x15 inked box -> 1 px letter/line spacing inside 8x16 */
+        for (int j = 0; j < 15; j++) {
             unsigned row = g[j >> 1];
             int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
-                if (dx >= 8) continue;
+                if (dx >= 7) continue;
                 px_abs(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 8)
+                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
                     px_abs(ox + dx + 1, oy + j, f);
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) hline_abs(ox, oy + 14, 8, f);
-    if (c->attrs & CON_ATTR_STRIKE)    hline_abs(ox, oy + 8, 8, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) hline_abs(ox, oy + 15, 8, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline_abs(ox, oy + 10, 8, f);
 }
 
 static void draw_wide(int ox, int oy, const con_cell_t *c,
@@ -399,7 +400,8 @@ static void vbe_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void vbe_set_cursor(int x, int y) { (void)x; (void)y; }
 static void vbe_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    hline_abs(x * 8, (y + pan_off) * 16 + 15, 8, fg_rgb & 0x00FFFFFFu);
+    /* #58: block cursor (lower half); render.c blinks it every 0.5 s */
+    fill_abs(x * 8, (y + pan_off) * 16 + 8, 8, 8, fg_rgb & 0x00FFFFFFu);
 }
 static void vbe_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;      /* truecolour: no CLUT in hardware */

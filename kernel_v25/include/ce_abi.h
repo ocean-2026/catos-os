@@ -223,6 +223,13 @@ typedef struct catos_api {
          Decode and return one pending key (ASCII or KB_* >0xFF),
          or -1 when nothing is pending.  Modifier presses/releases and
          break codes are consumed silently.  Never blocks, never yields. */
+
+    /* ---- #60 (v2.21): line addressing (append-only) -------------------
+     * Old binaries see NULL here.  Move the console cursor to (x, y) so a
+     * TUI can rewrite one line in place -- the alternative, cls() plus a
+     * full repaint, shows the blank frame in between ("flicker"). */
+    int     (*gotoxy)(int x, int y);               /* 65
+         0 on success, -3 if x/y is outside the screen. */
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

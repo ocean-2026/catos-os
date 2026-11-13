@@ -4,6 +4,10 @@
 现状基线：v2.18（LFN 已入库 `9ca51c1`），回归 user 15/15、disk 5/5、qemu 12/12、
 security 17/17 全绿。
 
+> **状态更新 2026-11-13**：本轮全部开发在**云主机（Linux, env `vm`）**完成。
+> v2.18 源码经 CDN 从 Windows 侧传入，构建链改造后 kernel/iso/disk 三个产物均重建成功，
+> QEMU 冒烟启动通过。逐项进度见文末 **五、2026-11-13 执行进度**。
+
 ---
 
 ## 〇、已完成（本轮）
@@ -77,7 +81,7 @@ VMware 里 `netdiag` 显示 `net_ready=1 mac=FF:FF:FF:FF`——**探测失败却
 |---|---|---|
 | T50 | lang 语言设置命令（默认英文，持久化 /etc/lang，zh 翻译关键消息） | 待做 |
 | T51 | Shell 交互：Ctrl+↑↓ 滚动回看、↑↓ 历史、语法高亮、←→ 光标编辑（块状闪烁光标） | 待做 |
-| T52 | 用户密码交互输入（login/su/passwd 隐藏回显）+ useradd 交互式权限向导 | 待做 |
+| T52 | 用户密码交互输入（login/su/passwd 隐藏回显）+ useradd 交互式权限向导 | ✅ 本轮完成（见 §五） |
 
 ## 三、优先级建议
 
@@ -88,6 +92,10 @@ P2  #59 后台输出；#57 退出图形恢复调色板；T50 lang
 P3  #58 VMware SVGA II 图形驱动；#60 adofai 打磨
 ```
 
+2026-11-13 执行后：**P0 两项（#54 / T52）已完成**；**#57 / #59 / #58 / #60 已完成**；
+剩余 **#55 / #56 / T51 / T50** 未开始，其中 #55 是"完备网络"的关键路径。
+
+
 ## 四、VMware vs QEMU 设备对照表（实测结论）
 
 | 设备 | QEMU | VMware 17.6.1 | CatOS 现状 |
@@ -97,3 +105,58 @@ P3  #58 VMware SVGA II 图形驱动；#60 adofai 打磨
 | 网卡 | pcnet（1022:2000） | e1000/vmxnet3（15AD:*） | 仅 pcnet → VMware 无网 |
 | 磁盘 | IDE | IDE（vmdk 描述符） | ✅ 可用 |
 | BIOS | SeaBIOS | VMware BIOS | ✅ 引导同源已实测 |
+
+---
+
+## 五、2026-11-13 执行进度（云主机）
+
+### 5.1 环境结论（云主机构建链）
+
+| 现象 | 根因 | 解决 |
+|---|---|---|
+| `extapp/build_ce.sh: 16: set: Illegal option -` | Windows 打包文件为 CRLF，`dash` 解析 `set -e\r` 失败 | 全量 `sed -i 's/\r$//'`（*.sh/*.c/*.h/*.s/*.py/*.ld/*.list/*.md） |
+| `src/task.c:1972: invalid suffix "o111"` | `0o111` 是 C23 字面量，云主机 gcc 11 + `-std=c99` 不支持 | 改为标准八进制 `0111` |
+| `Failed to get "write" lock`（已存在 img） | 容器文件系统锁，QEMU 5.2 默认加锁 | `-drive file=...,format=raw,if=ide,file.locking=off` |
+
+云主机 binutils 2.38 的 `ld` 支持 `i386pe` 仿真、`objcopy` 支持 `pe-i386`，
+因此 Windows 的 PE 链接流程（`pe.ld` + `objcopy -O binary`）在 Linux 上原样跑通，无需改构建脚本。
+
+### 5.2 逐项状态
+
+| # | 优先级 | 状态 | 本轮改动 | 验证 |
+|---|---|---|---|---|
+| #54 net 伪就绪 | P0 | ✅ 完成 | `net.c`：失败码（no-dev/bus-FF/mac/init）、CSR0 读 `FFFF/0000` 判 dead bus、五处失败点置 `net_ready=0`、新增 `net_env_vmware()`（扫 `15AD:0405/0790/07B0/0740`、`1274:1371`）；`shell.c`：`net_why_down()` 按失败码给原因，VMware→"NIC 设为 Intel E1000"，QEMU→`-device pcnet,netdev=n0`；`cmd_netdiag()` 增加 `fail=`/`env=`/`mac_state=`；`kernel.c` 启动提示环境感知 | **QEMU 实测通过**：`-net none` 下 `net: no usable NIC (no 1022:2000)` + PCI 列表 + QEMU 建议，`net_ready=0`（不再是伪 1） |
+| T52 密码/权限向导 | P0 | ✅ 完成 | 新增 `kb_readline_masked()`（`*` 回显、退格擦一个星号、不支持 IME）；`login`/`su` 未给密码时交互提示 `Password:`；`passwd` 无密码参数时两次输入 + 比对 + 空密码拒绝（保留 `passwd NAME NEWPW` 脚本形式）；`useradd` 无 CAPS 参数时逐项 y/N 询问 **7 个能力位**（NET/KILL/FSADMIN/AUDIO/USERADM/DEVICE/SYS），结束时打印 `caps=0x…` | 编译通过；交互路径待实机点测 |
+| #57 退出图形清屏 | P2 | ✅ 完成 | 审计确认 `be_text.c::text_enter()` 已完整恢复（16 色 DAC 重载、AC palette 0x00-0x0F 重写、plane 0/1/3 清零、sequencer reset 脉冲、video off/on、(0x00,0x00) 预填 0xB8000 破 QEMU per-cell 缓存条纹）；补上 `cmd_text()` 成功后 `vga_clear()` + 重置样式再提示 | 编译通过；图形↔文本往返视觉待实机点测 |
+| #59 后台输出 | P2 | ✅ 完成 | `task_t` 增 `bg_mode` / `log_head` / `log_tail` / `log_lost` / 1 KB 环形 `log_buf`（spawn 复用槽位时清零）；`task.c` 新增 `task_log_append/pending/drain`；`SYS_WRITE` 控制台分支在 `bg_mode` 下改写入环形，`SYS_PUTC` 同步捕获，`SYS_CLS` 后台任务被忽略（不再擦前台屏）；`shell.c` 新增 `jobs`（TID/状态/名字/待读字节）与 `log TID` / `log -f TID`（跟随到任务退出、溢出丢字节提示、约 60 s 安全退出） | 编译通过；命令行为待实机点测 |
+| #58 图形文字 | P3 | ✅ 完成（非 SVGA II 路线） | `be_gfx/be_vbe/be_vbe24` 的 ASCII 字形改为 **7×15 内缩**（格内留 1 px 字距 + 1 px 行距，等价 9×16 观感），不改 8 px 列网格 → 保住 CJK=2×ASCII 不变式与所有 pan/scroll 偏移；下划线移到 +15、删除线 +8→+10；三个后端 `draw_cursor` 由 1 px 线改为**下半块块状光标**；`render.c` 的 `paint()` 仅在 `blink_phase==0` 时绘制光标，`con_tick()` 每 0.5 s 翻转 → 光标闪烁且旧位置被整格重绘、无残留 | 编译通过；`CJK=2×ASCII` 逐像素回归断言**尚未补入 tests** |
+| #60 adofai | P3 | ✅ 完成（三项） | ① 新增内核 syscall `SYS_GOTOXY`（slot 65，append-only，`ce_abi.h` 加 `gotoxy` 槽 + `con_set_cursor` 落地），adofai 改为**脏行重绘**（只刷 row1 HUD / row9 marker / row10 判断 / row11 误差），旧内核自动退回全屏重画；② 开局 **3-2-1-GO!**（各 1 s，GO 额外 0.5 s，期间时钟不前进、按键只排空不判定、ESC 可退出）；③ 判断行下方新增 `LAST ±N ms EARLY/LATE (pressed too soon/too late)`，Perfect/E/LPerfect/Early/Late 全部记录带符号误差 | 编译通过（`adofai.ce` image=11704, bss=0x4920, api_off=0x2db4）；实机手感待点测 |
+| #55 e1000 | P1 | ⬜ 未开始 | — | — |
+| #56 ES1371 | P1 | ⬜ 未开始 | — | — |
+| T51 Shell 交互 | P1 | ⬜ 未开始 | — | — |
+| T50 lang | P2 | ⬜ 未开始 | — | — |
+
+### 5.3 本轮产物
+
+| 文件 | 大小 | 说明 |
+|---|---|---|
+| `build/kernel.bin` | 733,684 B | 含本轮机/`#54/#57/#58/#59` 与 `SYS_GOTOXY`（原 725,396 B） |
+| `build/kernel.pe` | 752,177 B（上一轮） | PE 中间产物 |
+| `catos.iso` | 11,460,608 B | 新 kernel + 20 个 CE 应用 + node.ce |
+| `catos_disk.img` | 67,108,864 B | 39 files，`adofai.ce` 已更新 |
+
+QEMU 启动实测（云主机，QEMU 5.2.0）：
+`-L <bios> -m 256 -no-reboot -net none -cdrom catos.iso -boot order=d
+-drive file=catos_disk.img,format=raw,if=ide,file.locking=off -display none
+-monitor tcp:127.0.0.1:4444,server,nowait` → 正常进 `root@catos:/$`。
+
+### 5.4 本轮遗留（下一轮直接接手）
+
+1. **#55 e1000 驱动**：PCI 探测 → BAR0 MMIO → RX/TX 描述符环 → 中断 → 接 `net_send/net_recv`；QEMU `-device e1000,netdev=n0` 验证（云主机无 `efi-e1000.rom`，需 `-netdev user -device e1000` 走非 UEFI 路径）。
+2. **#56 ES1371**：`1274:1371` → PCI BAR → DMA 环形缓冲 + 采样率寄存器 → 接 `snd_play()`；QEMU `-device es1370` 同族验证；SB16 路径保留。
+3. **T51 Shell 交互**：行编辑器（↑↓ 历史、←→ 光标编辑、Ctrl+↑↓ 回看、语法高亮）；块状光标闪烁已在 #58 就位，可直接复用。
+4. **T50 lang**：`/etc/lang` 持久化 + `lang` 命令 + 关键消息翻译表。
+5. **回归复跑**：`tests/qemu_regress.py`（需 `-L` wrapper 注入与 `--disk` 副本绕 write lock）、`user_regress.py`、`disk_regress.py`、`security_regress.py` 全绿，并补 `CJK=2×ASCII` 逐像素断言。
+6. **反向同步**：云主机改动尚未回写 `D:\CatOs`（`FileBatchUpload` → Windows 下载路径已验证可用）。
+7. **VMware 实机项**（#55/#56/#58-SVGA II）只能在 QEMU 同族设备上验证，VMware 真机行为需用户复测。
+

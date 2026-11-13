@@ -262,3 +262,34 @@ int kb_readline(char *buf, int len) {
         /* arrow / function keys: ignored in line mode */
     }
 }
+
+/* T52: password entry.  Identical key handling to kb_readline, except that
+ * a printable key appends to buf without echoing it -- a '*' is printed
+ * instead, and backspace erases one star.  IME / UTF-8 input is deliberately
+ * not routed here: passwords are ASCII. */
+int kb_readline_masked(char *buf, int len) {
+    int n = 0;
+    if (len <= 0) return 0;
+    while (1) {
+        int k = kb_getkey();
+        if (k == '\n') {
+            buf[n] = 0;
+            vga_putc('\n');
+            return 1;
+        }
+        if (k == '\b' || k == KB_DEL) {
+            if (n > 0) {
+                n--;
+                vga_putc('\b'); vga_putc(' '); vga_putc('\b');
+            }
+            continue;
+        }
+        if (k >= 32 && k < 127) {
+            if (n < len - 1) {
+                buf[n++] = (char)k;
+                vga_putc('*');
+            }
+        }
+        /* arrows / function keys: ignored */
+    }
+}

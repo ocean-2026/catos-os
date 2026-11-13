@@ -71,6 +71,15 @@ typedef struct task {
     int         in_pipe;
     char        out_file[160];  /* FS_PATH_MAX; "" = none */
     int         out_append;     /* 1 = append mode (>>) */
+    /* #59 background output capture: a task started with '&' has its
+     * SYS_WRITE console output diverted into this per-task ring instead of
+     * scribbling over the shell prompt.  `log TID` drains it, `log -f TID`
+     * follows it until the task exits. */
+    int         bg_mode;        /* 1 = background job -> capture stdout */
+    uint16_t    log_head;       /* write index (bytes)                 */
+    uint16_t    log_tail;       /* read index  (bytes)                 */
+    uint32_t    log_lost;       /* bytes dropped because the ring was full */
+    uint8_t     log_buf[1024];
 } task_t;
 
 /* ---- lifecycle ------------------------------------------------------- */
@@ -107,6 +116,13 @@ uint32_t task_uptime_ms(void);
 int      task_stat(int slot, int *tid, uint32_t *cpu_ticks, uint32_t *pages,
                    int *state, int *uid, int *ring, char *name, int namelen);
 uint32_t task_idle_ticks(void);
+
+/* ---- #59 background output capture ------------------------------------ */
+void     task_log_append(task_t *t, const char *buf, uint32_t len);
+/* Drain up to max bytes of pending log text into out; returns byte count.
+ * Also reports bytes dropped since the last drain in *lost (may be NULL). */
+int      task_log_drain(task_t *t, char *out, int max, uint32_t *lost);
+int      task_log_pending(task_t *t);
 
 /* ---- VMA-backed user-pointer helpers (declared in vma.c) ------------- */
 /* Check a single pointer is inside the task's VMA list (any page). */

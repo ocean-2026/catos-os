@@ -210,6 +210,38 @@ static void reschedule(void) {
     /* resumed: caller retries / continues */
 }
 
+/* ---- #59: per-task stdout ring (background jobs) ---------------------- */
+void task_log_append(task_t *t, const char *buf, uint32_t len) {
+    if (!t || !buf) return;
+    for (uint32_t i = 0; i < len; i++) {
+        uint16_t next = (uint16_t)((t->log_head + 1u) % (uint16_t)sizeof(t->log_buf));
+        if (next == t->log_tail) {              /* ring full: drop oldest */
+            t->log_tail = (uint16_t)((t->log_tail + 1u) % (uint16_t)sizeof(t->log_buf));
+            t->log_lost++;
+        }
+        t->log_buf[t->log_head] = (uint8_t)buf[i];
+        t->log_head = next;
+    }
+}
+
+int task_log_pending(task_t *t) {
+    if (!t) return 0;
+    int n = (int)t->log_head - (int)t->log_tail;
+    if (n < 0) n += (int)sizeof(t->log_buf);
+    return n;
+}
+
+int task_log_drain(task_t *t, char *out, int max, uint32_t *lost) {
+    if (!t || !out || max <= 0) return 0;
+    int n = 0;
+    while (n < max && t->log_tail != t->log_head) {
+        out[n++] = (char)t->log_buf[t->log_tail];
+        t->log_tail = (uint16_t)((t->log_tail + 1u) % (uint16_t)sizeof(t->log_buf));
+    }
+    if (lost) { *lost = t->log_lost; t->log_lost = 0; }
+    return n;
+}
+
 void task_yield(void) {
     if (!tasks_on) return;
     if (!pick_ready()) return;
@@ -495,6 +527,11 @@ enum {
     /* v2.14: non-blocking keyboard poll.  Append-only; 65 thunks still
      * fit in the 2 KiB thunk area.  Takes 0 arguments; never blocks. */
     SYS_POLLKEY,
+    /* #60 (v2.21): line addressing for TUI programs.  Append-only; a full
+     * screen repaint after cls() flickers because the blank frame is
+     * visible.  With gotoxy a program rewrites only the lines that changed
+     * (dirty-region redraw).  66 thunks still fit in the 2 KiB area. */
+    SYS_GOTOXY,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -1052,7 +1089,10 @@ void isr_syscall(int_frame_t *f) {
                                           (uint32_t)i, mode);
                 if (r != 0) { err = r; break; }
             } else {
-                vga_write_n(b, i, done);
+                /* #59: a background job must not paint over the shell; its
+                 * console output goes into the per-task ring instead. */
+                if (t->bg_mode) task_log_append(t, b, (uint32_t)i);
+                else            vga_write_n(b, i, done);
             }
             total += (uint32_t)i;
         }
@@ -1062,8 +1102,15 @@ void isr_syscall(int_frame_t *f) {
         ret = err ? (uint32_t)err : (uint32_t)total;
         break;
     }
-    case SYS_PUTC: vga_putc((char)a1); ret = 0; break;
-    case SYS_CLS:  vga_clear(); ret = 0; break;
+    case SYS_PUTC:
+        /* #59: single-char output from a background job is captured too */
+        if (t->bg_mode) { char c = (char)a1; task_log_append(t, &c, 1); }
+        else            vga_putc((char)a1);
+        ret = 0; break;
+    case SYS_CLS:
+        /* a background job must never wipe the foreground console */
+        if (!t->bg_mode) vga_clear();
+        ret = 0; break;
     case SYS_READLINE: {
         static char b[256];
         char *ub = (char *)a1; int max = (int)a2;
@@ -1215,6 +1262,17 @@ void isr_syscall(int_frame_t *f) {
          * -1 the moment the queue runs dry; with 0 ticks it can never
          * reach task_sleep_ticks(), so the call never yields the CPU. */
         ret = (uint32_t)kb_getkey_timed(0);
+        break;
+    }
+    case SYS_GOTOXY: {
+        /* #60: position the console cursor so a TUI can repaint one line
+         * instead of cls()+redraw (dirty-region update, no flicker). */
+        int x = (int)a1, y = (int)a2;
+        int mc = con_info(CON_INFO_COLS), mr = con_info(CON_INFO_ROWS);
+        if (mc <= 0 || mr <= 0) { ret = (uint32_t)CON_ENODEV; break; }
+        if (x < 0 || y < 0 || x >= mc || y >= mr) { ret = (uint32_t)CON_EINVAL; break; }
+        con_set_cursor((uint8_t)x, (uint8_t)y);
+        ret = 0;
         break;
     }
     case SYS_FILE_EXISTS: {
@@ -1969,7 +2027,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     {
         int fuid = 0, fgid = 0, fmode = 0;
         if (acl_lookup(path, &fuid, &fgid, &fmode) == 0 &&
-            !(fmode & 0o111)) {
+            !(fmode & 0111)) {
             /* No execute bit at all (owner/group/other): deny spawn outright
              * unless the resolver above returned an explicit match.  This
              * covers both "file not readable by anyone" and "chmod 000". */
@@ -2031,6 +2089,11 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->in_pipe = -1;
     t->out_file[0] = 0;
     t->out_append = 0;
+    /* #59: reused slots must not leak the previous job's captured output */
+    t->bg_mode = 0;
+    t->log_head = 0;
+    t->log_tail = 0;
+    t->log_lost = 0;
     uint8_t *ks = task_kstacks[slot - 1];
     uint32_t ks_top = (uint32_t)ks + sizeof(task_kstacks[0]);
     for (uint32_t i = 0; i < sizeof(task_kstacks[0]); i++) ks[i] = 0;

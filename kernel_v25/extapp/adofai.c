@@ -58,6 +58,13 @@ static int  score, pcount, judged, combo, mp;
 static int  won, failed;
 static const char *jtext;
 static int  jcol;
+/* #60 additions */
+static int  last_err_ms;        /* signed ms of the last non-miss hit      */
+static int  last_err_set;       /* 0 = nothing judged yet                  */
+static int  cd_phase = -1;      /* countdown shown last frame (3,2,1,0=GO) */
+static int  prev_jtext_len = -1;
+static int  prev_hud;           /* packed HUD fields, to skip repaints     */
+static int  has_gotoxy;         /* api->gotoxy available (v2.21 kernel)    */
 
 /* line builder */
 static char rb[96];
@@ -258,48 +265,155 @@ static void rb_s(const char *s) { while (*s) { rb[rl] = *s++; rb[rl + 1] = 0; rl
 static void rb_i(int v) { rb_s(i2a(v)); }
 static void rb_pad(void) { while (rl < 80) { rb[rl] = ' '; rb[rl + 1] = 0; rl++; } }
 
-static void draw(void) {
-    int pct, acc, beat, off, col, jl, lead;
-    api->cls();
-    /* row 0: title + bpm */
+/* #60 (a): dirty-region redraw.  Clearing the screen every 33 ms and then
+ * repainting 25 lines shows the blank frame in between -- that IS the
+ * flicker.  With the v2.21 gotoxy slot we repaint only the lines whose
+ * content actually changed; on an older kernel we fall back to the old
+ * full-frame path (correct, just less pretty).
+ *
+ * Static layout (drawn once per level):  row 0 title, rows 2-7 blank,
+ * row 8 accuracy bar, row 11 "last error", row 12 hint, 13..24 blank.
+ * Dynamic rows: 1 (HUD), 9 (sweep marker), 10 (judgement word). */
+
+static void draw_title(void) {
     api->set_fg(C_WHITE);
     rb_reset(); rb_s(title[0] ? title : "Cat Beats"); rb_pad(); w(rb); w("\n");
-    /* row 1: HUD */
-    pct = (nb > 0) ? cur * 100 / nb : 0;
-    acc = (judged > 0) ? pcount * 100 / judged : 0;
+}
+
+static void draw_static(void) {
+    int col;
+    api->cls();
+    draw_title();
+    /* rows 1..7: leave row 1 for the HUD, 2..7 blank */
+    w("\n\n\n\n\n\n\n");
+    /* row 8: accuracy bar, columns 10..69 */
+    pads(10);
+    api->set_fg(C_RED);    for (col = 0; col < 15; col++) pc('=');
+    api->set_fg(C_YELLOW); for (col = 0; col < 5;  col++) pc('=');
+    api->set_fg(C_GREEN);  for (col = 0; col < 20; col++) pc('=');
+    api->set_fg(C_YELLOW); for (col = 0; col < 5;  col++) pc('=');
+    api->set_fg(C_RED);    for (col = 0; col < 15; col++) pc('=');
+    api->set_fg(C_WHITE); pads(10); w("\n");
+    /* row 9 marker (dynamic), row 10 judgement (dynamic), row 11 last err */
+    w("\n\n\n");
+    /* row 12: hint */
+    rb_reset(); rb_s("  ANY KEY = TAP     ESC = QUIT  "); rb_pad(); w(rb); w("\n");
+    w("\n\n\n\n\n\n\n\n\n\n\n");
+}
+
+static void draw_hud(int force) {
+    int pct = (nb > 0) ? cur * 100 / nb : 0;
+    int acc = (judged > 0) ? pcount * 100 / judged : 0;
+    int pack = (cur << 16) ^ score ^ (acc << 8) ^ (combo << 4);
+    if (!force && pack == prev_hud) return;
+    prev_hud = pack;
+    if (has_gotoxy) api->gotoxy(0, 1);
+    api->set_fg(C_WHITE);
     rb_reset();
     rb_s("PROGRESS "); rb_i(pct); rb_s("%  SCORE "); rb_i(score);
     rb_s("  ACC "); rb_i(acc); rb_s("%  COMBO "); rb_i(combo);
     rb_pad(); w(rb); w("\n");
-    /* rows 2..7 empty */
-    w("\n\n\n\n\n\n");
-    /* row 8: accuracy bar 10..69 (60 wide) */
-    pads(10);
-    api->set_fg(C_RED);    { int i; for (i = 0; i < 15; i++) pc('='); }
-    api->set_fg(C_YELLOW); { int i; for (i = 0; i < 5; i++) pc('='); }
-    api->set_fg(C_GREEN);  { int i; for (i = 0; i < 20; i++) pc('='); }
-    api->set_fg(C_YELLOW); { int i; for (i = 0; i < 5; i++) pc('='); }
-    api->set_fg(C_RED);    { int i; for (i = 0; i < 15; i++) pc('='); }
-    api->set_fg(C_WHITE); pads(10); w("\n");
-    /* row 9: sweep marker O, center col 40 */
-    beat = 60000 / (wbpm[cur] > 0 ? wbpm[cur] : 100);
-    off = (now - hit[cur]) * 60 / beat;
-    col = 40 + tdir[cur] * off;
+}
+
+static void draw_marker(void) {
+    int beat = 60000 / (wbpm[cur] > 0 ? wbpm[cur] : 100);
+    int off = (now - hit[cur]) * 60 / beat;
+    int col = 40 + tdir[cur] * off;
     if (col < 10) col = 10;
     if (col > 69) col = 69;
-    api->set_fg(C_WHITE); pads(col); pc('O'); pads(79 - col); w("\n");
-    /* row 10: judgment word centered */
-    api->set_fg(jcol);
-    jl = 0; while (jtext[jl]) jl++;
-    lead = 40 - jl / 2; if (lead < 0) lead = 0;
-    pads(lead); w(jtext); pads(79 - lead - jl); w("\n");
-    /* row 11 empty */
-    w("\n");
-    /* row 12: hint */
+    if (has_gotoxy) api->gotoxy(0, 9);
+    else     { int i; for (i = 0; i < 9; i++) w("\n"); }
     api->set_fg(C_WHITE);
-    rb_reset(); rb_s("  ANY KEY = TAP     ESC = QUIT  "); rb_pad(); w(rb); w("\n");
-    /* rows 13..24 empty */
-    w("\n\n\n\n\n\n\n\n\n\n\n");
+    pads(col); pc('O'); pads(79 - col); w("\n");
+}
+
+static void draw_judge(void) {
+    int jl = 0, lead;
+    while (jtext[jl]) jl++;
+    lead = 40 - jl / 2; if (lead < 0) lead = 0;
+    if (has_gotoxy) api->gotoxy(0, 10);
+    api->set_fg(jcol);
+    pads(lead); w(jtext); pads(79 - lead - jl); w("\n");
+}
+
+/* row 11: signed timing of the last hit -- "12ms EARLY" means the player
+ * pressed 12 ms before the tile beat.  This is what makes a rhythm game
+ * learnable: the player can see which way they are drifting. */
+static void draw_lasterr(void) {
+    int v = last_err_ms;
+    if (has_gotoxy) api->gotoxy(0, 11);
+    else     { int i; for (i = 0; i < 2; i++) w("\n"); }
+    api->set_fg(C_WHITE);
+    if (!last_err_set) { pads(80); w("\n"); return; }
+    rb_reset();
+    rb_s("LAST ");
+    if (v < 0) rb_s("-"); else rb_s("+");
+    rb_i(v < 0 ? -v : v); rb_s(" ms  ");
+    rb_s(v < 0 ? "EARLY (pressed too soon)" : "LATE  (pressed too late)");
+    rb_pad(); w(rb); w("\n");
+}
+
+static void draw_countdown(int n) {
+    /* big centred banner on rows 3..6, 3-2-1-GO */
+    int row;
+    for (row = 3; row <= 6; row++) {
+        if (has_gotoxy) api->gotoxy(0, row);
+        else { int i; for (i = 0; i < row; i++) w("\n"); }
+        pads(80); w("\n");
+    }
+    if (has_gotoxy) api->gotoxy(0, 4);
+    else { int i; for (i = 0; i < 4; i++) w("\n"); }
+    api->set_fg(n > 0 ? C_YELLOW : C_GREEN);
+    if (n > 0) {
+        pads(39); pc('0' + n); pc(' '); pads(39);
+    } else {
+        pads(38); w("GO!"); pads(39);
+    }
+    w("\n");
+}
+
+static void draw(void) {
+    if (has_gotoxy) {
+        draw_hud(0);
+        draw_marker();
+        if (jtext[0]) draw_judge();
+        if (last_err_set) draw_lasterr();
+        return;
+    }
+    /* legacy full-frame path (kernel has no gotoxy): cls + repaint all */
+    {
+        int pct = (nb > 0) ? cur * 100 / nb : 0;
+        int acc = (judged > 0) ? pcount * 100 / judged : 0;
+        int beat = 60000 / (wbpm[cur] > 0 ? wbpm[cur] : 100);
+        int off = (now - hit[cur]) * 60 / beat;
+        int col = 40 + tdir[cur] * off, col2;
+        int jl = 0, lead;
+        api->cls();
+        draw_title();
+        api->set_fg(C_WHITE);
+        rb_reset();
+        rb_s("PROGRESS "); rb_i(pct); rb_s("%  SCORE "); rb_i(score);
+        rb_s("  ACC "); rb_i(acc); rb_s("%  COMBO "); rb_i(combo);
+        rb_pad(); w(rb); w("\n");
+        w("\n\n\n\n\n\n");
+        pads(10);
+        api->set_fg(C_RED);    for (col2 = 0; col2 < 15; col2++) pc('=');
+        api->set_fg(C_YELLOW); for (col2 = 0; col2 < 5;  col2++) pc('=');
+        api->set_fg(C_GREEN);  for (col2 = 0; col2 < 20; col2++) pc('=');
+        api->set_fg(C_YELLOW); for (col2 = 0; col2 < 5;  col2++) pc('=');
+        api->set_fg(C_RED);    for (col2 = 0; col2 < 15; col2++) pc('=');
+        api->set_fg(C_WHITE); pads(10); w("\n");
+        if (col < 10) col = 10;
+        if (col > 69) col = 69;
+        pads(col); pc('O'); pads(79 - col); w("\n");
+        api->set_fg(jcol);
+        while (jtext[jl]) jl++;
+        lead = 40 - jl / 2; if (lead < 0) lead = 0;
+        pads(lead); w(jtext); pads(79 - lead - jl); w("\n");
+        w("\n");
+        rb_reset(); rb_s("  ANY KEY = TAP     ESC = QUIT  "); rb_pad(); w(rb); w("\n");
+        w("\n\n\n\n\n\n\n\n\n\n\n");
+    }
 }
 
 /* ---- input: kernel pollkey() (v2.14 slot 64) ----
@@ -361,7 +475,47 @@ static int play_level(void) {
     score = 0; pcount = 0; judged = 0; combo = 0; mp = 0;
     won = 0; failed = 0;
     jtext = ""; jcol = C_WHITE;
-    api->cls();
+    last_err_ms = 0; last_err_set = 0;
+    prev_jtext_len = -1; prev_hud = -1; cd_phase = -1;
+    has_gotoxy = (api->gotoxy != 0);
+
+    if (has_gotoxy) draw_static();
+    else            api->cls();
+
+    /* #60 (b): 3-2-1-GO! countdown.  now stays 0 (hit[] is relative to the
+     * first tile) -- the clock simply does not advance until "GO!", so a
+     * stray key during the countdown is drained instead of judged. */
+    {
+        int cd, t;
+        for (cd = 3; cd >= 1; cd--) {
+            draw_countdown(cd);
+            cd_phase = cd;
+            for (t = 0; t < 1000; t++) {
+                api->delay(1);
+                if (api->pollkey() == 27) return 1;
+            }
+        }
+        draw_countdown(0);                    /* GO! */
+        cd_phase = 0;
+        for (t = 0; t < 500; t++) {
+            api->delay(1);
+            if (api->pollkey() == 27) return 1;
+        }
+        drain_kb();
+        /* wipe the banner rows 3..6 */
+        if (has_gotoxy) {
+            int row;
+            for (row = 3; row <= 6; row++) {
+                api->gotoxy(0, row);
+                pads(80); w("\n");
+            }
+        } else {
+            api->cls();
+        }
+        cd_phase = -1;
+        draw();
+    }
+
     while (1) {
         api->delay(1); now++;
         /* poll keys via the kernel; every key = a tap; ESC quits */
@@ -383,16 +537,19 @@ static int play_level(void) {
                     beep(180, 120);
                 } else if (adt <= p) {
                     jtext = "Perfect!"; jcol = C_WHITE;
+                    last_err_ms = dt; last_err_set = 1;
                     score += 2; pcount++; judged++; combo++; cur++;
                     beep(880, 50);
                 } else if (adt <= ep) {
                     jtext = (dt < 0) ? "EPerfect!" : "LPerfect!";
                     jcol = (dt < 0) ? C_BLUE : C_BRED;
+                    last_err_ms = dt; last_err_set = 1;
                     score += 1; judged++; combo++; cur++;
                     beep(740, 50);
                 } else if (adt <= e) {
                     jtext = (dt < 0) ? "Early!" : "Late!";
                     jcol = C_YELLOW;
+                    last_err_ms = dt; last_err_set = 1;
                     score += 1; judged++; combo++; cur++;
                     beep(520, 50);
                 } else {

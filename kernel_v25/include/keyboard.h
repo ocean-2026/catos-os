@@ -40,5 +40,8 @@ int  kb_getkey(void);
 /* Line mode used by the shell: echoes input, returns 1 on Enter with the
  * line copied into buf (NUL-terminated, max len-1 chars). */
 int  kb_readline(char *buf, int len);
+/* T52: same line reader but every printable key echoes '*' instead of the
+ * character -- for password entry.  Backspace erases one star. */
+int  kb_readline_masked(char *buf, int len);
 
 #endif

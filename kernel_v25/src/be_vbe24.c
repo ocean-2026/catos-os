@@ -252,24 +252,26 @@ static void resolve_colors(const con_cell_t *c, uint32_t *f, uint32_t *b) {
 
 static void draw_narrow(int ox, int oy, const con_cell_t *c,
                         uint32_t f, uint32_t b) {
+    /* #58: 7x15 inked box inside the 8x16 cell -> one blank pixel of
+     * letter/line spacing, same treatment as be_gfx. */
     fill(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 16; j++) {
+        for (int j = 0; j < 15; j++) {
             unsigned row = g[j >> 1];
             int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
-                if (dx >= 8) continue;
+                if (dx >= 7) continue;
                 put3(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 8)
+                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
                     put3(ox + dx + 1, oy + j, f);
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + 14, 8, 1, f);
-    if (c->attrs & CON_ATTR_STRIKE)    fill(ox, oy + 8, 8, 1, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + 15, 8, 1, f);
+    if (c->attrs & CON_ATTR_STRIKE)    fill(ox, oy + 10, 8, 1, f);
 }
 
 static void draw_wide(int ox, int oy, const con_cell_t *c,
@@ -304,7 +306,8 @@ static void v24_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void v24_set_cursor(int x, int y) { (void)x; (void)y; }
 static void v24_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    fill(x * 8, y * 16 + 15, 8, 1, fg_rgb & 0x00FFFFFFu);
+    /* #58: block cursor, lower half; render.c blinks it every 0.5 s */
+    fill(x * 8, y * 16 + 8, 8, 8, fg_rgb & 0x00FFFFFFu);
 }
 static void v24_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;          /* truecolour: no hardware CLUT */

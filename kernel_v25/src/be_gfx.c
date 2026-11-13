@@ -138,27 +138,32 @@ static void resolve_colors(const con_cell_t *c, uint8_t *f, uint8_t *b) {
     *f = fi; *b = bi;
 }
 
-/* ASCII: the 8x8 font is stretched to the unified 8x16 cell. */
+/* ASCII: the 8x8 font is stretched to the unified 8x16 cell.
+ * #58: the glyph is inked inside a 7x15 box so there is one blank pixel
+ * column/row between neighbours -- the VMware report called the old 8x16
+ * packing "too tight"; 7x15 + the 16 px cell gives an effective 9x16
+ * advance rhythm without changing the 8 px column grid (a real 9 px grid
+ * would break the CJK = 2 x ASCII invariant and every pan/scroll offset). */
 static void draw_narrow(int ox, int oy, const con_cell_t *c,
                         uint8_t f, uint8_t b) {
     fill_rect(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 16; j++) {
+        for (int j = 0; j < 15; j++) {
             unsigned row = g[j >> 1];
             int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 int dx = i + shift;
-                if (dx >= 8) continue;
+                if (dx >= 7) continue;
                 px(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 8)
+                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
                     px(ox + dx + 1, oy + j, f);
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 14, 8, f);
-    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 8, 8, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) hline(ox, oy + 15, 8, f);
+    if (c->attrs & CON_ATTR_STRIKE)    hline(ox, oy + 10, 8, f);
 }
 
 /* CJK: 16x16 glyph == 2 columns x 1 row of the 8x16 grid. */
@@ -193,7 +198,9 @@ static void gfx_draw_cell(int gx, int gy, const con_cell_t *c) {
 
 static void gfx_set_cursor(int x, int y) { (void)x; (void)y; }
 static void gfx_draw_cursor(int x, int y, uint32_t fg_rgb) {
-    hline(x * 8, y * CON_CELL_H + 15, 8, render_quantize(fg_rgb));
+    /* #58: a block cursor (lower half of the cell), not a 1 px underline;
+     * render.c flips it on/off with the 0.5 s blink phase. */
+    fill_rect(x * 8, y * CON_CELL_H + 8, 8, 8, render_quantize(fg_rgb));
 }
 
 static void gfx_diag(void) {

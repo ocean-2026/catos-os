@@ -123,7 +123,10 @@ static void paint(int x, int y) {
     if (be->sw_blink && (t.attrs & CON_ATTR_BLINK) && !blink_phase)
         t.attrs |= CON_ATTR_HIDDEN;      /* software blink: hide text */
     be->draw_cell(x, y, &t);
-    if (be->draw_cursor && x == cur_x && y == cur_y)
+    /* #58: the block cursor blinks with the same phase as the BLINK
+     * attribute -- the whole cell is repainted on every phase flip, so the
+     * cursor disappears and reappears without leaving a trail. */
+    if (be->draw_cursor && x == cur_x && y == cur_y && !blink_phase)
         be->draw_cursor(x, y, t.fg);
     render_busy--;
 }

@@ -119,6 +119,9 @@ static void cmd_help(void) {
         "  chmod OCT PATH | chown UID[:GID] PATH  (persistent /etc/acl)\n"
         "  uptime       seconds since boot + task count\n"
         "  top          live task monitor (CPU% per task, any key quits)\n"
+        "  jobs         list background jobs ('run X &') with pending log\n"
+        "  log TID      show a background job's captured output\n"
+        "  log -f TID   follow that job until it exits\n"
         "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
         "  -- audio (Sound Blaster 16, ISA) --\n"
         "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
@@ -384,6 +387,12 @@ static void cmd_text(void) {
     else if (r == CON_ENODEV) vga_write("text: backend unavailable\n");
     else if (r != 0)          vga_write("text: switch failed\n");
     else {
+        /* #57: leaving graphics mode restores the 16-colour VGA DAC and
+         * palette (be_text::enter does that), but the old graphics-era
+         * cells would still be repainted cell-by-cell.  Wipe the screen so
+         * the user gets a clean text console instead of a stale picture
+         * rendered in text-mode colours. */
+        vga_clear();
         con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
         vga_write("text: back to 80x25 text mode (CJK via dynamic font slots)\n");
     }
@@ -604,6 +613,8 @@ void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int u
         return;
     }
     if (bg) {
+        task_t *bt = task_by_tid(tid);
+        if (bt) bt->bg_mode = 1;      /* #59: capture stdout into the ring */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -683,6 +694,7 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
     if (out_pipe >= 0) kpipe_assign_out(tid, out_pipe);
     if (in_pipe  >= 0) kpipe_assign_in(tid, in_pipe);
     if (!fg) {
+        tt->bg_mode = 1;              /* #59: capture stdout into the ring */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -908,7 +920,86 @@ static void cmd_top(void) {
     vga_clear();
 }
 
-/* ---------- netdiag: dump NIC/driver state ---------- */
+/* ---------- #59: jobs / log -- background job output ---------- */
+static const char *job_state_name(int st) {
+    switch (st) {
+    case T_READY:      return "ready";
+    case T_RUNNING:    return "run";
+    case T_SLEEPING:   return "sleep";
+    case T_WAIT_KB:    return "waitkey";
+    case T_WAIT_CHILD: return "wait";
+    case T_ZOMBIE:     return "done";
+    default:           return "?";
+    }
+}
+
+static void cmd_jobs(void) {
+    int tid, state, uid, ring, found = 0;
+    uint32_t cpu, pages;
+    char nm[16];
+    vga_write("TID  STATE    NAME             LOG\n");
+    for (int slot = 1; slot < MAX_TASKS; slot++) {
+        if (!task_stat(slot, &tid, &cpu, &pages, &state, &uid, &ring,
+                       nm, sizeof(nm))) continue;
+        task_t *t = task_by_tid(tid);
+        if (!t || !t->bg_mode) continue;     /* background jobs only */
+        found = 1;
+        vga_write("  "); print_int(tid);
+        vga_write("   "); vga_write(job_state_name(state));
+        vga_write("    "); vga_write(nm);
+        vga_write("  "); print_int(task_log_pending(t));
+        vga_write("B\n");
+    }
+    if (!found) vga_write("no background jobs\n");
+}
+
+/* log TID      : dump everything the job has printed since the last drain
+ * log -f TID   : keep following until the job exits (like tail -f)
+ * Both drain the per-task ring, so a second `log TID` shows only new text. */
+static void cmd_log(char *arg) {
+    while (*arg == ' ') arg++;
+    int follow = 0;
+    if (arg[0] == '-' && arg[1] == 'f' && (arg[2] == ' ' || arg[2] == 0)) {
+        follow = 1; arg += 2;
+        while (*arg == ' ') arg++;
+    }
+    if (*arg < '0' || *arg > '9') {
+        vga_write("usage: log [-f] TID   (see `jobs` for TIDs)\n");
+        return;
+    }
+    int tid = 0;
+    while (*arg >= '0' && *arg <= '9') tid = tid * 10 + (*arg++ - '0');
+    task_t *t = task_by_tid(tid);
+    if (!t || t->state == T_UNUSED) { vga_write("log: no such task\n"); return; }
+    if (!t->bg_mode) {
+        vga_write("log: task "); print_int(tid);
+        vga_write(" is not a background job (its output went to the console)\n");
+        return;
+    }
+    char buf[161];
+    int idle = 0, printed = 0;
+    for (;;) {
+        uint32_t lost = 0;
+        int n = task_log_drain(t, buf, 160, &lost);
+        if (n > 0) {
+            vga_write_n(buf, n, 1);          /* keeps UTF-8 state across chunks */
+            printed += n;
+            idle = 0;
+            continue;
+        }
+        if (lost) {
+            vga_write("\n[log: "); print_int(lost);
+            vga_write(" bytes dropped (ring overflow)]\n");
+            lost = 0;
+        }
+        if (!follow) break;
+        t = task_by_tid(tid);
+        if (!t || t->state == T_UNUSED || t->state == T_ZOMBIE) break;
+        if (idle++ > 600) break;             /* ~60 s safety stop */
+        task_sleep_ticks(1);                 /* 100 ms */
+    }
+    if (printed) vga_putc('\n');
+}
 extern uint8_t net_mac[6];
 extern int net_ready;
 extern int netdbg_tx_calls, netdbg_tx_last, netdbg_rx_frames, netdbg_io_base;
@@ -921,6 +1012,8 @@ extern uint32_t netdbg_tx_word0, netdbg_rx_word0;
 extern uint32_t netdbg_desc_tx0(void), netdbg_desc_rx0(void);
 extern uint32_t netdbg_init_addr(void), netdbg_init_rxring(void), netdbg_init_txring(void);
 extern uint16_t netdbg_csr(int i);
+extern int net_fail_code;
+extern int net_env_vmware(void);
 static void cmd_netdiag(const char *arg) {
     (void)arg;
     vga_write("PCI bus 0: ");
@@ -934,6 +1027,15 @@ static void cmd_netdiag(const char *arg) {
     vga_write("net_ready="); print_int(net_ready); vga_write("  io_base=0x");
     print_hex((uint32_t)netdbg_io_base);
     vga_write("  width="); print_int(netdbg_io_width); vga_write("-bit\n");
+    vga_write("fail="); print_int(net_fail_code);
+    vga_write(" (0=ok 1=no-dev 2=bus-FF 3=mac 4=init)  env=");
+    vga_write(net_env_vmware() ? "VMware" : "QEMU/PC");
+    vga_write("  mac_state=");
+    if (net_mac[0]==0xFF && net_mac[1]==0xFF && net_mac[2]==0xFF &&
+        net_mac[3]==0xFF && net_mac[4]==0xFF && net_mac[5]==0xFF)
+        vga_write("OPEN-BUS");
+    else vga_write("valid");
+    vga_write("\n");
     vga_write("csr0=0x"); print_hex(netdbg_csr0); vga_write("\n");
     vga_write("mac="); print_hex((net_mac[0]<<8)|net_mac[1]); vga_write(":");
     print_hex((net_mac[2]<<8)|net_mac[3]); vga_write(":");
@@ -966,16 +1068,23 @@ static void net_why_down(void) {
     extern int netdbg_pci_count;
     extern uint16_t netdbg_pci_vend[8];
     extern uint16_t netdbg_pci_dev[8];
+    extern int net_fail_code;
+    extern int net_env_vmware(void);
     if (netdbg_pci_count == 0) {
-        vga_write(" (no PCI NIC; add -device pcnet)\n");
-        return;
-    }
-    for (int i = 0; i < netdbg_pci_count; i++)
-        if (netdbg_pci_vend[i] == 0x1022 && netdbg_pci_dev[i] == 0x2000) {
-            vga_write(" (PCnet found but init failed; run 'netdiag')\n");
-            return;
+        vga_write(" (no PCI devices at all)");
+    } else {
+        switch (net_fail_code) {
+        case 1: vga_write(" (no PCnet 1022:2000 on any bus)"); break;
+        case 2: vga_write(" (NIC registers read open-bus FF/00)"); break;
+        case 3: vga_write(" (MAC unreadable: device not answering)"); break;
+        case 4: vga_write(" (INIT/START did not latch)"); break;
+        default: vga_write(" (driver not initialised)"); break;
         }
-    vga_write(" (NIC on bus is not PCnet 1022:2000; use -device pcnet)\n");
+    }
+    if (net_env_vmware())
+        vga_write("; VMware guest -> set the VM network adapter to Intel E1000\n");
+    else
+        vga_write("; QEMU -> -device pcnet,netdev=n0\n");
 }
 
 /* ---------- curl: one-shot HTTP GET ---------- */
@@ -1564,12 +1673,20 @@ static void cmd_login(char *arg, int as_su) {
     char *argv[3];
     int argc = split_words(arg, argv, 3);
     const char *name = argc >= 1 ? argv[0] : "root";
-    const char *pw   = argc >= 2 ? argv[1] : "";
+    const char *pw   = argc >= 2 ? argv[1] : 0;
     user_rec_t *u = user_by_name(name);
     if (!u) { vga_write("login: no such user\n"); return; }
     if (u->uid == g_uid) { vga_write("already session user\n"); return; }
     int need_pw = u->passhash != 0;
     if (as_su && g_uid == UID_ROOT) need_pw = 0;      /* root may su freely */
+    /* T52: when no password was given on the command line, ask for it
+     * interactively and echo '*' per keystroke instead of the characters. */
+    char typed[64];
+    if (need_pw && !pw) {
+        vga_write("Password: ");
+        kb_readline_masked(typed, sizeof(typed));
+        pw = typed;
+    }
     if (need_pw && user_check_pw(u, pw) != 0) {
         vga_write("login: incorrect password\n");
         return;
@@ -1581,20 +1698,54 @@ static void cmd_login(char *arg, int as_su) {
     vga_write(")\n");
 }
 
-/* useradd NAME [UID [GID [CAPS_HEX]]] */
+/* useradd NAME [UID [GID [CAPS_HEX]]]
+ * With no CAPS_HEX argument the capability set is built interactively: one
+ * yes/no prompt per capability bit (T52).  `useradd NAME UID GID CAPS` keeps
+ * working for scripts and for the regression suite. */
 static void cmd_useradd(char *arg) {
     if (!session_is_admin()) { vga_write("useradd: permission denied\n"); return; }
     char *argv[5];
     int argc = split_words(arg, argv, 5);
     if (argc < 1) {
         vga_write("usage: useradd NAME [UID [GID [CAPS_HEX]]]\n");
+        vga_write("       with no CAPS_HEX the capability wizard starts\n");
         vga_write("       e.g. useradd guest 101 101 0   (no capabilities)\n");
         return;
     }
     const char *name = argv[0];
     int uid  = argc >= 2 ? atoi_(argv[1]) : 101;
     int gid  = argc >= 3 ? atoi_(argv[2]) : uid;
-    uint32_t caps = argc >= 4 ? hex32_(argv[3]) : 0;
+    uint32_t caps;
+    if (argc >= 4) {
+        caps = hex32_(argv[3]);
+    } else {
+        /* T52: interactive capability wizard, one question per bit */
+        static const struct { uint32_t bit; const char *q; } W[] = {
+            { CAP_NET,     "network (http/dns/udp/ping)" },
+            { CAP_KILL,    "kill other users' tasks" },
+            { CAP_FSADMIN, "filesystem admin (format/fsck)" },
+            { CAP_AUDIO,   "audio playback (SB16/ES1371)" },
+            { CAP_USERADM, "user admin (useradd/passwd/su)" },
+            { CAP_DEVICE,  "raw device + hw info access" },
+            { CAP_SYS,     "system (reboot/kernel introspection)" },
+        };
+        caps = 0;
+        vga_write("Capabilities for '"); vga_write(name); vga_write("' (y/N per item)\n");
+        char ans[8];
+        for (int i = 0; i < (int)(sizeof(W) / sizeof(W[0])); i++) {
+            char num[4]; num[0] = (char)('1' + i); num[1] = 0;
+            vga_write("  "); vga_write(num); vga_write(". allow ");
+            vga_write(W[i].q); vga_write("? [y/N] ");
+            kb_readline(ans, sizeof(ans));
+            if (ans[0] == 'y' || ans[0] == 'Y') {
+                caps |= W[i].bit;
+                vga_write("     -> granted\n");
+            } else {
+                vga_write("     -> denied\n");
+            }
+        }
+        vga_write("       caps=0x"); print_hex(caps); vga_write("\n");
+    }
     char home[48];
     int o = 0;
     for (const char *q = "/home/"; *q && o < 47; q++) home[o++] = *q;
@@ -1625,15 +1776,28 @@ static void cmd_passwd(char *arg) {
     char *argv[3];
     int argc = split_words(arg, argv, 3);
     const char *name = argc >= 1 ? argv[0] : (user_by_uid(g_uid) ? user_by_uid(g_uid)->name : 0);
-    if (!name) { vga_write("usage: passwd [NAME] NEWPW\n"); return; }
-    if (argc < 2) { vga_write("usage: passwd NAME NEWPW\n"); return; }
+    if (!name) { vga_write("usage: passwd [NAME] [NEWPW]\n"); return; }
     user_rec_t *u = user_by_name(name);
     if (!u) { vga_write("passwd: no such user\n"); return; }
     if (u->uid != g_uid && !session_is_admin()) {
         vga_write("passwd: permission denied\n");
         return;
     }
-    user_set_pw(name, argv[1]);
+    const char *pw;
+    char p1[64], p2[64];
+    if (argc >= 2) {
+        pw = argv[1];                        /* non-interactive form */
+    } else {
+        /* T52: interactive, no echo -- '*' per keystroke, retype check */
+        vga_write("New password for "); vga_write(u->name); vga_write(": ");
+        kb_readline_masked(p1, sizeof(p1));
+        vga_write("Retype new password: ");
+        kb_readline_masked(p2, sizeof(p2));
+        if (!p1[0]) { vga_write("passwd: empty password rejected\n"); return; }
+        if (strcmp_(p1, p2) != 0) { vga_write("passwd: passwords differ\n"); return; }
+        pw = p1;
+    }
+    user_set_pw(name, pw);
     if (user_save() != 0) vga_write("passwd: WARNING: could not persist\n");
     else vga_write("password set\n");
 }
@@ -1846,11 +2010,22 @@ static void net_boot_status(void) {
     extern int netdbg_pci_count;
     extern uint16_t netdbg_pci_vend[8];
     extern uint16_t netdbg_pci_dev[8];
+    extern int net_fail_code;
+    extern uint8_t net_mac[6];
+    extern int net_env_vmware(void);
     if (net_ready) {
-        vga_write("net: AMD PCnet-PCI up (10.0.2.15)\n");
+        vga_write("net: AMD PCnet-PCI up  mac=");
+        print_hex((net_mac[0]<<8)|net_mac[1]); vga_write(":");
+        print_hex((net_mac[2]<<8)|net_mac[3]); vga_write(":");
+        print_hex((net_mac[4]<<8)|net_mac[5]); vga_write("\n");
         return;
     }
-    vga_write("net: PCnet-PCI (1022:2000) NOT found; PCI bus 0: ");
+    vga_write("net: no usable NIC");
+    if (net_fail_code == 1) vga_write(" (no 1022:2000)");
+    else if (net_fail_code == 2) vga_write(" (open bus)");
+    else if (net_fail_code == 3) vga_write(" (MAC unreadable)");
+    else if (net_fail_code == 4) vga_write(" (INIT/START failed)");
+    vga_write("; PCI bus 0: ");
     if (netdbg_pci_count == 0) {
         vga_write("no devices\n");
     } else {
@@ -1861,7 +2036,11 @@ static void net_boot_status(void) {
         }
         vga_write("\n");
     }
-    vga_write("add to QEMU:  -netdev user,id=n0  -device pcnet,netdev=n0\n");
+    if (net_env_vmware())
+        vga_write("net: VMware guest -> set the VM NIC to Intel E1000\n"
+                  "     (PCnet path works only when the adapter is 'AMD PCnet')\n");
+    else
+        vga_write("net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0\n");
 }
 
 void shell_run(void) {
@@ -1977,6 +2156,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "chown"))       cmd_chown(arg);
         else if (!strcmp_(cmd, "ps"))          task_ps_print();
         else if (!strcmp_(cmd, "top"))         cmd_top();
+        else if (!strcmp_(cmd, "jobs"))        cmd_jobs();
+        else if (!strcmp_(cmd, "log"))         cmd_log(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo();
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
