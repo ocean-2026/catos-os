@@ -181,7 +181,14 @@ def type_text(s, text, wait=0.12):
                "/": "slash", "\n": "ret", "$": "shift-4",
                "_": "shift-minus", "*": "shift-8", "~": "shift-quote_t",
                "|": "shift-backslash", "!": "shift-1",
-               "?": "shift-dot", ":": "shift-semicolon"}
+               "?": "shift-dot", ":": "shift-semicolon",
+               "\\": "backslash", "@": "shift-2", "#": "shift-3",
+               "%": "shift-5", "^": "shift-6", "&": "shift-7",
+               "(": "shift-9", ")": "shift-0", "'": "apostrophe",
+               ";": "semicolon", ",": "comma", "[": "bracket_left",
+               "]": "bracket_right", "{": "shift-bracket_left",
+               "}": "shift-bracket_right", "<": "shift-comma",
+               ">": "shift-dot", "+": "shift-equal", "`": "quote_left"}
     for ch in text:
         k = special.get(ch)
         if k is None:

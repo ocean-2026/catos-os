@@ -82,3 +82,4 @@ CatOS[易错点] fsrec 回归必须带 -drive 硬盘（disk= 参数），无盘�
 CatOS[易错点] ata.c 各等待循环上限 10M 次迭代（每次 inb+yield，秒级）：底层超时返回错误后，上层必须检查返回值，否则"有界等待"叠加成用户眼中的死循环。
 CatOS[易错点] FAT32 驱动里 max_clus 是 FAT 表条目容量（fat_sz*512/4），不是数据区簇数；数据簇号上界必须用 vol_clusters+2，否则小卷上越界分配/统计翻倍（#118）。
 CatOS[易错点] 新增跨模块调用（如 keyboard.c 调 usb_service）必须同步 #include 头文件，否则隐式声明默认返回 int 编译不报错但留下 ABI 隐患。
+CatOS[易错点] qemu_driver.type_text 的特殊字符映射不全时（如反斜杠、@、#）字符会静默丢失——测试输入含符号的字符串前先确认映射表覆盖。

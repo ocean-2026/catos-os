@@ -2986,13 +2986,34 @@ static void prompt(void) {
     char pwd[160];
     fs_pwd(pwd, sizeof(pwd));
     user_rec_t *u = user_by_uid(g_uid);
+
+    /* v2.35: PS1 custom prompt (\u = user, \h = host, \w = cwd,
+     * \$ = $; anything else passes through).  Unset PS1 -> default. */
+    const char *ps1 = env_get_("PS1");
+    if (ps1 && *ps1) {
+        vga_set_fg(VGA_LIGHT_GREEN);
+        for (const char *p = ps1; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                if (*p == 'u' && u) vga_write(u->name);
+                else if (*p == 'h') vga_write("catos");
+                else if (*p == 'w') { vga_set_fg(VGA_LIGHT_BLUE); vga_write(pwd); vga_set_fg(VGA_LIGHT_GREEN); }
+                else if (*p == '$') vga_write(g_uid == UID_ROOT ? "#" : "$");
+                else { vga_write("\\"); vga_putc(*p); }
+            } else vga_putc(*p);
+        }
+        vga_write(" ");
+        vga_set_fg(VGA_WHITE);
+        return;
+    }
+
     vga_set_fg(VGA_LIGHT_GREEN);
     if (u) { vga_write(u->name); vga_write("@"); }
     vga_write("catos");
     vga_set_fg(VGA_LIGHT_BLUE);
     vga_write(":");
     vga_write(pwd);
-    vga_write("$ ");
+    vga_write(g_uid == UID_ROOT ? "# " : "$ ");
     vga_set_fg(VGA_WHITE);
 }
 

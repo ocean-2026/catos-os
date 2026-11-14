@@ -437,3 +437,13 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 清理 keyboard.c/intr.c 缺失 include 的隐式声明警告。
 - 实机验证：df 生命周期（写 40 行文件 used 274→275K）✓；ls -l 目录/
   单文件 ✓（-rw-r--r-- 312 hello.ce）。回归 fsrec/caps/user/qemu 全绿。
+
+## 二十三、v2.35 PS1 自定义提示符
+
+- prompt() 支持 PS1 环境变量：\u=用户 \h=主机 \w=当前目录 \$=提示符
+  （root 显 #）；未设置时默认提示符不变。export PS1=... 设置、
+  unset PS1 恢复。
+- 测试基建：qemu_driver.type_text 补全 20+ 特殊字符映射
+  （backslash/@/#+括号等），此前反斜杠与多数符号输入直接丢失。
+- 实机验证：PS1=\u@\h:\w\$ 后提示符 root@catos:/#；unset 恢复默认。
+- fsrec/user/qemu 回归全绿。
