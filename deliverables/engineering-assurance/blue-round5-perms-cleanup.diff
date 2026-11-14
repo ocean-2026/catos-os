@@ -1,0 +1,42 @@
+--- a/kernel_v25/extapp/perms.c
++++ b/kernel_v25/extapp/perms.c
+@@ -24,6 +24,19 @@
+  * semantics of /etc/passwd and /etc/acl are unchanged: useradd,
+  * passwd and chcaps still need to rewrite them.
+  *
++ * The middle tier reads "allowed" for root and "refused" for an
++ * unprivileged session, and that difference comes from the ACL, NOT
++ * from the read-only attribute: fs_perm_check() only lets an
++ * unprivileged user write inside the world-writable scratch whitelist
++ * (/home/ and /tmp/), while /etc is 0755 and owned by root.  The
++ * built-in apps are refused for the opposite reason -- they carry the
++ * FAT read-only attribute, which no uid can talk the FAT layer out of.
++ * Both refusals print -13, so the two tiers are told apart by their
++ * reason, not by their error code; this asymmetry is existing ACL
++ * semantics, not something the read-only attribute introduced.  For the
++ * same reason the cleanup below is refused for an unprivileged user
++ * ("demo cleanup: FAILED (rc=-13)"): there is nothing to delete there.
++ *
+  * Also demonstrates the new getuid() extension.
+  */
+ __attribute__((section(".text.ce_entry")))
+@@ -61,5 +74,19 @@
+     int r5 = api->mkdir("/bin/mine");
+     api->print_int(r5);
+     api->write(r5 == -13 ? "  EACCES (protected!)\n" : "\n");
++
++    /* Clean up: a demo must not leave anything behind in a system
++     * directory.  "Write it, then delete it" also demonstrates the
++     * second half of the middle tier -- a plain file in /etc is
++     * removable as well as writable, because it is NOT a built-in and
++     * therefore carries no read-only attribute.  If this delete ever
++     * fails for root, the read-only check has started rejecting plain
++     * files and has to be fixed. */
++    api->write("demo cleanup: ");
++    int r6 = api->file_delete("/etc/perm_demo.txt");
++    api->write(r6 == 0 ? "removed" : "FAILED");
++    api->write(" (rc=");
++    api->print_int(r6);
++    api->write(")\n");
+     return 0;
+ }

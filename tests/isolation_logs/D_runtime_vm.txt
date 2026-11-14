@@ -1,0 +1,187 @@
+=== D0: boot (port 4494 only, disk = copy) ===
+qemu = C:\qemu-portable\qemu-system-i386.exe
+iso  = C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos.iso
+disk = C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\tests\isolation_probe.img
+pid  = 12532 (started at 19:20:12)
+
+=== D1: live process command line (Win32_Process.CommandLine) ===
+$ powershell -NoProfile -NonInteractive -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; (Get-CimInstance Win32_Process -Filter "ProcessId=12532").CommandLine
+C:\qemu-portable\qemu-system-i386.exe -m 256 -no-reboot -net none -cdrom C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos.iso -boot order=d -display none -monitor tcp:127.0.0.1:4494,server,nowait -drive file=C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\tests\isolation_probe.img,format=raw,if=ide
+
+=== D2: TCP/UDP endpoints owned by pid 12532 (host view) ===
+-- TCP --
+$ powershell -NoProfile -NonInteractive -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-NetTCPConnection -OwningProcess 12532 -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,State | Format-Table -AutoSize | Out-String -Width 200
+
+LocalAddress LocalPort RemoteAddress       State
+------------ --------- -------------       -----
+127.0.0.1         4494 0.0.0.0            Listen
+127.0.0.1         4494 127.0.0.1     Established
+-- UDP --
+$ powershell -NoProfile -NonInteractive -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-NetUDPEndpoint -OwningProcess 12532 -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort | Format-Table -AutoSize | Out-String -Width 200
+-- netstat -ano (grep pid) --
+$ powershell -NoProfile -NonInteractive -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; netstat -ano | Select-String -Pattern '\s12532$'
+
+  TCP    127.0.0.1:4494         0.0.0.0:0              LISTENING       12532
+  TCP    127.0.0.1:4494         127.0.0.1:63789        ESTABLISHED     12532
+-- listener on the monitor port --
+$ powershell -NoProfile -NonInteractive -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-NetTCPConnection -LocalPort 4494 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess | Out-String -Width 200
+
+LocalAddress LocalPort OwningProcess
+------------ --------- -------------
+127.0.0.1         4494         12532
+
+=== D3: QEMU monitor view (info pci / network / usernet / chardev) ===
+---- info pci ----
+QEMU 11.1.0 monitor - type 'help' for more information
+(qemu) i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo p[K[D[D[D[D[D[Dinfo pc[K[D[D[D[D[D[D[Dinfo pci[K
+  Bus  0, device   0, function 0:
+    Host bridge: PCI device 8086:1237
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device   1, function 0:
+    ISA bridge: PCI device 8086:7000
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device   1, function 1:
+    IDE controller: PCI device 8086:7010
+      PCI subsystem 1af4:1100
+      BAR4: I/O at 0xc000 [0xc00f]
+      id ""
+  Bus  0, device   1, function 3:
+    Bridge: PCI device 8086:7113
+      PCI subsystem 1af4:1100
+      IRQ 9, pin A
+      id ""
+  Bus  0, device   2, function 0:
+    VGA controller: PCI device 1234:1111
+      PCI subsystem 1af4:1100
+      BAR0: 32 bit prefetchable memory at 0xfd000000 [0xfdffffff]
+      BAR2: 32 bit memory at 0xfebf0000 [0xfebf0fff]
+      BAR6: 32 bit memory (not mapped)
+      id ""
+(qemu)
+---- info network ----
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo n[K[D[D[D[D[D[Dinfo ne[K[D[D[D[D[D[D[Dinfo net[K[D[D[D[D[D[D[D[Dinfo netw[K[D[D[D[D[D[D[D[D[Dinfo netwo[K[D[D[D[D[D[D[D[D[D[Dinfo networ[K[D[D[D[D[D[D[D[D[D[D[Dinfo network[K
+(qemu)
+---- info usernet ----
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo u[K[D[D[D[D[D[Dinfo us[K[D[D[D[D[D[D[Dinfo use[K[D[D[D[D[D[D[D[Dinfo user[K[D[D[D[D[D[D[D[D[Dinfo usern[K[D[D[D[D[D[D[D[D[D[Dinfo userne[K[D[D[D[D[D[D[D[D[D[D[Dinfo usernet[K
+(qemu)
+---- info chardev ----
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo c[K[D[D[D[D[D[Dinfo ch[K[D[D[D[D[D[D[Dinfo cha[K[D[D[D[D[D[D[D[Dinfo char[K[D[D[D[D[D[D[D[D[Dinfo chard[K[D[D[D[D[D[D[D[D[D[Dinfo charde[K[D[D[D[D[D[D[D[D[D[D[Dinfo chardev[K
+parallel0: filename=vc
+compat_monitor0: filename=tcp:127.0.0.1:4494,server=on <-> 127.0.0.1:63789
+serial0: filename=vc
+(qemu)
+
+=== D4: guest-side probes ===
+shell prompt reached: True (15.7s)
+---- guest: netdiag ----
+root@catos:/$ netdiag
+PCI bus 0: vend=8086 dev=1237  vend=8086 dev=7000  vend=8086 dev=7010  vend=8086
+ dev=7113  vend=1234 dev=1111
+net_ready=0  io_base=0x0  width=0-bit
+fail=1 (0=ok 1=no-dev 2=bus-FF 3=mac 4=init)  env=QEMU/PC  mac_state=valid
+csr0=0x0
+mac=0:0:0
+tx_calls=0 tx_last=0 rx_frames=0
+tx_word0=0x0 rx_word0=0x0
+desc_tx0=0x0 desc_rx0=0x0
+init@0x500000 rxr=0x0 txr=0x0
+XMTRC=65535 CXDA=0xFFFFFFFF RL/TL=65535/65535
+csr0_now=0xFFFF csr15(mode)=FFFF POLL=65535
+IADR=0xFFFFFFFF csr6=FFFF XMTRC=65535
+init_rcvrl=0 init_xmtrl=0
+root@catos:/$
+
+
+
+
+
+
+
+
+
+---- guest: run /bin/netinfo.ce ----
+root@catos:/$ run /bin/netinfo.ce
+=== CatOS netinfo ===
+network: no network card found (add -device pcnet)
+[task 1 'netinfo' exit(0)]
+root@catos:/$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---- guest: touch /ISOPROBE.TXT ----
+root@catos:/$ touch /ISOPROBE.TXT
+root@catos:/$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---- guest: ls / ----
+root@catos:/$ ls /
+[DIR ] ./
+[DIR ] ../
+[DIR ] dev/
+[DIR ] etc/
+[DIR ] bin/
+[DIR ] sbin/
+[DIR ] lib/
+[DIR ] usr/
+[DIR ] home/
+[DIR ] root/
+[DIR ] tmp/
+[DIR ] var/
+[DIR ] proc/
+[DIR ] sys/
+[DIR ] mnt/
+[DIR ] boot/
+[DIR ] appdevel/
+[FILE] isoprobe.txt  (0 bytes)
+--- 18 entries ---
+root@catos:/$
+
+
+
+
+
+=== D6: guest shutdown ===
+monitor socket closed by quit (ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。) -- expected
+qemu exited rc=0 after HMP quit (clean, cache flushed)
+
+=== D7: after kill_qemu(proc) -- pid 12532 alive-count = 0 (0 = gone) ===

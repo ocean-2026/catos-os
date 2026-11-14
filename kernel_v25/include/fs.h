@@ -63,6 +63,9 @@ int        fs_get_line(const fs_entry_t *f, int idx, char *out, int outlen);
 int        fs_delete_line(fs_entry_t *f, int idx);           /* 0 ok, -1 bad idx */
 void       fs_clear_file(fs_entry_t *f);
 int        fs_save(fs_entry_t *f);        /* write memory view back to disk */
+/* is the file read-only (FAT_ATTR_RO, e.g. a built-in app)?
+ * 1 = yes, 0 = no or absent */
+int        fs_is_readonly(const char *path);
 
 /* raw (non-editor) access, used by the CE loader and CE system calls */
 typedef void (*fs_foreach_cb)(int is_dir, const char *name,
@@ -74,6 +77,13 @@ int  fs_write_text(const char *path, const char *data, uint32_t size);
 /* raw write of arbitrary-size data (no FS_DATA_MAX limit); skips if the
  * file already exists.  Used to install built-in .ce apps and docs. */
 int  fs_write_raw(const char *path, const char *data, uint32_t size);
+/* same as fs_write_raw(), but the file is created with `attr` (the
+ * built-in apps are installed FAT_ATTR_FILE | FAT_ATTR_RO) */
+int  fs_write_raw_attr(const char *path, const char *data, uint32_t size,
+                       uint8_t attr);
+/* set the FAT attribute byte of an existing file; the content is left
+ * untouched (used to seal the built-in apps on older volumes) */
+int  fs_set_attr(const char *path, uint8_t attr);
 /* v2.5 big files: offset read, mode write (0=truncate, 1=append), delete */
 int  fs_read_at(const char *path, char *buf, int offset, int max);
 int  fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mode);

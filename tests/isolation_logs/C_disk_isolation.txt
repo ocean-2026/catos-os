@@ -1,0 +1,19 @@
+=== source image (MUST NOT CHANGE) ===
+path      : C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos_disk.img
+sha256 bef: 9361a29db20fc428214704de8417505bd1513dbec239d44830f756711d62490b
+sha256 aft: 9361a29db20fc428214704de8417505bd1513dbec239d44830f756711d62490b
+identical : True
+
+=== guest-visible copy (expected to CHANGE) ===
+path      : C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\tests\isolation_probe.img
+sha256 bef: 9361a29db20fc428214704de8417505bd1513dbec239d44830f756711d62490b
+sha256 aft: 2acf143efa1ce82d869de9f1ecc462af0343d35d97377ff0a2af73f7b6ccb2d2
+changed   : True
+
+$ stat -c %n size=%s mtime=%y C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos_disk.img
+C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos_disk.img size=67108864 mtime=2026-11-13 18:43:15.610831700 +0800
+
+
+=== cleanup 2026-11-13 19:21 ===
+artifact deleted to reclaim 64 MB; hashes above are the evidence
+rerun recreates it automatically; pass --keep-probe to retain it

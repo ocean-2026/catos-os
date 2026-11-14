@@ -1,0 +1,459 @@
+--- a/kernel_v25/src/fat.c
++++ b/kernel_v25/src/fat.c
+@@ -534,18 +534,55 @@
+     return o > 0;
+ }
+ 
+-/* full-name lookup: exact 8.3 first (legacy layout), then LFN match.
+- * On success fills out and the *actual* 11-byte short name of the hit. */
++/* fill a fat_dirent_t from the raw 32 bytes of a directory entry.
++ * Only the fields the callers use are copied (attr, first cluster,
++ * size); the 8.3 name is kept separately in the out_n83 buffer. */
++static void dent_fill(fat_dirent_t *e, const uint8_t *b) {
++    e->attr = b[11];
++    /* clus_hi @20..21 (LE u16), clus_lo @26..27 (LE u16) */
++    e->cluster = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
++               | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
++    e->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
++            | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
++}
++
++/* Full-name lookup: VFAT semantics -- a long-name match always beats a
++ * match on the truncated 8.3 name.
++ *
++ * The old order was the opposite (exact 8.3 first, long name as the
++ * fallback), and that had two consequences:
++ *
++ *   - the same user-visible name resolved to DIFFERENT files depending
++ *     on how the volume was built.  The kernel installer stores
++ *     "allocprobe.ce" as the alias "ALLOCPRO~1.CE" plus a long-name
++ *     entry, while the host-side disk builder (build/mkdisk.py) stores
++ *     it as the plain 8.3 name "ALLOCPRO.CE"; before, "allocprobe.ce"
++ *     hit the long-name entry on a kernel-formatted volume but the 8.3
++ *     entry on a host-built image.  fat_delete_name() already resolved
++ *     per entry (its own 8.3 name first, then its own long name), so
++ *     the two resolvers could disagree about which file a name means.
++ *   - a user could create a plain 8.3 file whose name is the truncated
++ *     form of a built-in (e.g. "/bin/allocpro.ce" next to the built-in
++ *     "/bin/allocprobe.ce").  The 8.3 lookup matched THAT file first,
++ *     so `run /bin/allocprobe.ce` executed the user's file instead of
++ *     the built-in -- the same code-replacement primitive the read-only
++ *     attribute (H8) was meant to close.
++ *
++ * One directory walk collects both candidates: the long name wins, the
++ * exact 8.3 name is the fallback (all a volume without long names ever
++ * needs).  A single walk also keeps the I/O at one pass per lookup --
++ * looking the long name up first and the 8.3 name up afterwards would
++ * read every directory cluster twice for the common names that have no
++ * long form.
++ */
+ int fat_lookup_name(uint32_t dirclus, const char *name,
+                     fat_dirent_t *out, uint8_t out_n83[11]) {
+     uint8_t n83[11];
+     fat_name83(name, n83);
+     fat_dirent_t e;
+-    if (fat_lookup(dirclus, n83, &e) == 0) {
+-        if (out) *out = e;
+-        if (out_n83) memcpy_(out_n83, n83, 11);
+-        return 0;
+-    }
++    uint8_t short_hit[11];
++    int have_short = 0;
++
+     /* LFN walk: single pass, accumulate attr-0x0F windows */
+     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+     struct lfn_acc L;
+@@ -555,25 +592,24 @@
+         if (fat_read_cluster(c, buf) != 0) break;
+         for (int i = 0; i < per; i++) {
+             uint8_t *b = buf + i * DENT_SIZE;
+-            if (b[0] == 0x00) goto notfound;
++            if (b[0] == 0x00) goto done;           /* end of directory */
+             if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
+             if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
+             if (b[11] & 0x08) continue;               /* volume label */
++
++            /* the exact 8.3 name: remember it, but keep walking -- a
++             * long name further down the directory takes precedence */
++            if (!have_short && name83_eq(b, n83)) {
++                have_short = 1;
++                memcpy_(short_hit, b, 11);
++                dent_fill(&e, b);
++            }
+             /* short entry: does the accumulated LFN match? */
+             char lfn[FS_LFN_MAX];
+             if (lfn_of_short(&L, b, lfn, sizeof(lfn)) &&
+                 name_ieq_u16(name, L.ucs, L.len)) {
+                 lfn_acc_reset(&L);
+-                if (out) {
+-                    out->attr = b[11];
+-                    /* clus_hi @20..21 (LE u16), clus_lo @26..27 */
+-                    out->cluster = ((uint32_t)b[20] << 16)
+-                                 | ((uint32_t)b[21] << 24)
+-                                 | (uint32_t)b[26]
+-                                 | ((uint32_t)b[27] << 8);
+-                    out->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
+-                              | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
+-                }
++                if (out) dent_fill(out, b);
+                 if (out_n83) memcpy_(out_n83, b, 11);
+                 return 0;
+             }
+@@ -583,8 +619,11 @@
+         if (n == FAT_EOC) break;
+         c = n;
+     }
+-notfound:
+-    return -1;
++done:
++    if (!have_short) return -1;
++    if (out) *out = e;
++    if (out_n83) memcpy_(out_n83, short_hit, 11);
++    return 0;
+ }
+ 
+ /* unique BODY~N.EXT alias for a name that needs an LFN */
+--- a/kernel_v25/src/fs.c
++++ b/kernel_v25/src/fs.c
+@@ -431,6 +431,14 @@
+ 
+ int fs_save(fs_entry_t *f) {
+     if (!fs_ready || !f) return -1;
++    /* A read-only file (the built-in apps) must not be written back.
++     * fs_save() writes through fat_write_file() directly and is the
++     * last step of the editor path (edit + ^O), so without this check
++     * the shell's editor could still replace a built-in -- the very
++     * hole the FAT read-only attribute was added to close (H8). */
++    fat_dirent_t e;
++    if (fat_lookup(f->parent_cluster, f->name83, &e) == 0 &&
++        (e.attr & FAT_ATTR_RO)) return -1;
+     if (fat_write_file(f->cluster, f->data, f->size) != 0) return -1;
+     fat_update_entry(f->parent_cluster, f->name83, f->cluster, f->size);
+     return 0;
+@@ -529,6 +537,12 @@
+     return (e.attr & FAT_ATTR_RO) ? 1 : 0;
+ }
+ 
++/* public wrapper: is the file at `path` read-only (FAT_ATTR_RO)?
++ * 1 = yes, 0 = no (or the file does not exist). */
++int fs_is_readonly(const char *path) {
++    return fs_path_readonly(path);
++}
++
+ int fs_write_text(const char *path, const char *data, uint32_t size) {
+     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
+     if (size >= FS_DATA_MAX) return -1;          /* room for the NUL */
+--- a/kernel_v25/include/fs.h
++++ b/kernel_v25/include/fs.h
+@@ -63,6 +63,9 @@
+ int        fs_delete_line(fs_entry_t *f, int idx);           /* 0 ok, -1 bad idx */
+ void       fs_clear_file(fs_entry_t *f);
+ int        fs_save(fs_entry_t *f);        /* write memory view back to disk */
++/* is the file read-only (FAT_ATTR_RO, e.g. a built-in app)?
++ * 1 = yes, 0 = no or absent */
++int        fs_is_readonly(const char *path);
+ 
+ /* raw (non-editor) access, used by the CE loader and CE system calls */
+ typedef void (*fs_foreach_cb)(int is_dir, const char *name,
+--- a/kernel_v25/src/shell.c
++++ b/kernel_v25/src/shell.c
+@@ -1480,6 +1480,16 @@
+             return;
+         }
+     }
++    /* The built-in apps are installed read-only (H8).  Refuse to open
++     * them here instead of letting the user type into a buffer that can
++     * never be written back -- the editor's save path goes straight to
++     * fat_write_file(). */
++    if (fs_is_readonly(arg)) {
++        vga_write("edit: ");
++        vga_write(arg);
++        vga_write(" is read-only\n");
++        return;
++    }
+     fs_entry_t *f = fs_create_file(arg);
+     if (!f) { vga_write("edit: cannot create/open file\n"); return; }
+ 
+@@ -1977,7 +1987,11 @@
+     if (fs_perm_check(src, g_uid, g_gid, PERM_READ) != 0) return -13;
+     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
+     static char chunk[16384];     /* ring0 single shell: no reentry */
+-    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
++    /* -13 (EACCES) means the target exists but is read-only (a built-in
++     * app); pass it through so the shell can say "permission denied"
++     * instead of the misleading "cannot create target" (H8). */
++    int cr = fs_write_raw_mode(dst, "", 0, 0);
++    if (cr != 0) return (cr == -13) ? -13 : -2;
+     acl_set(dst, g_uid, g_gid, 0644);                       /* creator owns it */
+     uint32_t off = 0;
+     while (off < s) {
+--- a/kernel_v25/include/ce_abi.h
++++ b/kernel_v25/include/ce_abi.h
+@@ -141,7 +141,11 @@
+     int    (*file_write)(const char *path, const char *data, int size, int mode); /* 40 */
+     /*   mode 0 = truncate-replace, 1 = append; size <= 16384 per call;
+      *   0 = ok, negative = error */
+-    int    (*file_delete)(const char *path);        /* 41 0 ok, -1 noent, -2 EACCES */
++    int    (*file_delete)(const char *path);        /* 41 0 ok, -1 noent,
++                                                   *    -13 EACCES (POSIX EACCES
++                                                   *    = 13; the read-only
++                                                   *    built-in apps are
++                                                   *    refused with this) */
+     int    (*pipe_create)(void);                    /* 42 handle >= 0, -1 if full */
+     int    (*pipe_write)(int h, const char *data, int len);   /* 43 blocking; 0 ok */
+     int    (*pipe_read)(int h, char *buf, int max);           /* 44 blocking; bytes, 0 EOF */
+--- a/kernel_v25/extapp/perms.c
++++ b/kernel_v25/extapp/perms.c
+@@ -6,7 +6,14 @@
+ /* perms.ce - security pillar proof: runs as uid 100 (user) by default.
+  *   perms              -> tries to overwrite system files (must FAIL with
+  *                         -13 EACCES), then writes /home/user.txt (OK)
+- *   sudo perms         -> same writes as root (must SUCCEED)
++ *   sudo perms         -> the same writes as root.  The writes to the
++ *                         system files are refused HERE TOO, and that is
++ *                         the point: the built-in apps are installed
++ *                         read-only (FAT read-only attribute), so even
++ *                         root cannot replace the code in /bin -- that
++ *                         was the persistent code-replacement hole the
++ *                         read-only attribute closed (H8).  Only the
++ *                         /home write succeeds.
+  * Also demonstrates the new getuid() extension.
+  */
+ __attribute__((section(".text.ce_entry")))
+--- /dev/null
++++ b/tests/ro_builtin_regress.py
+@@ -0,0 +1,234 @@
++#!/usr/bin/env python3
++"""ro_builtin_regress.py -- on-metal acceptance for the read-only built-ins.
++
++Two dedicated cases for the H8 fix (the kernel's built-in apps must not be
++replaceable) and for the LFN-first name resolution it depends on:
++
++  TC-1  lfn-shadow   A plain 8.3 file whose name is the TRUNCATED form of
++                     a built-in ("/bin/allocpro.ce" for the built-in
++                     "/bin/allocprobe.ce") must not shadow the built-in:
++                     `run /bin/allocprobe.ce` still has to run the
++                     built-in.  Before the lookup was fixed to prefer the
++                     long name, the exact 8.3 name won -- so the user's
++                     file was executed instead, which is the same
++                     code-replacement primitive the read-only attribute
++                     was meant to close.
++
++  TC-2  ro-builtin   No shell path may replace or delete a built-in:
++                       cp    -> "cp: permission denied"
++                       edit  -> "edit: ... is read-only"
++                       rm    -> "rm: permission denied (read-only file)"
++                     and the built-in must still run afterwards, which
++                     proves the code on disk was not replaced.
++
++Both cases drive the SHELL only, so they need no new CE app and no
++rebuilt .ce image.
++
++The screen is read through the QEMU monitor's physical-memory dump of the
++VGA text buffer ("xp /4000 0xb8000") instead of being OCR-ed from a
++screenshot -- the frame buffer holds (char, attribute) pairs, so the
++character is every second byte.
++
++The QEMU lifecycle lives in tests/qemu_driver.py.  Two rules matter on
++a shared machine:
++  * the guest is torn down BY PID, never by image name;
++  * the shell's screen-clear command is `clear`, not `cls`.
++
++usage:
++  python tests/ro_builtin_regress.py <catos.iso> [--qemu PATH] [--keep]
++"""
++import os
++import subprocess
++import socket
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from qemu_driver import (clear_screen, cmd, find_qemu, kill_qemu,  # noqa: E402
++                          read_screen, screen_text, sendkey, type_text,
++                          wait_for_prompt)
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++MONITOR = ("127.0.0.1", 4444)
++
++
++def boot(iso, qemu, disk, port=None):
++    """Start the guest and connect to its monitor.
++
++    Returns (proc, sock): the caller must keep `proc` and hand it to
++    kill_qemu() so that no OTHER qemu on this machine is disturbed.
++    """
++    kill_qemu()                 # no-op: nothing of ours is running yet
++    time.sleep(1)
++    mon_port = port or MONITOR[1]
++    cmdline = [qemu, "-m", "256", "-no-reboot", "-net", "none",
++               "-cdrom", iso, "-boot", "order=d",
++               "-display", "none",
++               "-monitor", "tcp:%s:%d,server,nowait" % (MONITOR[0], mon_port)]
++    if disk:
++        cmdline += ["-drive", "file=%s,format=raw,if=ide" % disk]
++    print("boot:", " ".join(cmdline))
++    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
++                            stderr=subprocess.DEVNULL)
++    for _ in range(20):
++        try:
++            return proc, socket.create_connection((MONITOR[0], mon_port),
++                                                   timeout=5)
++        except OSError:
++            time.sleep(2)
++    kill_qemu(proc)
++    raise RuntimeError("could not reach the QEMU monitor")
++
++
++def main():
++    args = sys.argv[1:]
++    iso = None
++    if args and not args[0].startswith("--"):
++        iso = args.pop(0)
++    qemu = None
++    if "--qemu" in args:
++        i = args.index("--qemu")
++        if i + 1 < len(args):
++            qemu = args.pop(i + 1)
++            args.pop(i)
++    # --port / --disk let two drivers run concurrently on one host
++    # without fighting over the monitor port or the FAT volume image.
++    port = MONITOR[1]
++    if "--port" in args:
++        i = args.index("--port")
++        if i + 1 < len(args):
++            port = int(args.pop(i + 1))
++            args.pop(i)
++    disk_override = None
++    if "--disk" in args:
++        i = args.index("--disk")
++        if i + 1 < len(args):
++            disk_override = args.pop(i + 1)
++            args.pop(i)
++    if iso is None:
++        iso = os.path.join(os.path.dirname(HERE), "kernel_v25", "catos.iso")
++    iso = os.path.abspath(iso)
++    qemu = find_qemu(qemu)
++    if not qemu:
++        print("qemu-system-i386 not found")
++        return 2
++
++    disk = os.path.abspath(disk_override or
++                           os.path.join(HERE, "qemu_disk.img"))
++    if not os.path.exists(disk):
++        with open(disk, "wb") as fh:
++            fh.truncate(64 * 1024 * 1024)
++
++    proc, s = boot(iso, qemu, disk, port=port)
++    print("monitor connected")
++    # Wait for the shell instead of sleeping a fixed 25 s: a command
++    # typed before the shell is listening is dropped, and a dropped
++    # `format` leaves the disk image blank with no visible error.
++    if not wait_for_prompt(s):
++        print("FATAL: shell prompt never appeared")
++        kill_qemu(proc)
++        return 3
++
++    results = []
++
++    def step(name, fn):
++        try:
++            ok, note = fn()
++            results.append((name, ok, note))
++            print("%-4s %-20s %s" % ("PASS" if ok else "FAIL", name, note))
++        except Exception as e:
++            results.append((name, False, str(e)))
++            print("%-4s %-20s %s" % ("ERR ", name, e))
++
++    def do(line, wait=1.5):
++        type_text(s, line)
++        sendkey(s, "ret", wait)
++
++    def clear():
++        # `clear`, not `cls`: the CatOS shell has no `cls` command, so
++        # using it leaves the previous screen contents in place and a
++        # later assertion can match stale text.
++        clear_screen(s, 1.0)
++
++    def step_format():
++        clear()
++        do("format", 1.0)
++        sendkey(s, "y", 0.4)
++        sendkey(s, "ret", 10.0)          # fs_format(64 MiB) + install
++        return True, "formatted"
++
++    def step_lfn_shadow():
++        """TC-1: a plain 8.3 file must not shadow a built-in app."""
++        clear()
++        # "allocprobe.ce" is stored as the alias "ALLOCPRO~1.CE" plus a
++        # long-name entry on a kernel-formatted volume, so the plain 8.3
++        # name "allocpro.ce" is a DIFFERENT entry and can be created.
++        # (On a host-built disk image the built-in IS that 8.3 entry, so
++        # the cp is refused instead -- both outcomes must leave the
++        # built-in runnable.)
++        do("cp /bin/hello.ce /bin/allocpro.ce", 2.0)
++        clear()
++        do("run /bin/allocprobe.ce", 6.0)
++        txt = screen_text(s)
++        ran_builtin = "ALLOCPROBE" in txt
++        ran_shadow = "hello from ce!" in txt.lower()
++        ok = ran_builtin and not ran_shadow
++        return ok, "builtin=%s shadow=%s" % (ran_builtin, ran_shadow)
++
++    def step_ro_builtin():
++        """TC-2: no shell path may replace or delete a built-in."""
++        detail = []
++        ok = True
++
++        clear()
++        do("cp /bin/hello.ce /tmp/hello.copy", 2.0)
++        clear()
++        do("cp /tmp/hello.copy /bin/hello.ce", 2.0)
++        t = screen_text(s).lower()
++        cp_refused = "permission denied" in t
++        detail.append("cp=%s" % cp_refused)
++        ok = ok and cp_refused
++
++        clear()
++        do("edit /bin/hello.ce", 2.0)
++        # if the guard is missing the editor opens and blocks the shell;
++        # ^X leaves it again so the run can continue
++        sendkey(s, "ctrl-x", 1.0)
++        t = screen_text(s).lower()
++        # the editor's title row is "CatOS nano ..."; the refusal is
++        # "edit: <path> is read-only"
++        ed_refused = "read-only" in t and "nano" not in t
++        detail.append("edit=%s" % ed_refused)
++        ok = ok and ed_refused
++
++        clear()
++        do("rm /bin/hello.ce", 2.0)
++        t = screen_text(s).lower()
++        rm_refused = "read-only" in t
++        detail.append("rm=%s" % rm_refused)
++        ok = ok and rm_refused
++
++        clear()
++        do("run /bin/hello.ce", 6.0)
++        t = screen_text(s).lower()
++        still_runs = "hello from ce!" in t
++        detail.append("runs=%s" % still_runs)
++        ok = ok and still_runs
++
++        return ok, " ".join(detail)
++
++    step("format", step_format)
++    step("lfn-shadow", step_lfn_shadow)
++    step("ro-builtin", step_ro_builtin)
++
++    if "--keep" not in args:
++        kill_qemu(proc)
++    fails = [r for r in results if not r[1]]
++    print("\nsteps=%d ok=%d fail=%d" % (len(results),
++                                        len(results) - len(fails), len(fails)))
++    return 0 if not fails else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
++

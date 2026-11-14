@@ -1,0 +1,17 @@
+=== A3: AST scan -- real process-spawn calls in 39 python files ===
+  scanned 39 process-spawn call sites; taskkill /IM executed: 0
+
+=== A4: raw token scan over 42 scripts (not docs, not this verifier) ===
+  tests\gfx24_regress.py:20  is parsed.  Kill by PID only -- never taskkill /IM (shared machine).  <<taskkill /IM>>
+  tests\heap_regress.py:23  `taskkill /IM qemu-system-i386.exe` also kills the guests of other  <<taskkill /IM>>
+  tests\qa_probe_final.py:24  RENAMED COPY, so a `taskkill /IM qemu-system-i386.exe` by another  <<taskkill /IM>>
+  tests\qemu_driver.py:9  subprocess.run(["taskkill", "/F", "/IM", "qemu-system-i386.exe"])  <<taskkill /IM>>
+  tests\qemu_driver.py:72  `taskkill /IM qemu-system-i386.exe` kills every QEMU on the machine,  <<taskkill /IM>>
+  tests\qemu_regress.py:24  A global `taskkill /IM qemu-system-i386.exe` also kills the guests of  <<taskkill /IM>>
+  tests\qemu_regress.py:60  `taskkill /IM qemu-system-i386.exe` kills every QEMU on the machine,  <<taskkill /IM>>
+  tests\security_regress.py:19  guest is killed by PID (never `taskkill /IM`, which kills other guests).  <<taskkill /IM>>
+  tests\svga24_regress.py:16  Kill by PID only -- never taskkill /IM (shared machine).  <<taskkill /IM>>
+  (qemu_driver.py:9 docstring is prose, not code -- A3's AST pass is authoritative)
+
+=== A5: every -net form in QEMU launch scripts ===
+  -net none    5 site(s): tests\crash_attack.py:5, tests\crash_attack.py:112, tests\node48_qemu_test.py:42, tests\probe_ps2.py:13, tests\regression_after_fix.py:43

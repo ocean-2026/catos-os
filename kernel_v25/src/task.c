@@ -392,6 +392,23 @@ void task_exit_current(int code) {
 int task_kill(int tid, int by_uid) {
     task_t *t = task_by_tid(tid);
     if (!t || t == cur_task) return -1;
+    /* ring3 code may never kill a ring0 task.  TID 0 is the shell -- it
+     * IS the console loop (shell_run() never returns), and every CE spawned
+     * from it inherits UID_ROOT, so the uid gate below was wide open:
+     * api->kill(0) from an ordinary program ran task_cleanup() on the
+     * shell, whose slot then went T_UNUSED with nothing to respawn it.
+     * The machine kept ticking but the prompt was gone for good -- the
+     * cheapest possible denial of service, no kernel fault needed.
+     * Stated as a privilege boundary, not a tid blacklist: ring0 is the
+     * layer the user cannot preempt (sched_timer_tick only switches tasks
+     * when the interrupted frame is ring3, i.e. (f->cs & 3) == 3), so it
+     * must not be killable from ring3 either, and any future kernel task
+     * is covered automatically.
+     * Ring0 callers are unaffected: the shell's own `kill TID` command
+     * and its redirect-failure cleanup keep working, and same-uid kills
+     * between ring3 tasks stay legal (POSIX semantics, and orphaning a
+     * ring3 child is harmless -- maybe_autoreap reaps it). */
+    if (t->ring0 && !cur_task->ring0) return -2;    /* EPERM: kernel task */
     /* v2.13: root, the owner, or a caller with CAP_KILL */
     if (by_uid != UID_ROOT && t->uid != by_uid &&
         !(user_caps_of(by_uid) & CAP_KILL)) return -2;  /* not yours */
@@ -822,6 +839,18 @@ static int heap_vma_init(task_t *t) {
 }
 
 static void *sys_alloc(task_t *t, uint32_t size) {
+    /* Reject anything the arena could never satisfy, BEFORE the 8-byte
+     * round-up.  (size + 7) wraps for size in 0xFFFFFFF1..0xFFFFFFFF:
+     * alloc(0xFFFFFFFF) used to collapse to size 0, which "fits" the
+     * first free block, so the carve handed back rest = h + 8 -- the
+     * freelist's own header -- as the payload.  Eight attacker bytes
+     * there forged {size,next} for the next allocation and could make
+     * h->next point at h (see the walk guard below).  The heap payload
+     * is at most USER_HEAP_MAX - sizeof(heap_hdr_t), so no request above
+     * USER_HEAP_MAX can ever succeed: this rejects only doomed calls and
+     * leaves every currently-working allocation untouched
+     * (alloc(0) and alloc(1) still round up to a real 8-byte block). */
+    if (size > USER_HEAP_MAX) return 0;
     if (size == 0) size = 1;
     size = (size + 7u) & ~7u;
     if (heap_vma_init(t) != 0) return 0;
@@ -834,7 +863,15 @@ static void *sys_alloc(task_t *t, uint32_t size) {
         heap_free_root[t->tid] = t->heap_end;
     }
     uint32_t *pp = &heap_free_root[t->tid];
-    while (*pp) {
+    /* The freelist lives in USER pages, so every next pointer here is
+     * attacker-writable.  A double free (sys_free() keeps no allocation
+     * record) or one stray word past a block makes h->next point at h;
+     * the old `while (*pp)` then walked that cycle forever with
+     * interrupts off (int 0x80 is an interrupt gate) -- a hard hang, not
+     * a slow alloc.  Bound the walk: the arena holds at most
+     * USER_HEAP_MAX/sizeof(heap_hdr_t) blocks, so passing that many is
+     * already pathological.  Bound hit -> treat as no-fit, return NULL. */
+    for (uint32_t guard = 0; *pp && guard <= USER_HEAP_MAX / 8u; guard++) {
         heap_hdr_t *h = (heap_hdr_t *)*pp;
         if (h->size >= size) {
             if (h->size >= size + sizeof(heap_hdr_t) + 8) {
@@ -873,7 +910,13 @@ static void *sys_alloc(task_t *t, uint32_t size) {
 }
 
 static void sys_free(task_t *t, void *p) {
-    if (!vma_contains(t->vm, (uint32_t)p)) return;
+    /* vma_contains() also accepted the stack and the image, so
+     * free(stack_ptr) published the 8 bytes below that pointer as a heap
+     * block header: the attacker wrote {size,next} there, the next
+     * alloc() walked user-controlled metadata, and the freelist stayed
+     * poisoned afterwards (every later alloc returned NULL).  Only a
+     * pointer inside the HEAP VMA may enter the freelist. */
+    if (!heap_vma_has(t, (uint32_t)p)) return;
     uint32_t a = (uint32_t)p;
     if (a < USER_HEAP_BASE + sizeof(heap_hdr_t)) return;
     heap_hdr_t *h = (heap_hdr_t *)(a - sizeof(heap_hdr_t));
@@ -1630,6 +1673,22 @@ void isr_syscall(int_frame_t *f) {
         int tid = (int)a1;
         task_t *ch = task_by_tid(tid);
         if (!ch || ch->state == T_UNUSED) { ret = (uint32_t)-1; break; }
+        /* Only the caller's OWN child may be waited on.  task_wait_child()
+         * parks the caller in T_WAIT_CHILD until `ch` stops being
+         * RUNNING/READY, so waiting on a task that can never exit for us
+         * wedges BOTH sides: wait(gettid()) parked the CE on itself while
+         * the shell was already parked in task_wait_child() on that CE, so
+         * pick_ready() found nobody and the machine sat in the idle loop
+         * with the console dead for good (int 0x80 is an interrupt gate,
+         * so no timer tick could ever break the deadlock).  wait(0) did
+         * the same to the shell directly, and an arbitrary tid could also
+         * reap another parent's zombie through task_wait_child()'s
+         * unconditional `child->state = T_UNUSED`.  -1 (ECHILD) matches
+         * the !ch path above.  The shell is unaffected: it never comes
+         * through here, it calls task_wait_child() directly on a tid it
+         * just spawned, and task_spawn_ce() sets `t->parent = cur_task`,
+         * so ch->parent == cur_task holds there. */
+        if (ch == t || ch->parent != t) { ret = (uint32_t)-1; break; }
         task_wait_child(ch);
         ret = (uint32_t)ch->exit_code;
         break;
@@ -1772,6 +1831,20 @@ void isr_syscall(int_frame_t *f) {
             ret = (uint32_t)-22;                /* EINVAL */
             break;
         }
+        /* A10: w/h were checked but x/y were not, so x = INT_MAX reached the
+         * back-end.  clip() there did the bounds test in int, INT_MAX + w
+         * wrapped negative, the clamp was skipped and the store landed 2 GB
+         * past the framebuffer -> ring0 #PF -> permanent halt.  clip() now
+         * does the arithmetic in int64_t and cannot wrap; this window is the
+         * second layer: a rectangle starting more than 8 screens away cannot
+         * be partially visible by any stretch, so it is rejected up front
+         * (visible EINVAL to the caller rather than a silent no-op) and the
+         * back-end never sees a coordinate anywhere near INT_MAX. */
+        if (r.x <= -8 * GFX24_W || r.x >= 8 * GFX24_W ||
+            r.y <= -8 * GFX24_H || r.y >= 8 * GFX24_H) {
+            ret = (uint32_t)-22;                /* EINVAL */
+            break;
+        }
         gfx24_rect(r.x, r.y, r.w, r.h, r.rgb);
         ret = 0;
         break;
@@ -1786,6 +1859,14 @@ void isr_syscall(int_frame_t *f) {
         }
         if (b.src == 0 || b.w <= 0 || b.h <= 0 ||
             b.w > GFX24_W || b.h > GFX24_H) {
+            ret = (uint32_t)-22;                /* EINVAL */
+            break;
+        }
+        /* Same coordinate window as SYS_GFX_RECT: gfx24_blit() bounds-checks
+         * every pixel, but `b.x + i` / `b.y + j` are still int arithmetic on
+         * attacker input, so keep them away from the limits too. */
+        if (b.x <= -8 * GFX24_W || b.x >= 8 * GFX24_W ||
+            b.y <= -8 * GFX24_H || b.y >= 8 * GFX24_H) {
             ret = (uint32_t)-22;                /* EINVAL */
             break;
         }
@@ -2018,6 +2099,20 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
     return 0;
 }
 
+#ifdef SPAWN_DEBUG
+/* Print the physical address a user virtual address maps to, or "?"
+ * when the page is not mapped.  Physical address 0 is the x86
+ * interrupt vector table, so an unmapped page must never be turned
+ * into a physical address and dereferenced -- a diagnostic that reads
+ * page 0 is harmless, but the sibling code in the loader WRITES
+ * through the same translation. */
+static void wdbg_pa(task_space_t *s, uint32_t vaddr) {
+    uint32_t pa = task_virt_to_phys(s, vaddr);
+    if (!pa) { w("?"); return; }
+    whex(pa);
+}
+#endif
+
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
@@ -2142,6 +2237,13 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
             uint32_t k = 0;
             while (k < take) {
                 uint32_t pa = task_virt_to_phys(&t->space, (va + k) & ~0xFFFu);
+                /* An unmapped page translates to physical address 0, and
+                 * physical 0 is the x86 interrupt vector table: copying
+                 * the image there would destroy the IVT and halt the
+                 * machine on the next interrupt.  The image pages were
+                 * mapped a few lines above, so a 0 here means the page
+                 * tables are broken -- fail the load instead. */
+                if (!pa) goto fail_space4;
                 uint32_t poff = (va + k) & 0xFFF;
                 uint32_t n = 4096 - poff; if (n > take - k) n = take - k;
                 uint8_t *d = (uint8_t *)(pa + poff);
@@ -2212,17 +2314,24 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     k2u_copy(&t->space, usp, three, 12);
 #ifdef SPAWN_DEBUG
     {
-        uint32_t chk[3];
+        /* Physical address 0 is the interrupt vector table, so an
+         * unmapped page must never be dereferenced -- not even by a
+         * diagnostic.  Print "?" instead. */
+        uint32_t chk[3] = { 0, 0, 0 };
         uint32_t pa = task_virt_to_phys(&t->space, usp);
-        chk[0] = *(uint32_t *)pa;
-        chk[1] = *(uint32_t *)(pa + 4);
-        chk[2] = *(uint32_t *)(pa + 8);
+        if (pa) {
+            chk[0] = *(uint32_t *)pa;
+            chk[1] = *(uint32_t *)(pa + 4);
+            chk[2] = *(uint32_t *)(pa + 8);
+        }
         w("[dbg usp="); whex(usp);
-        w(" words="); whex(chk[0]); w(" "); whex(chk[1]); w(" "); whex(chk[2]);
-        w(" vs0="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_VSYSCALL));
-        w(" vs300="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_VSYSCALL + 0x300));
-        w(" tbl0="); whex(*(uint32_t *)task_virt_to_phys(&t->space, VS_TABLE));
-        w(" apislot="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_IMAGE_BASE + api));
+        w(" words=");
+        if (pa) { whex(chk[0]); w(" "); whex(chk[1]); w(" "); whex(chk[2]); }
+        else    w("?");
+        w(" vs0="); wdbg_pa(&t->space, USER_VSYSCALL);
+        w(" vs300="); wdbg_pa(&t->space, USER_VSYSCALL + 0x300);
+        w(" tbl0="); wdbg_pa(&t->space, VS_TABLE);
+        w(" apislot="); wdbg_pa(&t->space, USER_IMAGE_BASE + api);
         w("]\n");
     }
 #endif
@@ -2231,6 +2340,17 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * call the vsyscall table directly at CATOS_VS_TABLE) */
     if (!is_elf) {
         uint32_t pa = task_virt_to_phys(&t->space, USER_IMAGE_BASE + api);
+        /* Same trap as in the image loop above: an unmapped page yields
+         * physical address 0, and writing the vsyscall pointer there
+         * would overwrite the interrupt vector table.  The image slot
+         * must be mapped for the program to run at all, so an unmapped
+         * slot means the load is broken -- fail it. */
+        if (!pa) {
+            /* drop the VMA list built above first: every node is a
+             * kzalloc_frame'd block and would leak on this path */
+            while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
+            goto fail_space4;
+        }
         *(uint32_t *)pa = VS_TABLE;
     }
 

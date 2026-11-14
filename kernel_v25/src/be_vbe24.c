@@ -135,7 +135,13 @@ static inline void put3(int x, int y, uint32_t c) {
     if (g_stride == 4u) p[g_x] = 0xFFu;
 }
 
-static int clip(int *x, int *y, int *w, int *h) {
+/* A10: the bounds test used to run in int.  x = INT_MAX reached from a
+ * user gfx_rect() syscall, *x + *w wrapped negative, the clamp was
+ * skipped and fill() computed the LFB offset with x = 0x7FFFFFFF ->
+ * ring0 #PF -> permanent halt.  Do all the arithmetic in int64_t so an
+ * attacker coordinate cannot wrap the comparison; after clipping the
+ * surviving values are inside [0, GFX24_W/H] and safe to narrow back. */
+static int clip(int64_t *x, int64_t *y, int64_t *w, int64_t *h) {
     if (*x < 0) { *w += *x; *x = 0; }
     if (*y < 0) { *h += *y; *y = 0; }
     if (*x + *w > GFX24_W) *w = GFX24_W - *x;
@@ -144,7 +150,10 @@ static int clip(int *x, int *y, int *w, int *h) {
 }
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
-    if (!lfb || !clip(&x, &y, &w, &h)) return;
+    if (!lfb) return;
+    int64_t lx = x, ly = y, lw = w, lh = h;
+    if (!clip(&lx, &ly, &lw, &lh)) return;
+    x = (int)lx; y = (int)ly; w = (int)lw; h = (int)lh;
     uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
     for (int j = 0; j < h; j++) {
         volatile uint8_t *p = lfb + (uint32_t)(y + j) * g_pitch

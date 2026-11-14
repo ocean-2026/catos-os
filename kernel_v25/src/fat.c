@@ -534,18 +534,55 @@ static int lfn_of_short(const struct lfn_acc *L, const uint8_t *b,
     return o > 0;
 }
 
-/* full-name lookup: exact 8.3 first (legacy layout), then LFN match.
- * On success fills out and the *actual* 11-byte short name of the hit. */
+/* fill a fat_dirent_t from the raw 32 bytes of a directory entry.
+ * Only the fields the callers use are copied (attr, first cluster,
+ * size); the 8.3 name is kept separately in the out_n83 buffer. */
+static void dent_fill(fat_dirent_t *e, const uint8_t *b) {
+    e->attr = b[11];
+    /* clus_hi @20..21 (LE u16), clus_lo @26..27 (LE u16) */
+    e->cluster = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
+               | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
+    e->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
+            | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
+}
+
+/* Full-name lookup: VFAT semantics -- a long-name match always beats a
+ * match on the truncated 8.3 name.
+ *
+ * The old order was the opposite (exact 8.3 first, long name as the
+ * fallback), and that had two consequences:
+ *
+ *   - the same user-visible name resolved to DIFFERENT files depending
+ *     on how the volume was built.  The kernel installer stores
+ *     "allocprobe.ce" as the alias "ALLOCPRO~1.CE" plus a long-name
+ *     entry, while the host-side disk builder (build/mkdisk.py) stores
+ *     it as the plain 8.3 name "ALLOCPRO.CE"; before, "allocprobe.ce"
+ *     hit the long-name entry on a kernel-formatted volume but the 8.3
+ *     entry on a host-built image.  fat_delete_name() already resolved
+ *     per entry (its own 8.3 name first, then its own long name), so
+ *     the two resolvers could disagree about which file a name means.
+ *   - a user could create a plain 8.3 file whose name is the truncated
+ *     form of a built-in (e.g. "/bin/allocpro.ce" next to the built-in
+ *     "/bin/allocprobe.ce").  The 8.3 lookup matched THAT file first,
+ *     so `run /bin/allocprobe.ce` executed the user's file instead of
+ *     the built-in -- the same code-replacement primitive the read-only
+ *     attribute (H8) was meant to close.
+ *
+ * One directory walk collects both candidates: the long name wins, the
+ * exact 8.3 name is the fallback (all a volume without long names ever
+ * needs).  A single walk also keeps the I/O at one pass per lookup --
+ * looking the long name up first and the 8.3 name up afterwards would
+ * read every directory cluster twice for the common names that have no
+ * long form.
+ */
 int fat_lookup_name(uint32_t dirclus, const char *name,
                     fat_dirent_t *out, uint8_t out_n83[11]) {
     uint8_t n83[11];
     fat_name83(name, n83);
     fat_dirent_t e;
-    if (fat_lookup(dirclus, n83, &e) == 0) {
-        if (out) *out = e;
-        if (out_n83) memcpy_(out_n83, n83, 11);
-        return 0;
-    }
+    uint8_t short_hit[11];
+    int have_short = 0;
+
     /* LFN walk: single pass, accumulate attr-0x0F windows */
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     struct lfn_acc L;
@@ -555,25 +592,24 @@ int fat_lookup_name(uint32_t dirclus, const char *name,
         if (fat_read_cluster(c, buf) != 0) break;
         for (int i = 0; i < per; i++) {
             uint8_t *b = buf + i * DENT_SIZE;
-            if (b[0] == 0x00) goto notfound;
+            if (b[0] == 0x00) goto done;           /* end of directory */
             if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
             if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
             if (b[11] & 0x08) continue;               /* volume label */
+
+            /* the exact 8.3 name: remember it, but keep walking -- a
+             * long name further down the directory takes precedence */
+            if (!have_short && name83_eq(b, n83)) {
+                have_short = 1;
+                memcpy_(short_hit, b, 11);
+                dent_fill(&e, b);
+            }
             /* short entry: does the accumulated LFN match? */
             char lfn[FS_LFN_MAX];
             if (lfn_of_short(&L, b, lfn, sizeof(lfn)) &&
                 name_ieq_u16(name, L.ucs, L.len)) {
                 lfn_acc_reset(&L);
-                if (out) {
-                    out->attr = b[11];
-                    /* clus_hi @20..21 (LE u16), clus_lo @26..27 */
-                    out->cluster = ((uint32_t)b[20] << 16)
-                                 | ((uint32_t)b[21] << 24)
-                                 | (uint32_t)b[26]
-                                 | ((uint32_t)b[27] << 8);
-                    out->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
-                              | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
-                }
+                if (out) dent_fill(out, b);
                 if (out_n83) memcpy_(out_n83, b, 11);
                 return 0;
             }
@@ -583,8 +619,11 @@ int fat_lookup_name(uint32_t dirclus, const char *name,
         if (n == FAT_EOC) break;
         c = n;
     }
-notfound:
-    return -1;
+done:
+    if (!have_short) return -1;
+    if (out) *out = e;
+    if (out_n83) memcpy_(out_n83, short_hit, 11);
+    return 0;
 }
 
 /* unique BODY~N.EXT alias for a name that needs an LFN */
@@ -737,8 +776,8 @@ static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
     if (name_lossless83(name)) {
         uint8_t n83[11];
         fat_name83(name, n83);
-        if (attr == FAT_ATTR_DIR) return fat_mkdir(parent, n83);
-        return fat_mkfile(parent, n83);
+        if (attr & FAT_ATTR_DIR) return fat_mkdir(parent, n83);
+        return fat_mkfile_attr(parent, n83, attr);
     }
 
     uint8_t alias[11];
@@ -775,6 +814,12 @@ int fat_mkdir_name(uint32_t parent, const char *name) {
 
 int fat_mkfile_name(uint32_t parent, const char *name) {
     return fat_create_nl(parent, name, FAT_ATTR_FILE);
+}
+
+/* same as fat_mkfile_name() but the new entry gets `attr` instead of
+ * the plain FAT_ATTR_FILE -- used for the read-only built-in apps */
+int fat_mkfile_name_attr(uint32_t parent, const char *name, uint8_t attr) {
+    return fat_create_nl(parent, name, attr);
 }
 
 /* delete by full name: marks the short entry 0xE5 and any immediately
@@ -891,6 +936,14 @@ int fat_mkdir(uint32_t parent, const uint8_t *name83) {
 }
 
 int fat_mkfile(uint32_t parent, const uint8_t *name83) {
+    return fat_mkfile_attr(parent, name83, FAT_ATTR_FILE);
+}
+
+/* create a plain 8.3 file with an explicit attribute byte.  FAT_ATTR_RO
+ * is what makes the kernel's built-in apps immutable from user space:
+ * the attribute lives in the directory entry, so no amount of uid 0
+ * privilege can talk the FAT layer into overwriting the file (H8). */
+int fat_mkfile_attr(uint32_t parent, const uint8_t *name83, uint8_t attr) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;
 
@@ -901,10 +954,39 @@ int fat_mkfile(uint32_t parent, const uint8_t *name83) {
     fat_write_cluster(nc, buf);
 
     struct dent de;
-    dent_init(&de, name83, FAT_ATTR_FILE, nc, 0);
+    dent_init(&de, name83, attr, nc, 0);
     if (dir_write_dent(parent, &de) != 0) { fat_free_chain(nc); return -1; }
     fat_flush();
     return 0;
+}
+
+/* rewrite ONLY the attribute byte of an existing directory entry.  The
+ * name, the cluster chain, the size and the timestamps are left alone,
+ * so this can be used to seal a file that was installed earlier
+ * (e.g. a built-in app from an older volume) without rewriting -- or
+ * even looking at -- its content. */
+int fat_set_attr(uint32_t dirclus, const uint8_t *name83, uint8_t attr) {
+    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
+    uint32_t c = dirclus;
+    int per = (int)(spc * 512 / DENT_SIZE);
+    while (c >= 2 && c < max_clus) {
+        if (fat_read_cluster(c, buf) != 0) return -1;
+        for (int i = 0; i < per; i++) {
+            struct dent *e = (struct dent *)(buf + i * DENT_SIZE);
+            if (e->name[0] == 0x00) return -1;
+            if (e->name[0] == 0xE5) continue;
+            if (e->attr == 0x0F || (e->attr & 0x08)) continue;
+            if (name83_eq(e->name, name83)) {
+                if (e->attr == attr) return 0;    /* already sealed */
+                e->attr = attr;
+                return fat_write_cluster(c, buf);
+            }
+        }
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) break;
+        c = n;
+    }
+    return -1;
 }
 
 int fat_update_entry(uint32_t dirclus, const uint8_t *name83,

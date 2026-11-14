@@ -1,0 +1,80 @@
+{
+  "elapsed_s": 68.5,
+  "results": [
+    {
+      "id": "A05",
+      "name": "mmap-wrap",
+      "vector": "munmap addr+len 32-bit wrap -> VMA start rewritten to 0",
+      "ce": "ATKMMAP.CE",
+      "expect": "suspicious: vma_munmap has no overflow check",
+      "result": "OK",
+      "detail": "attacker task killed by its own ring3 fault, shell prompt back (defence held)",
+      "stuck": false,
+      "eip": "01000310",
+      "if": true,
+      "disk_after": "863049e0a319fdbe",
+      "f2_restart": "ok",
+      "disk_before": "e581a35bf78d8eec"
+    },
+    {
+      "id": "A10",
+      "name": "gfx-overflow",
+      "vector": "display_mode(3) + gfx_rect x/y=0x7FFFFFFF (clip overflow)",
+      "ce": "ATKGFX.CE",
+      "expect": "C1: signed overflow -> OOB LFB write -> ring0 #PF -> halt",
+      "result": "OK(gfx)",
+      "detail": "console switched to 800x600x24 so the VGA text dump is stale; register sampling shows a live kernel (IF=1, EIP advancing)",
+      "stuck": false,
+      "eip": "01000310",
+      "if": true,
+      "disk_after": "dcb74794691d1168",
+      "f2_restart": "ok",
+      "disk_before": "9391981ef3f165e5"
+    },
+    {
+      "id": "A13",
+      "name": "fs-abuse",
+      "vector": "path/dir/8.3 abuse, 300-char names, delete dirs",
+      "ce": "ATKFS.CE",
+      "expect": "OK",
+      "result": "OK",
+      "detail": "attack completed (ATK-DONE)",
+      "stuck": false,
+      "eip": "01000310",
+      "if": true,
+      "disk_after": "6ba51ebeb2bf4a05",
+      "f2_restart": "ok",
+      "disk_before": "96ab628cb0efbec1"
+    },
+    {
+      "id": "A18",
+      "name": "sysprot",
+      "vector": "system file write surface: overwrite / delete a built-in app, 8.3 shadow name",
+      "ce": "ATKSYSP.CE",
+      "expect": "OK: built-in writes/deletes refused (-13), long name still resolves to the built-in",
+      "result": "OK",
+      "detail": "attack completed (ATK-DONE)",
+      "stuck": false,
+      "eip": "01000310",
+      "if": true,
+      "disk_after": "214fe1f642ddcd63",
+      "f2_restart": "ok",
+      "disk_before": "8b782d1c5ef8ef49"
+    },
+    {
+      "id": "A19",
+      "name": "autostart",
+      "vector": "boot-time auto-execution: drop a script into /etc/autoexec and reboot",
+      "ce": "ATKAUTOS.CE",
+      "expect": "OK: file may be written, but the boot screen must NOT contain the marker",
+      "result": "OK",
+      "detail": "attack completed (ATK-DONE)",
+      "stuck": false,
+      "eip": "01000310",
+      "if": true,
+      "disk_after": "2ba14412086c14f2",
+      "f2_restart": "ok",
+      "disk_before": "202b38c29185bbe7"
+    }
+  ]
+}

@@ -29,6 +29,12 @@
 #define FAT_CACHE_MAX      (4u * 1024 * 1024)  /* FAT #1 cache cap */
 
 #define FAT_EOC        0x0FFFFFFF
+/* Standard FAT32 attribute bits.  FAT_ATTR_RO is the read-only bit:
+ * the FAT32 equivalent of a POSIX read-only file and the only
+ * protection that also holds for uid 0 -- fs_perm_check() short-circuits
+ * to "allowed" for root, so the ACL alone cannot keep the kernel's own
+ * built-in apps from being replaced (H8). */
+#define FAT_ATTR_RO    0x01
 #define FAT_ATTR_DIR   0x10
 #define FAT_ATTR_FILE  0x20
 
@@ -67,6 +73,12 @@ int  fat_lookup_name(uint32_t dirclus, const char *name,
 /* create dir/file by full name (LFN + BODY~N.EXT alias when needed) */
 int  fat_mkdir_name(uint32_t parent, const char *name);   /* 0 ok */
 int  fat_mkfile_name(uint32_t parent, const char *name);  /* 0 ok */
+/* same, but with an explicit attribute byte (e.g. FAT_ATTR_FILE |
+ * FAT_ATTR_RO for the read-only built-ins) */
+int  fat_mkfile_name_attr(uint32_t parent, const char *name, uint8_t attr);
+/* rewrite ONLY the attribute byte of an existing entry; the name, the
+ * cluster chain and the size are left exactly as they were */
+int  fat_set_attr(uint32_t dirclus, const uint8_t *name83, uint8_t attr);
 /* delete by full name (wipes the short entry + preceding LFN run) */
 int  fat_delete_name(uint32_t dirclus, const char *name);
 /* enumerate entries with display names (long name if present) */
@@ -78,6 +90,8 @@ void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
 int  fat_lookup(uint32_t dirclus, const uint8_t *name83, fat_dirent_t *out);
 int  fat_mkdir(uint32_t parent, const uint8_t *name83);   /* 0 ok */
 int  fat_mkfile(uint32_t parent, const uint8_t *name83);  /* 0 ok */
+/* same as fat_mkfile(), but the new entry carries `attr` */
+int  fat_mkfile_attr(uint32_t parent, const uint8_t *name83, uint8_t attr);
 /* update size (and cluster) of an existing entry in dir */
 int  fat_update_entry(uint32_t dirclus, const uint8_t *name83,
                       uint32_t cluster, uint32_t size);

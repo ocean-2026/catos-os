@@ -141,7 +141,11 @@ typedef struct catos_api {
     int    (*file_write)(const char *path, const char *data, int size, int mode); /* 40 */
     /*   mode 0 = truncate-replace, 1 = append; size <= 16384 per call;
      *   0 = ok, negative = error */
-    int    (*file_delete)(const char *path);        /* 41 0 ok, -1 noent, -2 EACCES */
+    int    (*file_delete)(const char *path);        /* 41 0 ok, -1 noent,
+                                                   *    -13 EACCES (POSIX EACCES
+                                                   *    = 13; the read-only
+                                                   *    built-in apps are
+                                                   *    refused with this) */
     int    (*pipe_create)(void);                    /* 42 handle >= 0, -1 if full */
     int    (*pipe_write)(int h, const char *data, int len);   /* 43 blocking; 0 ok */
     int    (*pipe_read)(int h, char *buf, int max);           /* 44 blocking; bytes, 0 EOF */

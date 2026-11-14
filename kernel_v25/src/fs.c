@@ -431,6 +431,14 @@ void fs_clear_file(fs_entry_t *f) {
 
 int fs_save(fs_entry_t *f) {
     if (!fs_ready || !f) return -1;
+    /* A read-only file (the built-in apps) must not be written back.
+     * fs_save() writes through fat_write_file() directly and is the
+     * last step of the editor path (edit + ^O), so without this check
+     * the shell's editor could still replace a built-in -- the very
+     * hole the FAT read-only attribute was added to close (H8). */
+    fat_dirent_t e;
+    if (fat_lookup(f->parent_cluster, f->name83, &e) == 0 &&
+        (e.attr & FAT_ATTR_RO)) return -1;
     if (fat_write_file(f->cluster, f->data, f->size) != 0) return -1;
     fat_update_entry(f->parent_cluster, f->name83, f->cluster, f->size);
     return 0;
@@ -497,9 +505,52 @@ int fs_read_text(const char *path, char *buf, int max) {
     return (int)n;
 }
 
+/* is the file at `path` marked read-only?  1 = yes, 0 = no (or the file
+ * does not exist yet).  The FAT attribute is the ONLY protection that
+ * also holds for uid 0: fs_perm_check() returns "allowed" for root
+ * straight away, so the ACL cannot stop root from replacing the
+ * kernel's own built-in apps (H8). */
+static int fs_path_readonly(const char *path) {
+    if (!path || !*path) return 0;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return 0;
+
+    char parent[FS_PATH_MAX];
+    int plen = (int)(leaf - abs);
+    if (plen <= 0) return 0;
+    if (plen == 1) scpy(parent, "/");
+    else {
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+
+    fat_dirent_t pe;
+    uint32_t pclus = resolve_path(parent, &pe);
+    if (!pclus) return 0;
+    uint8_t n83[11];
+    fat_dirent_t e;
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return 0;   /* absent */
+    return (e.attr & FAT_ATTR_RO) ? 1 : 0;
+}
+
+/* public wrapper: is the file at `path` read-only (FAT_ATTR_RO)?
+ * 1 = yes, 0 = no (or the file does not exist). */
+int fs_is_readonly(const char *path) {
+    return fs_path_readonly(path);
+}
+
 int fs_write_text(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (size >= FS_DATA_MAX) return -1;          /* room for the NUL */
+    /* The `save` syscall lands here, not in fs_write_raw_mode(), so the
+     * read-only guard has to be repeated: without it a CE app could
+     * still replace a built-in through api->save() even though
+     * api->file_write() was refused. */
+    if (fs_path_readonly(path)) return -13;      /* EACCES */
     fs_entry_t *f = fs_create_file(path);
     if (!f) return -1;
     int i;
@@ -512,6 +563,14 @@ int fs_write_text(const char *path, const char *data, uint32_t size) {
 /* raw write of arbitrary-size data (no FS_DATA_MAX limit); skips if the
  * file already exists.  Used to install built-in .ce apps and docs. */
 int fs_write_raw(const char *path, const char *data, uint32_t size) {
+    return fs_write_raw_attr(path, data, size, FAT_ATTR_FILE);
+}
+
+/* same as fs_write_raw(), but the file is created with `attr` -- the
+ * built-in apps are installed read-only (FAT_ATTR_FILE | FAT_ATTR_RO) so
+ * that no user, root included, can replace them on disk (H8). */
+int fs_write_raw_attr(const char *path, const char *data, uint32_t size,
+                      uint8_t attr) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     char abs[FS_PATH_MAX];
     abs_path(path, abs);
@@ -537,10 +596,41 @@ int fs_write_raw(const char *path, const char *data, uint32_t size) {
     if (!(e.attr & FAT_ATTR_DIR)) { fs_dbg2("[F5]",0); return -1; }
     if (fat_lookup_name(pclus, leaf, &e, n83) == 0) return 0;  /* already installed */
 
-    if (fat_mkfile_name(pclus, leaf) != 0) return -1;
+    if (fat_mkfile_name_attr(pclus, leaf, attr) != 0) return -1;
     if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (fat_write_file(e.cluster, data, size) != 0) return -1;
     return fat_update_entry(pclus, n83, e.cluster, size);
+}
+
+/* set the FAT attribute byte of an existing file; the content is not
+ * touched.  Used to seal the built-in apps on volumes that were built
+ * before the read-only attribute existed. */
+int fs_set_attr(const char *path, uint8_t attr) {
+    if (!fs_ready || !path || !*path) return -1;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return -1;
+
+    char parent[FS_PATH_MAX];
+    int plen = (int)(leaf - abs);
+    if (plen <= 0) return -1;
+    if (plen == 1) scpy(parent, "/");
+    else {
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+
+    uint8_t n83[11];
+    fat_dirent_t e;
+    uint32_t pclus = resolve_path(parent, &e);
+    if (!pclus) return -1;
+    if (!(e.attr & FAT_ATTR_DIR)) return -1;
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
+    if (e.attr & FAT_ATTR_DIR) return -1;   /* never strip the DIR bit */
+    return fat_set_attr(pclus, n83, attr);
 }
 
 /* ---- v2.5: offset read / mode write / delete (big files) ---------------- */
@@ -613,6 +703,23 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
         if (fat_lookup_name(pclus, leaf, &e, n83) != 0) { fs_dbg2("[F7]",0); return -1; }
     }
     fs_dbg2("[F8 c=", e.cluster); fs_dbg2("F9 sz=", e.size);
+    /* A13: writing to a DIRECTORY used to succeed.  fat_write_file() then
+     * stamped the caller's bytes over that directory's own dirents (and its
+     * cluster chain), so `file_write("/BIN", ...)` turned /BIN from 36
+     * entries into 2 and there was no way back after a reboot -- persistent
+     * data loss, which is strictly worse than the halts the red team also
+     * found.  A directory is not a byte stream, so refuse it here: this
+     * function is the single choke point for SYS_FILE_WRITE, `save` and the
+     * shell's redirect path, so one check covers all three.  Files and
+     * append mode are untouched (the attribute bit is not set for them). */
+    if (e.attr & FAT_ATTR_DIR) { fs_dbg2("[FD dir]", e.cluster); return -2; }  /* EISDIR */
+    /* A read-only file (the built-in apps) must not be rewritten.  The
+     * check sits next to the directory check, i.e. still BEFORE the
+     * first byte is written, so a refused write leaves the file exactly
+     * as it was.  This is the only barrier that also holds for uid 0:
+     * fs_perm_check() returns "allowed" for root without even looking
+     * at the ACL (H8). */
+    if (e.attr & FAT_ATTR_RO) { fs_dbg2("[FR ro]", e.cluster); return -13; }  /* EACCES */
     if (mode == 1) {
         if (fat_append_file(e.cluster, e.size, data, size) != 0) { fs_dbg2("[F10]",e.cluster); return -1; }
     } else {
@@ -650,6 +757,11 @@ int fs_delete(const char *path) {
     if (!pclus) { fs_dbg2("[F4]",0); return -1; }
     if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (e.attr & FAT_ATTR_DIR) return -1;
+    /* Deleting a read-only file is refused for the same reason writing
+     * to it is: the built-in apps must stay exactly as the kernel
+     * installed them, otherwise "rm /bin/x.ce" plus a same-named file
+     * is a second way to replace the code that runs (H8). */
+    if (e.attr & FAT_ATTR_RO) return -13;         /* EACCES */
     fat_free_chain(e.cluster);
     return fat_delete_name(pclus, leaf);
 }

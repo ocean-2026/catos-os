@@ -89,7 +89,7 @@ static void cmd_help(void) {
         "  Ctrl+Up/Down   scroll back console output (any key returns)\n"
         "  echo TEXT    print text back\n"
         "  about        system info banner\n"
-        "  autostart    re-run /etc/autostart scripts\n"
+        "  autostart    show the boot banner + list /etc/autoexec scripts\n"
         "  uname        print OS name\n"
         "  date         show RTC date/time\n"
         "  mem          show RAM size (multiboot)\n"
@@ -134,7 +134,7 @@ static void cmd_help(void) {
         "  -- audio (Sound Blaster 16, ISA) --\n"
         "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
         "  sndtest [HZ MS]  play a tone (default 440 Hz / 800 ms)\n"
-        "  -- network (PCnet) --\n"
+        "  -- network (e1000/PCnet) --\n"
         "  curl URL     HTTP GET (http://IP[:port]/path)\n"
         "  ping IP      ICMP echo (3 tries)\n"
         "  dns NAME     resolve a hostname\n"
@@ -148,6 +148,7 @@ static void cmd_help(void) {
         "  mkdir PATH   create a directory\n"
         "  touch FILE   create an empty file\n"
         "  cat FILE     print a file (text, up to 64 KiB)\n"
+        "  fsize FILE   print the size of one file in bytes\n"
         "  rm FILE      delete a file\n"
         "  cp SRC DST   copy a file\n"
         "  mv SRC DST   move a file (copy + delete)\n"
@@ -1534,6 +1535,16 @@ static void cmd_edit(const char *arg) {
             return;
         }
     }
+    /* The built-in apps are installed read-only (H8).  Refuse to open
+     * them here instead of letting the user type into a buffer that can
+     * never be written back -- the editor's save path goes straight to
+     * fat_write_file(). */
+    if (fs_is_readonly(arg)) {
+        vga_write("edit: ");
+        vga_write(arg);
+        vga_write(" is read-only\n");
+        return;
+    }
     fs_entry_t *f = fs_create_file(arg);
     if (!f) { vga_write("edit: cannot create/open file\n"); return; }
 
@@ -1995,6 +2006,19 @@ static void cmd_cat(const char *arg) {
     if (off) vga_write("\n");
 }
 
+/* fsize FILE: print the size of ONE file in bytes.  A directory listing
+ * is useless as an existence probe once it holds more entries than the
+ * 25-row screen has lines -- the interesting names scroll out of view
+ * -- so the size of a single file is the short, unambiguous answer. */
+static void cmd_fsize(const char *arg) {
+    if (!*arg) { vga_write("usage: fsize FILE\n"); return; }
+    uint32_t c, s;
+    if (fs_resolve_file(arg, &c, &s) != 0) { vga_write("fsize: no such file\n"); return; }
+    vga_write("fsize: ");
+    print_int((int)s);
+    vga_write(" bytes\n");
+}
+
 static void cmd_rm(const char *arg) {
     if (!*arg) { vga_write("usage: rm FILE\n"); return; }
     if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
@@ -2002,6 +2026,11 @@ static void cmd_rm(const char *arg) {
     }
     int r = fs_delete(arg);
     if (r == 0) return;
+    if (r == -13) {
+        /* the built-in apps are read-only: replacing them would be a
+         * way to swap the code that runs on this machine (H8) */
+        vga_write("rm: permission denied (read-only file)\n"); return;
+    }
     vga_write("rm: no such file (directories cannot be rm'd)\n");
 }
 
@@ -2013,7 +2042,11 @@ static int fs_copy_file(const char *src, const char *dst) {
     if (fs_perm_check(src, g_uid, g_gid, PERM_READ) != 0) return -13;
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     static char chunk[16384];     /* ring0 single shell: no reentry */
-    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
+    /* -13 (EACCES) means the target exists but is read-only (a built-in
+     * app); pass it through so the shell can say "permission denied"
+     * instead of the misleading "cannot create target" (H8). */
+    int cr = fs_write_raw_mode(dst, "", 0, 0);
+    if (cr != 0) return (cr == -13) ? -13 : -2;
     acl_set(dst, g_uid, g_gid, 0644);                       /* creator owns it */
     uint32_t off = 0;
     while (off < s) {
@@ -2104,14 +2137,14 @@ static void net_boot_status(void) {
     extern uint8_t net_mac[6];
     extern int net_env_vmware(void);
     if (net_ready) {
-        vga_write("net: AMD PCnet-PCI up  mac=");
+        vga_write("net: "); vga_write(net_backend_name()); vga_write(" up  mac=");
         print_hex((net_mac[0]<<8)|net_mac[1]); vga_write(":");
         print_hex((net_mac[2]<<8)|net_mac[3]); vga_write(":");
         print_hex((net_mac[4]<<8)|net_mac[5]); vga_write("\n");
         return;
     }
     vga_write("net: no usable NIC");
-    if (net_fail_code == 1) vga_write(" (no 1022:2000)");
+    if (net_fail_code == 1) vga_write(" (no e1000 8086:100e or PCnet 1022:2000)");
     else if (net_fail_code == 2) vga_write(" (open bus)");
     else if (net_fail_code == 3) vga_write(" (MAC unreadable)");
     else if (net_fail_code == 4) vga_write(" (INIT/START failed)");
@@ -2130,7 +2163,7 @@ static void net_boot_status(void) {
         vga_write("net: VMware guest -> set the VM NIC to Intel E1000\n"
                   "     (PCnet path works only when the adapter is 'AMD PCnet')\n");
     else
-        vga_write("net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0\n");
+        vga_write("net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=n0\n");
 }
 
 void shell_run(void) {
@@ -2149,9 +2182,11 @@ void shell_run(void) {
         vga_write(tr(L_NO_FAT32));
     else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
-        /* v2.17: boot output now comes from /etc/autostart scripts
-         * (echo lines) instead of a hardcoded banner.  Falls back to a
-         * seeded default script on a fresh volume. */
+        /* v2.17: the boot banner is printed from a kernel string and
+         * /etc/autoexec is only LISTED.  Nothing found on the volume is
+         * executed at boot any more -- that directory is user-writable,
+         * so running what it contains was root code execution on every
+         * reboot (H9). */
         boot_autostart();
     }
 
@@ -2172,8 +2207,8 @@ void shell_run(void) {
 }
 
 /* Execute one parsed command line: builtins first, then current-dir
- * program and /bin PATH lookup.  Shared by the interactive loop and the
- * /etc/autostart script runner (identical semantics for both). */
+ * program and /bin PATH lookup.  Only the interactive loop calls this
+ * now: /etc/autoexec scripts are no longer executed at boot (H9). */
 static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
@@ -2202,6 +2237,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "mkdir"))      cmd_mkdir(arg);
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
         else if (!strcmp_(cmd, "cat"))        cmd_cat(arg);
+        else if (!strcmp_(cmd, "fsize"))      cmd_fsize(arg);
         else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);
         else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
         else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
@@ -2373,8 +2409,9 @@ static void shell_exec(char *cmd, char *arg) {
  * stem) is rejected by path_has_long_names() -- hence "autoexec". */
 #define AUTOSTART_DIR "/etc/autoexec"
 
-/* Seeded on a fresh volume so the boot banner still works out of the
- * box; the user may edit or delete it and add more scripts. */
+/* Seeded on a fresh volume so the user can read what a boot script
+ * looks like.  It is documentation only: nothing in this directory is
+ * executed any more (see boot_autostart below). */
 static const char *const AUTOSTART_DEFAULT =
     "# CatOS boot scripts live in /etc/autoexec\n"
     "# (one shell command per line, '#' comments and blank lines skipped,\n"
@@ -2387,6 +2424,22 @@ static const char *const AUTOSTART_DEFAULT =
     "echo Runs on      : QEMU / VMware / Bochs / real PC\n"
     "echo Type 'help' for a list of commands.\n";
 
+/* The boot banner itself is embedded in the kernel image.  It used to be
+ * produced by running /etc/autoexec/banner.sh, but that directory lives
+ * on a writable volume: one file dropped there was executed as root on
+ * every single boot, with no user interaction and no trace beyond the
+ * file itself -- a persistence channel that survived a reboot and a
+ * reformat of the "attacker-controlled" state (H9).  The banner is now
+ * a kernel string, and the scripts are only LISTED. */
+static const char *const AUTOSTART_BANNER =
+    "CatOS 0.3 -- A tiny Unix-like OS on GRUB Multiboot\n"
+    "Architecture : i386 (32-bit x86)\n"
+    "Bootloader   : GRUB 2 (ISO9660 / El Torito)\n"
+    "Filesystem   : FAT32 on IDE (persistent)\n"
+    "Display      : front-end + text/gfx back-ends\n"
+    "Runs on      : QEMU / VMware / Bochs / real PC\n"
+    "Type 'help' for a list of commands.\n";
+
 static void boot_autostart(void) {
     if (!fs_fs_ready()) return;
     /* seed dir + default banner (fs_write_raw skips an existing file) */
@@ -2394,47 +2447,23 @@ static void boot_autostart(void) {
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
 
+    /* the banner comes from the kernel image, never from the volume */
+    vga_write(AUTOSTART_BANNER);
+
+    /* The scripts are listed, never executed.  Running them at boot was
+     * equivalent to giving every user who can write into /etc/autoexec
+     * root command execution at every boot (H9); the manual "run" below
+     * keeps the directory useful without reopening the hole. */
     char names[8][FS_NAME_MAX];
     int n = fs_enum_files(AUTOSTART_DIR, names, 8);
     if (n <= 0) return;
     for (int i = 0; i < n && i < 8; i++) {
-        char path[FS_PATH_MAX];
-        int k = 0;
-        const char *s;
-        for (s = AUTOSTART_DIR; *s && k < (int)sizeof(path) - 1; s++)
-            path[k++] = *s;
-        if (k < (int)sizeof(path) - 1) path[k++] = '/';
-        for (s = names[i]; *s && k < (int)sizeof(path) - 1; s++)
-            path[k++] = *s;
-        path[k] = 0;
-
-        static char buf[2048];
-        int len = fs_read_text(path, buf, (int)sizeof(buf) - 1);
-        if (len <= 0) continue;
-        buf[len] = 0;
-
         vga_write("autostart: ");
         vga_write(names[i]);
-        vga_write("\n");
-        char *p = buf;
-        while (*p) {
-            char *line = p;
-            while (*p && *p != '\n') p++;
-            if (*p) *p++ = 0;
-            char *e = line + slen_(line);
-            if (e > line && e[-1] == '\r') e[-1] = 0;   /* CRLF safety */
-
-            char *lcmd = line;
-            while (*lcmd == ' ' || *lcmd == '\t') lcmd++;
-            if (!*lcmd || *lcmd == '#') continue;
-            char *larg = lcmd;
-            while (*larg && *larg != ' ' && *larg != '\t') larg++;
-            if (*larg) {
-                *larg = 0; larg++;
-                while (*larg == ' ' || *larg == '\t') larg++;
-            }
-            shell_exec(lcmd, larg);
-        }
+        vga_write(" (not auto-executed; run it manually: run ");
+        vga_write(AUTOSTART_DIR "/");
+        vga_write(names[i]);
+        vga_write(")\n");
     }
     net_boot_status();              /* keep the one-line NIC status at boot */
     vga_write("\n");

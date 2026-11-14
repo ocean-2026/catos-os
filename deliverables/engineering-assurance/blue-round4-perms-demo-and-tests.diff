@@ -1,0 +1,181 @@
+--- a/kernel_v25/extapp/perms.c
++++ b/kernel_v25/extapp/perms.c
+@@ -14,6 +14,16 @@
+  *                         was the persistent code-replacement hole the
+  *                         read-only attribute closed (H8).  Only the
+  *                         /home write succeeds.
++ *
++ * The second case used to write the REAL /etc/passwd, so running the
++ * demo as root replaced the user database with 17 bytes of payload.
++ * It now writes /etc/perm_demo.txt -- a plain file in a system
++ * directory -- which keeps the three-tier comparison intact (built-in
++ * app = refused / plain file in a system dir = writable by root /
++ * user area = writable) without touching real state.  The product
++ * semantics of /etc/passwd and /etc/acl are unchanged: useradd,
++ * passwd and chcaps still need to rewrite them.
++ *
+  * Also demonstrates the new getuid() extension.
+  */
+ __attribute__((section(".text.ce_entry")))
+@@ -32,10 +42,10 @@
+     api->print_int(r1);
+     api->write(r1 == -13 ? "  EACCES (protected!)\n" : "\n");
+ 
+-    api->write("save /etc/passwd (system file):   ");
+-    int r2 = api->save("/etc/passwd", payload, sizeof(payload));
++    api->write("save /etc/perm_demo.txt (system dir, plain file): ");
++    int r2 = api->save("/etc/perm_demo.txt", payload, sizeof(payload));
+     api->print_int(r2);
+-    api->write(r2 == -13 ? "  EACCES (protected!)\n" : "\n");
++    api->write(r2 == -13 ? "  EACCES (not writable)\n" : "\n");
+ 
+     api->write("save /home/user.txt (user area):  ");
+     int r3 = api->save("/home/user.txt", payload, sizeof(payload));
+--- a/tests/ro_builtin_regress.py
++++ b/tests/ro_builtin_regress.py
+@@ -1,8 +1,9 @@
+ #!/usr/bin/env python3
+ """ro_builtin_regress.py -- on-metal acceptance for the read-only built-ins.
+ 
+-Two dedicated cases for the H8 fix (the kernel's built-in apps must not be
+-replaceable) and for the LFN-first name resolution it depends on:
++Three dedicated shell-level cases for the H8 fix (the kernel's built-in
++apps must not be replaceable) and for the LFN-first name resolution it
++depends on:
+ 
+   TC-1  lfn-shadow   A plain 8.3 file whose name is the TRUNCATED form of
+                      a built-in ("/bin/allocpro.ce" for the built-in
+@@ -19,10 +20,21 @@
+                        edit  -> "edit: ... is read-only"
+                        rm    -> "rm: permission denied (read-only file)"
+                      and the built-in must still run afterwards, which
+-                     proves the code on disk was not replaced.
++                     proves the code on disk was not replaced.  The size
++                     of the target is compared before and after the
++                     attempts, so a refused write that still touched the
++                     file (truncation, a backup copy) is caught too.
++
++  TC-3  passwd-writable
++                     The read-only attribute must NOT bleed into
++                     /etc/passwd: useradd / passwd / chcaps rewrite the
++                     user database, and they have to keep working.  The
++                     file must also still be the real database and not
++                     the 17-byte payload the perms demo used to write
++                     over it.
+ 
+-Both cases drive the SHELL only, so they need no new CE app and no
+-rebuilt .ce image.
++These are the SHELL-level cases; the CE-ABI-level probes (A18 sysprot,
++A19 autostart) live in tests/crash_attack.py and are complementary.
+ 
+ The screen is read through the QEMU monitor's physical-memory dump of the
+ VGA text buffer ("xp /4000 0xb8000") instead of being OCR-ed from a
+@@ -38,6 +50,7 @@
+   python tests/ro_builtin_regress.py <catos.iso> [--qemu PATH] [--keep]
+ """
+ import os
++import re
+ import subprocess
+ import socket
+ import sys
+@@ -51,6 +64,9 @@
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ MONITOR = ("127.0.0.1", 4444)
+ 
++# the perms demo used to overwrite /etc/passwd with this payload
++PERMS_PAYLOAD_LEN = 17
++
+ 
+ def boot(iso, qemu, disk, port=None):
+     """Start the guest and connect to its monitor.
+@@ -150,6 +166,18 @@
+         # later assertion can match stale text.
+         clear_screen(s, 1.0)
+ 
++    def fsize_of(path):
++        """Size the shell reports for `path`, or None if it has none.
++
++        One short line per file, so it cannot be thrown off by the
++        screen layout the way a directory listing can.
++        """
++        clear()
++        do("fsize " + path, 1.5)
++        t = screen_text(s)
++        m = re.search(r"fsize:\s*(\d+)\s*bytes", t)
++        return int(m.group(1)) if m else None
++
+     def step_format():
+         clear()
+         do("format", 1.0)
+@@ -180,6 +208,9 @@
+         detail = []
+         ok = True
+ 
++        size_before = fsize_of("/bin/hello.ce")
++        detail.append("size0=%s" % size_before)
++
+         clear()
+         do("cp /bin/hello.ce /tmp/hello.copy", 2.0)
+         clear()
+@@ -215,11 +246,61 @@
+         detail.append("runs=%s" % still_runs)
+         ok = ok and still_runs
+ 
++        # a refused write that still touched the file (truncation, a
++        # backup copy) would leave the size changed
++        size_after = fsize_of("/bin/hello.ce")
++        unchanged = (size_before is not None and size_after == size_before)
++        detail.append("size=%s" % size_after)
++        ok = ok and unchanged
++
++        return ok, " ".join(detail)
++
++    def step_passwd_writable():
++        """TC-3: the user database must stay writable."""
++        detail = []
++        ok = True
++
++        clear()
++        do("useradd bob 102 102 0", 2.0)
++        t = screen_text(s)
++        added = "user added" in t
++        detail.append("useradd=%s" % added)
++        ok = ok and added
++
++        clear()
++        do("passwd bob secret1", 2.0)
++        t = screen_text(s)
++        pw = "password set" in t
++        detail.append("passwd=%s" % pw)
++        ok = ok and pw
++
++        clear()
++        do("chcaps 2 bob", 2.0)
++        t = screen_text(s)
++        caps = "capabilities updated" in t
++        detail.append("chcaps=%s" % caps)
++        ok = ok and caps
++
++        clear()
++        do("lsuser", 2.0)
++        t = screen_text(s)
++        listed = "bob" in t
++        detail.append("lsuser=%s" % listed)
++        ok = ok and listed
++
++        # the real database, not the 17-byte payload the perms demo used
++        # to write over /etc/passwd
++        size = fsize_of("/etc/passwd")
++        intact = size is not None and size > PERMS_PAYLOAD_LEN
++        detail.append("passwd_size=%s" % size)
++        ok = ok and intact
++
+         return ok, " ".join(detail)
+ 
+     step("format", step_format)
+     step("lfn-shadow", step_lfn_shadow)
+     step("ro-builtin", step_ro_builtin)
++    step("passwd-writable", step_passwd_writable)
+ 
+     if "--keep" not in args:
+         kill_qemu(proc)
