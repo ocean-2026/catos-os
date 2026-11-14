@@ -18,6 +18,7 @@ static int  active;
 static char py[8];
 static int  py_len;
 static int  page;
+static int  anchor_row = -1;    /* row of the input line (editor sets) */
 
 #define PER_PAGE 9
 #define BAR_MAX  200
@@ -49,14 +50,28 @@ static void bar_num(char *b, int *n, int v) {
     while (i > 0) b[(*n)++] = t[--i];
 }
 
+void ime_set_anchor(int row) { anchor_row = row; }
+
+/* v2.25: candidates appear directly BELOW the input line (row+1) instead
+ * of always hugging the bottom edge.  With prompt anchoring the input
+ * line sits mid-screen, so the bar no longer covers fresh output. */
+static int ime_bar_row(void) {
+    int rows = con_rows();
+    int r = (anchor_row >= 0) ? anchor_row + 1 : rows - 1;
+    if (r >= rows) r = anchor_row - 1;          /* input on the last row */
+    if (r < 0)     r = rows - 1;
+    return r;
+}
+
 static void ime_show(void) {
     char bar[BAR_MAX];
     int n = 0;
+    int row = ime_bar_row();
     bar[0] = 0;
     if (py_len == 0) {
         bar_put(bar, &n, "[IME] F2 off | type pinyin, 1-9 select, space first, -/= page");
         bar[n] = 0;
-        con_status_bar(bar);
+        con_status_bar_at(row, bar);
         return;
     }
     const py_entry_t *e = py_find(py);
@@ -65,7 +80,7 @@ static void ime_show(void) {
         bar_put(bar, &n, py);
         bar_put(bar, &n, ": no match");
         bar[n] = 0;
-        con_status_bar(bar);
+        con_status_bar_at(row, bar);
         return;
     }
     int total = py_len_(e->hz) / 3;
@@ -86,7 +101,7 @@ static void ime_show(void) {
     }
     bar_put(bar, &n, "(-/= page, esc)");
     bar[n] = 0;
-    con_status_bar(bar);
+    con_status_bar_at(row, bar);
 }
 
 static void ime_cancel(void) {

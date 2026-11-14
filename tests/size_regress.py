@@ -132,7 +132,11 @@ def main():
     iso = os.path.abspath(sys.argv[1])
     qemu = find_qemu(sys.argv[sys.argv.index("--qemu") + 1]
                      if "--qemu" in sys.argv else None)
-    proc, sock = boot(qemu, iso, PORT)
+    SERIAL = "/tmp/catos_serial_size.log"
+    if os.path.exists(SERIAL):
+        os.remove(SERIAL)
+    proc, sock = boot(qemu, iso, PORT,
+                      extra_args=["-serial", "file:" + SERIAL])
     r = R()
     os.makedirs(SHOT, exist_ok=True)
     try:
@@ -189,6 +193,10 @@ def main():
         r.check("no-fatal-fault", hi is not None)
     finally:
         kill_qemu(proc)
+        if r.fails and os.path.exists(SERIAL):
+            print("---- serial breadcrumb tail ----")
+            with open(SERIAL, "rb") as fh:
+                print(fh.read().decode("latin-1", "replace")[-2000:])
     print("size_regress: %d/%d PASS" % (r.n - len(r.fails), r.n))
     if r.fails:
         print("  FAILED: " + ", ".join(r.fails))

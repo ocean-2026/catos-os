@@ -64,6 +64,7 @@ static uint32_t hz_map[CON_TEXT_HZ_SLOTS];
 /* transient status bar row (pinyin IME) */
 static con_cell_t saved_row[CON_MAX_COLS];
 static int        saved_row_valid;
+static int        saved_row_index = -1;   /* v2.25: WHICH row is barrowed */
 
 /* v2.25 dirty-CELL tracker (the CatOS dirty rectangle: our unit IS the
  * cell).  painted[] remembers the last PIXELS actually on screen for a
@@ -672,12 +673,18 @@ void con_write_at_utf8(uint8_t x, uint8_t y, const char *s) {
  * the composition ends.  Only the inverse attribute is changed, so a
  * text-mode font-slot rebuild (redraw_all) cannot repaint the screen in
  * the bar's colours. */
-void con_status_bar(const char *s) {
+void con_status_bar(const char *s) { con_status_bar_at(rows - 1, s); }
+
+void con_status_bar_at(int row, const char *s) {
     if (!s) return;
-    int row = rows - 1;
+    if (row < 0 || row >= rows) return;
+    /* Only one bar at a time: if the bar moved (IME following the input
+     * line), put the previous row back before borrowing the new one. */
+    if (saved_row_valid && row != saved_row_index) con_status_bar_off();
     if (!saved_row_valid) {
         for (int x = 0; x < cols; x++) saved_row[x] = cells[row][x];
         saved_row_valid = 1;
+        saved_row_index = row;
     }
     uint8_t old_attrs = s_attrs;
     s_attrs |= CON_ATTR_INVERSE;
@@ -690,9 +697,10 @@ void con_status_bar(const char *s) {
 
 void con_status_bar_off(void) {
     if (!saved_row_valid) return;
-    int row = rows - 1;
+    int row = saved_row_index >= 0 ? saved_row_index : rows - 1;
     for (int x = 0; x < cols; x++) cells[row][x] = saved_row[x];
     saved_row_valid = 0;
+    saved_row_index = -1;
     if (be->mode == CON_MODE_TEXT) redraw_all();  /* reassign font slots */
     else for (int x = 0; x < cols; x++) paint(x, row);
     sync_cursor(1);

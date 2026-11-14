@@ -138,6 +138,10 @@ void        con_write_at_utf8(uint8_t x, uint8_t y, const char *s);
  * candidate list never destroys shell output or editor content. */
 void        con_status_bar(const char *s);
 void        con_status_bar_off(void);
+/* v2.25: transient bar on an ARBITRARY row (the pinyin IME puts its
+ * candidate list directly BELOW the input line).  Only one bar at a
+ * time; switching rows restores the previous bar's row verbatim. */
+void        con_status_bar_at(int row, const char *s);
 
 /* ---- display policy / introspection ------------------------------------- */
 int         con_get_mode(void);

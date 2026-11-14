@@ -20,6 +20,7 @@
 int  ime_active(void);
 int  ime_feed(int key, char out[5]);   /* returns IME_PASS / CONSUME / COMMIT */
 void ime_refresh(void);                /* repaint the bar after a redraw */
+void ime_set_anchor(int row);          /* v2.25: bar row follows input */
 void ime_off(void);                    /* force-close bar + deactivate   */
 
 #endif

@@ -369,6 +369,7 @@ int kb_readline(char *buf, int len) {
     if (len <= 0) return 0;
     int x0 = 0, y0 = 0;
     con_get_cursor(&x0, &y0);
+    ime_set_anchor(y0);             /* v2.25: candidate bar under the line */
     uint8_t base = con_get_fg();
     int cols = con_cols();
     int hist_pos = -1;                  /* -1 = the draft line being typed */
