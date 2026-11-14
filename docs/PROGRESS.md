@@ -350,3 +350,13 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **回归**：fsrec 12/12、caps 12/12、user 15/15 全绿；实机验证
   `echo hello-from-usb-keyboard` 全 USB 路径完整回显，reports 递增、
   errors=0。截图 tests/qemu_shots/usb_keyboard.png。
+
+## 十六、v2.27 IME 候选条宽度自适应
+
+- vbe24 large 档（50x18，16x32 cell）实机验证 IME：候选条正确跟随输入
+  行、选字 commit（"中"）正确上屏。
+- 修复：窄档候选条右缘截断（第 9 候选被切半、分页提示丢失）。现按
+  con_cols() 计算每个候选占宽（数字 + 汉字 2 cells + 空格），放不下的
+  候选主动跳过（= 翻页仍可达），80 列以上才追加 "(-/= page, esc)" 尾注。
+- 回归：fsrec 12/12；normal 80 列候选条完整（9 候选 + 尾注）；large
+  50 列完整（8 候选，无截断）。

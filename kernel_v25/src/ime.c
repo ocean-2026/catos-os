@@ -93,13 +93,23 @@ static void ime_show(void) {
     bar_put(bar, &n, "/");
     bar_num(bar, &n, (total + PER_PAGE - 1) / PER_PAGE);
     bar_put(bar, &n, " ");
+    /* v2.27: fit the console width -- a hanzi candidate costs num + 2
+     * cells + space; skip the trailing hint when the grid is narrow so
+     * no candidate is silently clipped at the right edge. */
+    int cols = con_cols();
+    int head = n;                       /* cells consumed by the prefix  */
+    int used = head;
     for (int i = 0; i < PER_PAGE && start + i < total; i++) {
+        int w = (i == 9 ? 2 : 1) + 3;   /* digit + hanzi(2 cells) + space */
+        if (used + w > cols) break;
         bar_num(bar, &n, i + 1);
         for (int k = 0; k < 3 && n < BAR_MAX - 1; k++)
             bar[n++] = e->hz[(start + i) * 3 + k];
         bar_put(bar, &n, " ");
+        used += w;
     }
-    bar_put(bar, &n, "(-/= page, esc)");
+    if (cols >= 66 && used + 16 <= cols)
+        bar_put(bar, &n, "(-/= page, esc)");
     bar[n] = 0;
     con_status_bar_at(row, bar);
 }
