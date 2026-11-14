@@ -71,3 +71,7 @@ __pycache__/
 # ---- WorkBuddy workspace memory (project-local notes, not source) ----
 .workbuddy/
 trash
+
+# disk image backups (huge, reproducible)
+kernel_v25/catos_disk.img.bak-*
+kernel_v25/catos_work_kernel.bin
