@@ -36,3 +36,5 @@
 - [CatOS/v2.14][经验] **收编老项目的原则是"内核已有的从 ot 去掉，没有但有价值的内核态实现"**：ot 的 30 个与 shell 重复命令直接从命令表删除（而不是留着兼容），独有价值（脚本引擎/文件管理器/十六进制编辑/搜索/版本控制）保留；当年在用户态做 workaround 的根因（无非阻塞按键、无文件四件套）在内核态补齐后，应用侧 hack 一行不留
 - [CatOS/v2.14][经验] **修用户态 hack 要修到 API 层而不是给 hack 发护照**：adofai 屏蔽 IRQ1 + 直读 0x64/0x60 的"解法"本质是 ring3 篡改中断控制器；正确路径是内核补 slot 64 `pollkey()`（`kb_getkey_timed(0)`，nargs=0 沿用单参 thunk），游戏删光 IMR/端口代码——能力进内核，应用只管调用
 - [CatOS/v2.14][经验] **测试 flaky 先怀疑测试节奏再怀疑内核**：ot_regress 三处 FAIL 手动复现全部成功，根因全是测试侧（y 没跟 Enter、format 后等 2.5s 不够、读屏竞态）；诊断方法是手动脚本逐步二分"哪一步之后 faultinfo 有记录"，定位后修测试而非内核
+CatOS[经验] UHCI 轮询式 HID 键盘驱动最小实现：PIIX3 UHCI（BAR4 I/O）+ 4KB 帧表全指向单 QH + 单中断 IN TD，10ms 定时器轮询 TD status，免 EHCI/OHCI 复杂度即得 USB 键盘；控制传输（SETUP/IN/OUT 深度链）仅用于枚举三步，之后设备地址固定，无需 SET_IDLE/SET_PROTOCOL。
+CatOS[经验] 判定"内核某路径是否真的执行"：不要相信源码里有调用就等于运行——先核实调用点是否处于可达路径（CatOS case 0 教训），再用一次性串口 breadcrumb（static flag 打一次日志）做存在性验证，成本远低于反复推断。

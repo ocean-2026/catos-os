@@ -131,6 +131,7 @@ static void ser_putc(char c) {
 static void ser_write(const char *s) {
     while (*s) ser_putc(*s++);
 }
+void ser_dbg(const char *s) { ser_write(s); }
 static void ser_hex(const char *tag, uint32_t v) {
     static const char *h = "0123456789abcdef";
     ser_write(tag);
@@ -237,6 +238,8 @@ void isr_irq(int_frame_t *f) {
     switch (irq) {
     case 0:
         timer_ticks++;
+        { static int once0; if (!once0) { ser_dbg("[intr] irq0 fired\n"); once0 = 1; } }
+        usb_poll();                 /* v2.26 UHCI/HID keyboard polling */
         svga_tick();                         /* SVGA II FIFO UPDATE (25 Hz) */
         con_tick();                          /* BLINK phase + software cursor */
         task_tick_wake();                    /* wake sleepers, set need_resched */

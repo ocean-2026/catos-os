@@ -8,6 +8,7 @@
 #include "task.h"
 #include "hw.h"
 #include "snd.h"
+#include "usb.h"
 
 uint32_t multiboot_info_ptr = 0;
 uint32_t multiboot_flags = 0;
@@ -70,6 +71,13 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     } else {
         vga_write("snd: no audio device detected (audio disabled)\n");
     }
+
+    /* v2.26 USB (UHCI + HID keyboard).  Missing controller is NOT fatal:
+     * PS/2 remains the primary input path and all regressions must boot
+     * identically without -usb.  Port reset costs ~200ms only when a
+     * device actually attaches. */
+    if (usb_start() && usb_ready())
+        vga_write("usb: UHCI ready, HID keyboard on port\n");
 
     if (net_init() < 0) {
         vga_write("net: no usable NIC");

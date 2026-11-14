@@ -321,3 +321,32 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   caps=0xFFFFFFFF），实机捕获后修正。
 - **回归**：tests/caps_regress.py 12 步全过（三命令拒绝、预设 0x400、
   细位放行、TUI 往返、屏幕逐字恢复、无致命故障）。
+
+## 十五、v2.26 USB 支持（需求 5，本批 7 项全部完成）
+
+- **UHCI 主机控制器驱动**（src/usb_uhci.c，~600 行）：
+  PCI 扫描 8086:7020/7112（PIIX3/PIIX4 UHCI，含 function 扫描——QEMU PIIX3
+  UHCI 在 dev1.fn2）；BAR4 I/O 基址；HCRESET/GRESET 复位序列；1024 项
+  1ms 帧表（固定物理区 0x560000，与 es1371/snd DMA 区错开）→ QH → TD。
+- **完整 USB 枚举**：GET_DESCRIPTOR(8B) → SET_ADDRESS(1) → SET_CONFIGURA
+  TION(1)，控制传输经 SETUP/IN/OUT 三 TD 深度链，轮询收割。
+- **HID 键盘**：中断 IN（addr1 ep1 8B boot report）10ms 轮询收割；
+  make/break 按 6 槽报告比较；修饰键换档合成 set-1 0x2A/0xAA 等；
+  HID usage→i8042 scancode set 1 翻译表（字母三段、数字、F1-F12、
+  方向键、Home/End/PgUp/PgDn/Ins/Del），进 kb 统一队列——IME、
+  scrollback、rl 编辑器全部无需改动即可用。
+- **`usb` shell 命令**：控制器/端口/速度/报告数/错误数；`usb scan` 热插入。
+- **调试攻坚记录（全部实机捕获）**：
+  1. 只扫 fn=0 漏掉 PIIX3 UHCI（fn2）；
+  2. FRBASEADD 是 32 位寄存器，outw 只写低 16 位 → 帧表基址=0；
+  3. intr.c isr_irq case 0 是死代码，IRQ0 真入口在 cpu.s _irq_0 →
+     task.c sched_timer_tick——usb_poll 原先永远不被调用；
+  4. UHCI 控制器会推进 QH element pointer（TD 完成后 QEMU 把 TD[0]
+     即 TERM 写进 QH[1]），每次重排 TD 必须同时把 QH[1] 指回 TD；
+  5. TD 未武装时 TD[1]=0 被误判为"完成 1 字节"，产生幽灵报告；
+  6. SET_ADDRESS 发两次且第二次用错设备地址（addr=1 发给 addr0 设备）；
+  7. QEMU `-usbdevice keyboard` 存在时 sendkey 输入只走 USB 设备，
+     PS/2 收不到——USB 路径是唯一输入通道（stale 内核验证）。
+- **回归**：fsrec 12/12、caps 12/12、user 15/15 全绿；实机验证
+  `echo hello-from-usb-keyboard` 全 USB 路径完整回显，reports 递增、
+  errors=0。截图 tests/qemu_shots/usb_keyboard.png。

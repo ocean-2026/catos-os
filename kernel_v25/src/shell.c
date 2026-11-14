@@ -3,6 +3,7 @@
 #include "render.h"      /* display front-end: mode policy + text styles */
 #include "keyboard.h"
 #include "ime.h"
+#include "usb.h"
 #include "rtc.h"
 #include "io.h"
 #include "fs.h"
@@ -2899,6 +2900,17 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
         else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
+        else if (!strcmp_(cmd, "usb")) {
+            if (!strcmp_(arg, "scan")) {
+                int n = usb_scan_devices();
+                vga_write(n ? "usb: keyboard attached\n"
+                            : "usb: no device found\n");
+            } else {
+                char b[96];
+                vga_write("usb: "); vga_write(usb_status(b, sizeof(b)));
+                vga_write("\n");
+            }
+        }
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();

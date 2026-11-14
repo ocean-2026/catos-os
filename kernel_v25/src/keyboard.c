@@ -58,6 +58,15 @@ static int scq_pop(void) {
 /* non-blocking: 1 when at least one scancode is pending (for `top`) */
 int kb_peek(void) { return scq_tail != scq_head; }
 
+/* v2.26: USB keyboard path -- HID reports are translated to scancode
+ * set 1 by usb_uhci.c and pushed through the SAME queue as PS/2, so the
+ * whole decoder stack (shift/caps/ctrl, IME, scrollback) works unchanged. */
+void kb_usb_feed(uint8_t sc) {
+    uint32_t n = (scq_head + 1) % SCQ_SZ;
+    if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
+    console_wake_all();
+}
+
 void kb_init(void) {
     line_len = line_cur = 0;
     shift = 0; caps = 0; ctrl = 0; got_e0 = 0;

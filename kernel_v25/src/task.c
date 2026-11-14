@@ -12,6 +12,7 @@
  */
 
 #include "task.h"
+#include "usb.h"
 #include "io.h"
 #include "vga.h"
 #include "render.h"      /* v2.7 display front-end (mode policy + styles) */
@@ -299,6 +300,7 @@ uint32_t sched_timer_tick(int_frame_t *f) {
      *                 frozen.  (#108 v2.21) */
     svga_tick();
     con_tick();
+    usb_poll();                  /* v2.26 UHCI/HID keyboard polling (10ms gate) */
     /* CPU accounting for `top`: every tick is charged to whoever is on
      * the CPU when it fires (the idle pseudo-task absorbs idle time) */
     if (cur_task && cur_task != &idle_task_v) cur_task->cpu_ticks++;

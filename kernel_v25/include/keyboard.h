@@ -42,6 +42,7 @@
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */
+void kb_usb_feed(uint8_t sc); /* USB HID: set-1 scancode from usb_uhci.c   */
 int  kb_peek(void);           /* non-blocking: a scancode is pending */
 int  kb_getkey_timed(uint32_t ticks);  /* real key within N ticks, else -1 */
 /* Blocking: returns one key as either an ASCII code (0..255, Ctrl+letter

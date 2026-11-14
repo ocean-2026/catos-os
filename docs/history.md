@@ -68,3 +68,9 @@ CatOS[易错点] 像素断言不能读 0xB8000（仅文本模式有效）；vbe2
 CatOS[易错点] useq() 相等返回 1（*a==*b），从 strcmp 迁移比较条件时 `==0` 会反转语义（实机表现为 preset 'viewer' 匹配到 'admin' caps=0xFFFFFFFF）；改造比较逻辑时必须按返回值语义重写条件。
 CatOS[易错点] `format` 是交互式确认命令（Proceed? y/n），回归测试用它做"门是否打开"探针时，后续命令会被 y/n 提示吞掉；探针后必须显式应答 n，或改用无副作用命令。
 CatOS[易错点] Bash 里 `pkill -f qemu-system-i386` 会自杀（-f 匹配到自身命令行文本），用 `pkill -x qemu-system-i386` 按进程名精确匹配。
+CatOS[易错点] UHCI 的 QH element pointer 是硬件 scratch 寄存器：控制器每完成一个 TD 就把 TD[0]（next 指针）写回 QH[1]；轮询式驱动每次重排 TD 必须同时重写 QH[1]，否则队列被 TERM 后永远沉默。
+CatOS[易错点] UHCI FRBASEADD 是 32 位 I/O 寄存器，用 outw 只写低 16 位（帧表基址变成 0，控制器读中断向量表当帧表、FRNUM 照常走但永无传输）；4 字节寄存器一律 outl。
+CatOS[易错点] CatOS 的 IRQ0 真入口是 cpu.s _irq_0 → task.c sched_timer_tick()；intr.c isr_irq 的 case 0 是永远不可达的死代码，往那里挂每 tick 钩子会静默失效（本次 usb_poll 中招 2 小时）。
+CatOS[易错点] QEMU -usbdevice keyboard 附加后 sendkey 的键盘事件只进 USB HID 设备，PS/2 i8042 收不到任何键——测试 USB 键盘时类型注入必须走 USB 路径。
+CatOS[易错点] QEMU PIIX3 的 UHCI 在 PCI dev1.fn2（8086:7020），PCI 扫描必须遍历 function，只扫 fn0 会漏掉。
+CatOS[易错点] build.sh 的链接失败信息是 "undefined reference"（不含 "error" 字样），用 grep error 过滤构建输出会把链接失败漏判成成功；应过滤 'error|undefined' 并检查产物 mtime。
