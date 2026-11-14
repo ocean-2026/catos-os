@@ -705,3 +705,14 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 117 | 低 | text 模式（VGA 字库）下中文内容无法显示（cat 输出中文静默丢弃） | VGA 9042 字库无中文字形，图形模式才有软件字库渲染 | 记录为已知限制；可选改进：非 ASCII 渲染为 '?' 或提示切图形模式 | ⏳ 已知限制 |
 
 | 118 | 高 | fat_alloc/free 计数用 max_clus 当数据簇上界，小卷上可达数据区 2 倍——可能分配卷尾外簇（数据损坏）且 df 显示 free>total | max_clus 语义混用（FAT 表容量 vs 数据区簇数） | v2.34：clus_hi()=vol_clusters+2 统一替换 17 处 | ✅ 已修 |
+
+## 二十四、v2.36 审查轮（#120~#123，2026-11-15）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 120 | 中 | `alias name=value` 对已存在别名重复赋值时，新值被**追加**到旧值之后（`alias ll=ls` 再 `alias ll=dir` 得到 `ll='lsdir'`），而非替换 | cmd_alias 命中已有条目后直接 `strcat_b(al_value[i], …)`，未先清空旧值；仅在 strcat_b 放不下的 fallback 分支才整段覆盖 | v2.36：覆盖前先 `al_value[i][0]=0` 再拼接，实机复现验证 `alias ll='dir'` 纯替换 | ✅ 已修 |
+| 121 | 高 | ring0 shell 的 `touch` 不做父目录写权限检查，非 root 用户可在 /etc、/bin 下新建空文件（与 #112 mkdir 同类缺口，当时只补了 mkdir/cp -r，漏了 touch） | cmd_touch 直接调 fs_touch，未走 perm_write_on_parent；fs.c 层无 ACL 概念，守卫只在 shell 侧 | v2.36：文件不存在时先 `perm_write_on_parent()` 守卫父目录写权限；已存在文件不改动目录条目，保留原行为。实机：user 建 /etc/* 被拒、/tmp/* 允许 | ✅ 已修 |
+| 122 | 低 | `export`/`unset`/`size` 直接写全局持久化配置 /etc/env、/etc/size，未做管理员（CAP_USERADM/root）守卫；非 root 可改全局环境变量与字号默认值 | 这些命令在 ring0 shell 直接 fs_write_text 系统配置文件，未复用 session_is_admin() 闸门 | 本轮记录为低危观察项，未改：env/size 属会话偏好语义，是否全局可写需产品决策；后续若收紧，应在 cmd_export/cmd_unset/size_apply 落盘前加 admin 检查 | ⏳ 观察项 |
+| 123 | 低 | `ata_read_sectors` 的 DRQ 等待超时/错误分支为空：等待失败后仍继续从数据口读 256 字并返回 0（成功），上层拿到陈旧/垃圾数据却无错误信号 | ata_wait_drq 返回 -1 后未中断读循环、未把失败上抛；与 ata_write_sectors（失败即 return -1）不对称 | 本轮记录为低危观察项；建议读超时/错误时 return -1，由 fs/fat 层按既有 -1 路径处理 | ⏳ 观察项 |
+
+*本节后继续编号为 #124+。*

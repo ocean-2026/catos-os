@@ -267,12 +267,13 @@ def wait_for_prompt(s, timeout=90.0, poll=2.0):
     the next step then fails with a confusing "no such file" instead of
     "the guest was not ready yet".
 
-    The match is anchored on the prompt's shape ("catos" ":" <pwd> "$")
+    The match is anchored on the prompt's shape ("catos" ":" <pwd> "#" or "$")
     rather than on the bare word "catos": the GRUB boot menu also names
     the CatOS entry, so a loose match returns while the kernel is still
     booting and the first real command is dropped again.
     """
-    pattern = re.compile(r"catos:[^\n]*\$")
+    # v2.35: root prompt ends in '#', unprivileged in '$' -- accept both.
+    pattern = re.compile(r"catos:[^\n]*[\$#]")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

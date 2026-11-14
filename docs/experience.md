@@ -38,3 +38,5 @@
 - [CatOS/v2.14][经验] **测试 flaky 先怀疑测试节奏再怀疑内核**：ot_regress 三处 FAIL 手动复现全部成功，根因全是测试侧（y 没跟 Enter、format 后等 2.5s 不够、读屏竞态）；诊断方法是手动脚本逐步二分"哪一步之后 faultinfo 有记录"，定位后修测试而非内核
 CatOS[经验] UHCI 轮询式 HID 键盘驱动最小实现：PIIX3 UHCI（BAR4 I/O）+ 4KB 帧表全指向单 QH + 单中断 IN TD，10ms 定时器轮询 TD status，免 EHCI/OHCI 复杂度即得 USB 键盘；控制传输（SETUP/IN/OUT 深度链）仅用于枚举三步，之后设备地址固定，无需 SET_IDLE/SET_PROTOCOL。
 CatOS[经验] 判定"内核某路径是否真的执行"：不要相信源码里有调用就等于运行——先核实调用点是否处于可达路径（CatOS case 0 教训），再用一次性串口 breadcrumb（static flag 打一次日志）做存在性验证，成本远低于反复推断。
+CatOS[经验] 审查 ring0 shell 权限面的高效手法：按 fs_touch/fs_mkdir/fs_write_raw_mode/fs_copy_file/fs_delete/fs_rmdir 全量 grep shell.c，逐个确认该命令在写盘前是否经过 perm_write_on_parent 或 fs_perm_check；未经过的就是 syscall 层守卫罩不住的缺口（本轮由此定位 touch 漏网）。
+CatOS[经验] QEMU UHCI 热插拔时序：monitor device_add usb-kbd 后，内核靠 100 tick 轮询挂起 pending_attach、由键盘等待循环里的 usb_service() 触发扫描+端口复位；枚举/复位需要 1~2s 窗口，探针延迟太短会读到 "no device found" 误判为驱动缺陷。端口状态 bit7(0x0080) 在 QEMU 实连时置位，可作端口有效位判据。

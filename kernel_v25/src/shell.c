@@ -682,6 +682,16 @@ static void cmd_mkdir_p(const char *arg, int parents) {
 
 static void cmd_touch(const char *arg) {
     if (!*arg) { vga_write("usage: touch FILE\n"); return; }
+    /* #121: creating a NEW entry needs write perm on its parent, the same
+     * guard mkdir/cp -r already apply; a touch of an existing file does not
+     * modify the directory entry so it keeps the old behaviour. */
+    uint32_t tc, ts;
+    if (fs_resolve_file(arg, &tc, &ts) != 0) {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+            vga_write("touch: permission denied\n"); return;
+        }
+    }
     int r = fs_touch(arg);
     if (r == FS_OK)            return;
     if (r == FS_ERR_NOENT)      vga_write("touch: parent directory not found\n");
@@ -2827,7 +2837,8 @@ static void cmd_alias(char *arg) {
         for (int j = 0; j < l; j++) al_name[i][j] = name[j];
         al_name[i][l] = 0;
     }
-    if (strcat_b(al_value[i], 64, value) != 0) {   /* overwrite in place */
+    al_value[i][0] = 0;   /* #120: an existing alias must be REPLACED, not appended to */
+    if (strcat_b(al_value[i], 64, value) != 0) {
         int v = 0; while (value[v] && v < 63) { al_value[i][v] = value[v]; v++; }
         al_value[i][v] = 0;
     }

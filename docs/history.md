@@ -85,3 +85,7 @@ CatOS[易错点] 新增跨模块调用（如 keyboard.c 调 usb_service）必须
 CatOS[易错点] qemu_driver.type_text 的特殊字符映射不全时（如反斜杠、@、#）字符会静默丢失——测试输入含符号的字符串前先确认映射表覆盖。
 CatOS[易错点] Ubuntu 环境可能随时重置：qemu-system-i386 等已装工具会消失，表现为所有回归 FATAL "shell prompt never appeared"——排查顺序：which qemu-system-i386 先确认工具存在，再怀疑代码；重装用 sudo apt-get update && sudo apt-get install -y qemu-system-x86。
 CatOS[易错点] git checkout <old-commit> -- kernel_v25 会静默回滚源码——排查环境问题时回滚验证后必须立刻恢复 HEAD 版本。
+CatOS[易错点] 环境重置后 /usr/bin/qemu-system-i386 可能消失：真实可用入口是包装脚本 /home/user/bin/qemu-system-i386（内部 export LD_LIBRARY_PATH=/home/user/qemu-root/usr/lib/x86_64-linux-gnu:/home/user/qemu-root/lib/x86_64-linux-gnu 与 QEMU_MODULE_DIR，再 -L /home/user/qemu-bios 启动 /home/user/qemu-root/usr/bin/qemu-system-i386）；直接调裸二进制缺 libpmem/libfdt/librdmacm 等库起不来。回归/探针务必 --qemu 显式传包装脚本。
+CatOS[易错点] ring0 shell 直调 fs_touch/fs_mkdir/fs_copy_file 时 ACL/fs_perm_check 不生效（守卫只在 syscall 层和 shell 显式调用点）；每新增一个"创建/删除目录条目"的 shell 命令，必须在命令层补 perm_write_on_parent（父目录写权限），#112 补了 mkdir/cp -r，#121 漏网的 touch 本轮补上。
+CatOS[易错点] 覆盖已有字符串表项前必须先把旧缓冲清零再拼接：strcat_b 是追加语义不是替换；alias 表项重复赋值未清空旧值会得到旧值+新值的拼接串（#120）。
+CatOS[易错点] 整屏 read_screen 会残留上一行 "permission denied"：判定新命令被拒/允许时，先 clear 再用 ls 结果（文件是否列出）复核，不要只在整屏文本里 grep denied，否则会把允许误判成拒绝（#121 探针虚惊）。
