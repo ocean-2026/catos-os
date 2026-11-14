@@ -395,3 +395,10 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 对抗测试记录：模式切换 churn（gfx24/size compact|normal|large/text 确认）
   3 轮 6/6 过；shell 输入 fuzz 60 轮无崩溃；并发后台任务 + scrollback
   深分页往返 + ps 正常；fsrec/caps/user 全绿。
+
+## 十九、v2.31 history 命令
+
+- keyboard 暴露 kb_hist_count/kb_hist_get（0=最老，环形栈换算），shell 新增
+  `history` 命令：编号列出本次会话命令历史（与 Up/Down 共用 rl_hist，
+  连续重复自动去重）。实机验证 tests/qemu_shots/history_cmd.png。
+- fsrec/caps/user 回归全绿。

@@ -2806,7 +2806,7 @@ static const char *sh_cmds[] = {
     "about","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
     "color","cp","curl","date","dir","display","dns","echo","edit","env",
     "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
-    "id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mv",
+    "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mv",
     "netcfg","netdiag","palette","passwd","ping","ps","reboot","rgb","rm","run",
     "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
     "touch","udp","uname","unset","uptime","usb","useradd","userdel","useredit",
@@ -3111,6 +3111,16 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "chcaps"))      cmd_chcaps(arg);
         else if (!strcmp_(cmd, "chmod"))       cmd_chmod(arg);
         else if (!strcmp_(cmd, "chown"))       cmd_chown(arg);
+        else if (!strcmp_(cmd, "history")) {
+            int n = kb_hist_count();
+            for (int i = 0; i < n; i++) {
+                vga_write("  ");
+                print_int(i + 1);
+                vga_write("  ");
+                vga_write(kb_hist_get(i));
+                vga_write("\n");
+            }
+        }
         else if (!strcmp_(cmd, "ps"))          task_ps_print();
         else if (!strcmp_(cmd, "top"))         cmd_top();
         else if (!strcmp_(cmd, "jobs"))        cmd_jobs();

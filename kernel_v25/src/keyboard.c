@@ -258,6 +258,13 @@ int kb_getkey(void) {
 static char rl_hist[RL_HIST][KB_BUF];
 static int  rl_hist_head, rl_hist_count;
 
+int kb_hist_count(void) { return rl_hist_count; }
+const char *kb_hist_get(int i) {           /* 0 = oldest */
+    if (i < 0 || i >= rl_hist_count) return "";
+    int idx = (rl_hist_head - rl_hist_count + i + RL_HIST * 4) % RL_HIST;
+    return rl_hist[idx];
+}
+
 static void rl_hist_push(const char *s) {
     if (!s || !*s) return;
     if (rl_hist_count) {

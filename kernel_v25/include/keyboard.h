@@ -58,6 +58,8 @@ int  kb_getkey(void);
 typedef int (*rl_complete_fn)(const char *line, int cur,
                               char out[KB_BUF], char bar[160]);
 void kb_set_completer(rl_complete_fn fn);
+int  kb_hist_count(void);              /* v2.31: history listing */
+const char *kb_hist_get(int i);        /* 0 = oldest */
 /* Line mode used by the shell: echoes input, returns 1 on Enter with the
  * line copied into buf (NUL-terminated, max len-1 chars); returns 2 on
  * Ctrl+C (line cancelled, buf cleared). */
