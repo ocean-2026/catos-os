@@ -83,3 +83,5 @@ CatOS[易错点] ata.c 各等待循环上限 10M 次迭代（每次 inb+yield，
 CatOS[易错点] FAT32 驱动里 max_clus 是 FAT 表条目容量（fat_sz*512/4），不是数据区簇数；数据簇号上界必须用 vol_clusters+2，否则小卷上越界分配/统计翻倍（#118）。
 CatOS[易错点] 新增跨模块调用（如 keyboard.c 调 usb_service）必须同步 #include 头文件，否则隐式声明默认返回 int 编译不报错但留下 ABI 隐患。
 CatOS[易错点] qemu_driver.type_text 的特殊字符映射不全时（如反斜杠、@、#）字符会静默丢失——测试输入含符号的字符串前先确认映射表覆盖。
+CatOS[易错点] Ubuntu 环境可能随时重置：qemu-system-i386 等已装工具会消失，表现为所有回归 FATAL "shell prompt never appeared"——排查顺序：which qemu-system-i386 先确认工具存在，再怀疑代码；重装用 sudo apt-get update && sudo apt-get install -y qemu-system-x86。
+CatOS[易错点] git checkout <old-commit> -- kernel_v25 会静默回滚源码——排查环境问题时回滚验证后必须立刻恢复 HEAD 版本。
