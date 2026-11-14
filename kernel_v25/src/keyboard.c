@@ -89,6 +89,7 @@ static int sc_to_key(uint8_t sc) {
     case 0x52: return KB_INS;
     case 0x49: return KB_PGUP;
     case 0x51: return KB_PGDN;
+    case 0x0F: return KB_TAB;         /* v2.28: TAB for completion */
     case 0x3B: return KB_F1;
     case 0x3C: return KB_F2;
     case 0x3D: return KB_F3;
@@ -328,6 +329,10 @@ static uint8_t rl_tok_color(const char *tok, int n, int index, uint8_t base) {
     return base;
 }
 
+/* v2.28: completer hook registered by the shell. */
+static rl_complete_fn rl_completer;
+void kb_set_completer(rl_complete_fn fn) { rl_completer = fn; }
+
 static void rl_redraw(int x0, int y0, uint8_t base) {
     int cols = con_cols();
     if (x0 >= cols) x0 = cols - 1;
@@ -421,6 +426,29 @@ int kb_readline(char *buf, int len) {
             }
         }
 
+        if (k == KB_CTRL_C) {          /* v2.28: cancel the line */
+            line_len = line_cur = 0; line[0] = 0;
+            rl_redraw(x0, y0, base);
+            buf[0] = 0;
+            con_set_fg(base);
+            return 2;
+        }
+        if (k == KB_TAB && rl_completer) {
+            char out[KB_BUF], bar[160];
+            out[0] = 0; bar[0] = 0;
+            if (rl_completer(line, line_cur, out, bar) == 1 && out[0]) {
+                int j = 0;
+                for (; out[j] && j < KB_BUF - 1; j++) line[j] = out[j];
+                line[j] = 0; line_len = line_cur = j;
+                rl_redraw(x0, y0, base);
+            }
+            if (bar[0]) {
+                int br = y0 + 1;
+                if (br >= con_rows()) br = y0 - 1;
+                con_status_bar_at(br, bar);
+            }
+            continue;
+        }
         if (k == '\n') {
             int n = line_len;
             if (n >= len) n = len - 1;

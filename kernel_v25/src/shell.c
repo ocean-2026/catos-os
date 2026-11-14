@@ -2781,6 +2781,122 @@ static void cmd_useredit(void) {
 /* ---------- shell loop ---------- */
 static char input[256];
 
+
+/* ---- v2.28: TAB completion --------------------------------------------
+ * helpers: bounded strncmp and bounded string append */
+static int sh_strneq_(const char *s, const char *p, int n) {
+    for (int i = 0; i < n; i++) {
+        if (s[i] != p[i]) return 0;
+        if (!s[i]) return 1;              /* prefix already shorter */
+    }
+    return 1;
+}
+static void bar_put_str(char *b, int *n, const char *s) {
+    while (*s && *n < 158) b[(*n)++] = *s++;
+}
+/* ---- v2.28: TAB completion ----
+ * token 0 completes against the command table; later tokens complete
+ * against the current directory's file names (prefix only, no path
+ * parsing).  Multiple matches go into the candidate bar (the row under
+ * the input line), exactly one replacement goes back into the line. */
+static const char *sh_cmds[] = {
+    "about","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
+    "color","cp","curl","date","dir","display","dns","echo","edit","env",
+    "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mv",
+    "netcfg","netdiag","palette","passwd","ping","ps","reboot","rgb","rm","run",
+    "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
+    "touch","udp","uname","unset","uptime","usb","useradd","userdel","useredit",
+    "users","vbe","vbe24","vdiag","whoami",
+};
+#define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
+
+static void sh_best_prefix(const char *const *tab, int n,
+                           const char *pfx, int plen,
+                           char *out, char *bar) {
+    out[0] = 0; bar[0] = 0;
+    const char *hit = 0; int hits = 0;
+    for (int i = 0; i < n; i++)
+        if (plen == 0 || (sh_strneq_(tab[i], pfx, plen))) { hit = tab[i]; hits++; }
+    if (hits == 1) {
+        int j = 0;
+        while (hit[j] && j < 120) out[j] = hit[j], j++;
+        out[j++] = ' '; out[j] = 0;
+        return;
+    }
+    if (hits > 1) {                       /* candidate bar, first N names */
+        int n2 = 0;
+        bar_put_str(bar, &n2, "[tab] ");
+        for (int i = 0; i < n && n2 < 140; i++)
+            if (plen == 0 || sh_strneq_(tab[i], pfx, plen)) {
+                bar_put_str(bar, &n2, tab[i]);
+                bar_put_str(bar, &n2, " ");
+            }
+        bar[n2] = 0;
+    }
+}
+
+static int sh_complete(const char *line, int cur, char out[KB_BUF], char bar[160]) {
+    /* command token = the region from the first non-blank char up to the
+     * first blank; if `cur` is inside it (or nothing typed yet) complete
+     * against the command table, otherwise against file names. */
+    int s0 = 0;
+    while (s0 < cur && line[s0] == ' ') s0++;
+    int blank = (s0 >= cur);
+    int cmd_end = s0;
+    while (cmd_end < cur && line[cmd_end] != ' ') cmd_end++;
+    if (blank || cmd_end >= cur) {        /* inside the command token */
+        int plen = cur - s0;
+        if (plen == 0) { out[0] = 0; bar[0] = 0; return 0; }  /* no hint on bare TAB */
+        sh_best_prefix(sh_cmds, SH_NCMDS, line + s0, plen, out, bar);
+        return (out[0] != 0);
+    }
+    int ts = s0;
+    int i = cmd_end;
+    while (i < cur) {
+        while (i < cur && line[i] == ' ') i++;
+        if (i >= cur) break;
+        ts = i;
+        while (i < cur && line[i] != ' ') i++;
+        if (i >= cur) break;
+    }
+    int te = (i > cur) ? cur : i;
+    if (ts >= te) { out[0] = 0; bar[0] = 0; return 0; }
+    /* path completion only for a plain name (no '/' yet) */
+    for (int j = ts; j < te; j++)
+        if (line[j] == '"') { out[0] = 0; bar[0] = 0; return 0; }
+    static char names[64][FS_NAME_MAX];
+    char cwdp[FS_PATH_MAX];
+    fs_pwd(cwdp, sizeof(cwdp));
+    int n = fs_enum_entries(cwdp, names, 64);
+    if (n <= 0) { out[0] = 0; bar[0] = 0; return 0; }
+    /* shell order: files enum returns dir names first?  just prefix-match */
+    int plen = te - ts;
+    int kept = 0;
+    static const char *ptrs[64];
+    static char flat[64][FS_NAME_MAX];
+    for (int j = 0; j < n; j++)
+        if (plen == 0 || sh_strneq_(names[j], line + ts, plen)) {
+            for (int k2 = 0; k2 < FS_NAME_MAX; k2++) flat[kept][k2] = names[j][k2];
+            ptrs[kept] = flat[kept];
+            kept++;
+        }
+    if (kept == 0) { out[0] = 0; bar[0] = 0; return 0; }
+    char fo[KB_BUF], fbar[160];
+    sh_best_prefix(ptrs, kept, line + ts, plen, fo, fbar);
+    if (fo[0]) {                          /* splice the completed token */
+        int j = 0, o = 0;
+        for (; j < ts && o < KB_BUF - 1; j++) out[o++] = line[j];
+        for (j = 0; fo[j] && o < KB_BUF - 1; j++) out[o++] = fo[j];
+        for (j = te; line[j] && o < KB_BUF - 1; j++) out[o++] = line[j];
+        out[o] = 0;
+        if (fbar[0]) { int b = 0; while (fbar[b] && b < 159) { bar[b] = fbar[b]; b++; } bar[b] = 0; }
+        return 1;
+    }
+    if (fbar[0]) { int b = 0; while (fbar[b] && b < 159) { bar[b] = fbar[b]; b++; } bar[b] = 0; }
+    return 0;
+}
+
 static void prompt(void) {
     /* v2.25: keep the input line on the middle row of the screen. */
     con_scroll_anchor();
@@ -2860,9 +2976,16 @@ void shell_run(void) {
         boot_autostart();
     }
 
+    kb_set_completer(sh_complete);        /* v2.28: TAB completion */
+
     while (1) {
         prompt();
-        kb_readline(input, sizeof(input));
+        if (kb_readline(input, sizeof(input)) == 2) {   /* ^C cancels */
+            vga_set_fg(VGA_LIGHT_GREEN);
+            vga_write("^C\n");
+            vga_set_fg(VGA_WHITE);
+            continue;
+        }
         env_expand(input, (int)sizeof(input));   /* v2.23: $KEY / ${KEY} */
 
         /* Split first token */

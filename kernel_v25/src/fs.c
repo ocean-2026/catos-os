@@ -223,6 +223,18 @@ int fs_touch(const char *path) {
  * Returns the number of names found, or -1 if the path is not an
  * existing directory (e.g. the volume is not mounted). */
 struct enumf_ud { char (*out)[FS_NAME_MAX]; int maxn; int count; };
+static void enumf_all_cb(const char *name, uint8_t attr,
+                         uint32_t clus, uint32_t size, void *ud) {
+    struct enumf_ud *u = ud;
+    (void)clus; (void)size;
+    if (u->count < u->maxn) {
+        int k;
+        for (k = 0; name[k] && k < FS_NAME_MAX - 2; k++) u->out[u->count][k] = name[k];
+        if (attr & FAT_ATTR_DIR) { u->out[u->count][k++] = '/'; }
+        u->out[u->count][k] = 0;
+    }
+    u->count++;
+}
 static void enumf_cb(const char *name, uint8_t attr,
                      uint32_t clus, uint32_t size, void *ud) {
     struct enumf_ud *u = (struct enumf_ud *)ud;
@@ -233,6 +245,21 @@ static void enumf_cb(const char *name, uint8_t attr,
         u->out[u->count][k] = 0;
     }
     u->count++;
+}
+
+/* v2.28: like fs_enum_files but includes directories; a directory name
+ * comes back with a trailing '/' so completion can offer both kinds. */
+int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
+    if (!fs_ready || !path || maxn < 1) return -1;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
+
+    struct enumf_ud u = { out, maxn, 0 };
+    fat_list_dir(clus, enumf_all_cb, &u);
+    return u.count;
 }
 
 int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {

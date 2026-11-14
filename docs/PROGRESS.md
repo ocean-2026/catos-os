@@ -360,3 +360,19 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   候选主动跳过（= 翻页仍可达），80 列以上才追加 "(-/= page, esc)" 尾注。
 - 回归：fsrec 12/12；normal 80 列候选条完整（9 候选 + 尾注）；large
   50 列完整（8 候选，无截断）。
+
+## 十七、v2.28 TAB 补全 + Ctrl+C 行取消
+
+- **Tab 命令补全**：kb_readline 挂补全钩子（kb_set_completer）；shell 侧
+  sh_complete：光标位于命令 token 时对 71 个命令名前缀匹配——唯一命中
+  直接补全 + 尾空格；多命中把候选列表画到输入行下一行反白条（不动
+  行缓冲）。
+- **Tab 文件/目录补全**：光标在参数 token 时用 fs_enum_entries（新增，
+  含目录、目录名带 '/' 尾）前缀匹配；含 '"' 或路径中已有 '/' 的复杂
+  情形暂不处理（保守 return 0）。
+- **Ctrl+C 取消行**：kb_readline 遇 ^C（0x03）清行返回 2，shell 主循环
+  打印 "^C" 重开提示符——与 bash 习惯一致。
+- **根因教训**：fs_enum_files 跳过目录（FAT 目录过滤），补全需新的
+  fs_enum_entries；测试盘上 zz_demo 实际不存在导致两轮误判"补全失效"。
+- 回归：fsrec 12/12、caps 12/12、user 15/15 全绿。截图
+  tests/qemu_shots/tab_complete.png。
