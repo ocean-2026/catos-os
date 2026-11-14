@@ -65,3 +65,6 @@
 - [CatOS][易错点] 宿主 ce_sim（Python CE 模拟器）只认 MinGW gcc 的指令编码，Linux gcc 产物报 unsupported opcode 0x6a（push imm8）等：宿主快速回归在 Linux 上需先扩 ce_sim 的 opcode 表，FAIL 不代表内核问题。
 CatOS[易错点] QEMU monitor screendump 偶发不产文件或 socket BrokenPipe（guest 三重故障 -no-reboot 直接退出）：测试脚本必须对 screendump 做 3 次重试并先删旧文件；断管时先怀疑 guest 崩溃而非脚本。
 CatOS[易错点] 像素断言不能读 0xB8000（仅文本模式有效）；vbe24/gfx 模式断言一律走 screendump PPM。定位"输入行是否在屏幕中部"可用提示符前景色（LIGHT_GREEN=0x55FF55）的像素行带 + 从底部向上取连续绿带，避免屏上方残留旧 prompt 干扰 min_y。
+CatOS[易错点] useq() 相等返回 1（*a==*b），从 strcmp 迁移比较条件时 `==0` 会反转语义（实机表现为 preset 'viewer' 匹配到 'admin' caps=0xFFFFFFFF）；改造比较逻辑时必须按返回值语义重写条件。
+CatOS[易错点] `format` 是交互式确认命令（Proceed? y/n），回归测试用它做"门是否打开"探针时，后续命令会被 y/n 提示吞掉；探针后必须显式应答 n，或改用无副作用命令。
+CatOS[易错点] Bash 里 `pkill -f qemu-system-i386` 会自杀（-f 匹配到自身命令行文本），用 `pkill -x qemu-system-i386` 按进程名精确匹配。

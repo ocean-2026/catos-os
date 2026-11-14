@@ -27,6 +27,18 @@
 #define CAP_SYS      0x0040u   /* reserved (reboot, kernel introspection)          */
 #define CAP_ALL      0xFFFFFFFFu
 
+/* v2.25 fine-grained split (append-only; broad bits stay valid and each
+ * gate accepts the broad bit OR its fine successor):
+ *   CAP_FSADMIN -> CAP_FORMAT (0x0080) + CAP_FSCK (0x0100)
+ *   CAP_DEVICE  -> CAP_RAWIO  (0x0200) + CAP_HWINFO (0x0400)
+ *   CAP_SYS     -> CAP_REBOOT (0x0800) + CAP_DIAG  (0x1000) */
+#define CAP_FORMAT   0x0080u
+#define CAP_FSCK     0x0100u
+#define CAP_RAWIO    0x0200u
+#define CAP_HWINFO   0x0400u
+#define CAP_REBOOT   0x0800u
+#define CAP_DIAG     0x1000u
+
 #define MAX_USERS    32
 #define ACL_MAX      256
 
@@ -72,6 +84,9 @@ int         user_set_pw(const char *name, const char *pw);
 int         user_set_caps(const char *name, uint32_t caps);
 int         user_save(void);                     /* rewrite /etc/passwd          */
 uint32_t    user_hash_pw(const char *pw);       /* djb2, non-cryptographic     */
+/* v2.25 preset capability templates: admin / operator / developer /
+ * viewer / guest.  Returns 0 and fills *out, or -1 for an unknown name. */
+int         user_preset_caps(const char *preset, uint32_t *out);
 int         user_pw_is_set(const user_rec_t *u);/* non-empty password record    */
 void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      */
 

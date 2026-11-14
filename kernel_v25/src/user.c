@@ -214,6 +214,22 @@ int user_del(const char *name) {
     return 0;
 }
 
+/* v2.25 preset capability templates (useradd -p NAME / useredit UI) */
+int user_preset_caps(const char *preset, uint32_t *out) {
+    static const struct { const char *n; uint32_t c; } P[] = {
+        { "admin",     CAP_ALL },
+        { "operator",  CAP_NET | CAP_KILL | CAP_AUDIO | CAP_FSCK |
+                       CAP_HWINFO | CAP_DIAG },
+        { "developer", CAP_NET | CAP_AUDIO | CAP_RAWIO | CAP_DIAG },
+        { "viewer",    CAP_HWINFO },
+        { "guest",     0 },
+    };
+    if (!preset || !out) return -1;
+    for (unsigned i = 0; i < sizeof(P) / sizeof(P[0]); i++)
+        if (useq(P[i].n, preset)) { *out = P[i].c; return 0; }
+    return -1;
+}
+
 int user_set_pw(const char *name, const char *pw) {
     user_rec_t *u = user_by_name(name);
     if (!u) return -1;

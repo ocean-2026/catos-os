@@ -41,6 +41,10 @@ static con_cell_t sb[CON_SB_ROWS][CON_MAX_COLS];
 static int sb_head, sb_count, sb_view;
 static con_cell_t sb_live[CON_MAX_ROWS][CON_MAX_COLS];
 
+/* v2.25 full-screen UI takeover backup (one level) */
+static con_cell_t ui_backup[CON_MAX_ROWS][CON_MAX_COLS];
+static int ui_backup_cur_x, ui_backup_cur_y, ui_backup_valid;
+
 /* current style */
 static uint32_t s_fg_rgb, s_bg_rgb, clear_bg;
 static uint8_t  s_fg_idx, s_bg_idx, s_attrs;
@@ -803,6 +807,30 @@ int con_set_cell_size(int s) {
     redraw_all();
     if (cur_x > cols) cur_x = cols;
     if (cur_y >= rows) cur_y = rows - 1;
+    sync_cursor(1);
+    return 0;
+}
+
+int con_screen_push(void) {
+    if (ui_backup_valid) return -1;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) ui_backup[y][x] = cells[y][x];
+    ui_backup_cur_x = cur_x; ui_backup_cur_y = cur_y;
+    ui_backup_valid = 1;
+    return 0;
+}
+
+int con_screen_pop(void) {
+    if (!ui_backup_valid) return -1;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) cells[y][x] = ui_backup[y][x];
+    cur_x = ui_backup_cur_x; cur_y = ui_backup_cur_y;
+    if (cur_x >= cols) cur_x = cols - 1;
+    if (cur_y >= rows) cur_y = rows - 1;
+    ui_backup_valid = 0;
+    saved_row_valid = 0; saved_row_index = -1;
+    dcx = dcy = -1;
+    redraw_all();
     sync_cursor(1);
     return 0;
 }

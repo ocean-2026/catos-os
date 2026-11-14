@@ -1783,6 +1783,9 @@ static void print_caps(uint32_t caps) {
         { CAP_FSADMIN, "fsadmin" }, { CAP_AUDIO, "audio" },
         { CAP_USERADM, "useradm" }, { CAP_DEVICE, "device" },
         { CAP_SYS, "sys" },
+        { CAP_FORMAT, "format" }, { CAP_FSCK, "fsck" },
+        { CAP_RAWIO, "rawio" },   { CAP_HWINFO, "hwinfo" },
+        { CAP_REBOOT, "reboot" }, { CAP_DIAG, "diag" },
     };
     int first = 1;
     for (unsigned i = 0; i < sizeof(T) / sizeof(T[0]); i++)
@@ -1907,18 +1910,33 @@ static void cmd_useradd(char *arg) {
     if (argc >= 4) {
         caps = hex32_(argv[3]);
     } else {
-        /* T52: interactive capability wizard, one question per bit */
+        /* T52 wizard, extended v2.25: presets first, then per-bit
+         * questions including the fine-grained successors. */
         static const struct { uint32_t bit; const char *q; } W[] = {
             { CAP_NET,     "network (http/dns/udp/ping)" },
             { CAP_KILL,    "kill other users' tasks" },
-            { CAP_FSADMIN, "filesystem admin (format/fsck)" },
+            { CAP_FSADMIN, "filesystem admin (format+fsck, broad)" },
+            { CAP_FORMAT,  "format disks (fine)" },
+            { CAP_FSCK,    "fsck mirror repair (fine)" },
             { CAP_AUDIO,   "audio playback (SB16/ES1371)" },
             { CAP_USERADM, "user admin (useradd/passwd/su)" },
-            { CAP_DEVICE,  "raw device + hw info access" },
-            { CAP_SYS,     "system (reboot/kernel introspection)" },
+            { CAP_DEVICE,  "raw device access (broad)" },
+            { CAP_RAWIO,   "raw device I/O (fine)" },
+            { CAP_HWINFO,  "hardware info read (fine)" },
+            { CAP_SYS,     "system (broad: reboot+introspection)" },
+            { CAP_REBOOT,  "reboot (fine)" },
+            { CAP_DIAG,    "kernel introspection/faultinfo (fine)" },
         };
         caps = 0;
-        vga_write("Capabilities for '"); vga_write(name); vga_write("' (y/N per item)\n");
+        vga_write("Capabilities for '"); vga_write(name);
+        vga_write("'\n  preset? admin/operator/developer/viewer/guest or ENTER for wizard: ");
+        char pans[16];
+        kb_readline(pans, sizeof(pans));
+        if (pans[0] && user_preset_caps(pans, &caps) == 0) {
+            vga_write("     preset '"); vga_write(pans);
+            vga_write("' -> caps=0x"); print_hex(caps); vga_write("\n");
+        } else {
+        vga_write("(y/N per item)\n");
         char ans[8];
         for (int i = 0; i < (int)(sizeof(W) / sizeof(W[0])); i++) {
             char num[4]; num[0] = (char)('1' + i); num[1] = 0;
@@ -1933,6 +1951,7 @@ static void cmd_useradd(char *arg) {
             }
         }
         vga_write("       caps=0x"); print_hex(caps); vga_write("\n");
+        }
     }
     char home[48];
     int o = 0;
@@ -2516,6 +2535,248 @@ static void cmd_size(const char *arg) {
     vga_write(" x "); print_int(con_rows()); vga_write("\n");
 }
 
+
+/* ---------- v2.25 full-screen user administration UI (`useredit`) -------
+ * Full-screen takeover: con_screen_push() saves the live grid, the TUI
+ * owns every row until Q/Esc, con_screen_pop() restores the shell view
+ * verbatim.  Requires CAP_USERADM (or root). */
+static void ue_line(int y, int x, const char *txt, uint8_t fg, uint8_t bg) {
+    if (y < 0 || y >= con_rows()) return;
+    con_set_style(fg, bg, 0);
+    con_write_at((uint8_t)x, (uint8_t)y, txt);
+}
+
+static void ue_pad(int y, uint8_t bg) {
+    char blanks[128];
+    int w = con_cols();
+    if (w > 120) w = 120;
+    for (int i = 0; i < w; i++) blanks[i] = ' ';
+    blanks[w] = 0;
+    con_set_style(CON_LIGHT_GREY, bg, 0);
+    con_write_at(0, (uint8_t)y, blanks);
+}
+
+static void ue_frame(const char *title) {
+    for (int y = 0; y < con_rows(); y++) ue_pad(y, CON_BLUE);
+    ue_line(0, 2, "+-------------------------------------------------------------+",
+            CON_YELLOW, CON_BLUE);
+    ue_line(1, 2, "|                                                             |",
+            CON_YELLOW, CON_BLUE);
+    char hdr[80];
+    int o = 0;
+    for (const char *q = "| "; *q && o < 78; q++) hdr[o++] = *q;
+    for (const char *q = title; *q && o < 77; q++) hdr[o++] = *q;
+    while (o < 63) hdr[o++] = ' ';
+    for (const char *q = "|"; *q && o < 78; q++) hdr[o++] = *q;
+    hdr[o] = 0;
+    ue_line(1, 2, hdr, CON_YELLOW, CON_BLUE);
+}
+
+static const char *ue_pwmark(const user_rec_t *u) {
+    return user_pw_is_set(u) ? "yes" : "no ";
+}
+
+static void ue_draw_list(int sel) {
+    ue_frame("CatOS user administration (v2.25 fine-grained caps)");
+    ue_line(2, 4, "  # name        uid gid caps      password",
+            CON_WHITE, CON_BLUE);
+    char ln[80];
+    int row = 3;
+    for (int i = 0; i < 10 && row < con_rows() - 3; i++) {
+        user_rec_t *u = user_at(i);
+        if (!u || !u->used) continue;
+        int o = 0;
+        ln[o++] = u->uid == (int)sel ? '>' : ' ';
+        ln[o++] = ' ';
+        char num[12];
+        int n = 0;
+        int v = i;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        if (n < 2) ln[o++] = '0';
+        while (n > 0) ln[o++] = num[--n];
+        ln[o++] = ' ';
+        for (const char *q = u->name; *q && o < 14; q++) ln[o++] = *q;
+        while (o < 16) ln[o++] = ' ';
+        n = 0; v = u->uid;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        while (n > 0) ln[o++] = num[--n];
+        ln[o++] = ' ';
+        n = 0; v = u->gid;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        while (n > 0) ln[o++] = num[--n];
+        while (o < 24) ln[o++] = ' ';
+        for (int k = 0; k < 8; k++) {
+            uint32_t c = user_caps_of(u->uid);
+            ln[o++] = "0123456789ABCDEF"[(c >> (28 - k * 4)) & 0xF];
+        }
+        ln[o++] = ' ';
+        for (const char *q = ue_pwmark(u); *q && o < 76; q++) ln[o++] = *q;
+        ln[o] = 0;
+        ue_line(row, 2, ln,
+                u->uid == (int)sel ? CON_BLACK : CON_LIGHT_GREY,
+                u->uid == (int)sel ? CON_YELLOW : CON_BLUE);
+        row++;
+    }
+    ue_line(con_rows() - 2, 2,
+            " arrows=select  N=new  E=edit caps  P=password  D=delete  Q=quit ",
+            CON_BLACK, CON_LIGHT_GREY);
+}
+
+static void ue_draw_caps(const char *name, uint32_t caps) {
+    ue_frame("editing capabilities (space toggles, R=preset, Esc=done)");
+    static const struct { uint32_t bit; const char *q; } W[] = {
+        { CAP_NET,     "network (http/dns/udp/ping)" },
+        { CAP_KILL,    "kill other users' tasks" },
+        { CAP_FSADMIN, "fs admin broad (format+fsck)" },
+        { CAP_FORMAT,  "format disks (fine)" },
+        { CAP_FSCK,    "fsck repair (fine)" },
+        { CAP_AUDIO,   "audio playback" },
+        { CAP_USERADM, "user admin" },
+        { CAP_DEVICE,  "raw device broad" },
+        { CAP_RAWIO,   "raw I/O (fine)" },
+        { CAP_HWINFO,  "hw info read (fine)" },
+        { CAP_SYS,     "system broad (reboot+diag)" },
+        { CAP_REBOOT,  "reboot (fine)" },
+        { CAP_DIAG,    "kernel introspection (fine)" },
+    };
+    char ln[80];
+    int row = 3;
+    for (int i = 0; i < (int)(sizeof(W) / sizeof(W[0])) && row < con_rows() - 3; i++) {
+        int o = 0;
+        ln[o++] = '[';
+        ln[o++] = (caps & W[i].bit) ? 'x' : ' ';
+        ln[o++] = ']';
+        ln[o++] = ' ';
+        for (const char *q = W[i].q; *q && o < 60; q++) ln[o++] = *q;
+        ln[o] = 0;
+        ue_line(row, 4, ln, (caps & W[i].bit) ? CON_LIGHT_GREEN : CON_LIGHT_GREY,
+                CON_BLUE);
+        row++;
+    }
+    char st[80];
+    int o = 0;
+    for (const char *q = name; *q && o < 30; q++) st[o++] = *q;
+    for (const char *q = "  caps=0x"; *q && o < 62; q++) st[o++] = *q;
+    for (int k = 0; k < 8 && o < 70; k++)
+        st[o++] = "0123456789ABCDEF"[(caps >> (28 - k * 4)) & 0xF];
+    st[o] = 0;
+    ue_line(con_rows() - 2, 2, st, CON_BLACK, CON_LIGHT_GREY);
+}
+
+static void ue_edit_caps(const char *name) {
+    user_rec_t *u = user_by_name(name);
+    if (!u) return;
+    uint32_t caps = user_caps_of(u->uid);
+    static const uint32_t bits[] = {
+        CAP_NET, CAP_KILL, CAP_FSADMIN, CAP_FORMAT, CAP_FSCK, CAP_AUDIO,
+        CAP_USERADM, CAP_DEVICE, CAP_RAWIO, CAP_HWINFO, CAP_SYS,
+        CAP_REBOOT, CAP_DIAG
+    };
+    int nb = (int)(sizeof(bits) / sizeof(bits[0]));
+    int cur = 0;
+    for (;;) {
+        ue_draw_caps(name, caps);
+        int k = kb_getkey();
+        if (k == KB_UP)   { if (--cur < 0) cur = nb - 1; }
+        else if (k == KB_DOWN) { if (++cur >= nb) cur = 0; }
+        else if (k == ' ') caps ^= bits[cur];
+        else if (k == 27 || k == '\n') {
+            user_set_caps(name, caps);
+            if (user_save() != 0) vga_write("useredit: persist failed\n");
+            return;
+        }
+        else if (k == 'r' || k == 'R') {
+            ue_line(con_rows() - 1, 2,
+                    " preset: admin/operator/developer/viewer/guest: ",
+                    CON_WHITE, CON_BLUE);
+            char p[16];
+            kb_readline(p, sizeof(p));
+            uint32_t pc;
+            if (p[0] && user_preset_caps(p, &pc) == 0) caps = pc;
+        }
+    }
+}
+
+static void ue_password(const char *name) {
+    char p1[64], p2[64];
+    ue_line(con_rows() - 1, 2, " new password (masked): ", CON_WHITE, CON_BLUE);
+    kb_readline_masked(p1, sizeof(p1));
+    ue_line(con_rows() - 1, 2, " retype:                 ", CON_WHITE, CON_BLUE);
+    kb_readline_masked(p2, sizeof(p2));
+    if (!p1[0] || strcmp_(p1, p2) != 0) {
+        ue_line(con_rows() - 1, 2, " password NOT set (empty or mismatch) ",
+                CON_LIGHT_RED, CON_BLUE);
+        return;
+    }
+    user_set_pw(name, p1);
+    if (user_save() != 0)
+        ue_line(con_rows() - 1, 2, " persist FAILED ", CON_LIGHT_RED, CON_BLUE);
+    else
+        ue_line(con_rows() - 1, 2, " password set + persisted ", CON_LIGHT_GREEN, CON_BLUE);
+}
+
+static void cmd_useredit(void) {
+    if (!session_is_admin()) {
+        vga_write("useredit: permission denied (need CAP_USERADM)\n");
+        return;
+    }
+    if (con_screen_push() != 0) { vga_write("useredit: push failed\n"); return; }
+    int sel = UID_USER;
+    for (;;) {
+        ue_draw_list(sel);
+        int k = kb_getkey();
+        if (k == KB_UP) {
+            int best = -1;
+            for (int i = 0; i < 10; i++) {
+                user_rec_t *u = user_at(i);
+                if (u && u->used && u->uid < sel && u->uid > best) best = u->uid;
+            }
+            if (best >= 0) sel = best;
+        } else if (k == KB_DOWN) {
+            int best = -1;
+            for (int i = 0; i < 10; i++) {
+                user_rec_t *u = user_at(i);
+                if (u && u->used && u->uid > sel &&
+                    (best < 0 || u->uid < best)) best = u->uid;
+            }
+            if (best >= 0) sel = best;
+        } else if (k == 'q' || k == 'Q' || k == 27) break;
+        else if (k == 'e' || k == 'E') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u && u->uid != UID_ROOT) ue_edit_caps(u->name);
+        } else if (k == 'p' || k == 'P') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u) ue_password(u->name);
+        } else if (k == 'd' || k == 'D') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u && u->uid != UID_ROOT) {
+                user_del(u->name);
+                user_save();
+                sel = UID_ROOT;
+            }
+        } else if (k == 'n' || k == 'N') {
+            ue_line(con_rows() - 1, 2, " new user name: ", CON_WHITE, CON_BLUE);
+            char nm[24], uid[8];
+            kb_readline(nm, sizeof(nm));
+            if (nm[0] && !user_by_name(nm)) {
+                ue_line(con_rows() - 1, 2, " uid (>=100):   ", CON_WHITE, CON_BLUE);
+                kb_readline(uid, sizeof(uid));
+                int uidv = uid[0] ? atoi_(uid) : 101;
+                if (uidv < 100) uidv = 101;
+                char home[48];
+                int o = 0;
+                for (const char *q = "/home/"; *q && o < 47; q++) home[o++] = *q;
+                for (const char *q = nm; *q && o < 47; q++) home[o++] = *q;
+                home[o] = 0;
+                user_add(nm, uidv, uidv, home, "/bin/shell.ce", 0);
+                user_save();
+                sel = uidv;
+            }
+        }
+    }
+    con_screen_pop();
+}
+
 /* ---------- shell loop ---------- */
 static char input[256];
 
@@ -2637,6 +2898,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
+        else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();
@@ -2644,7 +2906,13 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
         else if (!strcmp_(cmd, "date"))       cmd_date();
         else if (!strcmp_(cmd, "mem"))        cmd_mem();
-        else if (!strcmp_(cmd, "reboot"))    cmd_reboot();
+        else if (!strcmp_(cmd, "reboot")) {
+            /* v2.25 fine-grained split: CAP_SYS (broad) or CAP_REBOOT. */
+            if (g_uid == UID_ROOT || (g_caps & (CAP_SYS | CAP_REBOOT)))
+                cmd_reboot();
+            else
+                vga_write("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
         else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
@@ -2661,8 +2929,10 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
         else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
         else if (!strcmp_(cmd, "format")) {
-            if (session_is_fsadmin()) cmd_format();
-            else vga_write("format: permission denied (need CAP_FSADMIN)\n");
+            /* v2.25: fine-grained split -- CAP_FSADMIN (broad) or the
+             * new CAP_FORMAT successor both grant mkfs. */
+            if (session_is_fsadmin() || (g_caps & CAP_FORMAT)) cmd_format();
+            else vga_write("format: permission denied (need CAP_FSADMIN or CAP_FORMAT)\n");
         }
         else if (!strcmp_(cmd, "edit"))      cmd_edit(arg);
         else if (!strcmp_(cmd, "run"))        cmd_run(arg, g_uid);
@@ -2734,8 +3004,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
         else if (!strcmp_(cmd, "fsck")) {
-            if (!session_is_fsadmin()) {
-                vga_write("fsck: permission denied (need CAP_FSADMIN)\n");
+            if (!(session_is_fsadmin() || (g_caps & CAP_FSCK))) {
+                vga_write("fsck: permission denied (need CAP_FSADMIN or CAP_FSCK)\n");
             } else {
             int r = fat_verify_mirror();
             if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");

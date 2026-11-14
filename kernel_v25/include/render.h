@@ -191,4 +191,10 @@ void        con_scroll_anchor(void);
 int         con_set_cell_size(int s);
 int         con_get_cell_scale(void);
 
+/* v2.25 full-screen UI takeover: save the live grid + cursor, hand the
+ * whole screen to a TUI, then restore verbatim on exit.  Only ONE level
+ * (the useredit panel); nested pushes are refused with -1. */
+int         con_screen_push(void);
+int         con_screen_pop(void);
+
 #endif /* RENDER_H */

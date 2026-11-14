@@ -303,3 +303,21 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **待查（记 #115）**：偶发 guest 崩溃（QEMU -no-reboot 退出，monitor 断管），
   在 size 回归长流程中非确定性出现，单步手动复现未果；下一步加串口日志
   或 panic 截屏定位。
+
+## 十四、v2.25c 细粒度权限 + 全屏用户管理 UI（需求 4）
+
+- **CAP 六细拆（append-only，宽位仍有效，各门接受 宽位 OR 细位）**：
+  CAP_FSADMIN→CAP_FORMAT(0x0080)+CAP_FSCK(0x0100)；CAP_DEVICE→CAP_RAWIO(0x0200)
+  +CAP_HWINFO(0x0400)；CAP_SYS→CAP_REBOOT(0x0800)+CAP_DIAG(0x1000)。
+  format/fsck/reboot 门已切换到 宽 OR 细；`reboot` 由无门控改为需要
+  CAP_SYS 或 CAP_REBOOT（root 例外）。
+- **预设用户模板**：admin / operator / developer / viewer / guest；
+  useradd 向导首选预设，`useredit` 内 R 键应用预设。
+- **全屏接管 UI `useredit`**：con_screen_push()/pop() 整屏快照恢复；
+  用户列表（name/uid/gid/caps hex/密码有无）+ 方向键选择 + N 新建 /
+  E 细粒度 caps 逐位开关 / P 掩码改密 / D 删除 / Q 退出（退出后
+  shell 界面逐字恢复）。需 CAP_USERADM。
+- **修复**：user_preset_caps 预设比较条件写反（useq==0 误配 admin →
+  caps=0xFFFFFFFF），实机捕获后修正。
+- **回归**：tests/caps_regress.py 12 步全过（三命令拒绝、预设 0x400、
+  细位放行、TUI 往返、屏幕逐字恢复、无致命故障）。
