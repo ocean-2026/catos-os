@@ -139,9 +139,10 @@ void fs_init(void) {
 
 int fs_fs_ready(void) { return fs_ready; }
 
-void fs_format(void) {
-    fat_mkfs();
+int fs_format(void) {
+    if (fat_mkfs() != 0) return -1;        /* v2.32: no IDE disk */
     fs_init();
+    return 0;
 }
 
 uint16_t fs_cwd_index(void) { return (uint16_t)g_cwd; }

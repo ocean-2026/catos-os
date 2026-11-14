@@ -402,3 +402,12 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   `history` 命令：编号列出本次会话命令历史（与 Up/Down 共用 rl_hist，
   连续重复自动去重）。实机验证 tests/qemu_shots/history_cmd.png。
 - fsrec/caps/user 回归全绿。
+
+## 二十、v2.32 无盘 format 死循环修复（#116）
+
+- 对抗测试发现：无 -drive 硬盘时 `format` y 确认后假死 20s+。
+- 根因：fat_mkfs 在 ata_identify 失败时虚构 64MiB 卷继续写，每个扇区
+  写烧满 ata 层 10M 迭代超时，累计分钟级。
+- 修复：fat_mkfs→int（-1 无盘）、fs_format→int、format 命令与 boot
+  自动 format 路径报错并继续。带盘 format 2s 正常，无盘立即报错。
+- fsrec/caps/user 回归全绿。

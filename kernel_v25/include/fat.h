@@ -50,7 +50,7 @@ typedef struct {
 int  fat_probe(void);
 /* build a fresh FAT32 volume (size from ATA IDENTIFY) and standard
  * top-level directories. */
-void fat_mkfs(void);
+int  fat_mkfs(void);            /* v2.32: -1 = no IDE disk */
 
 uint32_t fat_root(void);                    /* root directory cluster */
 uint32_t fat_cluster_size(void);            /* bytes per cluster */

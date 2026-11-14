@@ -39,7 +39,7 @@ typedef struct fs_entry {
 
 void       fs_init(void);                 /* probe FAT32 volume */
 int        fs_fs_ready(void);             /* 1 when a FAT32 volume is mounted */
-void       fs_format(void);               /* create FAT32 volume + std dirs */
+int        fs_format(void);               /* v2.32: -1 = no IDE disk */
 uint16_t   fs_cwd_index(void);
 int        fs_chdir(const char *path);    /* empty path = root */
 int        fs_mkdir(const char *path);

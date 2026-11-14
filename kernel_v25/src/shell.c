@@ -1415,7 +1415,10 @@ static void cmd_format(void) {    vga_write(tr(L_FORMAT_CONFIRM));
     char ans[16];
     kb_readline(ans, sizeof(ans));
     if (ans[0] == 'y' || ans[0] == 'Y') {
-        fs_format();
+        if (fs_format() != 0) {
+            vga_write("format: no IDE disk attached\n");
+            return;
+        }
         vga_write(tr(L_FORMAT_DONE));
         vga_write("Top-level dirs: /dev /etc /bin /sbin /lib /usr /home\n");
         vga_write("                /root /tmp /var /proc /sys /mnt /boot\n");

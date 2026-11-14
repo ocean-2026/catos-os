@@ -78,3 +78,5 @@ CatOS[易错点] QEMU 6.2 的 monitor device_add 设备名是 usb-kbd，-usbdevi
 CatOS[易错点] QEMU 有 USB 键盘设备时 sendkey 事件只路由给 USB 设备（PS/2 收不到）；无 USB 键盘时 sendkey 走 PS/2——测试键盘路径前先确认当前 QEMU 设备构成。
 CatOS[易错点] tick 上下文（IRQ0 处理路径）里不能跑带 usb_delay_ticks 忙等的代码：deadline 依赖 timer_ticks 前进而 tick 本身不返回，死循环；热插拔要用"tick 置标志 + 任务上下文消费"两段式。
 CatOS[易错点] task_block(T_WAIT_KB) 无唤醒源时会永远睡死（USB 收割前 feed_report 才唤醒）——需要在等待循环里周期性调用 usb_service() 的场景应改 task_sleep_ticks 轮询。
+CatOS[易错点] fsrec 回归必须带 -drive 硬盘（disk= 参数），无盘时 format/挂载路径行为完全不同——复现 fs 相关问题先确认盘是否存在（#116 教训）。
+CatOS[易错点] ata.c 各等待循环上限 10M 次迭代（每次 inb+yield，秒级）：底层超时返回错误后，上层必须检查返回值，否则"有界等待"叠加成用户眼中的死循环。

@@ -1127,14 +1127,15 @@ int fat_probe(void) {
 }
 
 /* ---------- mkfs (geometry from ATA IDENTIFY) ---------- */
-void fat_mkfs(void) {
+int fat_mkfs(void) {
     uint8_t mbr[512], sec[512];
     uint32_t i;
 
-    /* 0) drive size */
+    /* 0) drive size -- v2.32: no IDE disk is a hard error (writing a
+     * phantom volume made every sector write burn its 10M-iteration
+     * timeout: "format" looked frozen for minutes). */
     vol_total = 0;
-    if (ata_identify(&vol_total) != 0 || vol_total <= 1)
-        vol_total = 131072u;               /* fallback: 64 MiB */
+    if (ata_identify(&vol_total) != 0 || vol_total <= 1) return -1;
     uint32_t part_sec = vol_total - 1;
 
     /* pick sectors/cluster by volume size (FAT32 convention) */
@@ -1308,6 +1309,7 @@ void fat_mkfs(void) {
     }
     sec[0x1FC] = 0x00; sec[0x1FD] = 0x00; sec[0x1FE] = 0x55; sec[0x1FF] = 0xAA;
     ata_write_sectors(PART_START + 1, 1, sec);
+    return 0;
 }
 
 /* ---- v2.5: append to an existing file (cluster-level, no full-file

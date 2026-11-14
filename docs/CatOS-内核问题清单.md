@@ -699,3 +699,5 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 114 | 低 | `fs_copy_file` 给副本写死 0644（无执行位），副本 .ce 比"无条目=0755"默认语义更受限，`run` 报 err -13 | 创建者 ACL 用了 0644 | v2.24 改为 0755，与文档化默认一致 | ✅ 已修 |
 
 *本节后继续编号为 #115+。*
+
+| 116 | 高 | 无 IDE 硬盘时 `format` 死循环假死（分钟级无响应） | fat_mkfs 对 IDENTIFY 失败 fallback 到虚构 64MiB 卷继续 mkfs，每个扇区写都烧满 10M 迭代超时 | v2.32：fat_mkfs/fs_format 改 int 签名，无盘立即返回 -1，shell 报 "no IDE disk attached" | ✅ 已修 |
