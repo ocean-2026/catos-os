@@ -1855,6 +1855,9 @@ static void cmd_caps_legend(void) {
     vga_write("  0x0010 useradm  useradd/userdel/passwd/chcaps/su\n");
     vga_write("  0x0020 device   raw device + low-level hw info\n");
     vga_write("  0x0040 sys      reserved\n");
+    vga_write("  fine-grained (v2.25c splits of fsadmin/device):\n");
+    vga_write("  0x0080 format   0x0100 fsck    0x0200 rawio\n");
+    vga_write("  0x0400 hwinfo   0x0800 reboot  0x1000 diag\n");
     vga_write("session: uid="); print_int(g_uid);
     vga_write(" caps=0x"); print_hex(g_caps);
     vga_write(" ("); print_caps(g_caps); vga_write(")\n");
