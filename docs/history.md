@@ -63,3 +63,5 @@
 - [CatOS][易错点] /etc/passwd 旧格式第 7 字段是 uint32 passhash，"0" 表示无口令；v2.22 迁移为字符串 pw 字段时必须在 user_db_init 里把 legacy "0" 归一为空串，否则旧盘上 root 被当成"已设未知口令"锁在门外。
 - [CatOS][易错点] env_expand 首版在扫描 key 前没跳过 '$' 本身，"$A" 因 '$' 非合法 key 字符而 k=0 → 死循环把 256 字节缓冲灌满 '$'（QEMU 上表现为 "run $A" 变 200 个 $ 的路径）。教训：解析变量引用时先显式 i+1 越过 '$' 再扫 key，且这类纯函数先用宿主 gcc 单测复现再上实机。
 - [CatOS][易错点] 宿主 ce_sim（Python CE 模拟器）只认 MinGW gcc 的指令编码，Linux gcc 产物报 unsupported opcode 0x6a（push imm8）等：宿主快速回归在 Linux 上需先扩 ce_sim 的 opcode 表，FAIL 不代表内核问题。
+CatOS[易错点] QEMU monitor screendump 偶发不产文件或 socket BrokenPipe（guest 三重故障 -no-reboot 直接退出）：测试脚本必须对 screendump 做 3 次重试并先删旧文件；断管时先怀疑 guest 崩溃而非脚本。
+CatOS[易错点] 像素断言不能读 0xB8000（仅文本模式有效）；vbe24/gfx 模式断言一律走 screendump PPM。定位"输入行是否在屏幕中部"可用提示符前景色（LIGHT_GREEN=0x55FF55）的像素行带 + 从底部向上取连续绿带，避免屏上方残留旧 prompt 干扰 min_y。

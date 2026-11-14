@@ -398,6 +398,8 @@ static void cmd_vbe(void) {
  * grid, and vga_clear() repaints it again, so the demo MUST come last.
  * Only the shell's top-row prompt is allowed to overlay it afterwards --
  * every pixel sampled by tests/gfx24_regress.py sits at y >= 120. */
+static void size_restore(void);
+
 static void cmd_gfx24(void) {
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
@@ -407,6 +409,7 @@ static void cmd_gfx24(void) {
     }
     if (r != 0) { vga_write("gfx24: switch failed\n"); return; }
     vga_clear();                 /* clears cells + resets cursor to (0,0) */
+    size_restore();              /* v2.25: re-apply /etc/size if present */
     gfx24_demo();
 }
 
@@ -492,7 +495,15 @@ static void cmd_display(void) {
     vga_write(gfx24_info(GFX_INFO_BACKEND) == 1 ? "SVGA-II" : "Bochs");
     vga_write(" hw_bpp="); print_int(gfx24_info(GFX_INFO_HW_BPP));
     vga_write(" stride="); print_int(gfx24_info(GFX_INFO_STRIDE));
-    vga_write("\nswitch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
+    vga_write("\ndirty-cell tracker: ");
+    print_int(con_info(CON_INFO_CELLS_DRAWN));
+    vga_write(" drawn, ");
+    print_int(con_info(CON_INFO_CELLS_SKIPPED));
+    vga_write(" skipped (identical repaints cost 0 VRAM writes)\n");
+    vga_write("glyph scale       : ");
+    print_int(con_info(CON_INFO_CELL_SCALE));
+    vga_write(" (0 compact 8x8 / 1 normal 8x16 / 2 large 16x32)\n");
+    vga_write("switch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
 }
 
 /* v2.20: raw SVGA II register dump.  Useful when a VMware guest shows a
@@ -2459,10 +2470,58 @@ static void cmd_unset(char *arg) {
         vga_write(tr(L_ENV_NOSAVE));
 }
 
+/* ---------- v2.25 glyph scale (`size`, persisted in /etc/size) ---------- */
+static const char *size_name(int s) {
+    if (s == 0) return "compact  (8x8 cell, 100x75)";
+    if (s == 2) return "large    (16x32 cell, 50x18)";
+    return "normal   (8x16 cell, 100x37)";
+}
+
+static void size_apply(int s) {
+    if (con_set_cell_size(s) == 0) {
+        char b[2] = { (char)('0' + s), 0 };
+        fs_write_text("/etc/size", b, 1);
+    }
+}
+
+/* Re-apply the persisted scale when entering vbe24 (boot default 1). */
+static void size_restore(void) {
+    char b[8];
+    int n = fs_read_text("/etc/size", b, (int)sizeof(b) - 1);
+    if (n < 1) return;
+    b[n] = 0;
+    if (b[0] >= '0' && b[0] <= '2') con_set_cell_size(b[0] - '0');
+}
+
+static void cmd_size(const char *arg) {
+    if (con_get_mode() != CON_MODE_VBE24) {
+        vga_write("size: only supported in vbe24 mode (run `gfx24` first)\n");
+        return;
+    }
+    int s = con_info(CON_INFO_CELL_SCALE);
+    if (!*arg) {
+        vga_write("size: current "); vga_write(size_name(s));
+        vga_write("\nusage: size compact|normal|large  (rows x cols change with\n");
+        vga_write("       the cell size; layout is re-flowed, choice persists)\n");
+        return;
+    }
+    if (!strcmp_(arg, "compact") || !strcmp_(arg, "small") ||
+        arg[0] == '0')      size_apply(0);
+    else if (!strcmp_(arg, "normal") || arg[0] == '1') size_apply(1);
+    else if (!strcmp_(arg, "large") || !strcmp_(arg, "big") ||
+        arg[0] == '2')      size_apply(2);
+    else { vga_write("size: compact|normal|large\n"); return; }
+    vga_write("size: now "); vga_write(size_name(con_info(CON_INFO_CELL_SCALE)));
+    vga_write(" -- grid "); print_int(con_cols());
+    vga_write(" x "); print_int(con_rows()); vga_write("\n");
+}
+
 /* ---------- shell loop ---------- */
 static char input[256];
 
 static void prompt(void) {
+    /* v2.25: keep the input line on the middle row of the screen. */
+    con_scroll_anchor();
     char pwd[160];
     fs_pwd(pwd, sizeof(pwd));
     user_rec_t *u = user_by_uid(g_uid);
@@ -2577,6 +2636,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);
         else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
         else if (!strcmp_(cmd, "display"))    cmd_display();
+        else if (!strcmp_(cmd, "size"))       cmd_size(arg);
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
         else if (!strcmp_(cmd, "about"))      cmd_about();

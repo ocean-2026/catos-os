@@ -234,5 +234,6 @@ render_be_t be_gfx = {
     .set_palette= gfx_set_palette,
     .scroll     = gfx_scroll,
     .draw_cursor= gfx_draw_cursor,
-    .diag       = gfx_diag
+    .diag       = gfx_diag,
+    .cell_w     = 8, .cell_h = 16
 };

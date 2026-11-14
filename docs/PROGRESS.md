@@ -281,3 +281,25 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   树删除、误用防护、悬空 ACL、越权 mkdir、无致命故障）。
 - **回归总账（2026-11-14，同 ISO）**：qemu 12/12、disk 5/5、security 17/17、
   user 15/15、pw 12/12、env 13/13、fsrec 12/12。
+
+## 十三、v2.25 图形命令行增强轮（脏单元格 / 滚动锚定 / 字号三档）
+
+- **字符单位脏矩形（v2.25 核心）**：render.c 维护 painted[][]（屏幕真实像素的
+  单元格镜像），paint() 逐字节比较，相同内容零显存写入；新增选择器
+  CON_INFO_CELLS_DRAWN=16 / CELLS_SKIPPED=17（display 显示计数，实测
+  skipped 55→717→1629 持续增长）。painted 随 scroll 同步平移，模式切换/
+  清屏/scale 切换时整体失效。
+- **滚动锚定 #7**：con_scroll_anchor() —— shell 每次打印提示符前把输入行
+  滚回屏幕中间行（带 scrollback 归档），长输出后提示符始终居中。
+- **字号三档 #2**：vbe24 后端 set_scale(0/1/2) = 8x8(100x75)/8x16(100x37)/
+  16x32(50x18)；ASCII 字形本源 8x8，密集模式取消拉伸、大号模式 2x 放大；
+  CJK 恒为 2列x1行（密集模式 16x16 纵向压缩为 16x8），WIDE 不变式保住。
+  shell 新命令 `size compact|normal|large`，选择持久化 /etc/size，
+  重新进入 vbe24 时自动恢复；CON_INFO_CELL_SCALE=18 / CELL_W/H 动态化。
+  reflow 复用既有机制，CON_MAX_ROWS 40→80。
+- **测试**：tests/size_regress.py（文本模式计数断言 + vbe24 像素绿带断言，
+  端口 4492）。normal-band / dirty-skip 等核心检查通过，compact/large
+  三档字形截图经像素验证正确。
+- **待查（记 #115）**：偶发 guest 崩溃（QEMU -no-reboot 退出，monitor 断管），
+  在 size 回归长流程中非确定性出现，单步手动复现未果；下一步加串口日志
+  或 panic 截屏定位。

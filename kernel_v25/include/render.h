@@ -75,7 +75,10 @@ enum con_info_sel {
     CON_INFO_BLINK,         /* 12: animated blink supported (0/1)     */
     CON_INFO_SCROLL_FAST,   /* 13: backend does framebuffer scrolling  */
     CON_INFO_WC,            /* 14: framebuffer mapped Write-Combining  */
-    CON_INFO_HW_SCROLL      /* 15: scroll = viewport move, no copies   */
+    CON_INFO_HW_SCROLL,     /* 15: scroll = viewport move, no copies   */
+    CON_INFO_CELLS_DRAWN,   /* 16: cells actually painted since boot   */
+    CON_INFO_CELLS_SKIPPED, /* 17: cells skipped by the dirty tracker  */
+    CON_INFO_CELL_SCALE     /* 18: glyph scale (0 compact 1 normal 2 large) */
 };
 
 #define CON_EINVAL  (-3)
@@ -165,5 +168,23 @@ void        con_diag(void);
 int         con_scrollback(int delta);
 int         con_scrollback_view(void);
 void        con_scrollback_reset(void);
+
+/* ---- v2.25 graphics-CLI enhancements ------------------------------------- */
+
+/* Scroll the grid up (with archive) until the cursor row sits on the
+ * MIDDLE row of the screen.  The shell calls this before each prompt so
+ * the input line stays centred while output pushes it down. */
+void        con_scroll_anchor(void);
+
+/* Glyph scale for back-ends that support it (only vbe24 today):
+ *   0 = compact  8x8   cell  (100x75 on 800x600)
+ *   1 = normal   8x16  cell  (100x37, boot default)
+ *   2 = large   16x32  cell  ( 50x18)
+ * Returns CON_ENOSYS on fixed-cell back-ends, CON_EINVAL for a bad s. */
+#define CON_SIZE_COMPACT 0
+#define CON_SIZE_NORMAL  1
+#define CON_SIZE_LARGE   2
+int         con_set_cell_size(int s);
+int         con_get_cell_scale(void);
 
 #endif /* RENDER_H */

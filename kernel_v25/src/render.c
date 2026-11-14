@@ -24,7 +24,7 @@
 #include "task.h"
 
 #define CON_MAX_COLS 100        /* 800 / 8, the widest (VBE) terminal */
-#define CON_MAX_ROWS 40         /* 592 / 16 -> 37 rows on VBE         */
+#define CON_MAX_ROWS 80         /* 592 / 8  -> 75 rows, compact scale */
 #define BLINK_TICKS  50         /* 100 Hz PIT -> 0.5 s half-period    */
 
 static con_cell_t cells[CON_MAX_ROWS][CON_MAX_COLS];
@@ -64,6 +64,24 @@ static uint32_t hz_map[CON_TEXT_HZ_SLOTS];
 /* transient status bar row (pinyin IME) */
 static con_cell_t saved_row[CON_MAX_COLS];
 static int        saved_row_valid;
+
+/* v2.25 dirty-CELL tracker (the CatOS dirty rectangle: our unit IS the
+ * cell).  painted[] remembers the last PIXELS actually on screen for a
+ * position; paint() skips the framebuffer write when the next cell to
+ * draw is byte-identical.  Repeated identical output (progress bars,
+ * blink overlays, self-redrawing apps) costs ZERO VRAM writes.
+ * painted_valid is cleared whenever the grid and the framebuffer may
+ * disagree (mode switch, clear, scrollback view, scale change). */
+static con_cell_t painted[CON_MAX_ROWS][CON_MAX_COLS];
+static uint8_t    painted_cur[CON_MAX_ROWS][CON_MAX_COLS]; /* cursor shown */
+static uint8_t    painted_valid[CON_MAX_ROWS][CON_MAX_COLS];
+static uint32_t   stat_drawn, stat_skipped;
+
+static void painted_invalidate_all(void) {
+    for (int y = 0; y < CON_MAX_ROWS; y++)
+        for (int x = 0; x < CON_MAX_COLS; x++)
+            painted_valid[y][x] = 0;
+}
 
 /* ---- colour helpers ----------------------------------------------------- */
 uint32_t render_clut(uint8_t idx) { return clut[idx]; }
@@ -121,7 +139,7 @@ static void cell_set(con_cell_t *c, uint32_t cp, uint8_t flags) {
     c->gslot = CELL_GSLOT_NONE;
 }
 
-/* A WIDE_L paints both halves; WIDE_R is never painted on its own.
+/* A WIDE_R is never painted on its own; its glyph comes from WIDE_L.
  * render_busy fences the PIT IRQ out of a half-drawn cell. */
 static void paint(int x, int y) {
     if (x < 0 || x >= cols || y < 0 || y >= rows) return;
@@ -129,6 +147,18 @@ static void paint(int x, int y) {
     if (c->flags == CELL_F_WIDE_R) return;
     int is_cur = (be->draw_cursor && x == cur_x && y == cur_y);
     int show_cur = is_cur && !blink_phase;   /* dark half of the blink */
+    /* v2.25 dirty-cell skip: compare against what is REALLY on screen. */
+    if (painted_valid[y][x] && painted_cur[y][x] == (uint8_t)show_cur) {
+        con_cell_t t = *c;
+        if (be->sw_blink && (t.attrs & CON_ATTR_BLINK) && !blink_phase)
+            t.attrs |= CON_ATTR_HIDDEN;
+        con_cell_t p = painted[y][x];
+        if (t.cp == p.cp && t.fg == p.fg && t.bg == p.bg &&
+            t.attrs == p.attrs && t.flags == p.flags) {
+            stat_skipped++;
+            return;
+        }
+    }
     render_busy++;
     con_cell_t t = *c;
     if (be->sw_blink && (t.attrs & CON_ATTR_BLINK) && !blink_phase)
@@ -150,6 +180,10 @@ static void paint(int x, int y) {
     } else {
         be->draw_cell(x, y, &t);
     }
+    painted[y][x] = t;
+    painted_cur[y][x] = (uint8_t)show_cur;
+    painted_valid[y][x] = 1;
+    stat_drawn++;
     render_busy--;
 }
 
@@ -199,13 +233,20 @@ static void hz_rebuild_map(void) {
 static void redraw_all(void) {
     if (be->mode == CON_MODE_TEXT) hz_rebuild_map();
     clear_bg = s_bg_rgb;
+    painted_invalidate_all();
     be->clear(clear_bg);
     /* Everything already covered by clear() needs no repaint. */
     for (int y = 0; y < rows; y++)
         for (int x = 0; x < cols; x++) {
             con_cell_t *c = &cells[y][x];
             if (c->flags == CELL_F_WIDE_R) continue;
-            if (c->cp == 0 && c->bg == clear_bg) continue;
+            if (c->cp == 0 && c->bg == clear_bg) {
+                /* be->clear() already put these pixels on screen. */
+                painted[y][x] = *c;
+                painted_cur[y][x] = 0;
+                painted_valid[y][x] = 1;
+                continue;
+            }
             paint(x, y);
         }
     sync_cursor(1);
@@ -253,6 +294,15 @@ static void scroll_one(void) {
         for (int x = 0; x < cols; x++) cells[y - 1][x] = cells[y][x];
     for (int x = 0; x < cols; x++) cell_blank(&cells[rows - 1][x]);
     cur_y--; if (cur_y < 0) cur_y = 0;
+    /* The dirty tracker mirrors the grid: rows shift up with it, the new
+     * bottom row is whatever be->scroll()/redraw_all() leaves there. */
+    for (int y = 1; y < rows; y++)
+        for (int x = 0; x < cols; x++) {
+            painted[y - 1][x]     = painted[y][x];
+            painted_cur[y - 1][x] = painted_cur[y][x];
+            painted_valid[y - 1][x] = painted_valid[y][x];
+        }
+    for (int x = 0; x < cols; x++) painted_valid[rows - 1][x] = 0;
     /* Erase a software cursor drawn into the LFB BEFORE the pan moves the
      * framebuffer; otherwise its pixels scroll with the viewport and leave
      * a ghost one line higher (QEMU -vga std with hardware panning, seen
@@ -449,6 +499,7 @@ static int switch_backend(render_be_t *nb) {
     rows = be->rows;
     saved_row_valid = 0;           /* bottom row changed size/position */
     dcx = dcy = -1;
+    sb_view = 0;                   /* archive rows never match the new grid */
     redraw_all();
     if (cur_x > cols) cur_x = cols;
     if (cur_y >= rows) cur_y = rows - 1;
@@ -702,6 +753,52 @@ void con_scrollback_reset(void) {
     if (sb_view) con_scrollback(-sb_view);
 }
 
+/* ---- v2.25: input-line anchoring + adjustable glyph scale ---------------- */
+
+/* Scroll (with archive) until the cursor row is the middle row.  The
+ * shell calls this before printing each prompt: output pushes the input
+ * line down, and the next prompt re-centres it -- like a modern full-
+ * screen terminal keeping the active line mid-viewport. */
+void con_scroll_anchor(void) {
+    if (!be) return;
+    int mid = rows / 2;
+    int guard = rows;               /* scroll_one() always decrements cur_y */
+    while (cur_y > mid && guard-- > 0) scroll_one();
+    sync_cursor(1);
+}
+
+static int vbe24_scale(void) {
+    /* Mirrors be_vbe24's current glyph scale via its cell height. */
+    if (be_vbe24.cell_h == 8)  return 0;
+    if (be_vbe24.cell_h == 32) return 2;
+    return 1;
+}
+
+int con_get_cell_scale(void) {
+    return vbe24_scale();
+}
+
+int con_set_cell_size(int s) {
+    if (!be) return CON_ENOSYS;
+    if (be != &be_vbe24 || !be->set_scale) return CON_ENOSYS;
+    if (s < 0 || s > 2) return CON_EINVAL;
+    if (vbe24_scale() == s && cols == be->cols && rows == be->rows)
+        return 0;
+    int oc = cols, orow = rows;
+    if (be->set_scale(s) != 0) return CON_ENODEV;
+    reflow(oc, orow, be->cols, be->rows);
+    cols = be->cols;
+    rows = be->rows;
+    saved_row_valid = 0;
+    dcx = dcy = -1;
+    sb_view = 0;
+    redraw_all();
+    if (cur_x > cols) cur_x = cols;
+    if (cur_y >= rows) cur_y = rows - 1;
+    sync_cursor(1);
+    return 0;
+}
+
 int con_get_mode(void) { return be->mode; }
 int con_cols(void)     { return cols; }
 int con_rows(void)     { return rows; }
@@ -726,12 +823,15 @@ int con_info(int what) {
     case CON_INFO_BPP:         return be->bpp;
     case CON_INFO_CJK:         return be->cjk;
     case CON_INFO_HZ_COUNT:    return (int)render_font_hz_count();
-    case CON_INFO_CELL_W:      return CON_CELL_W;
-    case CON_INFO_CELL_H:      return CON_CELL_H;
+    case CON_INFO_CELL_W:      return be->cell_w ? (int)be->cell_w : CON_CELL_W;
+    case CON_INFO_CELL_H:      return be->cell_h ? (int)be->cell_h : CON_CELL_H;
     case CON_INFO_BLINK:       return 1;
     case CON_INFO_SCROLL_FAST: return be->scroll ? 1 : 0;
     case CON_INFO_WC:          return be->wc_mode;
     case CON_INFO_HW_SCROLL:   return be->hw_scroll;
+    case CON_INFO_CELLS_DRAWN: return (int)(stat_drawn & 0x7FFFFFFFu);
+    case CON_INFO_CELLS_SKIPPED: return (int)(stat_skipped & 0x7FFFFFFFu);
+    case CON_INFO_CELL_SCALE:  return vbe24_scale();
     default:                   return CON_ENOSYS;
     }
 }

@@ -437,5 +437,6 @@ render_be_t be_text = {
     .set_palette= text_set_palette,
     .scroll     = 0,               /* full redraw rebuilds font slots */
     .draw_cursor= 0,               /* hardware cursor */
-    .diag       = text_diag
+    .diag       = text_diag,
+    .cell_w     = 8, .cell_h = 16
 };
