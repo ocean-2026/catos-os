@@ -25,11 +25,11 @@ def find_qemu():
         p = os.path.join(d, "qemu-system-i386.exe")
         if os.path.isfile(p):
             return p
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        p = os.path.join(d, "qemu-system-i386.exe")
-        if os.path.isfile(p):
-            return p
-    return None
+        import shutil
+        which = shutil.which("qemu-system-i386") or shutil.which("qemu-system-i386.exe")
+        if which:
+            return which
+        return None
 
 def installer_ready():
     """server Content-Length for qemu-w64-setup-20260811.exe"""

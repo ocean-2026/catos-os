@@ -69,6 +69,10 @@ PERMS_PAYLOAD_LEN = 17
 
 
 def boot(iso, qemu, disk, port=None):
+    from qemu_driver import _stage_image
+    iso = _stage_image(iso)
+    if disk:
+        disk = _stage_image(disk)
     """Start the guest and connect to its monitor.
 
     Returns (proc, sock): the caller must keep `proc` and hand it to

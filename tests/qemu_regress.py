@@ -45,13 +45,13 @@ DEFAULT_QEMU_CANDIDATES = [
 def find_qemu(explicit=None):
     if explicit:
         return explicit if os.path.isfile(explicit) else explicit
+    import shutil
+    which = shutil.which("qemu-system-i386") or shutil.which("qemu-system-i386.exe")
+    if which:
+        return which
     for c in DEFAULT_QEMU_CANDIDATES:
         if os.path.isfile(c):
             return c
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        p = os.path.join(d, "qemu-system-i386.exe")
-        if os.path.isfile(p):
-            return p
     return None
 
 def kill_qemu(proc=None):
@@ -75,6 +75,10 @@ def kill_qemu(proc=None):
         pass
 
 def boot(iso, qemu, disk=None, port=None):
+    from qemu_driver import _stage_image
+    iso = _stage_image(iso)
+    if disk:
+        disk = _stage_image(disk)
     kill_qemu()                 # no-op: nothing of ours is running yet
     time.sleep(1)
     mon_port = port or MONITOR[1]

@@ -97,7 +97,7 @@ def vram_chars(s):
     data = bytearray()
     for line in out.splitlines():
         line = line.strip()
-        if not re.match(r"^[0-9a-fA-F]{8}:", line):
+        if not re.match(r"^[0-9a-fA-F]{8,16}:", line):
             continue
         for word in re.findall(r"0x([0-9a-fA-F]{8})", line):
             v = int(word, 16)
