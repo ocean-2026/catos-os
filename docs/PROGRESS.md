@@ -247,3 +247,20 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **回归总账（2026-11-14，同 ISO）**：宿主 test_mkce 48、test_cc 10、
   test_app_list 24；实机 qemu 12/12、security 17/17、user 15/15、diag 4/4、
   pw 12/12。
+
+## 十一、v2.23 shell 环境变量轮（2026-11-14 跨夜）
+
+- **env 模块**（`src/shell.c`，无新 syscall，ABI 不动）：`export K=V` /
+  `setenv` / `env` / `unset K`；`$K`、`${K}` 在键入行与 /etc/autostart
+  脚本行统一展开（`$$` 字面量，未知变量展开为空，sh 语义）；同名单上限
+  16 项、key<16、val<64，表满/超长明确报错。
+- **$PATH 驱动裸名查找**：`run_from_path` 第 2 段由硬编码 /bin 改为解析
+  `$PATH`（冒号分隔、按序、容忍空段）；首启 `env_init()` 落盘默认
+  `PATH=/bin`。
+- **持久化 /etc/env**（KEY=VALUE，随改随存，风格同 /etc/lang）；
+  中英文警告消息走 lang 翻译表（append-only L_ENV_NOSAVE）。
+- **CE 应用暂不继承 env**：传环境块需 append-only ABI 新槽，列入待办。
+- **新回归 `tests/env_regress.py`**：13 步全过（含 PATH 重定向查找、
+  变量删除、持久化、无致命故障）。
+- **回归总账（2026-11-14，同 ISO）**：qemu 12/12、security 17/17、
+  user 15/15、pw 12/12、env 13/13；宿主 test_mkce 48、test_app_list 24。

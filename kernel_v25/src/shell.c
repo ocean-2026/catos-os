@@ -130,6 +130,10 @@ static void cmd_help(void) {
         "  jobs         list background jobs ('run X &') with pending log\n"
         "  log TID      show a background job's captured output\n"
         "  log -f TID   follow that job until it exits\n"
+        "  -- environment (v2.23, persisted in /etc/env) --\n"
+        "  export K=V   set variable (empty V deletes); env lists all\n"
+        "  unset K      delete variable; $K / ${K} expand in typed lines\n"
+        "  PATH         drives bare-NAME lookup (default /bin)\n"
         "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
         "  -- audio (Sound Blaster 16, ISA) --\n"
         "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
@@ -629,6 +633,9 @@ static int strcat_b(char *d, int size, const char *s) {
     return *s ? -1 : 0;
 }
 
+/* v2.23 environment variables (defined near the shell loop below) */
+static const char *env_get_(const char *key);
+
 /* run "cmd" as a CE program: current directory first, then /bin (PATH).
  * Returns 0 when a program was found (spawn attempted), -1 if not found.
  * A command that already carries an extension (e.g. "hello.elf") is tried
@@ -668,14 +675,27 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
         spawn_and_maybe_wait(p, argc, argv, bg, uid);
         return 0;
     }
-    /* 2) PATH: /bin */
-    p[0] = 0;
-    if (strcat_b(p, sizeof(p), "/bin/") != 0) return -1;
-    if (strcat_b(p, sizeof(p), cmd) != 0) return -1;
-    if (strcat_b(p, sizeof(p), ext) != 0) return -1;
-    if (fs_resolve_file(p, &c, &s) == 0) {
-        spawn_and_maybe_wait(p, argc, argv, bg, uid);
-        return 0;
+    /* 2) $PATH lookup (v2.23; default "/bin", colon-separated, in order) */
+    const char *pathv = env_get_("PATH");
+    if (!pathv || !*pathv) pathv = "/bin";
+    const char *seg = pathv;
+    while (*seg) {
+        char dir[64];
+        int di = 0;
+        while (*seg && *seg != ':' && di < (int)sizeof(dir) - 1)
+            dir[di++] = *seg++;
+        dir[di] = 0;
+        if (*seg == ':') seg++;
+        if (!di) continue;
+        p[0] = 0;
+        if (strcat_b(p, sizeof(p), dir) != 0) continue;
+        if (dir[di - 1] != '/' && strcat_b(p, sizeof(p), "/") != 0) continue;
+        if (strcat_b(p, sizeof(p), cmd) != 0) continue;
+        if (strcat_b(p, sizeof(p), ext) != 0) continue;
+        if (fs_resolve_file(p, &c, &s) == 0) {
+            spawn_and_maybe_wait(p, argc, argv, bg, uid);
+            return 0;
+        }
     }
     return -1;
 }
@@ -2076,6 +2096,180 @@ static void cmd_mv(char *arg) {
     else              vga_write("mv: move failed mid-way\n");
 }
 
+/* ---------- v2.23 environment variables (session table + /etc/env) -------
+ * Windows/Linux both expose process/session environment variables; CatOS's
+ * shell is ring0 and single-session, so a flat table is honest here.
+ *   export KEY=value   set (empty value deletes, like POSIX unset semantics)
+ *   export KEY=        delete
+ *   export / env       list
+ *   unset KEY          delete
+ *   $KEY / ${KEY}      expanded in typed lines and autostart scripts
+ *   PATH               drives bare-NAME program lookup (default /bin)
+ * Persistence: /etc/env, one KEY=VALUE per line, saved on every change
+ * (same on-demand style as /etc/lang).  CE apps do NOT inherit env yet --
+ * passing an environment block needs an append-only ABI slot, tracked in
+ * PROGRESS as the next step. */
+#define ENV_MAX     16
+#define ENV_KEY_MAX 16
+#define ENV_VAL_MAX 64
+typedef struct { char key[ENV_KEY_MAX]; char val[ENV_VAL_MAX]; } env_rec_t;
+static env_rec_t g_env[ENV_MAX];
+static int g_env_used[ENV_MAX];
+
+static int env_key_ok(const char *k) {
+    if (!k || !*k) return 0;
+    for (int i = 0; k[i]; i++) {
+        char c = k[i];
+        int ok = (c == '_') ||
+                 (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (i > 0 && c >= '0' && c <= '9');
+        if (!ok) return 0;
+    }
+    return slen_(k) < ENV_KEY_MAX;
+}
+
+static const char *env_get_(const char *key) {
+    if (!env_key_ok(key)) return 0;
+    for (int i = 0; i < ENV_MAX; i++)
+        if (g_env_used[i] && !strcmp_(g_env[i].key, key)) return g_env[i].val;
+    return 0;
+}
+
+/* returns 0 set, 1 deleted, -1 table full / bad key */
+static int env_set_(const char *key, const char *val) {
+    if (!env_key_ok(key)) return -1;
+    int slot = -1;
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (g_env_used[i] && !strcmp_(g_env[i].key, key)) { slot = i; break; }
+        if (slot < 0 && !g_env_used[i]) slot = i;
+    }
+    if (slot < 0) return -1;
+    if (val && *val) {
+        if (slen_(val) >= ENV_VAL_MAX || slen_(key) >= ENV_KEY_MAX) return -1;
+        int i = 0;
+        for (; key[i]; i++) g_env[slot].key[i] = key[i];
+        g_env[slot].key[i] = 0;
+        for (i = 0; val[i]; i++) g_env[slot].val[i] = val[i];
+        g_env[slot].val[i] = 0;
+        g_env_used[slot] = 1;
+        return 0;
+    }
+    g_env_used[slot] = 0;               /* empty value deletes */
+    return 1;
+}
+
+static void env_list(void) {
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (!g_env_used[i]) continue;
+        vga_write(g_env[i].key);
+        vga_write("=");
+        vga_write(g_env[i].val);
+        vga_write("\n");
+    }
+}
+
+int env_save(void) {
+    static char buf[2048];
+    int o = 0;
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (!g_env_used[i]) continue;
+        for (int j = 0; g_env[i].key[j]; j++) buf[o++] = g_env[i].key[j];
+        buf[o++] = '=';
+        for (int j = 0; g_env[i].val[j]; j++) buf[o++] = g_env[i].val[j];
+        buf[o++] = '\n';
+    }
+    if (o == 0) return 0;               /* empty table: nothing to persist */
+    return fs_write_text("/etc/env", buf, (uint32_t)o) == 0 ? 0 : -1;
+}
+
+void env_init(void) {
+    for (int i = 0; i < ENV_MAX; i++) g_env_used[i] = 0;
+    if (!fs_fs_ready()) return;
+    static char buf[2048];
+    int n = fs_read_text("/etc/env", buf, (int)sizeof(buf) - 1);
+    int fresh = (n <= 0);
+    if (n > 0) {
+        buf[n] = 0;
+        char *p = buf;
+        while (*p) {
+            char *line = p;
+            while (*p && *p != '\n') p++;
+            if (*p) *p++ = 0;
+            char *eq = line;
+            while (*eq && *eq != '=') eq++;
+            if (!*eq) continue;
+            *eq = 0;
+            env_set_(line, eq + 1);     /* bad keys silently skipped */
+        }
+    }
+    if (!env_get_("PATH")) env_set_("PATH", "/bin");
+    if (fresh) env_save();              /* seed /etc/env with PATH=/bin */
+}
+
+/* expand $KEY / ${KEY} in place.  Unknown names expand to empty (sh
+ * semantics).  "$$" is a literal '$'. */
+static void env_expand(char *line, int cap) {
+    char out[256];
+    int o = 0;
+    for (int i = 0; line[i] && o < (int)sizeof(out) - 1; ) {
+        if (line[i] != '$') { out[o++] = line[i++]; continue; }
+        if (line[i + 1] == '$') { out[o++] = '$'; i += 2; continue; }
+        int brace = 0;
+        int j = i + 1;                      /* skip the '$' itself */
+        if (line[j] == '{') { brace = 1; j++; }
+        char key[ENV_KEY_MAX];
+        int k = 0;
+        for (; line[j] && k < ENV_KEY_MAX - 1; j++) {
+            char c = line[j];
+            int ok = (c == '_') ||
+                     (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     (k > 0 && c >= '0' && c <= '9');
+            if (!ok) break;
+            key[k++] = c;
+        }
+        key[k] = 0;
+        if (brace && line[j] == '}') j++;
+        i = j;
+        if (!k) { if (o < (int)sizeof(out) - 1) out[o++] = '$'; continue; }
+        const char *v = env_get_(key);
+        if (v) for (; *v && o < (int)sizeof(out) - 1; v++) out[o++] = *v;
+    }
+    out[o] = 0;
+    int j = 0;
+    for (; out[j] && j < cap - 1; j++) line[j] = out[j];
+    line[j] = 0;
+}
+
+static void cmd_export(char *arg) {
+    if (!arg || !*arg) { env_list(); return; }
+    char *eq = arg;
+    while (*eq && *eq != '=') eq++;
+    if (!*eq) { vga_write("usage: export KEY=VALUE | export KEY= | export | env\n"); return; }
+    *eq = 0;
+    int r = env_set_(arg, eq + 1);
+    if (r == -1) { vga_write("export: bad key or table full or value too long\n"); return; }
+    if (r == 0) vga_write("export: "); else vga_write("unset: ");
+    vga_write(arg);
+    if (r == 0) { vga_write("="); vga_write(eq + 1); }
+    vga_write("\n");
+    if (env_save() != 0)
+        vga_write(tr(L_ENV_NOSAVE));
+}
+
+static void cmd_unset(char *arg) {
+    if (!arg || !*arg) { vga_write("usage: unset KEY\n"); return; }
+    char key[ENV_KEY_MAX];
+    int i = 0;
+    for (; arg[i] && i < ENV_KEY_MAX - 1; i++) key[i] = arg[i];
+    key[i] = 0;
+    if (env_set_(key, "") != 1) { vga_write("unset: no such variable\n"); return; }
+    vga_write("unset: ");
+    vga_write(key);
+    vga_write("\n");
+    if (env_save() != 0)
+        vga_write(tr(L_ENV_NOSAVE));
+}
+
 /* ---------- shell loop ---------- */
 static char input[256];
 
@@ -2139,6 +2333,7 @@ void shell_run(void) {
     vga_clear();
     fs_init();
     lang_init();              /* v2.21 T50: load /etc/lang, default en */
+    env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     ce_init();
     /* v2.13: load the persistent user database + ACL (seeds root/user and
      * the default owner/group/other table when the files are absent) */
@@ -2158,6 +2353,7 @@ void shell_run(void) {
     while (1) {
         prompt();
         kb_readline(input, sizeof(input));
+        env_expand(input, (int)sizeof(input));   /* v2.23: $KEY / ${KEY} */
 
         /* Split first token */
         char *cmd = input;
@@ -2177,6 +2373,10 @@ void shell_run(void) {
 static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
+        else if (!strcmp_(cmd, "export") ||
+                 !strcmp_(cmd, "setenv"))    cmd_export(arg);
+        else if (!strcmp_(cmd, "env"))       env_list();
+        else if (!strcmp_(cmd, "unset"))     cmd_unset(arg);
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
@@ -2423,6 +2623,7 @@ static void boot_autostart(void) {
             if (*p) *p++ = 0;
             char *e = line + slen_(line);
             if (e > line && e[-1] == '\r') e[-1] = 0;   /* CRLF safety */
+            env_expand(line, 256);                      /* v2.23 */
 
             char *lcmd = line;
             while (*lcmd == ' ' || *lcmd == '\t') lcmd++;

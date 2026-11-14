@@ -61,3 +61,5 @@
 - [CatOS][易错点] QEMU 6.2 HMP `xp` 输出 16 位地址（00000000000b8000:），旧测试脚本按 8 位地址正则匹配全空导致 wait_for_prompt 全挂：正则已放宽为 ^[0-9a-fA-F]{8,16}:。
 - [CatOS][易错点] 改内核后必须 sh build.sh iso 重打包；只 build kernel.bin 时 QEMU 仍引导旧 ISO，会得出"改动没生效"的假结论。
 - [CatOS][易错点] /etc/passwd 旧格式第 7 字段是 uint32 passhash，"0" 表示无口令；v2.22 迁移为字符串 pw 字段时必须在 user_db_init 里把 legacy "0" 归一为空串，否则旧盘上 root 被当成"已设未知口令"锁在门外。
+- [CatOS][易错点] env_expand 首版在扫描 key 前没跳过 '$' 本身，"$A" 因 '$' 非合法 key 字符而 k=0 → 死循环把 256 字节缓冲灌满 '$'（QEMU 上表现为 "run $A" 变 200 个 $ 的路径）。教训：解析变量引用时先显式 i+1 越过 '$' 再扫 key，且这类纯函数先用宿主 gcc 单测复现再上实机。
+- [CatOS][易错点] 宿主 ce_sim（Python CE 模拟器）只认 MinGW gcc 的指令编码，Linux gcc 产物报 unsupported opcode 0x6a（push imm8）等：宿主快速回归在 Linux 上需先扩 ce_sim 的 opcode 表，FAIL 不代表内核问题。

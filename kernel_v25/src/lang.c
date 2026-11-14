@@ -29,7 +29,8 @@ static const char *const tbl_en[L_COUNT] = {
     "Password: ",
     "passwd: passwords differ\n",
     "no background jobs\n",
-    "log: no such task\n"
+    "log: no such task\n",
+    "warning: could not save /etc/env (setting is session-only)\n"
 };
 
 static const char *const tbl_zh[L_COUNT] = {
@@ -50,7 +51,8 @@ static const char *const tbl_zh[L_COUNT] = {
     "密码：",
     "passwd：两次密码不一致\n",
     "当前没有后台任务\n",
-    "log：找不到该任务\n"
+    "log：找不到该任务\n",
+    "警告：无法保存 /etc/env（仅本次会话生效）\n"
 };
 
 const char *tr(int id) {

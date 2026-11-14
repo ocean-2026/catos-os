@@ -38,6 +38,7 @@ enum {
     L_PASSWD_MISMATCH,
     L_JOBS_NONE,
     L_LOG_NOJOB,
+    L_ENV_NOSAVE,
     L_COUNT
 };
 
