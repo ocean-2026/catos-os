@@ -624,6 +624,54 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     return ur;
 }
 
+
+int fs_is_dir(const char *path) {
+    if (!fs_ready || !path || !*path) return 0;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    return (clus && (e.attr & FAT_ATTR_DIR)) ? 1 : 0;
+}
+
+/* v2.24: remove an EMPTY directory.  The recursive emptier lives in the
+ * shell (rm -r); the kernel API stays minimal and refuses anything that
+ * still holds entries (besides the always-present "." / ".."). */
+struct rmdir_ud { int count; };
+static void rmdir_cb(const char *name, uint8_t attr,
+                     uint32_t clus, uint32_t size, void *ud) {
+    (void)attr; (void)clus; (void)size;
+    struct rmdir_ud *u = (struct rmdir_ud *)ud;
+    if (!scmp(name, ".") && !scmp(name, "..")) u->count++;
+}
+
+int fs_rmdir(const char *path) {
+    if (!fs_ready || !path || !*path) return -1;
+    char abs[FS_PATH_MAX];
+    abs_path(path, abs);
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return -2;                    /* root: never deletable */
+    char parent[FS_PATH_MAX];
+    int plen = (int)(leaf - abs);
+    if (plen == 1) scpy(parent, "/");
+    else {
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+    fat_dirent_t e;
+    uint32_t pclus = resolve_path(parent, &e);
+    if (!pclus || !(e.attr & FAT_ATTR_DIR)) return -1;
+    uint8_t n83[11];
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
+    if (!(e.attr & FAT_ATTR_DIR)) return -2;
+    struct rmdir_ud u = { 0 };
+    fat_list_dir(e.cluster, rmdir_cb, &u);
+    if (u.count) return -3;                   /* still has entries */
+    fat_free_chain(e.cluster);
+    return fat_delete_name(pclus, leaf);
+}
+
 int fs_delete(const char *path) {
     /* remove a file: free its cluster chain and mark the directory entry
      * deleted.  Directories are not deletable through this API (v2.5). */

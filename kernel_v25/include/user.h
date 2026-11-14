@@ -79,6 +79,7 @@ void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      *
 void        acl_init(void);
 int         acl_lookup(const char *path, int *uid, int *gid, int *mode);
 int         acl_set(const char *path, int uid, int gid, int mode);  /* insert/replace */
+int         acl_unset(const char *path);   /* v2.24: drop the entry (rm) */
 int         acl_default(const char *path, int uid, int gid, int mode);/* seed only   */
 int         acl_save(void);
 

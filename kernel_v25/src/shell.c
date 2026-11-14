@@ -590,15 +590,82 @@ static void cmd_cd(const char *arg) {
     else if (r == FS_ERR_NOTDIR) vga_write("cd: not a directory\n");
 }
 
-static void cmd_mkdir(const char *arg) {
-    if (!*arg) { vga_write("usage: mkdir PATH\n"); return; }
-    int r = fs_mkdir(arg);
-    if (r == FS_OK)            return;
-    if (r == FS_ERR_NOENT)      vga_write("mkdir: parent directory not found\n");
-    else if (r == FS_ERR_NOTDIR) vga_write("mkdir: parent is not a directory\n");
-    else if (r == FS_ERR_EXIST) vga_write("mkdir: file or directory already exists\n");
-    else if (r == FS_ERR_INVAL) vga_write("mkdir: invalid name\n");
-    else if (r == FS_ERR_FULL)  vga_write("mkdir: disk full (FAT32)\n");
+/* v2.24 forward declarations (helpers live across shell.c) */
+static int g_uid;         /* session uid/gid (defined with the session code) */
+static int g_gid;         /* tentative decls: the real defs sit below */
+static int fs_copy_file(const char *src, const char *dst);
+
+/* v2.24: write-permission check on the PARENT of a would-be entry -- the
+ * shell is ring0, so nobody else does it.  Without this any user could
+ * mkdir/cp straight into /etc or /bin (the ACL default only guards files
+ * written through the redirect path). */
+static int perm_write_on_parent(const char *path, char *parent, int pcap) {
+    char abs[FS_PATH_MAX];
+    fs_canon_path(path, abs, sizeof(abs));
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return -1;
+    int plen = (int)(leaf - abs);
+    if (plen == 1) { if (pcap > 0) parent[0] = '/'; parent[1] = 0; }
+    else {
+        if (plen >= pcap) return -1;
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+    return fs_perm_check(parent, g_uid, g_gid, PERM_WRITE) != 0 ? -13 : 0;
+}
+
+/* v2.24: mkdir [-p] PATH.  Without -p the parent must already exist;
+ * with -p every missing level is created (FS_ERR_EXIST tolerated). */
+static void cmd_mkdir_p(const char *arg, int parents) {
+    if (!*arg) { vga_write("usage: mkdir [-p] PATH\n"); return; }
+    char parent[FS_PATH_MAX];
+    if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+        vga_write("mkdir: permission denied\n");
+        return;
+    }
+    if (!parents) {
+        int r = fs_mkdir(arg);
+        if (r == FS_OK)            return;
+        if (r == FS_ERR_NOENT)      vga_write("mkdir: parent directory not found\n");
+        else if (r == FS_ERR_NOTDIR) vga_write("mkdir: parent is not a directory\n");
+        else if (r == FS_ERR_EXIST) vga_write("mkdir: file or directory already exists\n");
+        else if (r == FS_ERR_INVAL) vga_write("mkdir: invalid name\n");
+        else if (r == FS_ERR_FULL)  vga_write("mkdir: disk full (FAT32)\n");
+        return;
+    }
+    /* -p: create every missing level, tolerate existing ones */
+    char cur[FS_PATH_MAX];
+    int ci = 0;
+    const char *p2 = arg;
+    if (*p2 == '/') { cur[ci++] = '/'; p2++; }
+    cur[ci] = 0;
+    while (*p2) {
+        const char *seg = p2;
+        while (*p2 && *p2 != '/') p2++;
+        int sl = (int)(p2 - seg);
+        if (sl && ci + sl + 1 < (int)sizeof(cur)) {
+            for (int k = 0; k < sl; k++) cur[ci++] = seg[k];
+            cur[ci] = 0;
+            if (fs_is_dir(cur)) { /* already there */ }
+            else {
+                int r = fs_mkdir(cur);
+                if (r != FS_OK && r != FS_ERR_EXIST) {
+                    vga_write("mkdir: cannot create '");
+                    vga_write(cur);
+                    vga_write("' (");
+                    print_int(r);
+                    vga_write(")\n");
+                    return;
+                }
+            }
+        }
+        if (*p2 == '/') {
+            if (ci + 1 < (int)sizeof(cur)) cur[ci++] = '/';
+            cur[ci] = 0;
+            p2++;
+        }
+    }
 }
 
 static void cmd_touch(const char *arg) {
@@ -2015,14 +2082,115 @@ static void cmd_cat(const char *arg) {
     if (off) vga_write("\n");
 }
 
+/* v2.24 recursive helpers (rm -r / cp -r).  Depth-capped: every frame
+ * keeps two FS_PATH_MAX buffers, so the cap also bounds shell stack use.
+ * FAT32 has no symlinks, so no loop risk beyond pathological nesting. */
+#define FSREC_DEPTH_MAX 6
+
+static void rec_join(char *out, int cap, const char *dir, const char *leaf) {
+    int o = 0;
+    for (; *dir && o < cap - 1; dir++) out[o++] = *dir;
+    if (o > 0 && out[o - 1] != '/' && o < cap - 1) out[o++] = '/';
+    for (; *leaf && o < cap - 1; leaf++) out[o++] = *leaf;
+    out[o] = 0;
+}
+
+struct cp_ud { const char *dst; int depth; };
+
+static int copy_rec(const char *src, const char *dst, int depth);
+
+/* src prefix for the current fs_foreach walk -- the shell is the only
+ * ring0 thread, so a module-static here is race-free (same pattern the
+ * job/log code uses). */
+static const char *cp_src_prefix;
+
+static void cp_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    (void)size;
+    struct cp_ud *u = (struct cp_ud *)ud;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    char full_d[FS_PATH_MAX];
+    rec_join(full_d, sizeof(full_d), u->dst, name);
+    char full_s[FS_PATH_MAX];
+    rec_join(full_s, sizeof(full_s), cp_src_prefix, name);
+    if (is_dir) copy_rec(full_s, full_d, u->depth + 1);
+    else        fs_copy_file(full_s, full_d);
+}
+
+static int copy_rec(const char *src, const char *dst, int depth) {
+    if (depth > FSREC_DEPTH_MAX) return -5;
+    if (fs_is_dir(src)) {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(dst, parent, sizeof(parent)) == -13)
+            return -13;
+        int r = fs_mkdir(dst);
+        if (r != FS_OK && r != FS_ERR_EXIST) return -2;
+        acl_set(dst, g_uid, g_gid, 0755);
+        const char *saved = cp_src_prefix;
+        cp_src_prefix = src;
+        struct cp_ud u = { dst, depth };
+        fs_foreach(src, cp_cb, &u);
+        cp_src_prefix = saved;
+        return 0;
+    }
+    return fs_copy_file(src, dst);
+}
+
+static int rm_rec(const char *path, int depth);
+
+struct rm_ud { const char *base; int depth; };
+static void rm_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    (void)size;
+    struct rm_ud *u = (struct rm_ud *)ud;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    char full[FS_PATH_MAX];
+    rec_join(full, sizeof(full), u->base, name);
+    if (is_dir) rm_rec(full, u->depth + 1);
+    else {
+        if (fs_perm_check(full, g_uid, g_gid, PERM_WRITE) == 0) {
+            if (fs_delete(full) == 0) acl_unset(full);
+        }
+    }
+}
+
+static int rm_rec(const char *path, int depth) {
+    if (depth > FSREC_DEPTH_MAX) return -5;
+    if (!fs_is_dir(path)) return fs_delete(path) == 0 ? 0 : -1;
+    if (fs_perm_check(path, g_uid, g_gid, PERM_WRITE) != 0) return -13;
+    struct rm_ud u = { path, depth };
+    fs_foreach(path, rm_cb, &u);
+    int r = fs_rmdir(path);
+    if (r == 0) acl_unset(path);
+    return r;
+}
+
 static void cmd_rm(const char *arg) {
-    if (!*arg) { vga_write("usage: rm FILE\n"); return; }
+    int rec = 0;
+    while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'r' || arg[1] == 'R')) {
+        rec = 1;
+        arg += 2;
+        if (*arg == 'f') arg++;
+        while (*arg == ' ') arg++;
+    }
+    if (!*arg) { vga_write("usage: rm [-r] FILE|DIR\n"); return; }
+    if (fs_is_dir(arg)) {
+        if (!rec) { vga_write("rm: is a directory (use rm -r)\n"); return; }
+        char abs[FS_PATH_MAX];
+        fs_canon_path(arg, abs, sizeof(abs));
+        if (!strcmp_(abs, "/")) { vga_write("rm: refusing to remove /\n"); return; }
+        int r = rm_rec(arg, 0);
+        if (r == 0) return;
+        if (r == -13) vga_write("rm: permission denied\n");
+        else if (r == -5) vga_write("rm: nesting too deep\n");
+        else vga_write("rm: directory remove failed (entries left behind?)\n");
+        return;
+    }
     if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
         vga_write("rm: permission denied\n"); return;
     }
     int r = fs_delete(arg);
-    if (r == 0) return;
-    vga_write("rm: no such file (directories cannot be rm'd)\n");
+    if (r == 0) { acl_unset(arg); return; }
+    vga_write("rm: no such file\n");
 }
 
 /* shared copy core for cp / mv: read src in <=16 KiB chunks, append to a
@@ -2034,7 +2202,9 @@ static int fs_copy_file(const char *src, const char *dst) {
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     static char chunk[16384];     /* ring0 single shell: no reentry */
     if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
-    acl_set(dst, g_uid, g_gid, 0644);                       /* creator owns it */
+    acl_set(dst, g_uid, g_gid, 0755);   /* creator owns it; 0755 matches
+                                     * the documented "no entry" default so a
+                                     * copied .ce stays runnable (v2.24) */
     uint32_t off = 0;
     while (off < s) {
         uint32_t want = s - off;
@@ -2048,7 +2218,13 @@ static int fs_copy_file(const char *src, const char *dst) {
 }
 
 static void cmd_cp(char *arg) {
+    int rec = 0;
     while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'r' || arg[1] == 'R')) {
+        rec = 1;
+        arg += 2;
+        while (*arg == ' ') arg++;
+    }
     char *src = arg;
     while (*arg && *arg != ' ') arg++;
     if (!*arg) { vga_write("usage: cp SRC DST\n"); return; }
@@ -2057,7 +2233,19 @@ static void cmd_cp(char *arg) {
     char *dst = arg;
     while (*arg && *arg != ' ') arg++;
     *arg = 0;
-    if (!*src || !*dst) { vga_write("usage: cp SRC DST\n"); return; }
+    if (!*src || !*dst) { vga_write("usage: cp [-r] SRC DST\n"); return; }
+    if (rec && fs_is_dir(src)) {
+        char abs[FS_PATH_MAX];
+        fs_canon_path(src, abs, sizeof(abs));
+        if (!strcmp_(abs, "/")) { vga_write("cp: refusing to copy /\n"); return; }
+        int r = copy_rec(src, dst, 0);
+        if (r == 0) return;
+        if (r == -13) vga_write("cp: permission denied\n");
+        else if (r == -2) vga_write("cp: cannot create target directory\n");
+        else if (r == -5) vga_write("cp: nesting too deep\n");
+        else              vga_write("cp: copy failed mid-way\n");
+        return;
+    }
     int r = fs_copy_file(src, dst);
     if (r == 0) return;
     if (r == -13) vga_write("cp: permission denied\n");
@@ -2088,6 +2276,7 @@ static void cmd_mv(char *arg) {
             vga_write("mv: copied but could not delete source\n");
             return;
         }
+        acl_unset(src);
         return;
     }
     if (r == -13) vga_write("mv: permission denied\n");
@@ -2399,7 +2588,13 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
         else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
-        else if (!strcmp_(cmd, "mkdir"))      cmd_mkdir(arg);
+        else if (!strcmp_(cmd, "mkdir")) {
+            if (arg[0] == '-' && arg[1] == 'p' && (arg[2] == ' ' || arg[2] == 0)) {
+                const char *pa = arg + 2;
+                while (*pa == ' ') pa++;
+                cmd_mkdir_p(pa, 1);
+            } else               cmd_mkdir_p(arg, 0);
+        }
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
         else if (!strcmp_(cmd, "cat"))        cmd_cat(arg);
         else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);

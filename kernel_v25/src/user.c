@@ -371,6 +371,23 @@ int acl_set(const char *path, int uid, int gid, int mode) {
     return 0;
 }
 
+int acl_unset(const char *path) {
+    /* v2.24: deleting a file used to leave its ACL entry behind -- a
+     * re-created file with the same name then INHERITED the stale
+     * permission.  Drop the entry on delete instead. */
+    if (!path || !*path) return -1;
+    char key[FS_PATH_MAX];
+    acl_key(path, key);
+    for (int i = 0; i < ACL_MAX; i++) {
+        if (acl_tab[i].used && useq(acl_tab[i].path, key)) {
+            acl_tab[i].used = 0;
+            acl_dirty = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int acl_default(const char *path, int uid, int gid, int mode) {
     /* seed-time insert that never replaces an existing entry */
     for (int i = 0; i < ACL_MAX; i++)
