@@ -55,6 +55,8 @@ int  fat_mkfs(void);            /* v2.32: -1 = no IDE disk */
 uint32_t fat_root(void);                    /* root directory cluster */
 uint32_t fat_cluster_size(void);            /* bytes per cluster */
 uint32_t fat_disk_sectors(void);            /* total sectors on the drive */
+uint32_t fat_total_clusters(void);          /* v2.34: volume stats for df */
+uint32_t fat_free_clusters(void);           /* scan FAT for zero entries  */
 
 /* convert a user name ("note", "a.txt") to an 8.3 padded 11-byte name */
 void fat_name83(const char *name, uint8_t out[11]);

@@ -423,3 +423,17 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   ^S 保存 4 字节 → gfx24 下 cat 正确显示中文）✓。text 模式 VGA 字库
   无中文字形（cat 中文无输出）为硬件限制，记问题清单 #117 低优先级。
 - fsrec/caps/user 回归全绿。
+
+## 二十二、v2.34 df 命令 + #118 簇上界修复 + ls -l
+
+- `df`：FAT 卷用量表（total/used/free/use%），fat_free_clusters 扫描
+  FAT 空表项；无卷时报错。
+- **#118（对抗测试发现）**：fat_alloc/free_clusters 用 max_clus（FAT 表
+  容量）当数据簇上界——小卷上 max_clus 可达数据区 2 倍，可能分配越过
+  数据区的簇（卷尾损坏风险），df 也因此 free>total。加 clus_hi()=
+  vol_clusters+2 统一替换全部 17 处数据簇遍历上界。
+- `ls -l`：长格式（perms/size/name），支持目录与单文件；`ls -l 文件`
+  不再报 not a directory。
+- 清理 keyboard.c/intr.c 缺失 include 的隐式声明警告。
+- 实机验证：df 生命周期（写 40 行文件 used 274→275K）✓；ls -l 目录/
+  单文件 ✓（-rw-r--r-- 312 hello.ce）。回归 fsrec/caps/user/qemu 全绿。

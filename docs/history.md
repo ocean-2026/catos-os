@@ -80,3 +80,5 @@ CatOS[易错点] tick 上下文（IRQ0 处理路径）里不能跑带 usb_delay_
 CatOS[易错点] task_block(T_WAIT_KB) 无唤醒源时会永远睡死（USB 收割前 feed_report 才唤醒）——需要在等待循环里周期性调用 usb_service() 的场景应改 task_sleep_ticks 轮询。
 CatOS[易错点] fsrec 回归必须带 -drive 硬盘（disk= 参数），无盘时 format/挂载路径行为完全不同——复现 fs 相关问题先确认盘是否存在（#116 教训）。
 CatOS[易错点] ata.c 各等待循环上限 10M 次迭代（每次 inb+yield，秒级）：底层超时返回错误后，上层必须检查返回值，否则"有界等待"叠加成用户眼中的死循环。
+CatOS[易错点] FAT32 驱动里 max_clus 是 FAT 表条目容量（fat_sz*512/4），不是数据区簇数；数据簇号上界必须用 vol_clusters+2，否则小卷上越界分配/统计翻倍（#118）。
+CatOS[易错点] 新增跨模块调用（如 keyboard.c 调 usb_service）必须同步 #include 头文件，否则隐式声明默认返回 int 编译不报错但留下 ABI 隐患。

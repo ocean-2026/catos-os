@@ -276,10 +276,32 @@ int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     return u.count;
 }
 
-struct list_ud { int count; };
+struct list_ud { int count; int longfmt; };
 static void list_cb(const char *name, uint8_t attr,
                     uint32_t clus, uint32_t size, void *ud) {
     struct list_ud *u = (struct list_ud *)ud;
+    if (u->longfmt) {
+        /* v2.34: ls -l -- perms, size, name (ls -l <file> also works) */
+        int isdir = (attr & FAT_ATTR_DIR) != 0;
+        vga_write(isdir ? "drwxr-xr-x  " : "-rw-r--r--  ");
+        char sz[12];
+        int i = 0;
+        if (size == 0) { sz[i++] = '0'; }
+        else { char b[12]; int n = 0;
+               if (size == 0) b[n++] = '0';
+               while (size > 0) { b[n++] = (char)('0' + size % 10); size /= 10; }
+               while (n > 0) sz[i++] = b[--n]; }
+        sz[i] = 0;
+        for (int p = i; p < 8; p++) vga_write(" ");
+        vga_write(sz);
+        vga_write("  ");
+        vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
+        vga_write(name);
+        vga_set_fg(VGA_WHITE);
+        vga_write(isdir ? "/\n" : "\n");
+        u->count++;
+        return;
+    }
     if (attr & FAT_ATTR_DIR) {
         vga_set_fg(VGA_LIGHT_CYAN);
         vga_write("[DIR ] ");
@@ -302,14 +324,31 @@ void fs_list(const char *path) {
         vga_write("catos: no FAT32 volume. Run 'format' first.\n");
         return;
     }
+    int longfmt = 0;
+    if (path && path[0] == '-' && path[1] == 'l') {   /* v2.34: ls -l */
+        longfmt = 1;
+        path += 2;
+        while (*path == ' ') path++;
+        if (!*path) path = 0;
+    }
     char abs[FS_PATH_MAX];
     abs_path(path, abs);
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
-    if (!(e.attr & FAT_ATTR_DIR)) { vga_write("catos: dir: not a directory\n"); return; }
+    if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write("catos: dir: not a directory\n"); return; }
 
-    struct list_ud u = { 0 };
+    struct list_ud u; u.count = 0; u.longfmt = longfmt;
+    if (longfmt && !(e.attr & FAT_ATTR_DIR)) {
+        /* v2.34: ls -l <file> -- show just that entry */
+        const char *nm = abs;
+        for (const char *p = abs; *p; p++) if (*p == '/') nm = p + 1;
+        uint32_t fsize = e.size;
+        vga_write("perms      size     name\n");
+        struct list_ud one; one.count = 0; one.longfmt = 1;
+        list_cb(nm, e.attr, 0, fsize, &one);
+        return;
+    }
     fat_list_dir(clus, list_cb, &u);
     vga_set_fg(VGA_WHITE);
     vga_write("--- ");

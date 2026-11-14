@@ -18,6 +18,7 @@
 #include "e1000.h"      /* v2.21 #55: Intel e1000 PCI NIC IRQ top half */
 #include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
 #include "task.h"
+#include "usb.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
 
 /* ---- GDT -------------------------------------------------------------- */

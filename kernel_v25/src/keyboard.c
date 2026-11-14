@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "usb.h"
 #include "io.h"
 #include "vga.h"
 #include "ime.h"

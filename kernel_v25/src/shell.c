@@ -2844,6 +2844,24 @@ static void cmd_unalias(char *arg) {
     al_count--;
 }
 
+/* v2.34: df -- FAT32 volume usage */
+static void cmd_df(void) {
+    if (!fs_fs_ready()) { vga_write("df: no FAT32 volume\n"); return; }
+    uint32_t cs = fat_cluster_size();
+    uint32_t tot = fat_total_clusters();
+    uint32_t fre = fat_free_clusters();
+    uint32_t used = tot > fre ? tot - fre : 0;
+    uint32_t tot_k = (uint32_t)(((uint64_t)tot * cs) / 1024);
+    uint32_t use_k = (uint32_t)(((uint64_t)used * cs) / 1024);
+    uint32_t fre_k = (uint32_t)(((uint64_t)fre * cs) / 1024);
+    vga_write("Filesystem     total      used      free  use%\n");
+    vga_write("/dev/ide0  ");
+    print_int((int)tot_k); vga_write("K  ");
+    print_int((int)use_k); vga_write("K  ");
+    print_int((int)fre_k); vga_write("K  ");
+    print_int(tot ? (int)(used * 100 / tot) : 0); vga_write("%\n");
+}
+
 static char input[256];
 
 
@@ -3091,6 +3109,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "env"))       env_list();
         else if (!strcmp_(cmd, "unset"))     cmd_unset(arg);
         else if (!strcmp_(cmd, "alias"))     cmd_alias(arg);
+        else if (!strcmp_(cmd, "df"))        cmd_df();
         else if (!strcmp_(cmd, "unalias"))   cmd_unalias(arg);
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
