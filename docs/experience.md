@@ -40,3 +40,5 @@ CatOS[经验] UHCI 轮询式 HID 键盘驱动最小实现：PIIX3 UHCI（BAR4 I/
 CatOS[经验] 判定"内核某路径是否真的执行"：不要相信源码里有调用就等于运行——先核实调用点是否处于可达路径（CatOS case 0 教训），再用一次性串口 breadcrumb（static flag 打一次日志）做存在性验证，成本远低于反复推断。
 CatOS[经验] 审查 ring0 shell 权限面的高效手法：按 fs_touch/fs_mkdir/fs_write_raw_mode/fs_copy_file/fs_delete/fs_rmdir 全量 grep shell.c，逐个确认该命令在写盘前是否经过 perm_write_on_parent 或 fs_perm_check；未经过的就是 syscall 层守卫罩不住的缺口（本轮由此定位 touch 漏网）。
 CatOS[经验] QEMU UHCI 热插拔时序：monitor device_add usb-kbd 后，内核靠 100 tick 轮询挂起 pending_attach、由键盘等待循环里的 usb_service() 触发扫描+端口复位；枚举/复位需要 1~2s 窗口，探针延迟太短会读到 "no device found" 误判为驱动缺陷。端口状态 bit7(0x0080) 在 QEMU 实连时置位，可作端口有效位判据。
+CatOS[经验] 终端现代主题整改的最低风险路径：以 16 色 CLUT 为唯一语义映射层——bg=#0C0C0C、正文=#DCDCDC、次要=#8B949E、强调绿=#7EE787、路径蓝=#60A5FA、语义红=#F85149/黄=#E3B341/青=#39C5CF/成功绿=#56D364，分别映射到 CON_BLACK/LIGHT_GREY/DARK_GREY/LIGHT_GREEN/LIGHT_BLUE/LIGHT_RED/YELLOW/LIGHT_CYAN/GREEN；shell 侧提示符/错误/成功只引用索引，不改硬编码 RGB，换肤只需改一张表。
+CatOS[经验] 帮助/清单两列对齐：写一个 help_row(cmd,desc) 小助手，先把命令左对齐补齐到固定宽度（24）再写分隔与描述列（第 26 列起），比在超长静态字符串里手工数空格稳健；命令超宽时补齐循环自然跳过、描述退一格不崩溃。

@@ -115,11 +115,15 @@ uint8_t render_rgb_to_vga(uint32_t rgb) {
 }
 
 static void clut_init(void) {
+    /* v2.37 modern terminal theme (P0-2): single table drives both the text
+     * DAC and the truecolour back-end.  bg #0C0C0C, body #DCDCDC, secondary
+     * #8B949E; accent green #7EE787, path blue #60A5FA; semantic
+     * red #F85149 / yellow #E3B341 / cyan #39C5CF / success green #56D364. */
     static const uint32_t vga16[16] = {
-        0x000000,0x0000AA,0x00AA00,0x00AAAA,
-        0xAA0000,0xAA00AA,0xAA5500,0xAAAAAA,
-        0x555555,0x5555FF,0x55FF55,0x55FFFF,
-        0xFF5555,0xFF55FF,0xFFFF55,0xFFFFFF
+        0x0C0C0C,0x1F6FEB,0x56D364,0x39C5CF,
+        0xF85149,0xD299DD,0xE3B341,0xDCDCDC,
+        0x8B949E,0x60A5FA,0x7EE787,0x39C5CF,
+        0xF85149,0xD299DD,0xE3B341,0xFFFFFF
     };
     for (int i = 0; i < 16; i++) clut[i] = vga16[i];
     for (int i = 16; i < 256; i++) {

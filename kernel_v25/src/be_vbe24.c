@@ -224,7 +224,7 @@ void gfx24_demo(void) {
         0x000000, 0xFF0000, 0x00FF00, 0xFFFF00,
         0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF
     };
-    gfx24_clear(0x102040);                      /* dark blue backdrop */
+    gfx24_clear(0x0C0C0C);                      /* v2.37 unified theme backdrop */
     gfx24_rect(100, 120, 100, 100, 0xFF0000);  /* red   */
     gfx24_rect(250, 120, 100, 100, 0x00FF00);  /* green */
     gfx24_rect(100, 270, 100, 100, 0x0000FF);  /* blue  */
@@ -279,7 +279,7 @@ static int v24_enter_bochs(void) {
             return -3;
         }
         active = 1;
-        gfx24_clear(0x000000);
+        gfx24_clear(0x0C0C0C);
         return 0;
     }
     return -1;
@@ -298,7 +298,7 @@ static int v24_enter_svga(void) {
     g_r = s.off_r; g_g = s.off_g; g_b = s.off_b; g_x = s.off_x;
     svga_backend = 1;
     active = 1;
-    gfx24_clear(0x000000);
+    gfx24_clear(0x0C0C0C);
     svga_flush();
     return 0;
 }
@@ -425,6 +425,7 @@ static int v24_set_scale(int s) {
     be_vbe24.rows = (uint16_t)(GFX24_H / v24_ch());
     be_vbe24.cell_w = (uint16_t)v24_cw();
     be_vbe24.cell_h = (uint16_t)v24_ch();
+    gfx24_clear(0x0C0C0C);      /* v2.37: wipe old-scale demo pixels full-frame */
     return 0;
 }
 static void v24_set_palette(uint8_t idx, uint32_t rgb) {

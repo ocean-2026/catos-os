@@ -80,88 +80,108 @@ typedef struct {
 static multiboot_info_t *mbi;
 
 /* ---------- commands ---------- */
+/* v2.37 P0-4: fixed two-column help.  Command field is 24 chars wide,
+ * description starts in column 26.  Section headers / notes print raw. */
+static void help_row(const char *cmd, const char *desc) {
+    vga_write("  ");
+    int n = 0;
+    for (const char *p = cmd; *p; p++) { vga_putc(*p); n++; }
+    while (n < 24) { vga_putc(' '); n++; }
+    vga_write("  ");
+    vga_write(desc);
+    vga_write("\n");
+}
+static void help_head(const char *s) { vga_write("  -- "); vga_write(s); vga_write(" --\n"); }
+static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write("\n"); }
+
 static void cmd_help(void) {
-    vga_write(
-        "CatOS v0.3 (five-pillar kernel) - commands:\n"
-        "  help         show this message\n"
-        "  clear        clear the screen\n"
-        "  lang [en|zh] show/set UI language (default en, /etc/lang)\n"
-        "  Up/Down history | Left/Right/Home/End edit the line\n"
-        "  Ctrl+Up/Down   scroll back console output (any key returns)\n"
-        "  echo TEXT    print text back\n"
-        "  about        system info banner\n"
-        "  autostart    re-run /etc/autostart scripts\n"
-        "  uname        print OS name\n"
-        "  date         show RTC date/time\n"
-        "  mem          show RAM size (multiboot)\n"
-        "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
-        "  -- display (front-end / back-ends) --\n"
-        "  gfx          graphics mode (256-color styled text)\n"
-        "  vbe          800x600x32 truecolour text (Bochs VBE / VMware SVGA)\n"
-        "  gfx24|vbe24 800x600 24-bit-colour drawing surface + pixel demo\n"
-        "  svgainfo     VMware SVGA II PCI/FIFO register dump\n"
-        "  text         switch back - needs a physical Y confirmation\n"
-        "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
-        "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
-        "  palette I C  redefine CLUT[I] as RRGGBB\n"
-        "  display      backend, grid, depth, CJK, glyph count\n"
-        "  vdiag        raw VGA/VBE register diagnostic\n"
-        "  -- Chinese (GB2312 display + pinyin input) --\n"
-        "  zhdemo       built-in UTF-8 Chinese + truecolour demo\n"
-        "  F2           toggle pinyin IME (works in shell and edit)\n"
-        "  color NUM    set foreground palette index (0..255)\n"
-        "  reboot       warm reboot the machine\n"
-        "  hang         halt the CPU (QEMU: close window)\n"
-        "  -- processes (ring3 tasks, preemptive) --\n"
-        "  run FILE.ce [args..] [&]  execute a CE app (in background with &)\n"
-        "  ps           list tasks (tid, uid, ring, state)\n"
-        "  kill TID     terminate a task\n"
-        "  sudo CMD     run a program as root (uid 0)\n"
-        "  -- users & permissions (v2.13, initial user: root) --\n"
-        "  whoami       current session user\n"
-        "  id [USER]    uid/gid/capabilities of a user\n"
-        "  lsuser       list accounts (/etc/passwd)\n"
-        "  caps         capability bit legend + session caps\n"
-        "  login U [PW] switch session user ('su' = alias)\n"
-        "  useradd N [UID [GID [CAPS]]]  add user (CAP_USERADM)\n"
-        "  userdel N | passwd N PW | chcaps HEX N\n"
-        "  chmod OCT PATH | chown UID[:GID] PATH  (persistent /etc/acl)\n"
-        "  uptime       seconds since boot + task count\n"
-        "  top          live task monitor (CPU% per task, any key quits)\n"
-        "  jobs         list background jobs ('run X &') with pending log\n"
-        "  log TID      show a background job's captured output\n"
-        "  log -f TID   follow that job until it exits\n"
-        "  -- environment (v2.23, persisted in /etc/env) --\n"
-        "  export K=V   set variable (empty V deletes); env lists all\n"
-        "  unset K      delete variable; $K / ${K} expand in typed lines\n"
-        "  PATH         drives bare-NAME lookup (default /bin)\n"
-        "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
-        "  -- audio (Sound Blaster 16, ISA) --\n"
-        "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
-        "  sndtest [HZ MS]  play a tone (default 440 Hz / 800 ms)\n"
-        "  -- network (PCnet) --\n"
-        "  curl URL     HTTP GET (http://IP[:port]/path)\n"
-        "  ping IP      ICMP echo (3 tries)\n"
-        "  dns NAME     resolve a hostname\n"
-        "  udp IP PORT TEXT  send one UDP datagram and wait for a reply\n"
-        "  netdiag      dump NIC/driver state\n"
-        "  Bare NAME is looked up in cwd then /bin (PATH); 'run FILE' uses\n"
-        "  the path verbatim with NO lookup (a bare NAME there is cwd-only).\n"
-        "  -- filesystem (FAT32 on IDE, persistent) --\n"
-        "  dir [PATH]   list a directory\n"
-        "  cd [PATH]    change directory (use .. or /)\n"
-        "  mkdir PATH   create a directory\n"
-        "  touch FILE   create an empty file\n"
-        "  cat FILE     print a file (text, up to 64 KiB)\n"
-        "  rm FILE      delete a file\n"
-        "  cp SRC DST   copy a file\n"
-        "  mv SRC DST   move a file (copy + delete)\n"
-        "  format       erase the FAT32 volume (y/n confirm)\n"
-        "  fsck         verify/repair FAT #2 against FAT #1 (crash check)\n"
-        "  faultinfo    show the last fatal fault (vector, CR2, PF bits)\n"
-        "  edit FILE    nano-style full-screen editor\n"
-        "               (arrows move, ^O save, ^X exit, ^K del line, ^U clear)\n"
-    );
+    vga_write("CatOS v0.3 (five-pillar kernel) - commands:\n");
+    help_row("help",        "show this message");
+    help_row("clear",       "clear the screen");
+    help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
+    help_note("Up/Down history | Left/Right/Home/End edit the line");
+    help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
+    help_row("echo TEXT",   "print text back");
+    help_row("about",       "system info banner");
+    help_row("autostart",   "re-run /etc/autostart scripts");
+    help_row("uname",       "print OS name");
+    help_row("date",        "show RTC date/time");
+    help_row("mem",         "show RAM size (multiboot)");
+    help_row("color NUM",   "set foreground color (0..255; text mode maps to 16)");
+
+    help_head("display (front-end / back-ends)");
+    help_row("gfx",         "graphics mode (256-color styled text)");
+    help_row("vbe",         "800x600x32 truecolour text (Bochs VBE / VMware SVGA)");
+    help_row("gfx24|vbe24", "800x600 24-bit-colour drawing surface + pixel demo");
+    help_row("svgainfo",    "VMware SVGA II PCI/FIFO register dump");
+    help_row("text",        "switch back - needs a physical Y confirmation");
+    help_row("style SPEC",  "bold+italic+underline+inverse+strike+dim / off");
+    help_row("rgb FG [BG]", "literal 0xRRGGBB colors (VBE: 16.7M colors)");
+    help_row("palette I C", "redefine CLUT[I] as RRGGBB");
+    help_row("display",     "backend, grid, depth, CJK, glyph count");
+    help_row("vdiag",       "raw VGA/VBE register diagnostic");
+
+    help_head("Chinese (GB2312 display + pinyin input)");
+    help_row("zhdemo",      "built-in UTF-8 Chinese + truecolour demo");
+    help_row("F2",          "toggle pinyin IME (works in shell and edit)");
+    help_row("reboot",      "warm reboot the machine");
+    help_row("hang",        "halt the CPU (QEMU: close window)");
+
+    help_head("processes (ring3 tasks, preemptive)");
+    help_row("run FILE.ce [args..] [&]", "execute a CE app (in background with &)");
+    help_row("ps",          "list tasks (tid, uid, ring, state)");
+    help_row("kill TID",    "terminate a task");
+    help_row("sudo CMD",    "run a program as root (uid 0)");
+
+    help_head("users & permissions (v2.13, initial user: root)");
+    help_row("whoami",      "current session user");
+    help_row("id [USER]",   "uid/gid/capabilities of a user");
+    help_row("lsuser",      "list accounts (/etc/passwd)");
+    help_row("caps",        "capability bit legend + session caps");
+    help_row("login U [PW]","switch session user ('su' = alias)");
+    help_row("useradd N [UID [GID [CAPS]]]", "add user (CAP_USERADM)");
+    help_row("userdel N | passwd N PW | chcaps HEX N", "manage accounts / caps");
+    help_row("chmod OCT PATH | chown UID[:GID] PATH", "persistent /etc/acl");
+    help_row("uptime",      "seconds since boot + task count");
+    help_row("top",         "live task monitor (CPU% per task, any key quits)");
+    help_row("jobs",        "list background jobs ('run X &') with pending log");
+    help_row("log TID",     "show a background job's captured output");
+    help_row("log -f TID",  "follow that job until it exits");
+
+    help_head("environment (v2.23, persisted in /etc/env)");
+    help_row("export K=V",  "set variable (empty V deletes); env lists all");
+    help_row("unset K",     "delete variable; $K / ${K} expand in typed lines");
+    help_row("PATH",        "drives bare-NAME lookup (default /bin)");
+    help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
+
+    help_head("audio (Sound Blaster 16, ISA)");
+    help_row("sndinfo",     "SB16 probe, DSP version, IRQ/DMA diagnostics");
+    help_row("sndtest [HZ MS]", "play a tone (default 440 Hz / 800 ms)");
+
+    help_head("network (PCnet)");
+    help_row("curl URL",    "HTTP GET (http://IP[:port]/path)");
+    help_row("ping IP",     "ICMP echo (3 tries)");
+    help_row("dns NAME",    "resolve a hostname");
+    help_row("udp IP PORT TEXT", "send one UDP datagram and wait for a reply");
+    help_row("netdiag",     "dump NIC/driver state");
+
+    help_note("Bare NAME is looked up in cwd then /bin (PATH); 'run FILE' uses");
+    help_note("the path verbatim with NO lookup (a bare NAME there is cwd-only).");
+
+    help_head("filesystem (FAT32 on IDE, persistent)");
+    help_row("dir [PATH]",  "list a directory");
+    help_row("cd [PATH]",   "change directory (use .. or /)");
+    help_row("mkdir PATH",  "create a directory");
+    help_row("touch FILE",  "create an empty file");
+    help_row("cat FILE",    "print a file (text, up to 64 KiB)");
+    help_row("rm FILE",     "delete a file");
+    help_row("cp SRC DST",  "copy a file");
+    help_row("mv SRC DST",  "move a file (copy + delete)");
+    help_row("format",      "erase the FAT32 volume (y/n confirm)");
+    help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
+    help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
+    help_row("edit FILE",   "nano-style full-screen editor");
+    help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
 }
 
 /* ---------- SB16 audio (v2.11) -----------------------------------------
@@ -1647,7 +1667,12 @@ static void cmd_edit(const char *arg) {
         }
     }
     fs_entry_t *f = fs_create_file(arg);
-    if (!f) { vga_write("edit: cannot create/open file\n"); return; }
+    if (!f) {
+        vga_set_fg(VGA_LIGHT_RED);
+        vga_write("edit: cannot create/open file\n");
+        vga_set_fg(VGA_LIGHT_GREY);
+        return;
+    }
 
     int fi = 0;
     while (arg[fi] && fi < FS_NAME_MAX - 1) { ed_fname[fi] = arg[fi]; fi++; }
@@ -3222,8 +3247,10 @@ static void shell_exec(char *cmd, char *arg) {
                 argv[0] = scmd;
                 argc += split_words(sarg, argv + 1, 15);
                 if (run_from_path(scmd, argv, argc, 0, UID_ROOT) != 0) {
+                    vga_set_fg(VGA_LIGHT_RED);
                     vga_write("catos: unknown command: ");
                     vga_write(scmd); vga_write("\n");
+                    vga_set_fg(VGA_LIGHT_GREY);
                 }
             }
             }
@@ -3341,7 +3368,9 @@ static void shell_exec(char *cmd, char *arg) {
                         fs_resolve_file(p, &c, &s) != 0) p[0] = 0;
                 }
                 if (!p[0]) {
+                    vga_set_fg(VGA_LIGHT_RED);
                     vga_write("catos: unknown command: "); vga_write(cmd); vga_write("\n");
+                    vga_set_fg(VGA_LIGHT_GREY);
                 } else if (pipe_to && *pipe_to) {
                     char *file2 = pipe_to;
                     char *sp = pipe_to;
@@ -3364,8 +3393,10 @@ static void shell_exec(char *cmd, char *arg) {
                                       out_redir, append, -1, -1);
                 }
             } else if (run_from_path(cmd, argv, argc, bg, g_uid) != 0) {
+                vga_set_fg(VGA_LIGHT_RED);
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
+                vga_set_fg(VGA_LIGHT_GREY);
             }
         }
 }

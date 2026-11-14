@@ -177,7 +177,7 @@ def main(argv):
         r.eq_px(p, 300, 170, (0, 255, 0), "green block (G channel)")
         r.eq_px(p, 150, 320, (0, 0, 255), "blue block (B channel)")
         r.eq_px(p, 300, 320, (255, 255, 255), "white block (all channels)")
-        r.eq_px(p, 450, 200, (16, 32, 64), "24-bit backdrop 0x102040")
+        r.eq_px(p, 450, 200, (12, 12, 12), "24-bit backdrop 0x0C0C0C (v2.37 theme)")
         r.eq_px(p, 400, 440, (127, 0, 128), "256-step gradient midpoint")
         r.eq_px(p, 50, 520, (0, 0, 0), "bar 0 black")
         r.eq_px(p, 750, 520, (255, 255, 255), "bar 7 white")

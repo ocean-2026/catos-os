@@ -89,3 +89,7 @@ CatOS[易错点] 环境重置后 /usr/bin/qemu-system-i386 可能消失：真实
 CatOS[易错点] ring0 shell 直调 fs_touch/fs_mkdir/fs_copy_file 时 ACL/fs_perm_check 不生效（守卫只在 syscall 层和 shell 显式调用点）；每新增一个"创建/删除目录条目"的 shell 命令，必须在命令层补 perm_write_on_parent（父目录写权限），#112 补了 mkdir/cp -r，#121 漏网的 touch 本轮补上。
 CatOS[易错点] 覆盖已有字符串表项前必须先把旧缓冲清零再拼接：strcat_b 是追加语义不是替换；alias 表项重复赋值未清空旧值会得到旧值+新值的拼接串（#120）。
 CatOS[易错点] 整屏 read_screen 会残留上一行 "permission denied"：判定新命令被拒/允许时，先 clear 再用 ls 结果（文件是否列出）复核，不要只在整屏文本里 grep denied，否则会把允许误判成拒绝（#121 探针虚惊）。
+CatOS[易错点] v2.37 改终端主题只动 render.c clut_init() 的 vga16 表即可三端联动（text 后端据此编 DAC、vbe/vbe24 真彩后端直接取 CLUT RGB），不要逐后端找色值；但 gfx24 demo 是直接写 LFB 的固定诊断图，其方块/渐变/色条/底色被 tests/gfx24_regress.py 逐字节 eq_px 断言，改 demo 任何颜色必须同步改该套件期望值，否则 gfx24 回归挂。
+CatOS[易错点] v24_set_scale 只改网格 cols/rows/字号不清 LFB，切换 size 档位后旧 demo 像素会残留在新网格外；必须在 set_scale 布局完成后整帧 gfx24_clear(主题底色)。
+CatOS[易错点] fsrec_regress 偶发 exit 143（SIGTERM）多为上一个 qemu 进程没退干净、占用磁盘镜像，并非内核回归；先 pkill -x qemu-system-i386 再重跑即过，勿误判成新缺陷。
+CatOS[易错点] 端口段：本代理独占 4570-4585，4444-4539 与 4586-4599 是并行审美代理保留段；gfx24_regress 硬编码 4462 落在保留段，本轮冒烟不要启动它，避免撞 monitor。
