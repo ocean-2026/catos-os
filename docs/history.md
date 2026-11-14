@@ -74,3 +74,7 @@ CatOS[易错点] CatOS 的 IRQ0 真入口是 cpu.s _irq_0 → task.c sched_timer
 CatOS[易错点] QEMU -usbdevice keyboard 附加后 sendkey 的键盘事件只进 USB HID 设备，PS/2 i8042 收不到任何键——测试 USB 键盘时类型注入必须走 USB 路径。
 CatOS[易错点] QEMU PIIX3 的 UHCI 在 PCI dev1.fn2（8086:7020），PCI 扫描必须遍历 function，只扫 fn0 会漏掉。
 CatOS[易错点] build.sh 的链接失败信息是 "undefined reference"（不含 "error" 字样），用 grep error 过滤构建输出会把链接失败漏判成成功；应过滤 'error|undefined' 并检查产物 mtime。
+CatOS[易错点] QEMU 6.2 的 monitor device_add 设备名是 usb-kbd，-usbdevice keyboard 的别名 usb-keyboard 会报 "not a valid device model name"。
+CatOS[易错点] QEMU 有 USB 键盘设备时 sendkey 事件只路由给 USB 设备（PS/2 收不到）；无 USB 键盘时 sendkey 走 PS/2——测试键盘路径前先确认当前 QEMU 设备构成。
+CatOS[易错点] tick 上下文（IRQ0 处理路径）里不能跑带 usb_delay_ticks 忙等的代码：deadline 依赖 timer_ticks 前进而 tick 本身不返回，死循环；热插拔要用"tick 置标志 + 任务上下文消费"两段式。
+CatOS[易错点] task_block(T_WAIT_KB) 无唤醒源时会永远睡死（USB 收割前 feed_report 才唤醒）——需要在等待循环里周期性调用 usb_service() 的场景应改 task_sleep_ticks 轮询。

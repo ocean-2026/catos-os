@@ -434,9 +434,30 @@ static void feed_report(const volatile uint8_t *r) {
 }
 
 /* ---- periodic poll (hw.c timer) --------------------------------------- */
+/* v2.29: hot-plug.  The tick context cannot run the attach flow (it
+ * busy-waits on timer ticks), so usb_poll only latches a connect event
+ * into pending_attach; usb_service() -- called from task context (key
+ * wait loops, the shell loop) -- runs the full scan/attach then. */
+static int      pending_attach;
+static uint32_t probe_ticks;
+
+void usb_service(void) {
+    if (!pending_attach) return;
+    pending_attach = 0;
+    usb_scan_devices();
+}
+
 void usb_poll(void) {
-    if (!running || !kbd_port) return;
+    if (!running) return;
     uint32_t now = timer_ticks;
+    if (!kbd_port) {
+        if (now - probe_ticks >= 100) {           /* ~1 s probe */
+            probe_ticks = now;
+            for (uint8_t p = 1; p <= 2; p++)
+                if (rd(R_PORTSC(p)) & 0x0001) { pending_attach = 1; break; }
+        }
+        return;
+    }
     if (now - poll_ticks < 10) return;        /* ~100 Hz tick -> 10ms */
     poll_ticks = now;
     polls++;

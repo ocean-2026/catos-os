@@ -125,9 +125,12 @@ static int e0_map(int k, int ctrl_held) {
 /* blocking: waits for the next scancode (yields the CPU while waiting) */
 static int kb_next_scancode(void) {
     for (;;) {
+        usb_service();                     /* v2.29: latch hot-plug attach */
         int sc = scq_pop();
         if (sc >= 0) return sc;
-        task_block(T_WAIT_KB);
+        /* poll, don't block: usb_service() must run even with no key
+         * producer alive (hot-plugged USB keyboard before attach). */
+        task_sleep_ticks(2);
     }
 }
 
@@ -135,6 +138,7 @@ static int kb_next_scancode(void) {
 extern volatile uint32_t timer_ticks;
 static int kb_next_scancode_timed(uint32_t deadline) {
     for (;;) {
+        usb_service();                     /* v2.29 */
         int sc = scq_pop();
         if (sc >= 0) return sc;
         if ((int32_t)(timer_ticks - deadline) >= 0) return -1;

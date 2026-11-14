@@ -8,6 +8,7 @@ int      usb_probe(void);        /* PCI scan 8086:7020/7112 (PIIX3/4 UHCI) */
 int      usb_init(void);         /* reset HC, build 1ms QH/TD schedule, run */
 int      usb_start(void);        /* init + hot-attach scan; boot entry     */
 int      usb_scan_devices(void); /* rescan ports, attach keyboard, arm TD  */
+void     usb_service(void);      /* v2.29: run a latched hot-plug attach   */
 void     usb_poll(void);         /* periodic (timer tick): reap/requeue TD */
 
 int      usb_ready(void);

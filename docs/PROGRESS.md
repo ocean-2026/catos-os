@@ -376,3 +376,22 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   fs_enum_entries；测试盘上 zz_demo 实际不存在导致两轮误判"补全失效"。
 - 回归：fsrec 12/12、caps 12/12、user 15/15 全绿。截图
   tests/qemu_shots/tab_complete.png。
+
+## 十八、v2.30 USB 热插拔自动识别
+
+- **缺口**：-usbdevice keyboard 启动时正常，但运行中插入的 USB 键盘
+  （QEMU monitor device_add usb-kbd）导致输入全丢：kbd_port=0 时
+  usb_poll 直接返回，新设备永远不会被发现，而 QEMU 的 sendkey 又被
+  USB 设备独占——死锁。
+- **修复（两段式）**：usb_poll（tick 上下文，不能跑带忙等的 attach）
+  每 ~1s 探测各端口 connect status，命中只置 pending_attach；
+  usb_service()（新接口）在任务上下文消费 pending 执行完整
+  reset+enumerate+arm。调用点：kb_next_scancode / kb_next_scancode_timed
+  的等待循环——同时把阻塞等待改为 2-tick 轮询（task_block 在无键生产者
+  时永不唤醒，usb_service 永远没机会跑）。
+- **实机验证**：-usb 启动 → device_add usb-kbd → 首键触发 attach
+  （串口 breadcrumb：probe hit → service attach → attached）→ 后续输入
+  完整回显。截图 tests/qemu_shots/usb_hotplug.png。
+- 对抗测试记录：模式切换 churn（gfx24/size compact|normal|large/text 确认）
+  3 轮 6/6 过；shell 输入 fuzz 60 轮无崩溃；并发后台任务 + scrollback
+  深分页往返 + ps 正常；fsrec/caps/user 全绿。
