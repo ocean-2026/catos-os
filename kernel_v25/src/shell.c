@@ -2785,6 +2785,65 @@ static void cmd_useredit(void) {
 }
 
 /* ---------- shell loop ---------- */
+/* v2.33: shell aliases (bash-style, single-level expansion) */
+#define ALIAS_MAX 8
+static char al_name[ALIAS_MAX][16];
+static char al_value[ALIAS_MAX][64];
+static int  al_count;
+
+static int alias_lookup(const char *n) {
+    for (int i = 0; i < al_count; i++)
+        if (!strcmp_(al_name[i], n)) return i;
+    return -1;
+}
+
+static void cmd_alias(char *arg) {
+    char *eq = 0;
+    for (char *p = arg; *p; p++) if (*p == '=') { eq = p; break; }
+    if (!eq) {                          /* list all (or one) */
+        if (*arg) {
+            int i = alias_lookup(arg);
+            if (i < 0) { vga_write("alias: not found: "); vga_write(arg); vga_write("\n"); }
+            else { vga_write("alias "); vga_write(al_name[i]); vga_write("='");
+                   vga_write(al_value[i]); vga_write("'\n"); }
+            return;
+        }
+        for (int i = 0; i < al_count; i++) {
+            vga_write("alias "); vga_write(al_name[i]); vga_write("='");
+            vga_write(al_value[i]); vga_write("'\n");
+        }
+        if (!al_count) vga_write("(no aliases)\n");
+        return;
+    }
+    *eq = 0;
+    char *name = arg, *value = eq + 1;
+    if (!*name || !*value) { vga_write("usage: alias name=value\n"); return; }
+    int l = 0; while (name[l]) l++;
+    if (l >= 16) { vga_write("alias: name too long\n"); return; }
+    int i = alias_lookup(name);
+    if (i < 0) {
+        if (al_count >= ALIAS_MAX) { vga_write("alias: table full\n"); return; }
+        i = al_count++;
+        for (int j = 0; j < l; j++) al_name[i][j] = name[j];
+        al_name[i][l] = 0;
+    }
+    if (strcat_b(al_value[i], 64, value) != 0) {   /* overwrite in place */
+        int v = 0; while (value[v] && v < 63) { al_value[i][v] = value[v]; v++; }
+        al_value[i][v] = 0;
+    }
+}
+
+static void cmd_unalias(char *arg) {
+    if (!*arg) { vga_write("usage: unalias name\n"); return; }
+    int i = alias_lookup(arg);
+    if (i < 0) { vga_write("unalias: not found: "); vga_write(arg); vga_write("\n"); return; }
+    for (int j = i; j < al_count - 1; j++) {
+        for (int k = 0; k < 16; k++) al_name[j][k] = al_name[j + 1][k];
+        for (int k = 0; k < 64; k++) al_value[j][k] = al_value[j + 1][k];
+    }
+    al_count--;
+}
+
 static char input[256];
 
 
@@ -2806,13 +2865,13 @@ static void bar_put_str(char *b, int *n, const char *s) {
  * parsing).  Multiple matches go into the candidate bar (the row under
  * the input line), exactly one replacement goes back into the line. */
 static const char *sh_cmds[] = {
-    "about","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
+    "about","alias","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
     "color","cp","curl","date","dir","display","dns","echo","edit","env",
     "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mv",
     "netcfg","netdiag","palette","passwd","ping","ps","reboot","rgb","rm","run",
     "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
-    "touch","udp","uname","unset","uptime","usb","useradd","userdel","useredit",
+    "touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vbe","vbe24","vdiag","whoami",
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
@@ -3002,6 +3061,21 @@ void shell_run(void) {
         if (*arg) { *arg = 0; arg++; while (*arg == ' ') arg++; }
 
         if (!*cmd) continue;
+
+        /* v2.33: single-level alias expansion of the command word */
+        int ai = alias_lookup(cmd);
+        if (ai >= 0) {
+            char expanded[256];
+            expanded[0] = 0;
+            strcat_b(expanded, (int)sizeof(expanded), al_value[ai]);
+            if (*arg && strcat_b(expanded, (int)sizeof(expanded), " ") == 0)
+                strcat_b(expanded, (int)sizeof(expanded), arg);
+            char *earg = expanded;
+            while (*earg && *earg != ' ') earg++;
+            if (*earg) { *earg = 0; earg++; while (*earg == ' ') earg++; }
+            shell_exec(expanded, earg);
+            continue;
+        }
         shell_exec(cmd, arg);
     }
 }
@@ -3016,6 +3090,8 @@ static void shell_exec(char *cmd, char *arg) {
                  !strcmp_(cmd, "setenv"))    cmd_export(arg);
         else if (!strcmp_(cmd, "env"))       env_list();
         else if (!strcmp_(cmd, "unset"))     cmd_unset(arg);
+        else if (!strcmp_(cmd, "alias"))     cmd_alias(arg);
+        else if (!strcmp_(cmd, "unalias"))   cmd_unalias(arg);
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();

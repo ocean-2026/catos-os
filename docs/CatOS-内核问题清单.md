@@ -701,3 +701,5 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 *本节后继续编号为 #115+。*
 
 | 116 | 高 | 无 IDE 硬盘时 `format` 死循环假死（分钟级无响应） | fat_mkfs 对 IDENTIFY 失败 fallback 到虚构 64MiB 卷继续 mkfs，每个扇区写都烧满 10M 迭代超时 | v2.32：fat_mkfs/fs_format 改 int 签名，无盘立即返回 -1，shell 报 "no IDE disk attached" | ✅ 已修 |
+
+| 117 | 低 | text 模式（VGA 字库）下中文内容无法显示（cat 输出中文静默丢弃） | VGA 9042 字库无中文字形，图形模式才有软件字库渲染 | 记录为已知限制；可选改进：非 ASCII 渲染为 '?' 或提示切图形模式 | ⏳ 已知限制 |

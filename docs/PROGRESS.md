@@ -411,3 +411,15 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 修复：fat_mkfs→int（-1 无盘）、fs_format→int、format 命令与 boot
   自动 format 路径报错并继续。带盘 format 2s 正常，无盘立即报错。
 - fsrec/caps/user 回归全绿。
+
+## 二十一、v2.33 alias/unalias 命令
+
+- bash 风格别名：alias name=value 设置（同名单写覆盖）、alias 列出全部/
+  单条、unalias 删除；主循环对命令词做单层展开（value + 原参数拼接后
+  重新分词进 shell_exec），8 条容量。
+- 实机验证：alias ll='ls -l' → ll / 正确展开执行；unalias 后 ll 变
+  unknown command。截图 tests/qemu_shots/alias_cmd.png。
+- 对抗测试：编辑器 IME 全链路（F2 开启 → zhong 候选条 → 选"中"上屏 →
+  ^S 保存 4 字节 → gfx24 下 cat 正确显示中文）✓。text 模式 VGA 字库
+  无中文字形（cat 中文无输出）为硬件限制，记问题清单 #117 低优先级。
+- fsrec/caps/user 回归全绿。
