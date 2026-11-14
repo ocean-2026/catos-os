@@ -1,0 +1,75 @@
+=== A11 pipe-abuse ===
+under_test_iso_sha256=d7c5176f21d7e7b7
+host_free_mb=13711 guests=1
+vector  : pipe handle/length abuse, double close, write-after-close
+run     : run /bin/ATKPIPE.CE 
+expect  : OK
+result  : OK  (attack completed (ATK-DONE))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$
+
+--- screen AFTER ---
+STEP 1: -- create 12 pipes (table is 8)
+h=256  h=257  h=258  h=259  h=260  h=261  h=262  h=263  h=-1  h=-1  h=-1  h=-1
+STEP 2: -- bogus handles on read/write/close
+w=-1 -1 r=-1 -1 c=-1 -1 w=0 -1 r=0 -1 c=0 -1 w=1 -1 r=1 -1 c=1 -1 w=255 -1 r=255
+ -1 c=255 -1 w=264 -1 r=264 -1 c=264 -1 w=355 -1 r=355 -1 c=355 -1 w=2147483647
+-1 r=2147483647 -1 c=2147483647 -1 w=-1 -1 r=-1 -1 c=-1 -1
+STEP 3: -- length abuse on a real pipe (never exceed the capacity)
+h=-1
+STEP 4: -- read() with poison buffers on a live pipe
+STEP 5: -- close all, then channel storm (create/close x50)
+storm ok
+ATK-DONE
+[task 1 'ATKPIPE' exit(0)]
+root@catos:/$
+
+--- faultinfo probe ---
+STEP 4: -- read() with poison buffers on a live pipe
+STEP 5: -- close all, then channel storm (create/close x50)
+storm ok
+ATK-DONE
+[task 1 'ATKPIPE' exit(0)]
+root@catos:/$ faultinfo
+no fault recorded since boot
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=01645ee8
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010d4000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     015ebb40 0000002f
+IDT=     015eb340 000007ff
+CR0=80000011 CR2=00000000 CR3=015ed000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+
