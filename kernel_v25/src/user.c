@@ -57,12 +57,103 @@ static void emit_uint(char *out, uint32_t v, int base) {
 static user_rec_t users[MAX_USERS];
 static int users_dirty;
 
+extern volatile uint32_t timer_ticks;   /* hw.c IRQ0 counter */
+
 uint32_t user_hash_pw(const char *pw) {
-    /* djb2 -- deliberately NOT cryptographic: this is a teaching kernel
-     * with no crypto primitives.  It only prevents shoulder-surfing. */
+    /* djb2 -- legacy pre-v2.22 scheme, kept ONLY to verify old /etc/passwd
+     * records (and transparently upgrade them on the next login). */
     uint32_t h = 5381;
     for (; pw && *pw; pw++) h = h * 33u + (uint8_t)*pw;
     return h;
+}
+
+/* v2.22 salted iterated hash.  Deliberately NOT cryptographic (no crypto
+ * primitives in this kernel) -- but unlike the bare djb2 above, a leaked
+ * /etc/passwd no longer yields password candidates in microseconds: each
+ * guess costs 8192 mixing rounds and every record has its own random salt,
+ * so identical passwords hash differently and precomputed tables are
+ * useless.  Constants are FNV-1a; rounds fixed at 8192 (~ms on this CPU). */
+#define PW_ROUNDS 8192u
+
+static uint32_t pw_hash_salted(const char *pw, uint32_t salt) {
+    uint32_t h = 2166136261u ^ salt;
+    for (uint32_t r = 0; r < PW_ROUNDS; r++) {
+        for (const char *p = pw; p && *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 16777619u;
+        }
+        h ^= (uint8_t)r;
+        h *= 16777619u;
+        h ^= h >> 13;
+        h *= 16777619u;
+        h ^= salt + r;
+    }
+    /* final avalanche (murmur3 fmix32) */
+    h ^= h >> 16; h *= 0x85ebca6bu;
+    h ^= h >> 13; h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h;
+}
+
+static const char PWHEX[] = "0123456789abcdef";
+
+static void pw_emit32(uint32_t v, char out[8]) {
+    for (int i = 7; i >= 0; i--) { out[i] = PWHEX[v & 0xFu]; v >>= 4; }
+}
+
+static int pw_parse32(const char *s, uint32_t *out) {
+    uint32_t v = 0;
+    for (int i = 0; i < 8; i++) {
+        char c = s[i];
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else return -1;
+        v = (v << 4) | (uint32_t)d;
+    }
+    *out = v;
+    return 0;
+}
+
+void user_pw_set_rec(user_rec_t *u, const char *pw) {
+    /* salt: IRQ0 tick counter mixed with the record's address -- on this
+     * non-preemptible kernel the tick phase at password-set time is the
+     * best entropy available; enough to distinct two same-password users. */
+    uint32_t salt = timer_ticks * 2654435761u
+                  ^ (uint32_t)(uintptr_t)u * 0x9E3779B9u
+                  ^ (uint32_t)(uintptr_t)pw;
+    char d[8];
+    /* record = "$S$" + 8 hex salt + '$' + 8 hex digest  (20 chars + NUL) */
+    u->pw[0] = '$'; u->pw[1] = 'S'; u->pw[2] = '$';
+    pw_emit32(salt, u->pw + 3);
+    u->pw[11] = '$';
+    pw_emit32(pw_hash_salted(pw, salt), d);
+    for (int i = 0; i < 8; i++) u->pw[12 + i] = d[i];
+    u->pw[20] = 0;
+}
+
+int user_pw_is_set(const user_rec_t *u) {
+    return u && u->pw[0] != 0;
+}
+
+int user_check_pw(user_rec_t *u, const char *pw) {
+    if (!u) return -1;
+    if (u->pw[0] == 0) return 0;               /* open account */
+    if (u->pw[0] == '$' && u->pw[1] == 'S' && u->pw[2] == '$' && u->pw[3] != '$') {
+        /* "$S$" + 8 hex salt + 8 hex digest */
+        uint32_t salt, want;
+        if (u->pw[11] != '$' || pw_parse32(u->pw + 3, &salt) != 0 ||
+            pw_parse32(u->pw + 12, &want) != 0) return -1;
+        return pw_hash_salted(pw ? pw : "", salt) == want ? 0 : -1;
+    }
+    /* legacy bare-djb2 record: verify, then upgrade in place */
+    uint32_t want = parse_uint(u->pw, 16);
+    if (user_hash_pw(pw) == want) {
+        user_pw_set_rec(u, pw);
+        users_dirty = 1;
+        return 0;
+    }
+    return -1;
 }
 
 user_rec_t *user_by_name(const char *name) {
@@ -89,12 +180,6 @@ uint32_t user_caps_of(int uid) {
     return uid == UID_ROOT ? CAP_ALL : 0;
 }
 
-int user_check_pw(user_rec_t *u, const char *pw) {
-    if (!u) return -1;
-    if (u->passhash == 0) return 0;            /* open account */
-    return user_hash_pw(pw) == u->passhash ? 0 : -1;
-}
-
 static user_rec_t *user_alloc_slot(void) {
     for (int i = 0; i < MAX_USERS; i++)
         if (!users[i].used) return &users[i];
@@ -114,7 +199,7 @@ int user_add(const char *name, int uid, int gid,
     ucopy(u->home, home && *home ? home : "/", 48);
     ucopy(u->shell, shell && *shell ? shell : "/bin/shell.ce", 32);
     u->caps = caps;
-    u->passhash = 0;
+    u->pw[0] = 0;
     u->used = 1;
     users_dirty = 1;
     return 0;
@@ -132,7 +217,8 @@ int user_del(const char *name) {
 int user_set_pw(const char *name, const char *pw) {
     user_rec_t *u = user_by_name(name);
     if (!u) return -1;
-    u->passhash = user_hash_pw(pw);
+    if (pw && *pw) user_pw_set_rec(u, pw);
+    else u->pw[0] = 0;                         /* clear = open account */
     users_dirty = 1;
     return 0;
 }
@@ -152,7 +238,7 @@ int user_save(void) {
         if (!users[i].used) continue;
         user_rec_t *u = &users[i];
         char num[12];
-        /* name:uid:gid:home:shell:caps:passhash */
+        /* name:uid:gid:home:shell:caps:pw (v2.22 salted or legacy hex) */
         for (int j = 0; u->name[j] && o < 4000; j++) buf[o++] = u->name[j];
         buf[o++] = ':';
         emit_uint(num, u->uid, 10);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
@@ -165,7 +251,7 @@ int user_save(void) {
         buf[o++] = ':';
         emit_uint(num, u->caps, 16); for (int j = 0; num[j]; j++) buf[o++] = num[j];
         buf[o++] = ':';
-        emit_uint(num, u->passhash, 16); for (int j = 0; num[j]; j++) buf[o++] = num[j];
+        for (int j = 0; u->pw[j] && o < 4000; j++) buf[o++] = u->pw[j];
         buf[o++] = '\n';
     }
     buf[o] = 0;
@@ -225,7 +311,10 @@ void user_db_init(void) {
                 ucopy(u->home, fld[3], 48);
                 ucopy(u->shell, fld[4], 32);
                 u->caps = parse_uint(fld[5], 16);
-                u->passhash = parse_uint(fld[6], 16);
+                ucopy(u->pw, fld[6], 24);
+                /* legacy "0" meant OPEN account; keep that meaning */
+                if (u->pw[0] != '$' && parse_uint(u->pw, 16) == 0)
+                    u->pw[0] = 0;
                 u->used = 1;
                 restored++;
             }

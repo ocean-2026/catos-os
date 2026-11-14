@@ -1718,7 +1718,7 @@ static void cmd_id(const char *name) {
     vga_write(" home=");  vga_write(u->home);
     vga_write("\ncaps=0x"); print_hex(u->caps);
     vga_write(" ("); print_caps(u->caps); vga_write(")\n");
-    vga_write("pw="); vga_write(u->passhash ? "set" : "none");
+    vga_write("pw="); vga_write(user_pw_is_set(u) ? "set" : "none");
     vga_write(" shell="); vga_write(u->shell); vga_write("\n");
 }
 
@@ -1736,7 +1736,7 @@ static void cmd_lsuser(void) {
         if (!u || !u->used) continue;
         print_pad(u->uid, 4); vga_write(" ");
         print_pad(u->gid, 4); vga_write(" ");
-        vga_write(u->passhash ? "yes  " : "no   ");
+        vga_write(user_pw_is_set(u) ? "yes  " : "no   ");
         print_hex8(u->caps);
         vga_write("  ");
         vga_write(u->name);
@@ -1767,7 +1767,7 @@ static void cmd_login(char *arg, int as_su) {
     user_rec_t *u = user_by_name(name);
     if (!u) { vga_write("login: no such user\n"); return; }
     if (u->uid == g_uid) { vga_write("already session user\n"); return; }
-    int need_pw = u->passhash != 0;
+    int need_pw = user_pw_is_set(u);
     if (as_su && g_uid == UID_ROOT) need_pw = 0;      /* root may su freely */
     /* T52: when no password was given on the command line, ask for it
      * interactively and echo '*' per keystroke instead of the characters. */

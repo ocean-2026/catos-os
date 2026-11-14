@@ -229,3 +229,21 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 大小完全一致（6,662,308 字节）。
 
 **真实 VMware Workstation 仍需用户开机复测**（#107 黑屏、#108 刷新、#109/#110 光标）。
+
+## 十、v2.22 口令加固轮（2026-11-14 跨夜）
+
+- **加盐迭代口令哈希**（`src/user.c`）：新 /etc/passwd 第 7 字段格式
+  `$S$<8hex salt>$<8hex digest>`；FNV-1a + fmix32 雪崩，8192 轮迭代，
+  每记录独立随机盐（timer_ticks 混地址）。同口令不同用户 → 不同盐。
+  明确非密码学边界（内核无密码学原语），目标是抵御离线彩虹表/秒级爆破。
+- **旧格式兼容 + 透明升级**：legacy 裸 djb2 记录仍可验证，登录成功后
+  原地升级为加盐格式（users_dirty → 下次持久化写盘）；legacy "0"（无口令）
+  在 user_db_init 归一为空串。
+- **新回归 `tests/pw_regress.py`**：12 步（加盐落盘格式、错误口令/大小写
+  变体拒绝、正确口令接受、同口令不同盐、无致命故障）。
+- **测试基架 Linux/QEMU6.2 移植**：qemu_driver/qemu_regress 等 6 个驱动
+  支持 PATH 查找 qemu-system-i386；镜像统一暂存 /tmp（hpvs_fs 无文件锁）；
+  `xp` 地址正则放宽到 16 位；type_text 补 `$` 等按键映射。
+- **回归总账（2026-11-14，同 ISO）**：宿主 test_mkce 48、test_cc 10、
+  test_app_list 24；实机 qemu 12/12、security 17/17、user 15/15、diag 4/4、
+  pw 12/12。

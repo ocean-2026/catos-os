@@ -178,7 +178,10 @@ def sendkey(s, key, wait=0.12):
 
 def type_text(s, text, wait=0.12):
     special = {" ": "spc", "-": "minus", "=": "equal", ".": "dot",
-               "/": "slash", "\n": "ret"}
+               "/": "slash", "\n": "ret", "$": "shift-4",
+               "_": "shift-minus", "*": "shift-8", "~": "shift-quote_t",
+               "|": "shift-backslash", "!": "shift-1",
+               "?": "shift-dot", ":": "shift-semicolon"}
     for ch in text:
         k = special.get(ch)
         if k is None:

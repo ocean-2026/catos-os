@@ -54,3 +54,10 @@
 - [CatOS/v2.14 回归][易错点] format 成功后内核要**重装内置应用到磁盘**，耗时数秒；期间键入全部丢失——必须轮询屏幕出现 "Installed missing built-in" 再发下一条命令，固定 sleep 2.5s 不够
 - [CatOS/v2.14 回归][易错点] FAT `ls` 显示的是 8.3 目录项里**原创建时的大小写**（写 `C1.TAD` 删后显示 `c1.tad`，大小写转换取决于创建路径），文件名断言必须做大小写不敏感匹配
 - [CatOS/v2.14 回归][易错点] HMP `screendump` 异步落盘 + 读屏折叠空格，关键断言前先做一次"沉淀读"（读屏只为触发等待）再取值断言；否则偶发读到半更新屏造成 flaky
+
+## 2026-11-14 跨夜任务（v2.22 轮）易错点
+- [CatOS][易错点] Windows 打包的 CatOs.7z 快照文本文件是 CRLF，Linux dash 下 sh 脚本报 "set: Illegal option -"：解包后先 dos2unix 归一 build 关键文件（v2.19 先例：归一前后 kernel.bin 字节一致）。
+- [CatOS][易错点] /home/user 挂载为 hpvs_fs（不支持 QEMU 需要的 OFD 文件锁），QEMU 直接打开镜像报 "Failed to get write lock"：qemu_driver.boot 已统一把 iso/disk 暂存到 /tmp 再启动。
+- [CatOS][易错点] QEMU 6.2 HMP `xp` 输出 16 位地址（00000000000b8000:），旧测试脚本按 8 位地址正则匹配全空导致 wait_for_prompt 全挂：正则已放宽为 ^[0-9a-fA-F]{8,16}:。
+- [CatOS][易错点] 改内核后必须 sh build.sh iso 重打包；只 build kernel.bin 时 QEMU 仍引导旧 ISO，会得出"改动没生效"的假结论。
+- [CatOS][易错点] /etc/passwd 旧格式第 7 字段是 uint32 passhash，"0" 表示无口令；v2.22 迁移为字符串 pw 字段时必须在 user_db_init 里把 legacy "0" 归一为空串，否则旧盘上 root 被当成"已设未知口令"锁在门外。

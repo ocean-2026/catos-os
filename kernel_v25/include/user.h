@@ -6,7 +6,7 @@
  * CatOS user + capability security model (v2.13).
  *
  * Two persistent stores on the FAT32 volume:
- *   /etc/passwd  - one line per user:  name:uid:gid:home:shell:caps:passhash
+ *   /etc/passwd  - one line per user:  name:uid:gid:home:shell:caps:pw
  *   /etc/acl     - one line per path:  path:uid:gid:mode   (12-bit unix mode)
  *
  * A task carries its spawning user's uid/gid/caps (task_t).  The kernel
@@ -37,7 +37,16 @@ typedef struct {
     char     home[48];
     char     shell[32];
     uint32_t caps;
-    uint32_t passhash;   /* 0 = no password (open login)                       */
+    /* password record, stored verbatim in /etc/passwd field 7:
+     *   ""                        = open account (no password)
+     *   "<8 hex>"                 = legacy djb2 (pre-v2.22, verified then
+     *                               transparently upgraded on next login)
+     *   "$S$<8hex><8hex>"         = salted iterated FNV-1a (v2.22),
+     *                               8192 rounds, salt is 32-bit random.
+     * NOT cryptographic -- no crypto primitives in the kernel; the goal
+     * is to resist shoulder-surfing AND cheap offline dictionary scans
+     * (the old bare djb2 of a low-entropy password was instant to brute). */
+    char     pw[24];
     int      used;
 } user_rec_t;
 
@@ -63,6 +72,8 @@ int         user_set_pw(const char *name, const char *pw);
 int         user_set_caps(const char *name, uint32_t caps);
 int         user_save(void);                     /* rewrite /etc/passwd          */
 uint32_t    user_hash_pw(const char *pw);       /* djb2, non-cryptographic     */
+int         user_pw_is_set(const user_rec_t *u);/* non-empty password record    */
+void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      */
 
 /* ---- access control list (persistent /etc/acl) ---- */
 void        acl_init(void);
