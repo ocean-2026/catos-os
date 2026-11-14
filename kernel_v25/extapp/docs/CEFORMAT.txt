@@ -1,0 +1,44 @@
+CatOS Executable (.ce) format
+=============================
+
+A .ce file is a 20-byte header followed by the raw image (the flat
+objcopy -O binary dump of a freestanding i386 program: text + rodata +
+data).  Little-endian throughout.
+
+Header (20 bytes):
+  offset  size  field
+  0       4     magic      "CE01"
+  4       4     entry      entry offset inside the image (must be 0)
+  8       4     bss_size   bytes of zeroed bss placed after the image
+  12      4     api_offset offset of the 4-byte API pointer slot
+  16      4     image_size raw image bytes following the header
+
+Loading (done by the kernel for the `run` command):
+  1. the whole file is read from the FAT32 volume at CE_LOAD_BASE
+     (16 MiB, far above the kernel image);
+  2. the magic is verified; entry must be 0;
+  3. the 20-byte header is dropped and the raw image is slid to the base;
+  4. bss_size zero bytes follow the image;
+  5. the address of the system-call table is stored at
+     image[api_offset] (the __ce_api slot);
+  6. the CPU switches to a kernel-owned 8 KiB stack;
+  7. the kernel calls image offset 0 as  ce_main(argc, argv)  where
+     argc/argv carry the command line from `run FILE.ce args...`
+     (argv[0] is the .ce path; legacy ce_main(void) apps also work).
+     ce_main returns normally or calls exit() to go back to the shell.
+
+Building an application (on the Windows host):
+  sh build_ce.sh myapp.c      # gcc -> ld (extapp/ce.ld) -> objcopy
+                              # -> build/mkce.py adds the header
+                              # output: extapp/bin/myapp.ce
+
+  - the entry point must be named ce_main and sit at image offset 0
+    (build_ce.sh verifies this);
+  - the API pointer slot is created by declaring
+        catos_api_t *__ce_api __attribute__((section(".ce_api"))) = 0;
+    its offset is read with nm and stored in the header;
+  - no libc: write your own string/number helpers (see ce_abi.h).
+
+API documentation: see API.TXT in this directory.
+CE compiler:       build/mkce.py   (Python, wraps the CE01 header)
+                   extapp/build_ce.sh  (full compile pipeline)

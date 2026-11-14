@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<Foundry>
+<VM>
+<VMId type="string">52 85 49 94 4f 7d 6a 00-f4 cc fd 68 de a4 e1 d7</VMId>
+<ClientMetaData>
+<clientMetaDataAttributes/>
+<HistoryEventList/></ClientMetaData>
+<vmxPathName type="string">CatOS.vmx</vmxPathName></VM></Foundry>

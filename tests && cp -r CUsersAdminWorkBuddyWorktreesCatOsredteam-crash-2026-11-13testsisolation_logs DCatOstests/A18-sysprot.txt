@@ -1,0 +1,112 @@
+
+--- F2 restart (same image) ---
+[DIR ] dev/
+[DIR ] etc/
+[DIR ] bin/
+[DIR ] sbin/
+[DIR ] lib/
+[DIR ] usr/
+[DIR ] home/
+[DIR ] root/
+[DIR ] tmp/
+[DIR ] var/
+[DIR ] proc/
+[DIR ] sys/
+[DIR ] mnt/
+[DIR ] boot/
+[DIR ] appdevel/
+--- 17 entries ---
+root@catos:/$ fsck
+fsck: FAT mirror OK
+root@catos:/$ run /bin/hello.ce
+Hello from CE!
+This is a native CatOS application.
+Time: 2026-11-13 00:15:45
+alloc test: abcdefghij
+[task 1 'hello' exit(0)]
+root@catos:/$
+=== A18 sysprot ===
+under_test_iso_sha256=4dc87877beb6ac53
+host_free_mb=4335 guests=0
+disk_before=8b782d1c5ef8ef49 disk_after=a01b9aeb1c701d9e F2-restart=ok
+vector  : system file write surface: overwrite / delete a built-in app, 8.3 shadow name
+run     : run /bin/ATKSYSP.CE 
+expect  : OK: built-in writes/deletes refused (-13), long name still resolves to the built-in
+result  : OK  (attack completed (ATK-DONE))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+Runs on      : QEMU / VMware / Bochs / real PC
+Type 'help' for a list of commands.
+net: no usable NIC (no 1022:2000); PCI bus 0: vend=8086 dev=1237 vend=8086 dev=7
+000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev=1111
+net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0
+root@catos:/$
+
+--- screen AFTER ---
+Display      : front-end + text/gfx back-ends
+Runs on      : QEMU / VMware / Bochs / real PC
+Type 'help' for a list of commands.
+net: no usable NIC (no 1022:2000); PCI bus 0: vend=8086 dev=1237 vend=8086 dev=7
+000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev=1111
+net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0
+root@catos:/$ run /bin/ATKSYSP.CE
+ATK-SYSPROT: system file write surface
+STEP 1: baseline sizes of built-in apps (must stay constant)
+hello_size=4312 allocprobe_size=4828
+STEP 2: overwrite a built-in app with file_write()
+fw_builtin=0
+STEP 3: same through api->save()
+save_builtin=0
+STEP 4: delete a built-in app
+del_builtin=0
+STEP 5: 8.3 shadow name must not take over the long name
+shadow_write=0 allocprobe_size_after=13 hello_size_after=-1
+STEP 6: control: ordinary files must still be writable
+normal_write=0 normal_size=2
+ATK-DONE
+[task 1 'ATKSYSP' exit(0)]
+root@catos:/$
+
+--- faultinfo probe ---
+shadow_write=0 allocprobe_size_after=13 hello_size_after=-1
+STEP 6: control: ordinary files must still be writable
+normal_write=0 normal_size=2
+ATK-DONE
+[task 1 'ATKSYSP' exit(0)]
+root@catos:/$ faultinfo
+no fault recorded since boot
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=015f5ee8
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010cf000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     0159bc60 0000002f
+IDT=     0159b460 000007ff
+CR0=80000011 CR2=00000000 CR3=0159d000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+

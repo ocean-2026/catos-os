@@ -1,0 +1,11 @@
+=== A1: argv that qemu_driver.boot() ACTUALLY builds ===
+ARGV = C:\qemu-portable\qemu-system-i386.exe -m 256 -no-reboot -net none -cdrom C:\Users\Admin\WorkBuddy\Worktrees\CatOs\redteam-crash-2026-11-13\kernel_v25\catos.iso -boot order=d -display none -monitor tcp:127.0.0.1:4494,server,nowait -drive file=X:/probe.img,format=raw,if=ide
+
+  PASS -net none present and is the only -net               -net ['none']
+  PASS -display none                                        none
+  PASS monitor bound to 127.0.0.1 loopback only             tcp:127.0.0.1:4494,server,nowait
+  PASS -no-reboot (a crashing guest cannot loop-reboot)     present
+  PASS disk passed as plain image file, no host share       file=X:/probe.img,format=raw,if=ide
+
+=== A2: forbidden switches in the real argv ===
+  none of 12 forbidden pattern(s) present

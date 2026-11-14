@@ -1,0 +1,37 @@
+/* Hello.C -- sample source for the CatOS tiny C compiler (cc.ce).
+ *
+ *   run /bin/cc.ce /SRC/HELLO.C /BIN/HELLO.CE
+ *   run /BIN/HELLO.CE
+ *
+ * Shows recursion, a loop, globals and the api-> calls the compiler lowers
+ * into system-call table calls.
+ */
+char *greeting;
+
+int fib(int n) {
+    if (n < 2) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+int sum_to(int n) {
+    int i;
+    int s;
+    s = 0;
+    for (i = 1; i <= n; i = i + 1) {
+        s = s + i;
+    }
+    return s;
+}
+
+int ce_main(int argc, char **argv) {
+    greeting = "compiled by cc.ce";
+    api->write(greeting);
+    api->write("\n");
+    api->write("fib(10) = ");
+    api->print_int(fib(10));
+    api->write("\n");
+    api->write("sum(1..10) = ");
+    api->print_int(sum_to(10));
+    api->write("\n");
+    return 0;
+}

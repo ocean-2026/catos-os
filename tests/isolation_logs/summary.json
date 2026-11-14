@@ -1,0 +1,72 @@
+[
+  {
+    "item": "A1 QEMU 命令行（-net none / -display none / monitor 回环 / -no-reboot）",
+    "method": "import qemu_driver，替换 subprocess.Popen 截获 boot() 真实构造的 argv",
+    "evidence": "-net none present and is the only -net=-net ['none'] | -display none=none | monitor bound to 127.0.0.1 loopback only=tcp:127.0.0.1:4494,server,nowait | -no-reboot=present | disk passed as plain image file, no host share=file=X:/probe.img,format=raw,if=ide | 禁止项 0 命中",
+    "verdict": "PASS",
+    "residual": "argv 拦截法验证的是 boot() 的构造结果；运行时 argv 另见 D2"
+  },
+  {
+    "item": "A3 全仓无 taskkill /IM、且 -net 仅有 none 一种形态",
+    "method": "AST 遍历 tests/**、kernel_v25/** 的所有进程启动调用；再对 *.py/*.sh/*.bat 做原始 token 扫描",
+    "evidence": "进程启动调用点 39 个，执行式 taskkill /IM：0 处；-net 形态: {'none': 5}",
+    "verdict": "PASS",
+    "residual": "qemu_driver.py 文档字符串中提到 taskkill /IM 仅作反例说明（非可执行代码），已由 AST 层排除"
+  },
+  {
+    "item": "B 工作目录 + git 分支隔离（主工作区未被污染）",
+    "method": "git rev-parse --abbrev-ref HEAD / git worktree list / 对 master-a125998e 只读 git status --porcelain",
+    "evidence": "分支=redteam/crash-attack-2026-11-13；worktree 列表含 D:/CatOs、master-a125998e、redteam-…；主工作区 porcelain 输出=''（空=干净）",
+    "verdict": "PASS",
+    "residual": "两个 worktree 共享同一个 .git；分支隔离是 git 层的逻辑隔离，不是文件系统层的隔离"
+  },
+  {
+    "item": "D1 运行时真实命令行含 -net none（非仅源码声明）",
+    "method": "QEMU 起来后用 Win32_Process.CommandLine 读该 PID 的实际 argv",
+    "evidence": "live argv = C:\\qemu-portable\\qemu-system-i386.exe -m 256 -no-reboot -net none -cdrom C:\\Users\\Admin\\WorkBuddy\\Worktrees\\CatOs\\redteam-crash-2026-11-13\\kernel_v25\\catos.iso -boot order=d -display none -monitor tcp:127.0.0.1:4494,server,nowait -drive file=C:\\Users\\Admin\\Wor",
+    "verdict": "PASS",
+    "residual": "argv 由本脚本截获的 boot() 构造与我方 Popen 一致；若有人手工另起 QEMU 则不在此检查范围"
+  },
+  {
+    "item": "D2 宿主侧：该 guest 无 user-net/SMB/telnet 监听，monitor 只绑回环",
+    "method": "netstat -ano 过滤该 PID，解析 LOCAL 地址/端口列（不用 RemoteAddress，监听套接字的远端本来就是 0.0.0.0）",
+    "evidence": "归属该 PID 的 socket 共 2 条：local=['127.0.0.1'] port=[4494] udp=0 条",
+    "verdict": "PASS",
+    "residual": "monitor 端口本身是宿主上可被本机任意进程连接的一个 TCP 服务（见残余风险 R2）"
+  },
+  {
+    "item": "D3 guest 侧无网卡（QEMU 设备视图 + 内核自己枚举的 PCI 表）",
+    "method": "HMP `info pci`/`info network`，加上 guest 内 netdiag 打印的 PCI 设备清单",
+    "evidence": "内核枚举到的 PCI 设备: PCI bus 0: vend=8086 dev=1237  vend=8086 dev=7000  vend=8086 dev=7010  vend=8086 dev=7113  vend=1234 dev=1111",
+    "verdict": "PASS",
+    "residual": ""
+  },
+  {
+    "item": "D4 guest 侧 net_up()==0（kernel 自身回答）",
+    "method": "guest shell 跑 netdiag（打印 net_ready，net_up() 直接返回该变量）；再跑 netinfo.ce",
+    "evidence": "netdiag: net_ready=0 | netinfo: no network card found",
+    "verdict": "PASS",
+    "residual": "netdiag 未打印失败原因码时，以 netinfo.ce 的 'no network card found' 作为等价证据"
+  },
+  {
+    "item": "D5 guest 有写能力，但写的是副本（否则 C 项无法解释）",
+    "method": "guest shell `touch /ISOPROBE.TXT` 后 `ls /` 确认文件存在；宿主侧再看 C 项两侧 hash",
+    "evidence": "ls / 输出含 '[FILE] isoprobe.txt' = True；touch 无权限/IO 报错 = 是（无输出即成功）",
+    "verdict": "PASS",
+    "residual": "guest 能自由破坏自己那份镜像；这是设计如此，隔离目标是别让它破坏别的"
+  },
+  {
+    "item": "D6 进程隔离：只按 PID 收场",
+    "method": "HMP quit → kill_qemu(proc)（proc.terminate/kill）；随后 Get-Process -Id <pid> 复查",
+    "evidence": "quit rc=0；kill 后该 PID 存活计数=0",
+    "verdict": "PASS",
+    "residual": "Windows 上 terminate() 即 TerminateProcess；本脚本额外先发 HMP quit 让 FAT 刷盘"
+  },
+  {
+    "item": "C 磁盘隔离（攻击只写副本，源镜像字节不变）",
+    "method": "sha256(source) → cp 到 tests/isolation_probe.img → guest touch /ISOPROBE.TXT → 干净退出 QEMU → 重算两侧 sha256",
+    "evidence": "源: 9361a29db20fc428 → 9361a29db20fc428 (不变)；副本: 9361a29db20fc428 → 2acf143efa1ce82d (已变)",
+    "verdict": "PASS",
+    "residual": ""
+  }
+]

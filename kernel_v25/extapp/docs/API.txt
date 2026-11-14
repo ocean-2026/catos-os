@@ -1,0 +1,706 @@
+CatOS System API v2.2
+=====================
+
+CE programs are freestanding i386 binaries loaded by the `run` command.
+Before the entry point is called the kernel writes the address of the
+system-call table into the __ce_api slot of your image.  Every app must
+declare:
+
+    catos_api_t *__ce_api __attribute__((section(".ce_api"))) = 0;
+
+and then call the functions through __ce_api (or the CE_API() helper in
+extapp/ce_abi.h).  The entry point receives the command line:
+
+    int ce_main(int argc, char **argv)
+
+`run /bin/app.ce a b c` gives argc=4, argv[0]="/bin/app.ce",
+argv[1]="a", argv[2]="b", argv[3]="c".  A legacy ce_main(void) also
+works (the arguments are ignored).  The full table (33 calls):
+
+--- console ---------------------------------------------------------
+void write(const char *s);     print a NUL-terminated string
+void putc(char c);             print one character
+void cls(void);                clear the screen
+
+--- input -----------------------------------------------------------
+int readline(char *buf, int max);
+                               read one line (Enter), returns length;
+                               0 if nothing was typed
+
+--- time ------------------------------------------------------------
+void time_str(char *out);      fills "YYYY-MM-DD HH:MM:SS" (24 bytes)
+
+--- filesystem ------------------------------------------------------
+int fs_ready(void);            1 when the FAT32 volume is mounted
+int ls(const char *path, cb, ud);
+                               list a directory; cb(int is_dir,
+                               const char *name, uint32_t size, void *ud)
+                               is called for every entry; returns 0
+int touch(const char *path);   create an empty file if absent; 0 = ok
+int mkdir(const char *path);   create a directory; 0 = ok
+int cat(const char *path, char *buf, int max);
+                               read a file into buf, returns bytes read
+int save(const char *path, const char *data, uint32_t size);
+                               write a file (max 512 bytes); 0 = ok
+
+--- memory ----------------------------------------------------------
+void *alloc(uint32_t size);    8-byte aligned block, 0 when out of memory
+void free(void *p);            free a block returned by alloc
+
+--- misc ------------------------------------------------------------
+void exit(int code);           return to the shell immediately
+
+--- networking (AMD PCnet-PCI, QEMU user-net) ----------------------
+int net_init(void);            init the NIC (idempotent, called at boot)
+int net_up(void);              1 when the NIC is running
+int http_get(const char *url, char *buf, int max);
+                               one-shot HTTP GET.  Returns bytes copied
+                               into buf (>=0) or an error code:
+                                 -1 NIC down    -2 hostname unsupported
+                                 -3 connect     -4 HTTP status not 2xx
+                                 -5 response    -6 send failed
+                               URL form: http://host[:port]/path  where
+                               host may be an IP or a DNS name.
+int net_dns(const char *host, char *ip_out);
+                               resolve a host name to a dotted IPv4
+                               string (via the QEMU user-net DNS,
+                               10.0.2.3).  Returns 0 = ok, -1 = failed.
+                               IP literals ("10.0.2.2") pass through.
+int net_udp_send(const char *ip, int port, const char *data, int len);
+                               send one UDP datagram to ip:port.
+                               Returns 0 = ok, -1 = failed.
+int net_udp_recv(char *src_ip, int *src_port, char *buf, int max);
+                               wait (bounded) for one UDP datagram;
+                               copies payload into buf, fills src_ip /
+                               *src_port.  Returns bytes received,
+                               -1 = timed out / no datagram.
+int net_ping(const char *ip);  send one ICMP echo and wait for the
+                               reply.  Returns 0 = reply, -1 = no reply.
+int net_ip(char *out);         copies this machine's IPv4 address as a
+                               dotted string into out (e.g. 10.0.2.15).
+
+  Example (see extapp/netinfo.c for a complete program):
+
+      api->net_init();
+      if (!api->net_up()) { ...network adapter not ready... }
+      char ip[24];
+      api->net_ip(ip);                     /* "10.0.2.15" */
+      api->write(ip);
+      if (api->net_dns("example.com", ip) == 0) api->write(ip);
+      if (api->net_ping("10.0.2.2") == 0)  api->write("alive\n");
+      char buf[1024];
+      int n = api->http_get("http://10.0.2.2:8080/API.txt", buf, sizeof(buf));
+      if (n >= 0) { api->write(buf); }     /* n = number of bytes received */
+
+  (QEMU user-net: guest 10.0.2.15, host loopback 10.0.2.2, DNS 10.0.2.3.
+   To fetch from the host run `python -m http.server 8080` there and use
+   http://10.0.2.2:8080/...  External HTTP may be blocked by the host
+   network; DNS and ping are the reliable path for beginners.)
+
+--- beginner-friendly helpers (v2.0+, all NULL-safe / bounds-checked) -
+void print_int(int v);         print a decimal integer (handles negatives)
+void print_hex(uint32_t v);    print "0x" + 8 lowercase hex digits
+void set_fg(int color);        set foreground color 0..15
+void delay(uint32_t ms);       busy-wait (CPU loop; good for animations)
+int  atoi(const char *s);      decimal string -> int (0 if bad input)
+int  strlen(const char *s);    string length
+int  strcmp(const char *a, const char *b);
+                               -1 / 0 / +1 style comparison
+void strcpy(char *d, const char *s);
+                               copy string into d
+int  getch(void);              blocking single key (ASCII or KB_* code)
+int  file_exists(const char *path);
+                               1 = exists (file or directory)
+int  fsize(const char *path);  file size in bytes, -1 if absent
+
+Error codes (filesystem calls):
+    0  ok
+   -1  path / file not found
+   -2  expected a directory
+   -3  bad name
+   -4  disk / entry pool full
+   -5  already exists
+
+Limits:
+   image size   <= 64 KiB
+   file writes  <= 512 bytes (via save(); built-in apps are installed
+                  directly by the kernel so they can be larger)
+   heap         64 KiB static pool
+   stack        8 KiB kernel-owned
+
+Built-in apps:
+   After `format` (and at every boot as a fallback) the kernel installs
+   the CE apps embedded in the ISO image onto the FAT32 volume:
+     /bin/hello.ce   first program: strings, time, alloc/free
+     /bin/calc.ce    calculator: run /bin/calc.ce, or one-shot with
+                     arguments: run /bin/calc.ce 10 + 5  (print 15)
+     /bin/sysinfo.ce system information + directory browser
+     /bin/demo.ce    API demo: print_int/hex, strings, atoi, colors,
+                     getch, delay
+     /bin/curl.ce    tiny HTTP client; URL as argument:
+                     run /bin/curl.ce http://10.0.2.2:8080/API.txt
+                     (with no argument it asks for an URL)
+     /bin/netinfo.ce one-shot network report: own IP, DNS lookup,
+                     ping, UDP echo (see the networking section above)
+   Source code for all of them lives in extapp/ (host side).
+
+Program lookup (shell):
+   Every command is resolved in this order:
+     1. shell builtin (dir, cd, mkdir, touch, edit, format, run, curl,
+        ping, dns, udp, netdiag, help, clear, echo, about, uname, date,
+        mem, reboot, hang, color)
+     2. a .ce program in the current directory
+     3. a .ce program in /bin (the PATH directory)
+     4. otherwise: "catos: unknown command: <cmd>"
+   So from anywhere you can just type `calc`, `hello` or `netinfo`.
+
+Examples:
+   sh build_ce.sh calc.c      (see extapp/build_ce.sh)
+   run /bin/calc.ce           (from the CatOS shell)
+   run /bin/calc.ce 7 * 6     (print 42)
+   run /bin/curl.ce http://10.0.2.2:8080/API.txt
+
+
+=====================================================================
+ CatOS API v2.3 - the five-pillar kernel (ring3 + tasks + permissions)
+=====================================================================
+
+Starting with kernel v0.3, CE programs no longer run inside the kernel:
+each .ce file is spawned as a RING3 TASK with its own page directory and
+reaches the kernel only through the int 0x80 system-call gate.  Old
+binaries keep working unchanged - the kernel builds a per-task "vsyscall"
+page whose API table has exactly the shape of catos_api_t, so your
+api->fn(...) calls are transparently turned into system calls.
+
+New behavior to be aware of:
+   * your task has an identity: uid (0=root, 100=user) and a tid.
+     Use `sudo prog` from the shell to run as root.
+   * writing outside your own memory raises a page fault and KILLS YOUR
+     TASK (the system survives).  Touching kernel addresses (e.g.
+     0x1000000) or address 0 is fatal - see /bin/crash.ce.
+   * delay(ms) is a real sleep now: your task sleeps and other tasks run.
+   * readline/getch need the console: while another task owns console
+     input, your call blocks until it is your turn.
+   * file writes are permission-checked: system areas (/bin, /etc,
+     /appdevelop ...) are root-owned; writing them as uid 100 returns
+     -13 (EACCES).  /home and /tmp are world-writable.
+
+v2.3 API additions (appended to catos_api_t - old offsets unchanged):
+
+   int  getuid(void)          your user id (0 root, 100 user)
+   int  gettid(void)          your task id (as shown by `ps`)
+   int  kill(int tid)         terminate a task (only your own uid or root)
+   void yield(void)           give up the CPU to other tasks
+
+New shell commands:
+   ps               list tasks (tid, uid, ring, state, name)
+   kill TID         terminate a task
+   sudo CMD         run a program as root
+   uptime           seconds since boot + task count
+   CMD ... &        run a .ce program in the background
+
+New built-in apps (source in extapp/):
+   /bin/spinner.ce  multitasking demo (sleeps + prints; try `spinner 10 &`)
+   /bin/crash.ce    isolation demo (deliberate kernel-memory write)
+   /bin/perms.ce    permission demo (try it, then `sudo perms`)
+
+
+=====================================================================
+ CatOS API v2.4 - hardware properties (hw_num / hw_str syscalls)
+=====================================================================
+
+Modeled after Android's HardwarePropertiesManager: ring3 programs can
+query the machine through two new API calls (int 0x80 numbers 37/38):
+
+   int hw_num(int what);                    /* numeric property */
+   int hw_str(int what, char *buf, int max); /* string property, returns length */
+
+hw_num selectors:
+    1  HW_CPU_MHZ      calibrated TSC frequency (TSC vs PIT, at boot)
+    2  HW_CPU_CORES    CPUs managed by this kernel (1: BSP only)
+    3  HW_CPU_FAMILY   CPUID signature: family
+    4  HW_CPU_MODEL    CPUID signature: model
+    5  HW_CPU_STEPPING CPUID signature: stepping
+    6  HW_MEM_TOTAL_KB low-64MiB memory reported by the bootloader
+    7  HW_MEM_FREE_KB  free 4 KiB frames from the page allocator
+    8  HW_MEM_USED_KB  allocated frames
+    9  HW_MEM_KERNEL_KB kernel image size (text+data+bss)
+   10  HW_DISK_MB      first IDE disk capacity (MB)
+   11  HW_DISK_LBA48   1 = the drive supports 48-bit LBA
+   12  HW_NIC_UP       1 = PCnet initialized
+   13  HW_UPTIME_MS    ms since boot
+   14  HW_TASKS        tasks alive right now
+   15  HW_TICKS        timer ticks since boot
+
+hw_str selectors:
+    1  HW_CPU_VENDOR_S   CPUID vendor ("GenuineIntel" / ...)
+    2  HW_CPU_BRAND_S    full brand string ("QEMU Virtual CPU ...")
+    3  HW_CPU_FEATURES_S notable CPUID feature flags
+    4  HW_DISK_MODEL_S   ATA IDENTIFY model   ("QEMU HARDDISK")
+    5  HW_DISK_SERIAL_S  ATA IDENTIFY serial  ("QM00001")
+    6  HW_DISK_FW_S      ATA IDENTIFY firmware ("2.5+")
+    7  HW_NIC_MODEL_S    NIC model / "none"
+    8  HW_NIC_MAC_S      NIC MAC address
+    9  HW_NIC_IP_S       our IPv4 address
+   10  HW_PCI_LIST_S    lspci-style inventory (multi-line)
+
+Shell side: `hwinfo` prints the whole dump, `top` is a live task
+monitor with per-task CPU% (the kernel charges every timer tick to the
+task on the CPU) and per-task memory (page-table walk).
+
+New built-in app: /bin/hw.ce (source extapp/hw.c) - the listing above
+is exactly what it prints from ring3.
+
+
+=====================================================================
+ CatOS API v2.7 - display front-end (mode / info / text style)
+=====================================================================
+
+Rendering is now split into a mode-independent FRONT-END (render.c) and
+pluggable BACK-ENDS (VGA text 80x25 / Mode 13h 40x25).  Ring3 sees only
+styled text.  There is NO drawing API: no putpixel, no fillrect, no
+framebuffer pointer.  0xA0000 is supervisor-only in every user page
+directory, so a program cannot draw even by writing memory directly.
+
+Three new slots (49..51, append-only, old binaries keep working):
+
+   int display_mode(int mode)
+       -1  query: return current mode (0 = text, 1 = graphics)
+        0  request TEXT mode
+        1  request GRAPHICS mode
+       TEXT -> GFX is open to every ring3 program.
+       GFX  -> TEXT ALWAYS asks the human at the console for a physical
+       'Y' keypress.  There is no parameter, token or syscall that can
+       supply consent; a program can only REQUEST, never force.
+       Returns the resulting mode (>=0), or -13 (EACCES) on denial,
+       -3 (EINVAL) for an unknown mode.
+
+   int display_info(int what)
+        0  mode            4  supported style bitmask
+        1  columns         5  physical pixel width
+        2  rows            6  physical pixel height
+        3  colours (16/256)
+       Unknown selector -> -8 (ENOSYS).
+
+   void set_style(int fg, int bg, int attrs)
+       fg / bg are palette indices 0..255.  In text mode values >= 16
+       are mapped onto the nearest of black/dark-grey/light-grey/white.
+       attrs is a bitmask:
+          0x01 BOLD       0x02 DIM        0x04 ITALIC
+          0x08 UNDERLINE  0x10 BLINK*     0x20 INVERSE
+          0x40 STRIKE     0x80 HIDDEN
+       Text mode supports BOLD/DIM/BLINK/INVERSE/HIDDEN; the software
+       graphics back-end supports the rest.  BLINK is accepted but not
+       animated yet (needs a timer-driven repaint).
+       The existing set_fg(int) call now accepts 0..255 (was 0..15).
+
+   Graphics mode is a TEXT mode with more colours and styles, not a
+   drawing surface.  The 40x25 cell grid is a logical terminal; on a
+   mode switch the front-end re-wraps the screen contents, so text is
+   not lost.  No hardware cursor exists in graphics mode.
+
+Shell side:
+   gfx          switch to graphics mode (styled-text welcome)
+   text         switch back - physical Y confirmation required
+   style SPEC   bold+underline+inverse ... / off / decimal mask
+   display      backend, grid, colours, style bits, policy
+   color 0..255 set foreground palette index
+   vdiag        raw VGA register / glyph diagnostic
+
+New built-in app: /bin/gfxdemo.ce (source extapp/gfxdemo.c) - switches
+to graphics mode from ring3, paints only styled text, then requests a
+return to text mode so the consent gate can be exercised.
+
+
+=====================================================================
+ CatOS API v2.8 - 中文显示 / 真彩文字 / 自定义调色板
+=====================================================================
+
+三个新槽位（52..54，追加式，旧二进制不变），另有两个后端能力升级。
+
+--- 中文显示 -------------------------------------------------------
+   write(const char *s) 现在按 UTF-8 解码。GB2312 覆盖的 6763 个汉字
+   （U+4E00..U+9FA0）用 16x16 点阵绘制，占用 2x2 个逻辑字符格。
+   * 图形模式 / VBE 模式完整支持；文本模式（VGA text 8x16 字符格）
+     不支持，未覆盖的码点降级为 '?'。
+   * 汉字块在滚动、模式切换重排(reflow)时保持原子，不会被切一半。
+   * 每次 write() 结束时前端会 flush 未完成的 UTF-8 残字节（变成 '?'），
+     所以不同任务的字符串不会互相污染解码状态。
+   * 没有中文输入法：键盘是 US QWERTY 扫描码，只能显示不能输入。
+   * SYS_WRITE 单次上限仍是 512 字节（约 170 个汉字）。
+
+   display_mode() 现在接受：
+       -1 查询当前模式
+        0 文本模式（从任何非文本模式切回都要物理 Y 同意）
+        1 图形模式 Mode 13h 320x200x8bpp 40x25
+        2 VBE 800x600x32bpp 100x75（需要 QEMU -vga std / Bochs VBE）
+     返回切换后的模式，或负错误：-3 参数错、-13 用户拒绝、-19 无此硬件。
+
+   display_info(what) 新增：
+        7 色深 bpp (4 / 8 / 32)
+        8 当前后端是否支持汉字 (0/1)
+        9 内置 GB2312 字库字数 (6763)
+
+--- 真彩文字 -------------------------------------------------------
+   void set_style_rgb(uint32_t fg, uint32_t bg, int attrs)
+       fg/bg 是字面 0x00RRGGBB（传 0xRRGGBB 即可）。8bpp 后端会量化到
+       最近的 CLUT 项；VBE 32bpp 后端直接把 RGB 写进帧缓冲，也就是
+       每个字符都能用 1677 万色中的任意一种。
+   void set_fg(int) / set_style(int,int,int) 保持"调色板索引"语义不变。
+
+--- 自定义调色板 ---------------------------------------------------
+   int set_palette(int idx, uint32_t rgb)
+       把 CLUT[idx]（0..255）重定义为 0x00RRGGBB。Mode 13h 会同步写
+       6-bit VGA DAC（每通道 0..63，硬件自动截断 8-bit 值）；VBE 后端
+       把它保存在软件 CLUT 里供索引色使用。返回 0。
+   uint32_t palette(int idx)
+       读回 CLUT[idx]。
+
+   注意：标准 VGA 同屏仍只有 256 色，DAC 每通道 6-bit。VBE 32bpp 才是
+   真彩。"255*255*255 色"在 Mode 13h 上不存在，别指望靠调色板 API 拿到。
+
+--- 仍然没有的东西 -------------------------------------------------
+   * 没有 putpixel / fillrect / rect / framebuffer 指针等绘图调用。
+     0xA0000 和 VBE LFB 都只映射在内核页表（supervisor-only）；ring3
+     页目录只复制 PDEs 0..15，看不见任何帧缓冲。
+   * 图形模式和 VBE 模式依旧只是"颜色和样式更多的文本模式"。
+
+Shell 新增：
+   vbe          切到 800x600x32 真彩文字终端
+   rgb FG [BG]  直接设置 0xRRGGBB 前景/背景
+   palette I C  重定义 CLUT[I]
+   display      现在会打印 bpp、汉字支持和字库字数
+   zhdemo       内置中文 + 真彩演示程序 (/bin/zhdemo.ce)
+
+
+=====================================================================
+ CatOS API v2.9 - unified 8x16 cells, text-mode CJK, animation, IME
+=====================================================================
+
+No new CE API slots: everything below is a change in behaviour of the
+existing display calls, so old binaries keep working untouched.
+
+--- One unified cell (8x16) ----------------------------------------
+All three back-ends now use the SAME logical cell: 8 x 16 pixels.
+     VGA text   80 x 25   (was already 8x16)
+     Mode 13h   40 x 12   (was 40 x 25 of 8x8)
+     VBE 32bpp  100 x 37  (was 100 x 75 of 8x8)
+A 16x16 hanzi is therefore TWO COLUMNS x ONE ROW everywhere -- the old
+"even row / scroll two rows" rule is gone and ASCII output scrolls one
+line at a time like any other terminal.  display_info(1/2) reports the
+new grid; display_info(10/11) report the cell size.
+
+--- VGA text mode now displays Chinese -----------------------------
+Text mode loads each hanzi as two 8x16 half-glyphs into the spare VGA
+font slots 0x80..0xFF: up to 64 DISTINCT hanzi on screen at once
+(first-appearance order, rebuilt on every full redraw; overflow
+degrades to '?').  Graphics and VBE modes have no such limit.
+
+--- Animated BLINK + software cursor -------------------------------
+CON_ATTR_BLINK now actually blinks on every back-end (0.5 s half
+period, driven by the 100 Hz PIT tick).  VGA text uses the hardware
+attribute bit; Mode 13h / VBE repaint only the affected cells.
+Graphics and VBE modes draw a software cursor bar; the VGA text
+hardware cursor is unchanged.  display_info(12) = 1.
+
+--- Fast scrolling --------------------------------------------------
+scrolling no longer repaints the whole screen: Mode 13h and VBE move
+the framebuffer (one row = 51 KB on VBE instead of a 1.9 MB redraw)
+and repaint only the exposed strip.  display_info(13) = 1.
+
+--- write() length cap removed --------------------------------------
+The 512-byte cap on write() is gone: up to 64 KiB per call, copied in
+256-byte chunks with per-page user-address validation.  UTF-8 state is
+kept across chunks, so a hanzi split mid-sequence still renders; the
+decoder is flushed only at the end of the call, so tasks still cannot
+corrupt each other's strings.  Pipe and file redirection are unchanged.
+
+--- Pinyin IME (input, not just display) ----------------------------
+F2 toggles a per-character pinyin IME in the shell and in `edit`:
+letters build a syllable, 1-9 pick a candidate from a frequency-sorted
+table of all 6763 GB2312 hanzi (jieba word frequencies), Space picks
+the first, -/= pages, Backspace edits, Esc cancels.  The candidate bar
+is drawn on the bottom console row, which is saved and restored
+verbatim, so it never destroys shell output or editor content.
+
+--- Font licensing --------------------------------------------------
+The GB2312 bitmaps are now derived from GNU Unifont 16.0.01, which is
+dual-licensed GPLv2+ with the GNU Font Embedding Exception and SIL OFL
+1.1.  Embedding them in a kernel image is explicitly permitted, also
+for non-free use.  (v2.8 shipped bitmaps rendered from a proprietary
+Windows font - do NOT merge that variant into a public tree.)
+The committed source subset is tools/unifont-gb2312.hex; regeneration
+is offline (tools/gen_hz_font.py) and the build needs nothing but the
+committed .inc.  The pinyin table is tools/gen_pinyin.py (pypinyin +
+jieba, build-time only, MIT).
+
+--- v2.11: Sound Blaster 16 PCM audio (slots 57..60) ------------
+Four slots were appended; older binaries keep every old index, but must
+check that the pointer is non-NULL before calling it.  A machine booted
+without an SB16 answers snd_info(SND_INFO_READY) == 0.
+
+  int snd_info(int what);                         /* slot 57 */
+  int snd_play(const void *pcm, int len, int rate); /* slot 58 */
+  int snd_stop(void);                            /* slot 59 */
+  int snd_tone(int freq_hz, int ms);             /* slot 60 */
+
+snd_play() takes 8-bit UNSIGNED MONO PCM (0x80 = silence), len <= 32768,
+rate 5000..45000.  It is ASYNCHRONOUS: it arms the ISA DMA transfer and
+returns immediately, because int 0x80 enters through an interrupt gate
+(IF=0) and the kernel must never wait for a completion IRQ inside a
+syscall.  Poll snd_info(SND_INFO_PLAYING) from user context, e.g. with
+delay(10), then check snd_info(SND_INFO_IRQS) increased.  The kernel
+copies your buffer through the normal VMA validation, so invalid user
+pointers return -14 (EFAULT) instead of pointing DMA at kernel memory.
+
+snd_info() selectors (defined in ce_abi.h):
+  0 READY    1 = card probed and IRQ5 unmasked
+  1 VERSION  DSP version, 0xMMmm
+  2 PLAYING  1 = DMA block still in flight
+  3 IRQS     acknowledged 8-bit DMA completion IRQs
+  4 ERROR    last driver error code
+  5 BUFSZ    DMA buffer capacity (32768)
+  6 RATE     sample rate of the last play request
+  7 IRQSET   mixer 0x80 IRQ bitmap (diagnostic)
+  8 DMASET   mixer 0x81 DMA bitmap (diagnostic)
+
+snd_tone() fills the kernel's DMA buffer with an integer sine at 22050 Hz
+and starts it; the kernel is built -mno-80387, so there is no FP.  Shell
+equivalents are `sndinfo` and `sndtest [HZ MS]`.
+
+To hear it under QEMU >= 7.1 (-soundhw was removed), boot with:
+  -audiodev wav,id=snd0,path=snd.wav
+  -device sb16,iobase=0x220,irq=5,dma=1,dma16=5,audiodev=snd0
+See tests/snd_regress.py and docs/CatOS-内核问题清单.md section 11.
+
+--- user buffer validation (issue #78, 2026-11-10) ------------------
+Every syscall that fills or reads a user buffer validates the FULL range
+it may touch (not just its first byte) and copies through the task's page
+tables with copy_to_user() / copy_from_user().  Lazily mapped heap/mmap
+pages inside that range are faulted in by the kernel; a range outside your
+VMAs is rejected with an error instead of halting the machine.  Still
+pass a buffer that really covers the requested max/size: the kernel maps
+pages, it does not grow your allocation.  Regression: /bin/vprobe.ce and
+tests/vprobe_regress.py.
+
+=====================================================================
+ v2.12 -- 800x600x24 TRUECOLOUR DRAWING (2026-11-10)
+=====================================================================
+
+This is the FIRST user-visible drawing surface in CatOS.  The framebuffer
+is STILL supervisor-only: a CE program never receives a pointer to VRAM.
+Instead it hands the kernel a descriptor / bitmap; the kernel validates
+every page with copy_from_user() and performs the writes itself.
+
+New slots (append-only; an old kernel leaves them NULL -- ALWAYS check
+the pointer before calling):
+
+  int gfx_info(int what);                  /* slot 61 */
+  int gfx_rect(const gfx_rect_t *r);      /* slot 62 */
+  int gfx_blit(const gfx_blit_t *b);      /* slot 63 */
+
+  typedef struct {
+      int32_t  x, y, w, h;
+      uint32_t rgb;            /* 0x00RRGGBB */
+  } gfx_rect_t;
+  typedef struct {
+      const uint8_t *src;      /* w*h*3 tightly packed RGB24 (R,G,B) */
+      int32_t  x, y, w, h;
+  } gfx_blit_t;
+
+The generic syscall thunk forwards at most FOUR arguments (ebx/ecx/edx/
+esi -- edi is NOT forwarded), so the multi-field drawing calls take ONE
+descriptor pointer instead of five scalar arguments.
+
+Enable the mode first (3 == CON_MODE_VBE24):
+
+  api->display_mode(3);                    /* or shell command `gfx24` */
+  if (api->gfx_info(GFX_INFO_ACTIVE) != 1) { /* no 24bpp hardware */ }
+
+Switching INTO a graphics mode is free; switching back to text STILL
+requires a physical Y keypress (the consent gate is unchanged).
+
+gfx_info() selectors (macros in ce_abi.h):
+  0 ACTIVE     1 = 24bpp LFB live, 0 = another display mode
+  1 WIDTH      800
+  2 HEIGHT     600
+  3 BPP        24
+  4 PITCH      2400 bytes per row
+  5 FB_BYTES   1440000
+  6 LFB_PHYS   PCI BAR0 address (supervisor-only; informational)
+
+Pixel format in VRAM: 3 bytes per pixel, B then G then R, no padding and
+no alpha byte.  All RGB values passed TO the API are 0x00RRGGBB;
+gfx_blit() source buffers are R,G,B triples.  Coordinates are clipped to
+800x600; w must be 1..800 and h 1..600.
+
+Return values: 0 ok, -8 ENOSYS (mode inactive / unknown selector),
+-14 EFAULT (bad user pointer), -22 EINVAL (bad dimensions).
+
+  catos_api_t *api = __ce_api;
+  if (!api->gfx_info || !api->gfx_rect) return 0;    /* older kernel */
+  api->display_mode(3);
+  if (api->gfx_info(GFX_INFO_ACTIVE) != 1) return 0;
+  gfx_rect_t r = { 10, 10, 100, 60, 0x00FFFF };      /* cyan */
+  api->gfx_rect(&r);
+
+Shell: `gfx24` switches to mode 3 and paints a fixed diagnostic picture
+(four pure colour blocks, a 256-step gradient, eight bars).  `display`
+now reports the drawing API; `vdiag` prints the LFB / BAR details.
+Reference app: /bin/gfx24.ce.  Pixel-exact on-metal regression:
+tests/gfx24_regress.py (QEMU -vga std, parses screendump PPM).
+
+v2.13 -- users & capabilities (no new slots; existing calls may now
+return -13 EACCES when the session user lacks the capability):
+
+  net_init/net_up/http_get/net_dns/net_udp_send/net_udp_recv/net_ping
+      -> -13 unless the user has CAP_NET.
+  snd_info/snd_play/snd_stop/snd_tone
+      -> -13 unless the user has CAP_AUDIO.
+  kill -> allowed for root, the task's owner, or CAP_KILL holders.
+  File syscalls check the unix owner/group/other ACL (/etc/acl):
+  -13 on denial.  Unwritten paths: read/exec open, write only in
+  /home and /tmp.
+
+Shell session starts as root (the initial user).  whoami / id / lsuser /
+caps / login / su / useradd / userdel / passwd / chcaps / chmod / chown
+manage the persistent /etc/passwd and /etc/acl.  Probe: /bin/captest.ce
+prints raw return codes (root on a NIC-less machine: net_init=-1;
+a zero-capability user: net_init=-13 -- hardware absence vs. denial).
+
+v2.14 -- pollkey (slot 64): non-blocking key read (2026-11-11)
+=====================================================================
+
+Games, animations and any event-loop program need "read a key IF one is
+pending, never wait".  getch() (slot 22) blocks; polling ports 0x64/0x60
+from a CE was the old workaround -- and it required masking IRQ1 in the
+PIC, which starved every other keyboard consumer.  v2.14 does it
+properly, in the kernel:
+
+  int pollkey(void);                       /* slot 64 */
+
+  - Decodes pending scancodes exactly like getch() (modifiers, break
+    codes and 0xE0 prefixes are consumed silently) and returns ONE key:
+    an ASCII value, or a KB_* special key (all > 0xFF).
+  - Returns -1 when nothing is pending.  NEVER blocks, NEVER yields.
+  - Old binaries see NULL for this slot: check the pointer first.
+
+  if (api->pollkey) { int k = api->pollkey(); if (k == 27) quit(); }
+
+Reference apps: /bin/adofai.ce (rhythm game -- uses pollkey for taps,
+ESC handling and the menu, plus snd_tone for beat sounds) and the
+kernel shell itself.  On-metal regression: tests/ot_regress.py.
+
+Also in v2.14 (shell only, no new slots): the shell gained cat / rm /
+cp / mv builtins, imported from the retired ot (Ocean's Tools) user-mode
+REPL.  File permissions follow the standard ACL checks; cp creates the
+target owned by the caller with mode 0644.  ot itself lives on as
+/bin/ocntools.ce with its unique tools (file manager, hex editor,
+search, version control, image inspector) -- the duplicated commands
+are gone.
+
+v2.15 -- spawn PERM_EXEC + ACL path canonicalization (2026-11-12)
+=====================================================================
+
+spawn/run now enforce PERM_EXEC before loading a CE image:
+
+  - task_spawn_ce() rejects a path whose file mode has no execute bit
+    (returns -2) and any path that fs_perm_check(uid, gid, PERM_EXEC)
+    denies (returns -13).  /bin/*.ce is 0755 and unaffected; a user's
+    own .ce file must be chmod +x before it can run.
+  - All ACL lookups (acl_lookup/acl_set/fs_perm_check and the spawn
+    check) canonicalize the path first (fs_canon_path) and compare
+    case-insensitively.  FAT directory names are case-insensitive, so
+    "/BIN/XTEST.CE", "./xtest.CE" and "/bin/xtest.ce" are one file and
+    one ACL entry -- the old byte-wise comparison let any spelling
+    bypass chmod 000.
+  - Probe: /bin/captest.ce (chmod 000 then run under uid 100: err -13
+    on every spelling variant).
+
+v2.16 -- CJK fullwidth punctuation glyphs (2026-11-12)
+=====================================================================
+
+font_hz.inc grew from 6763 to 6961 glyphs: the GB2312 punctuation rows
+(A1/A3) plus common fullwidth marks are now rendered wide instead of
+"?".  Sources: tools/unifont-cjk-punct.hex (GNU Unifont 16.0.01,
+GPLv2 + font embedding exception / OFL 1.1) merged by tools/gen_hz_font.py.
+Regenerate offline: python tools/gen_hz_font.py.
+
+Reference app: /bin/punctest.ce prints the fullwidth punctuation table
+(text mode) -- asserted by tests/security_regress.py.  The render.c
+wide-character decision is now "font lookup succeeded" rather than a
+hardcoded codepoint range, which also fixes out-of-bounds font reads
+for cp 0x80-0xFF.
+
+v2.17 -- boot autostart scripts (/etc/autoexec) + new logo (2026-11-12)
+=====================================================================
+
+The hardcoded boot banner is gone.  At boot the shell now executes
+every file in /etc/autoexec (in directory order), one shell command
+per line; '#' comments and blank lines are skipped.  A fresh volume
+gets a seeded banner.sh with echo lines reproducing the old banner.
+Edit /etc/autoexec/banner.sh or add more scripts (8.3 names only --
+the volume has no LFN support) to change what boot prints.  The
+'autostart' shell command re-runs the directory on demand.
+
+Shell changes: cmd dispatch was factored into shell_exec() so script
+lines run through the exact same builtin/PATH lookup as typed input.
+cmd_about() keeps the new block-style CatOS logo ('about' command).
+
+Also fixed: be_text painted blanked cells (cp==0, produced by
+backspace) as '?' -- every backspace left ghost marks.  Blank cells
+now paint as spaces (issue #103).
+
+v2.18 -- VFAT long file names (2026-11-12)
+=====================================================================
+
+No syscall / slot change.  fs_* now accept names longer than 8.3 via
+VFAT LFN entries (UTF-8 <-> UTF-16, short-name checksum, BODY~N.EXT
+aliases).  FS_NAME_MAX 24 -> 48.  resolve_path / create_path / open /
+write / unlink / list / foreach / enum_files all use the long-name
+FAT helpers.  /etc/autoexec stays 8.3 by convention, not limitation.
+
+v2.19 -- cloud round: SYS_GOTOXY + background jobs (2026-11-13)
+=====================================================================
+
+Append-only slot 65:
+
+  int (*gotoxy)(int x, int y);   /* 0 ok, -3 outside the screen */
+
+Old CE binaries see a NULL pointer there (their API table is shorter),
+which adofai.ce uses as a feature gate: it falls back to full-screen
+repaints when the kernel has no line addressing.  Also in this round:
+masked password prompts, interactive useradd capability wizard,
+jobs / log / log -f for background output, net probe honesty,
+graphics glyph spacing + block cursor, adofai countdown and hit error.
+
+v2.20 -- VMware SVGA II graphics (2026-11-13)
+=====================================================================
+
+No new slots.  The 24-bit RGB drawing ABI (slots 61..63) now works on
+BOTH framebuffer families:
+
+  Bochs/QEMU -vga std : 800x600, 24bpp BGR,  pitch 2400, stride 3
+  VMware SVGA II      : 800x600, 32bpp XRGB, pitch 3200, stride 4
+                        (DEPTH reads 24; BPP is 32 -- the extra byte
+                         is opaque 0xFF and carries no colour data)
+
+  GFX_INFO_BPP stays 24: applications hand over tightly packed RGB24
+  and the kernel repacks it into the device's native pixel format.
+  PITCH is device-specific -- do NOT hard-code 2400.  /bin/gfx24.ce
+  was fixed to accept pitch >= width*3.
+
+New append-only gfx_info selectors (mirrored in ce_abi.h):
+
+  GFX_INFO_BACKEND  7   0 = Bochs dispi, 1 = VMware SVGA II
+  GFX_INFO_HW_BPP   8   24 or 32 (physical framebuffer depth)
+  GFX_INFO_STRIDE   9   bytes per pixel: 3 or 4
+
+The SVGA command FIFO is refreshed from the 100 Hz PIT IRQ (25 Hz
+full-screen SVGA_CMD_UPDATE) because the host stops VGA dirty
+tracking once the FIFO is enabled.  Kernel-side writes only: ring3
+still cannot map the framebuffer (supervisor-only PTEs).
+
+Shell: `vbe`, `vbe24` (new alias), `gfx24` all work on VMware;
+`svgainfo` dumps ID/CAPS/BARs/update count; `display` reports the
+graphics HW.  Regression: tests/svga24_regress.py (QEMU -vga vmware).

@@ -1,0 +1,88 @@
+$ git rev-parse --abbrev-ref HEAD
+redteam/crash-attack-2026-11-13
+
+$ git rev-parse HEAD
+7e1fa09d69c8f461390958176913b922f03a20d6
+
+$ git worktree list
+D:/CatOs                                                          7e1fa09 [master]
+C:/Users/Admin/WorkBuddy/Worktrees/CatOs/master-a125998e          7e1fa09 [workbuddy/master-a125998e]
+C:/Users/Admin/WorkBuddy/Worktrees/CatOs/redteam-crash-2026-11-13 7e1fa09 [redteam/crash-attack-2026-11-13]
+
+=== this worktree: git status --porcelain ===
+$ git status --porcelain
+ M kernel_v25/src/be_vbe24.c
+ M kernel_v25/src/builtin_apps.inc
+ M kernel_v25/src/fs.c
+ M kernel_v25/src/task.c
+ M kernel_v25/src/vma.c
+?? REDTEAM-BRIEF.md
+?? deliverables/
+?? kernel_v25/extapp/attacks/
+?? kernel_v25/extapp/bin/atk_args.ce
+?? kernel_v25/extapp/bin/atk_fs.ce
+?? kernel_v25/extapp/bin/atk_gfx.ce
+?? kernel_v25/extapp/bin/atk_heap.ce
+?? kernel_v25/extapp/bin/atk_len.ce
+?? kernel_v25/extapp/bin/atk_mmap.ce
+?? kernel_v25/extapp/bin/atk_net.ce
+?? kernel_v25/extapp/bin/atk_pipe.ce
+?? kernel_v25/extapp/bin/atk_proc.ce
+?? kernel_v25/extapp/bin/atk_stack.ce
+?? kernel_v25/extapp/bin/atk_sysnr.ce
+?? kernel_v25/extapp/bin/atk_wait.ce
+?? tests/a10_intno.py
+?? tests/attack_logs/
+?? tests/attack_logs_after/
+?? tests/bad_ce/
+?? tests/craft_bad_ce.py
+?? tests/crash_attack.py
+?? tests/isolation_logs/
+?? tests/isolation_verify.py
+?? tests/regression_after_fix.py
+
+=== this worktree: git status -sb ===
+$ git status -sb
+## redteam/crash-attack-2026-11-13
+ M kernel_v25/src/be_vbe24.c
+ M kernel_v25/src/builtin_apps.inc
+ M kernel_v25/src/fs.c
+ M kernel_v25/src/task.c
+ M kernel_v25/src/vma.c
+?? REDTEAM-BRIEF.md
+?? deliverables/
+?? kernel_v25/extapp/attacks/
+?? kernel_v25/extapp/bin/atk_args.ce
+?? kernel_v25/extapp/bin/atk_fs.ce
+?? kernel_v25/extapp/bin/atk_gfx.ce
+?? kernel_v25/extapp/bin/atk_heap.ce
+?? kernel_v25/extapp/bin/atk_len.ce
+?? kernel_v25/extapp/bin/atk_mmap.ce
+?? kernel_v25/extapp/bin/atk_net.ce
+?? kernel_v25/extapp/bin/atk_pipe.ce
+?? kernel_v25/extapp/bin/atk_proc.ce
+?? kernel_v25/extapp/bin/atk_stack.ce
+?? kernel_v25/extapp/bin/atk_sysnr.ce
+?? kernel_v25/extapp/bin/atk_wait.ce
+?? tests/a10_intno.py
+?? tests/attack_logs/
+?? tests/attack_logs_after/
+?? tests/bad_ce/
+?? tests/craft_bad_ce.py
+?? tests/crash_attack.py
+?? tests/isolation_logs/
+?? tests/isolation_verify.py
+?? tests/regression_after_fix.py
+
+=== USER MAIN WORKTREE (read-only check): C:/Users/Admin/WorkBuddy/Worktrees/CatOs/master-a125998e ===
+$ git rev-parse --abbrev-ref HEAD
+workbuddy/master-a125998e
+
+$ git rev-parse HEAD
+7e1fa09d69c8f461390958176913b922f03a20d6
+
+$ git status --porcelain
+
+=== main repo D:/CatOs (read-only, log only -- no index write) ===
+$ git -C D:/CatOs log -1 --oneline
+7e1fa09 fix(gfx): preserve SVGA FIFO host-owned CAPS/FLAGS; refresh embedded API.TXT + VMware retest checklist
