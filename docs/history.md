@@ -98,3 +98,6 @@ CatOS[易错点] 32 位内核做 KB→字节换算：mem_upper_kb<<10 在近 4Gi
 CatOS[易错点] `pkill -f qemu-system-i386` 或 `pkill -f 端口号` 会匹配 `bash -c` 包装进程自身的命令行，把自己 shell 杀掉（exit 143）；清理 guest 只按 PID kill_qemu(proc)，不要用 -f 全命令行匹配。
 CatOS[易错点] env_regress.py / size_regress.py 第一个位置参数是 catos.iso 路径，`--qemu` 是其后选项；把 --qemu 放首位会被当成 iso 路径，报 FileNotFoundError。
 CatOS[易错点] size_regress.py 的绿带检测常量 GREEN=(0x55,0xFF,0x55) 是旧主题值；现代主题强调绿已是 #7EE787=(126,231,135)，基线（未改源码）跑同样 normal/compact/large-band FAIL。遇到该脚本 band 失败先 A/B 对照基线，勿误判成新回归；/etc/size 持久化检查在无磁盘镜像的 size_regress 流程里也会失败，属脚本未挂盘的既有现象。
+CatOS[易错点] PE/COFF 段头（section header）开头有 8 字节 Name 字段，内核镜像结构体 pe_section_t 不能省：漏写 Name 后 VirtualSize/VirtualAddress/SizeOfRawData/PointerToRawData 整体错位 8 字节，字段读出全错、边界校验直接返回 -5，且编译期不报错；解析二进制格式时结构体字段顺序/偏移必须与磁盘布局逐字段对齐，最好用 objdump -h 与 Python 解包双重复核。
+CatOS[易错点] qemu_driver._stage_image() 把 iso/磁盘拷到 /tmp/catos_qemu_stage 并在进程退出后删除，跨两遍 guest 的格式化/注入写入不会落回原始磁盘；自己写两遍驱动必须把磁盘暂存到本地 /tmp 目录，并在阶段间显式拷回原始磁盘再注入。工作区文件系统（hpvs_fs）不支持 QEMU image flock，直接在工作区路径起 guest 会报 "Failed to get write lock"，磁盘镜像必须放本地 /tmp。
+CatOS[易错点] shell 交互询问可能是多步（PE->CE 先问 y/n，再问保存文件名，回车用默认）；自动化驱动必须对每一步提示各发一次按键，漏掉第二问会卡在文件名 readline，后续命令全部丢失。format 命令同理需要 y 后再回车。

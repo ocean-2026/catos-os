@@ -45,3 +45,6 @@ CatOS[经验] 帮助/清单两列对齐：写一个 help_row(cmd,desc) 小助手
 CatOS[经验] 扩展恒等映射覆盖范围时，把“映射上界”和“分配器上界”分开维护：PSE 尾块可整块映射（沿用旧 16-PSE 行为），但分配器只发 < mem_top 的帧，尾块内不存在的 RAM/hole 永远不会被触达；任务目录镜像要复制全部 1024 个内核 PDE（不能只拷前 16 个），高 LFB PT PDE 随 kdir 一起镜像且保持 supervisor-only（无 US 位），ring3 仍不可触达。
 CatOS[经验] 排查内存类回归先画探测链路再动手：GRUB mbi.mem_lower/mem_upper → kernel.c 透传 → hw_mem_boot/hw_num 显示 → paging_init 的 PMM 上界；逐段确认有无二次截断（本轮截断点在 hw.c 总量钳到 63MiB、paging.c top 钳到 64MiB 两处），其余消费方（shell mem 命令直读 mbi、hwinfo/top 走 hw_num）无需改。
 CatOS[经验] 区分“既有环境问题”与“新引入回归”的最快办法是 A/B：git stash 源码改动 → 重建 iso → 同一条回归脚本跑基线 → 比对失败集合；本轮 size_regress 三档 band 在基线同样 FAIL，根因是检测色值常量滞后于现代主题配色，与内存改动无关。
+CatOS[经验] 为新二进制格式写内核加载器时，先在宿主侧用 Python 按磁盘偏移逐字段解包并跑一遍全部边界校验，再对照内核 C 结构体；字段错位这类问题在宿主模拟器里能立刻暴露，比反复实机重编译截图定位快一个数量级。
+CatOS[经验] 跨 guest 会话持久化 FAT 卷的稳妥模式：fresh 磁盘 → 拷到本地 /tmp 暂存 → guest 格式化 → 退出前把暂存盘拷回原始磁盘 → 宿主注入工具写原始磁盘 → 再拷回暂存盘起第二遍；既绕开工作区 fs 的 flock 限制，又保证两遍之间卷状态连续。
+CatOS[经验] 给内核加第三条二进制轨道（CE01/ELF32 之外的 PE32）时，分派点先按魔数三分支，再把"镜像/bss/api 槽位注入"这类旧轨道专属条件用 !is_elf && !is_pe 排除；新轨道的段映射/VMA 标记在各自 loader 内部完成，避免污染既有 CE/ELF 路径的页表与 API 槽写入。

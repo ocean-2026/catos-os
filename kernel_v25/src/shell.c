@@ -36,6 +36,11 @@ static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
 static void shell_exec(char *cmd, char *arg);
 static void boot_autostart(void);
 
+/* P1: set while /etc/autostart scripts run their commands.  Interactive
+ * prompts (e.g. the PE->CE conversion offer in `run`) must default to
+ * refusal in this mode -- a script cannot answer a keyboard question. */
+static int      g_script_mode = 0;
+
 static void itoa(int v, char *out, int width) {
     char tmp[12]; int i = 0, neg = 0;
     if (v < 0) { neg = 1; v = -v; }
@@ -942,6 +947,63 @@ static void cmd_run(char *arg, int uid) {
     if (argc > 1 && argv[argc - 1][0] == '&' && argv[argc - 1][1] == 0) {
         bg = 1;
         argc--;
+    }
+
+    /* P1: PE32/MZ detection.  Offer a one-shot conversion to CE01 and save
+     * it on disk.  In non-interactive contexts (pipe, redirect, background,
+     * autostart script) the offer is skipped: there is no one to answer. */
+    {
+        uint32_t pclus = 0, psize = 0;
+        if (fs_resolve_file(file, &pclus, &psize) == 0 && psize >= 2) {
+            char mz[2];
+            if (fs_read_at(file, mz, 0, 2) == 2 &&
+                mz[0] == 'M' && mz[1] == 'Z') {
+                int noninter = pipe_to || out_redir || bg || g_script_mode;
+                if (noninter) {
+                    vga_write("run: '"); vga_write(file);
+                    vga_write("' is a PE32/MZ binary; skipping the conversion "
+                              "offer in a non-interactive session.\n");
+                } else {
+                vga_write("'"); vga_write(file);
+                vga_write("' starts with MZ (PE32 binary). Convert to CE01 "
+                          "and save? (y/n) ");
+                char ans[16];
+                kb_readline(ans, sizeof(ans));
+                if (ans[0] != 'y' && ans[0] != 'Y') {
+                    vga_write("PE conversion skipped; trying direct load.\n");
+                } else {
+                    /* default output: same directory, base name + .ce */
+                    char def[FS_PATH_MAX];
+                    int fi = 0; while (file[fi]) fi++;
+                    int dot = fi, slash = -1;
+                    for (int k = 0; k < fi; k++) {
+                        if (file[k] == '/') slash = k;
+                        if (file[k] == '.') dot = k;
+                    }
+                    int base = slash + 1, di = 0;
+                    if (slash >= 0) {
+                        for (int k = 0; k <= slash; k++) def[di++] = file[k];
+                    }
+                    for (int k = base; k < dot; k++) def[di++] = file[k];
+                    def[di++] = '.'; def[di++] = 'c'; def[di++] = 'e';
+                    def[di] = 0;
+
+                    vga_write("Save CE as ["); vga_write(def); vga_write("]: ");
+                    char name[FS_PATH_MAX];
+                    kb_readline(name, sizeof(name));
+                    const char *dst = name[0] ? name : def;
+                    char cerr[64];
+                    int cr = pe_to_ce_file(file, dst, cerr, sizeof(cerr));
+                    if (cr == 0) {
+                        vga_write("converted to "); vga_write(dst); vga_write("\n");
+                    } else {
+                        vga_write("convert failed: "); vga_write(cerr); vga_write("\n");
+                    }
+                    return;
+                }
+                }
+            }
+        }
     }
 
     if (pipe_to && *pipe_to) {
@@ -3467,6 +3529,7 @@ static void boot_autostart(void) {
         vga_write("autostart: ");
         vga_write(names[i]);
         vga_write("\n");
+        g_script_mode = 1;          /* P1: no interactive prompts in scripts */
         char *p = buf;
         while (*p) {
             char *line = p;
@@ -3487,6 +3550,7 @@ static void boot_autostart(void) {
             }
             shell_exec(lcmd, larg);
         }
+        g_script_mode = 0;
     }
     net_boot_status();              /* keep the one-line NIC status at boot */
     vga_write("\n");

@@ -2020,6 +2020,343 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
     return 0;
 }
 
+/* ---- PE32 loader (P1) ---------------------------------------------------
+ * Loads a minimal PE32 i386 image into the per-task user arena.  Import
+ * and export directories are ignored on purpose: CatOS has no dynamic
+ * linking, so only self-contained freestanding PEs are accepted.
+ *
+ * Supported subset (anything else returns -5, never crashes):
+ *   - IMAGE_FILE_MACHINE_I386 (0x14c), PE32 optional-header magic 0x10b
+ *     (PE32+ / x86-64 / ARM are rejected)
+ *   - not a DLL (IMAGE_FILE_DLL bit clear), non-high ImageBase
+ *     (< 0x80000000); the whole image fits
+ *     [USER_IMAGE_BASE, USER_EXT_END)
+ *   - sections mapped at ImageBase+RVA; raw data copied in, the
+ *     VirtualSize tails stay zeroed (kzalloc_frame)
+ *
+ * Error codes mirror spawn_load_elf: -5 bad/unsupported image,
+ * -4 disk read error, -12 out of memory, -3 file too large.
+ */
+#define PE_MAX_SECTIONS 16
+#define PE_MAX_FILE     (USER_EXT_SIZE / 2)     /* 2 MiB sanity cap */
+
+typedef struct {
+    uint16_t e_magic;            /* 0x5A4D "MZ" */
+    uint16_t e_cblp, e_cp, e_crlc, e_cparhdr, e_minalloc, e_maxalloc;
+    uint16_t e_ss, e_sp, e_csum, e_ip, e_cs, e_lfarlc, e_ovno;
+    uint16_t e_res[4], e_oemid, e_oeminfo;
+    uint16_t e_res2[10];
+    uint32_t e_lfanew;
+} pe_dos_t;
+
+typedef struct {
+    uint16_t Machine;
+    uint16_t NumberOfSections;
+    uint32_t TimeDateStamp;
+    uint32_t PointerToSymbolTable;
+    uint32_t NumberOfSymbols;
+    uint16_t SizeOfOptionalHeader;
+    uint16_t Characteristics;
+} pe_coff_t;
+
+typedef struct {
+    char     Name[8];
+    uint32_t VirtualSize;
+    uint32_t VirtualAddress;
+    uint32_t SizeOfRawData;
+    uint32_t PointerToRawData;
+    uint32_t PointerToRelocations;
+    uint32_t PointerToLinenumbers;
+    uint16_t NumberOfRelocations;
+    uint16_t NumberOfLinenumbers;
+    uint32_t Characteristics;
+} pe_section_t;
+
+#define PE_MACHINE_I386   0x14cu
+#define PE_OPT_MAGIC_32   0x10bu
+#define PE_CHAR_DLL       0x2000u
+#define PE_CHAR_WRITE     0x80000000u
+#define PE_HIGH_BASE      0x80000000u
+
+static uint32_t pe_rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
+                         uint32_t *entry_out) {
+    if (fsize < sizeof(pe_dos_t) || fsize > PE_MAX_FILE) return -5;
+
+    pe_dos_t dos;
+    if (fat_pread(clus0, fsize, 0, sizeof(dos), (uint8_t *)&dos) != 0) return -4;
+    if (dos.e_magic != 0x5A4Du) return -5;                 /* not "MZ" */
+    if (dos.e_lfanew == 0 || dos.e_lfanew > fsize - 4) return -5;
+
+    uint8_t pe_sig[4];
+    if (fat_pread(clus0, fsize, dos.e_lfanew, 4, pe_sig) != 0) return -4;
+    if (pe_sig[0] != 'P' || pe_sig[1] != 'E' || pe_sig[2] != 0 || pe_sig[3] != 0)
+        return -5;                                        /* no PE signature */
+
+    uint32_t coff_off = dos.e_lfanew + 4;
+    pe_coff_t coff;
+    if (fat_pread(clus0, fsize, coff_off, sizeof(coff), (uint8_t *)&coff) != 0)
+        return -4;
+    if (coff.Machine != PE_MACHINE_I386) return -5;       /* not i386 */
+    if (coff.Characteristics & PE_CHAR_DLL) return -5;   /* DLL, not an EXE */
+    if (coff.NumberOfSections == 0 || coff.NumberOfSections > PE_MAX_SECTIONS)
+        return -5;
+    if (coff.SizeOfOptionalHeader < 96 || coff.SizeOfOptionalHeader > 240)
+        return -5;
+
+    uint32_t opt_off = coff_off + sizeof(coff);
+    uint8_t opt[96];
+    if (fat_pread(clus0, fsize, opt_off, sizeof(opt), opt) != 0) return -4;
+    uint16_t opt_magic = (uint16_t)(opt[0] | (opt[1] << 8));
+    if (opt_magic != PE_OPT_MAGIC_32) return -5;         /* PE32+ / other */
+
+    uint32_t entry_rva  = pe_rd32(opt + 16);
+    uint32_t image_base = pe_rd32(opt + 28);
+    uint32_t size_image = pe_rd32(opt + 56);
+    if (image_base >= PE_HIGH_BASE) return -5;           /* high address */
+    if (size_image == 0 || size_image > USER_EXT_SIZE) return -5;
+    if (image_base < USER_IMAGE_BASE) return -5;
+    if (image_base > USER_EXT_END - size_image) return -5;
+
+    uint32_t sect_off = opt_off + coff.SizeOfOptionalHeader;
+    if ((uint64_t)sect_off + (uint64_t)coff.NumberOfSections * sizeof(pe_section_t)
+        > fsize) return -5;
+
+    pe_section_t sec[PE_MAX_SECTIONS];
+    if (fat_pread(clus0, fsize, sect_off,
+                  (uint32_t)coff.NumberOfSections * sizeof(pe_section_t),
+                  (uint8_t *)sec) != 0) return -4;
+
+    /* collect + merge page ranges of every section (mirrors spawn_load_elf) */
+    struct { uint32_t start, end; int w; } rg[PE_MAX_SECTIONS];
+    int nrg = 0;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        uint32_t va  = image_base + sec[i].VirtualAddress;
+        uint32_t mem = sec[i].VirtualSize;
+        if (mem < sec[i].SizeOfRawData) mem = sec[i].SizeOfRawData;
+        if (mem == 0) continue;
+        if (sec[i].SizeOfRawData != 0 &&
+            sec[i].PointerToRawData + sec[i].SizeOfRawData > fsize) return -5;
+        if (sec[i].VirtualAddress + mem > size_image) return -5;
+        uint32_t s = va & ~0xFFFu;
+        uint32_t e = (va + mem + 0xFFFu) & ~0xFFFu;
+        if (s < USER_IMAGE_BASE || e > USER_EXT_END) return -5;
+        int w = (sec[i].Characteristics & PE_CHAR_WRITE) ? 1 : 0;
+        int merged = 0;
+        for (int j = 0; j < nrg; j++) {
+            if (s <= rg[j].end && e >= rg[j].start) {
+                if (s < rg[j].start) rg[j].start = s;
+                if (e > rg[j].end)   rg[j].end   = e;
+                rg[j].w |= w;
+                merged = 1; break;
+            }
+        }
+        if (!merged && nrg < PE_MAX_SECTIONS) {
+            rg[nrg].start = s; rg[nrg].end = e; rg[nrg].w = w; nrg++;
+        } else if (!merged) return -5;
+    }
+    if (nrg == 0) return -5;
+
+    for (int i = 0; i < nrg; i++) {
+        for (uint32_t p = rg[i].start; p < rg[i].end; p += 4096) {
+            uint32_t f = (uint32_t)kzalloc_frame();
+            if (!f) return -12;
+            if (task_map_page(&t->space, p, f, rg[i].w) != 0) {
+                frame_free(f);
+                return -12;
+            }
+        }
+        vma_t *v = vma_new(rg[i].start, rg[i].end, VMA_IMAGE, rg[i].w);
+        if (!v) return -12;
+        t->vm = vma_insert(t->vm, v);
+    }
+
+    /* copy raw section bytes (bss tails stay zeroed) */
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        if (sec[i].SizeOfRawData == 0) continue;
+        static uint8_t fb2[FAT_CLUSTER_SZ_MAX];
+        uint32_t remaining = sec[i].SizeOfRawData;
+        uint32_t off = sec[i].PointerToRawData;
+        uint32_t va = image_base + sec[i].VirtualAddress;
+        while (remaining) {
+            uint32_t n = remaining > sizeof(fb2) ? sizeof(fb2) : remaining;
+            if (fat_pread(clus0, fsize, off, n, fb2) != 0) return -4;
+            k2u_copy(&t->space, va, fb2, n);
+            va += n; off += n; remaining -= n;
+        }
+    }
+
+    uint32_t entry = image_base + entry_rva;
+    int ok = 0;
+    for (int i = 0; i < nrg; i++)
+        if (entry >= rg[i].start && entry < rg[i].end) ok = 1;
+    if (!ok) return -5;
+    *entry_out = entry;
+    return 0;
+}
+
+/* ---- PE32 -> CE01 flattening (P1, shell convert-on-run) ------------------
+ * Converts the supported PE32 subset into a CE01 flat image saved on the
+ * FAT volume.  It mirrors tests/mkpe.py offline: sections are packed by
+ * RVA, zero tails go to the CE bss, and a 4-byte API slot is reserved at
+ * the image end.  Unsupported layouts (entry not at flat offset 0,
+ * oversize image/bss, sections needing absolute cross-section references)
+ * return -5 with a text error rather than corrupting anything. */
+
+static uint8_t pe_ce_bounce[sizeof(ce_header_t) + CE_MAX_IMAGE + 4];
+
+static void pe_ce_err(char *err, int errsz, const char *msg) {
+    if (!err || errsz < 1) return;
+    int i = 0;
+    while (msg[i] && i < errsz - 1) { err[i] = msg[i]; i++; }
+    err[i] = 0;
+}
+
+int pe_to_ce_file(const char *pe_path, const char *ce_path, char *err, int errsz) {
+    uint32_t clus = 0, fsize = 0;
+    if (!pe_path || !*pe_path || !ce_path || !*ce_path) {
+        pe_ce_err(err, errsz, "bad path"); return -3;
+    }
+    if (fs_resolve_file(pe_path, &clus, &fsize) != 0) {
+        pe_ce_err(err, errsz, "source file not found"); return -2;
+    }
+    if (fsize < sizeof(pe_dos_t)) {
+        pe_ce_err(err, errsz, "not a PE32 file"); return -5;
+    }
+
+    pe_dos_t dos;
+    if (fat_pread(clus, fsize, 0, sizeof(dos), (uint8_t *)&dos) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (dos.e_magic != 0x5A4Du || dos.e_lfanew == 0 || dos.e_lfanew > fsize - 4) {
+        pe_ce_err(err, errsz, "not an MZ/PE image"); return -5;
+    }
+
+    uint8_t pe_sig[4];
+    if (fat_pread(clus, fsize, dos.e_lfanew, 4, pe_sig) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (pe_sig[0] != 'P' || pe_sig[1] != 'E' || pe_sig[2] != 0 || pe_sig[3] != 0) {
+        pe_ce_err(err, errsz, "no PE signature"); return -5;
+    }
+
+    uint32_t coff_off = dos.e_lfanew + 4;
+    pe_coff_t coff;
+    if (fat_pread(clus, fsize, coff_off, sizeof(coff), (uint8_t *)&coff) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (coff.Machine != PE_MACHINE_I386 || (coff.Characteristics & PE_CHAR_DLL)) {
+        pe_ce_err(err, errsz, "unsupported PE (need i386 EXE, not DLL)"); return -5;
+    }
+    if (coff.NumberOfSections == 0 || coff.NumberOfSections > PE_MAX_SECTIONS) {
+        pe_ce_err(err, errsz, "bad section count"); return -5;
+    }
+    if (coff.SizeOfOptionalHeader < 96 || coff.SizeOfOptionalHeader > 240) {
+        pe_ce_err(err, errsz, "bad optional header"); return -5;
+    }
+
+    uint32_t opt_off = coff_off + sizeof(coff);
+    uint8_t opt[96];
+    if (fat_pread(clus, fsize, opt_off, sizeof(opt), opt) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    uint16_t opt_magic = (uint16_t)(opt[0] | (opt[1] << 8));
+    if (opt_magic != PE_OPT_MAGIC_32) {
+        pe_ce_err(err, errsz, "need PE32 (not PE32+)"); return -5;
+    }
+    uint32_t entry_rva  = pe_rd32(opt + 16);
+    uint32_t image_base = pe_rd32(opt + 28);
+    uint32_t size_image = pe_rd32(opt + 56);
+    if (image_base >= PE_HIGH_BASE || size_image == 0) {
+        pe_ce_err(err, errsz, "unsupported image base/size"); return -5;
+    }
+
+    uint32_t sect_off = opt_off + coff.SizeOfOptionalHeader;
+    if ((uint64_t)sect_off + (uint64_t)coff.NumberOfSections * sizeof(pe_section_t)
+        > fsize) {
+        pe_ce_err(err, errsz, "section table out of file"); return -5;
+    }
+    pe_section_t sec[PE_MAX_SECTIONS];
+    if (fat_pread(clus, fsize, sect_off,
+                  (uint32_t)coff.NumberOfSections * sizeof(pe_section_t),
+                  (uint8_t *)sec) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+
+    /* insertion sort sections by RVA so the flat image is RVA-ordered */
+    for (int i = 1; i < coff.NumberOfSections; i++) {
+        pe_section_t key = sec[i]; int j = i - 1;
+        while (j >= 0 && sec[j].VirtualAddress > key.VirtualAddress) {
+            sec[j + 1] = sec[j]; j--;
+        }
+        sec[j + 1] = key;
+    }
+
+    uint8_t *img = pe_ce_bounce + sizeof(ce_header_t);
+    uint32_t off[PE_MAX_SECTIONS], mem[PE_MAX_SECTIONS], raw[PE_MAX_SECTIONS];
+    uint32_t va[PE_MAX_SECTIONS];
+    uint32_t cur = 0, bss = 0;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        va[i]  = sec[i].VirtualAddress;
+        raw[i] = sec[i].SizeOfRawData;
+        mem[i] = sec[i].VirtualSize > raw[i] ? sec[i].VirtualSize : raw[i];
+        if (sec[i].SizeOfRawData != 0 &&
+            sec[i].PointerToRawData + raw[i] > fsize) {
+            pe_ce_err(err, errsz, "section raw data out of file"); return -5;
+        }
+        off[i] = cur;
+        if (raw[i] != 0) {
+            if (fat_pread(clus, fsize, sec[i].PointerToRawData, raw[i],
+                          img + cur) != 0) {
+                pe_ce_err(err, errsz, "disk read error"); return -4;
+            }
+        }
+        if (mem[i] > raw[i]) bss += mem[i] - raw[i];
+        cur = (cur + mem[i] + 3u) & ~3u;
+    }
+
+    uint32_t image_size = cur;
+    if (image_size + 4 > CE_MAX_IMAGE) {
+        pe_ce_err(err, errsz, "image too large for CE"); return -5;
+    }
+    if (bss > CE_MAX_BSS) {
+        pe_ce_err(err, errsz, "bss too large for CE"); return -5;
+    }
+    uint32_t api_off = image_size;
+    *(uint32_t *)(img + api_off) = 0;
+    image_size += 4;
+
+    /* the CE loader always jumps to flat offset 0; the entry must be there */
+    uint32_t entry_off = 0xFFFFFFFFu;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        if (entry_rva >= va[i] && entry_rva < va[i] + mem[i]) {
+            entry_off = off[i] + (entry_rva - va[i]);
+            break;
+        }
+    }
+    if (entry_off == 0xFFFFFFFFu || entry_off != 0) {
+        pe_ce_err(err, errsz, "entry not at image start; rebuild entry section first");
+        return -5;
+    }
+
+    ce_header_t *h = (ce_header_t *)pe_ce_bounce;
+    h->magic[0] = 'C'; h->magic[1] = 'E'; h->magic[2] = '0'; h->magic[3] = '1';
+    h->entry = 0;
+    h->bss_size = bss;
+    h->api_offset = api_off;
+    h->image_size = image_size;
+
+    if (fs_write_raw_mode(ce_path, (char *)pe_ce_bounce,
+                          sizeof(ce_header_t) + image_size, 0) != 0) {
+        pe_ce_err(err, errsz, "write failed (disk full or read-only)"); return -4;
+    }
+    return 0;
+}
+
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
@@ -2069,13 +2406,18 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     if (fat_read_cluster(clus, fbuf) != 0) return -4;
 
     /* v2.10: dual-track dispatch -- CE01 flat image (legacy, fixed
-     * offsets in PDE 8) or ELF32 (PIE + ASLR in the PDE 9 extension). */
+     * offsets in PDE 8) or ELF32 (PIE + ASLR in the PDE 9 extension).
+     * P1: third track -- PE32 EXE (MZ magic), loaded by spawn_load_pe. */
     int is_elf = (fbuf[0] == 0x7F && fbuf[1] == 'E' && fbuf[2] == 'L' && fbuf[3] == 'F');
+    int is_pe  = (fbuf[0] == 'M' && fbuf[1] == 'Z');
     uint32_t entry = USER_IMAGE_BASE;
     uint32_t img, bss, api;
 
     if (is_elf) {
         if (size > ELF_MAX_FILE) return -3;
+        img = bss = api = 0;
+    } else if (is_pe) {
+        if (size > PE_MAX_FILE) return -3;
         img = bss = api = 0;
     } else {
         if (size < sizeof(ce_header_t) || size > CE_MAX_IMAGE + sizeof(ce_header_t)) return -3;
@@ -2117,6 +2459,14 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         /* ELF path: segments are mapped, copied and VMA-tagged inside
          * spawn_load_elf (extension arena, PIE + ASLR). */
         int r = spawn_load_elf(t, clus, size, &entry);
+        if (r != 0) {
+            task_space_destroy(&t->space);
+            return r;
+        }
+    } else if (is_pe) {
+        /* PE32 path: sections are mapped, copied and VMA-tagged inside
+         * spawn_load_pe (per-task user arena, preferred ImageBase). */
+        int r = spawn_load_pe(t, clus, size, &entry);
         if (r != 0) {
             task_space_destroy(&t->space);
             return r;
@@ -2180,7 +2530,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * Heap VMA is created lazily on first SYS_ALLOC. */
     {
         uint32_t span = (img + bss + 0xFFF) & ~0xFFFu;
-        if (!is_elf) {
+        if (!is_elf && !is_pe) {
             vma_t *im = vma_new(USER_IMAGE_BASE, USER_IMAGE_BASE + span, VMA_IMAGE, 0);
             if (!im) goto fail_space6;
             t->vm = im;
@@ -2229,9 +2579,9 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     }
 #endif
 
-    /* api table pointer into the image's api slot (CE only; ELF programs
-     * call the vsyscall table directly at CATOS_VS_TABLE) */
-    if (!is_elf) {
+    /* api table pointer into the image's api slot (CE only; ELF/PE
+     * programs call the vsyscall table directly at CATOS_VS_TABLE) */
+    if (!is_elf && !is_pe) {
         uint32_t pa = task_virt_to_phys(&t->space, USER_IMAGE_BASE + api);
         *(uint32_t *)pa = VS_TABLE;
     }
