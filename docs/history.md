@@ -119,3 +119,6 @@ CatOS[易错点] shell 内建工具整文件读缓冲要按最大目标文件预
 CatOS[易错点] 并行分片共用 qemu_driver._stage_image 的 /tmp/catos_qemu_stage 目录，文件名固定 catos.iso/qemu_disk.img，并发 agent 互相覆盖；本分片曾因此启动别人陈旧内核，shell 新增命令全部报 "unknown command"。端到端驱动必须用私有舞台目录（/tmp/catos_p4_stage），iso 与磁盘两份都要私有复制。
 CatOS[易错点] QEMU OFD 写锁：舞台目录若放在工作区 hpvs_fs（/home/user/...）上，文件系统不支持 flock，镜像一打开即 "Failed to get write lock"，qemu rc=1 退出；即使是私有目录也不能放工作区，舞台必须落在 /tmp（overlay，支持 flock）。
 CatOS[易错点] 诊断"命令表加了命令却 unknown command"：先 strings 核对本地 kernel.bin 与 catos.iso 是否真含新命令串；镜像含串而 guest 不认，基本是舞台目录被并发覆盖（陈旧内核），不是内核代码缺陷。
+CatOS[易错点] 整目录 `ls` 条目数超过 25 行文本屏后，早期安装的条目会滚出可见帧缓冲；回归若靠整屏抓名字做断言会假阴性（heap_regress ls-bin 踩过）。查单文件存在性走 `ls -l /bin/<file>` 单条目分支（每条一行不滚动），不要依赖整屏可见列表。
+CatOS[易错点] 屏幕回显断言不能用 `text.rstrip().endswith(值)`：命令执行后尾随重绘的 shell prompt 会占末行，把值顶掉（size_regress size-persisted 踩过）。按命令回显位置用正则取值，例如 `/etc/size\s+0(?!\d)`。
+CatOS[易错点] 回归驱动的 Python stdout 是块缓冲落盘，分步 PASS 行滞后于 guest 实际状态；日志短时不刷新不等于卡死，判读以进程退出码和汇总行（steps=/PASS=）为准。

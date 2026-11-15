@@ -747,5 +747,8 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 136 | 低 | head/tail/wc 整文件读入 48KiB 静态缓冲（bss），超过 48KiB 的文件被拒绝（file too large） | 工具实现为一次性读入 | 现有文档/应用均在此范围内；流式逐行处理留后续 | ⏳ 已知限制 |
 | 137 | 中 | 联网拉包未实现：e1000 与 net_send/net_recv 在位，但 P4 只做本地 /pkg/ 仓库；HTTP/1.0 客户端、索引拉取、签名校验未做 | 包管理器本轮限定本地仓库 | 见 docs/pkg-repo-design.md §2；网络拉包留后续 | ⏳ deferred |
 | 138 | 低（测试基建） | size_regress 绿带检测常量 0x55FF55 滞后于现代主题实际绿 #7EE787，且脚本未挂磁盘导致 /etc/size 持久化步骤无源卷 | 调色板 v2.37 更新后测试脚本常量未同步；早期脚本 boot() 未传 disk | v2.42 集成收尾：GREEN 改为 (0x7E,0xE7,0x87)，boot() 挂 catos_disk.img；ISO 参数改为可选（测试基建，不改内核） | ✅ 已修 |
+| 139 | 低（测试基建） | heap_regress `ls-bin` 假阴性：`/bin` 已播种约 38 个条目，整目录列举超过 25 行文本屏，早期安装的 allocprobe.ce/heaptest.ce 滚出可见帧缓冲，screen_text 抓不到名字；目录条目实际存在，`run /bin/allocprobe.ce`、`run /bin/heaptest.ce` 真机均 PASS | 测试断言依赖整屏可见性，未考虑目录条目数超过单屏；与内核目录列举无关 | v2.43：步骤改为定向查询单条目分支 `ls -l /bin/<file>`（每条目一行，不滚动），复跑 4/4 PASS（测试基建，不改内核） | ✅ 已修 |
+| 140 | 低（测试基建） | size_regress `size-persisted` 假阴性：`cat /etc/size` 回显后尾随重绘的 shell prompt，`text.rstrip().endswith("0")` 匹配到 prompt 而非文件内容；实测文件内容为 compact 档 `0`，落盘正确 | 断言把屏幕末行当作文件值，未剥离尾随 prompt | v2.43：改用正则 `/etc/size\s+0(?!\d)` 匹配命令回显后的数值，复跑 7/7 PASS（测试基建，不改内核） | ✅ 已修 |
+| 141 | 低（内核 UX） | 目录列举/help 等输出超过 25 行文本屏时，顶部条目离开实时网格后无法回看：无内部分页暂停、屏幕回滚缓冲深度不足（与 #135 同源）；条目增多后整屏列举只能看到末尾一段 | 文本前端无 scrollback/分页机制，CON_SB_ROWS 存档深度有限 | 本轮测试侧绕开（定向单条目查询）；后续可在 `ls`/`help` 加分页暂停或加深回滚缓冲 | ⏳ 已知限制 |
 
-*本节后继续编号为 #139+。*
+*本节后继续编号为 #142+。*

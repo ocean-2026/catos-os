@@ -1,6 +1,6 @@
 #!/bin/bash
 # Full regression sweep after the night-merge (v2.42). Sequential: several
-# drivers share kernel_v25/catos_disk.img, so guests must not overlap.
+# drivers share FAT volume images, so guests must not overlap.
 set -u
 cd "$(dirname "$0")/.."
 export PATH=/home/user/bin:$PATH
@@ -13,9 +13,12 @@ run() {
     local name="$1"; shift
     echo "===== $name ====="
     python3 "$@" > "$LOGDIR/$name.log" 2>&1
-    echo "$name exit=$?"
+    local rc=$?
+    echo "$name exit=$rc"
+    return $rc
 }
 
+run qemu    tests/qemu_regress.py    "$ISO" --qemu "$Q" --port 4707
 run fsrec   tests/fsrec_regress.py   "$ISO" --qemu "$Q" --port 4711
 run caps    tests/caps_regress.py    "$ISO" --qemu "$Q"
 run user    tests/user_regress.py    "$ISO" --qemu "$Q"

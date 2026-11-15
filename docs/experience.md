@@ -59,3 +59,5 @@ CatOS[经验] 包管理器框架复用既有嵌入机制：gen_builtin.py 除 bu
 CatOS[经验] 容器包格式定长头 + 原始负载：头字段 NUL 填充、小端长度；安装器先校验 magic 与 头长+负载长==文件长，再按头内 cmd 名落盘 /bin/<cmd>.ce；未来更换负载格式（ELF/压缩）只需扩展头部并在安装器按 magic 分派。
 CatOS[经验] 并行分片 QEMU 端口隔离：本分片独占 4740-4749；回归脚本默认 4444，并发跑多个分片时必须显式 --port，避免撞 monitor socket。
 CatOS[经验] 实机验证前先做镜像内容自检：strings kernel.bin | grep 新命令串，确认代码真的链接进内核；再核对 catos.iso 内嵌副本与 kernel.bin 一致，避免把"舞台镜像陈旧"误判成编译/代码问题。
+CatOS[经验] 合并后全量回归分层跑：qemu 基础帧 → fsrec/caps/user/disk/env/heap/size 逐域 → ce_sim 主机侧；ce_sim 未建模 opcode（0x6a/0x08/ff /6 等）的 FAIL 不代表真机回归，同一应用在 QEMU 实机步骤 PASS 即可判定功能正常。
+CatOS[经验] 测试报 FAIL 先分层定性：让受测应用直接 `run` 一遍，能跑通即目录条目/加载路径正常，问题在前端列举可见性或断言位置；再决定改测试还是改内核，避免把基建假阴性当内核缺陷修。

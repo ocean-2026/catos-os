@@ -165,18 +165,20 @@ def main():
         return True, "formatted"
 
     def step_ls_bin():
+        # The /bin volume now holds ~38 entries; a plain `ls /bin` scrolls
+        # past the 25-row text screen, so early-installed apps fall off the
+        # visible framebuffer even though the directory entries exist.
+        # Query each file through the single-entry `ls -l <file>` branch,
+        # which prints one row and cannot lose the match to scrolling.
         clear()
-        do("ls /bin", 2.0)
-        txt = screen_text(s)
-        # v2.18 added VFAT long-file-name (LFN) support to fat.c, so the
-        # volume now stores the FULL name and `ls` prints it verbatim:
-        # "[FILE] allocprobe.ce".  Before v2.18 the FAT volume was 8.3
-        # only and the shell showed the truncated "allocpro.ce" -- that
-        # spelling is what this test used to assert, which broke as soon
-        # as LFN landed.  Match the long name.
-        ok = "allocprobe.ce" in txt and "heaptest.ce" in txt
+        do("ls -l /bin/allocprobe.ce", 1.5)
+        t1 = screen_text(s)
+        clear()
+        do("ls -l /bin/heaptest.ce", 1.5)
+        t2 = screen_text(s)
+        ok = "allocprobe.ce" in t1 and "heaptest.ce" in t2
         return ok, "allocprobe.ce=%s heaptest.ce=%s" % (
-            "allocprobe.ce" in txt, "heaptest.ce" in txt)
+            "allocprobe.ce" in t1, "heaptest.ce" in t2)
 
     def run_app(argv_line, expect, wait=6.0):
         clear()

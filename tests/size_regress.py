@@ -192,7 +192,11 @@ def main():
         sendkey(sock, "ret")
         time.sleep(2.0)
         t = clean_run(sock, "cat /etc/size", 1.5)
-        r.check("size-persisted", t.rstrip().endswith("0"), t)
+        # The file holds the compact scale ('0'); the captured screen also
+        # carries the trailing shell prompt, so match the value right after
+        # the command instead of requiring the text to END in '0'.
+        r.check("size-persisted",
+                re.search(r"/etc/size\s+0(?!\d)", t) is not None, t)
 
         # -7 re-enter vbe24 -> size_restore applies compact again
         run(sock, "gfx24", 3.5)

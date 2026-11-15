@@ -144,3 +144,55 @@ python3 tests/smoke_merge.py --qemu /home/user/bin/qemu-system-i386
 1. 补跑 user/disk/env/heap/size 五个回归（`tests/run_full_regress.sh`），登记结果。
 2. 执行 `tests/smoke_merge.py` 全量冒烟并目检 `tests/qemu_shots_merge/` 截图。
 3. caps_regress 补跑到汇总行。
+
+> 以上三项已于 2026-11-16 收尾轮完成，结果见第 8 节。
+
+## 8. 合并后全量回归收尾（2026-11-16，v2.43）
+
+### 8.1 实机冒烟 `tests/smoke_merge.py`：20/20 PASS
+
+`-m 3840` 客户机（宿主 cgroup 内存上限 ~3.9GiB，4096MiB 档 Cannot allocate memory，
+3840MiB 为可行上限；`mem` 如实报告 Total approx 3071 MB，为 #128 PCI hole 第二段
+RAM 未枚举的如实反映，非泄漏）。25 张截图存 `tests/qemu_shots_merge/`，逐张 Read 目检通过。
+
+| 分组 | 步骤 | 目检结论 |
+|---|---|---|
+| 内存/硬件 | `mem`、`hwinfo` | Lower 639KB / Upper 3144576KB / Total ~3071MB / PMM free 780415 帧；PCI 设备清单完整 |
+| 彩蛋 UX | `cowsay hello`、`sl`、`cal`、`fortune`、`yes q` | 牛形气泡；火车字符画帧；Nov 2026 月历；Lennon 引言带边框；列重复 q（Ctrl+C 可中断） |
+| 包流程 | `pkg list` / `install bc` / `bc 12 + 34` / `remove bc` / 回列 | bc/stats/rps available；`installed bc -> /bin/bc.ce`；`= 46` exit(0)；`removed bc`；回 available |
+| 文本工具 | `head -n 5`、`tail -n 3`、`wc`、`tree /` | 头尾行正确；`wc /appdevelop/API.TXT` = 706 行 / 4515 词 / 34894 字节；目录树含 /appdevelop 与 /pkg（3 容器 + PKGS.TXT） |
+| PE 三路径 | MZ 转换询问 → 答 n 直载 PE32 → 离线翻译 CE 运行 | 询问提示出现；直载 `PE->CE roundtrip OK` exit(0)；`run /bin/PESAMPLE.CE` 同样 roundtrip OK exit(0) |
+| 分区挂载 | `mount` 表 → `mount 2 /docs` → `ls /docs` → `cat` → `df` → `umount` | 根卷 hd0 `/`；note.txt 23B；跨盘读 `hello from partition 2`；df 双行 hd0 3% / hd0p2 /docs 0%；`umount: detached` |
+
+### 8.2 全量回归结果（最终扫描 + 修复复跑）
+
+驱动：`tests/run_full_regress.sh`（顺序执行，日志 `tests/regress_logs/<name>.log`）。
+
+| 回归脚本 | 最终结果 | 说明 |
+|---|---|---|
+| qemu_regress.py | ✅ 12/12 PASS（exit 0） | 端口 4707 |
+| fsrec_regress.py | ✅ 12/12 PASS（exit 0） | 端口 4711，目录复制/删除/ACL/用户隔离/faultinfo 全通过 |
+| caps_regress.py | ✅ 12/12 PASS（exit 0） | 用户/root 权限闸门、TUI 列表与 caps 视图、屏幕恢复 |
+| user_regress.py | ✅ 15/15 PASS（exit 0） | useradd/登录切换/ACL/sudo/format 拒绝/caps 拒绝/整机存活 |
+| disk_regress.py | ✅ 5/5 PASS（exit 0） | 64MiB 宿主构造盘挂载、磁盘来源应用列举与运行、FAT 镜像一致 |
+| env_regress.py | ✅ 13/13 PASS（exit 0） | 变量导出/落盘/展开/未知名/$ 字面量/删除/PATH 解析/无致命故障 |
+| heap_regress.py | ✅ 4/4 PASS（exit 0） | 初扫 ls-bin 假阴性，#139 测试基建修复后复跑转绿 |
+| size_regress.py | ✅ 7/7 PASS（exit 0） | 初扫 size-persisted 假阴性，#140 测试基建修复后复跑转绿；绿带 #7EE787 与挂盘修复（#138）生效 |
+| ce_regress.py | ⚠️ PASS=7 SKIP=13 FAIL=11 | 11 条全为 ce_sim 未建模 opcode（0x6a / 0x08 / `ff /6` / 0x0a 等），对应应用真机 guest 运行正常；属既有基线，非合并回归 |
+
+### 8.3 本轮测试基建修复（不改内核，登记 #139/#140）
+
+- **#139 heap_regress ls-bin 假阴性**：`/bin` 已播种约 38 个条目，整目录列举超过
+  25 行文本屏，早期安装的 allocprobe.ce/heaptest.ce 滚出可见帧缓冲；目录条目实际存在
+  （`run` 真机均 PASS）。步骤改为定向 `ls -l /bin/<file>` 单条目分支查询，复跑 4/4。
+- **#140 size_regress size-persisted 假阴性**：`cat /etc/size` 回显尾随重绘的 prompt，
+  旧断言 `endswith("0")` 匹配到 prompt；文件内容（compact 档 `0`）落盘正确。断言改用
+  正则匹配命令回显后的数值，复跑 7/7。
+- 两条均为测试侧问题，内核功能与数据路径未改动；环境级限制（4096MiB 档被 cgroup 挡）
+  以 3840MiB 替代验证，未死磕。
+
+### 8.4 推送
+
+v2.43 收尾提交（上述测试基建修复 + 本轮文档/回归脚本，commit hash 以推送后
+`git log` 为准）推送至 `github.com/ocean-2026/CatOS.git main`；推送命令 token
+已在输出日志 sed 脱敏。
