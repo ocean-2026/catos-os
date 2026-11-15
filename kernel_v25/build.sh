@@ -76,6 +76,22 @@ build_disk() {
     echo "OK -> catos_disk.img (boot with: -hda catos_disk.img)"
 }
 
+# NIGHT-P4: packaged apps are compiled from build/pkg.list and wrapped
+# into .catpkg containers by tools/mkpkg.py.  They are deliberately NOT
+# in apps.list, so they never land in /bin until the guest runs
+# `pkg install <name>`.
+build_packages() {
+echo "== building P4 packages (extapp/pkg/*.catpkg) =="
+mkdir -p extapp/pkg
+while IFS='|' read -r pname pver pdesc pfile pcmd; do
+    case "$pname" in ''|\#*) continue ;; esac
+    # build_ce.sh cd's into extapp/ itself, so the source is <cmd>.c there.
+    sh extapp/build_ce.sh "$pcmd.c" bin
+    "$PY" tools/mkpkg.py "extapp/bin/$pcmd.ce" "extapp/pkg/$pfile" \
+        --name "$pname" --version "$pver" --cmd "$pcmd" --desc "$pdesc"
+done < build/pkg.list
+}
+
 # Every target consumes the CE images that gen_builtin.py / mkdisk.py
 # embed, so build them before ANY of those run.  Previously only the
 # "disk" target did this: after adding an app, `build.sh iso` either died
@@ -83,6 +99,7 @@ build_disk() {
 # left over from an older build.  Rebuilding all apps costs a few seconds
 # and keeps build/apps.list a genuine single source of truth.
 build_apps
+build_packages
 
 # early dispatch: the disk target packages extapp/bin into a FAT32 image
 # and does NOT need the kernel compile below.

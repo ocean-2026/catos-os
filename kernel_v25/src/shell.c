@@ -190,6 +190,12 @@ static void cmd_help(void) {
     help_row("rm FILE",     "delete a file");
     help_row("cp SRC DST",  "copy a file");
     help_row("mv SRC DST",  "move a file (copy + delete)");
+    /* NIGHT-P4: package manager + migrated tools */
+    help_row("pkg list|info|install|remove NAME", "local package manager (/pkg)");
+    help_row("head [-n N] FILE", "print first N lines (default 10)");
+    help_row("tail [-n N] FILE", "print last N lines (default 10)");
+    help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
+    help_row("tree [DIR]",  "directory tree listing");
     help_row("format",      "erase the FAT32 volume (y/n confirm)");
     help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
     help_row("mount",       "list the mount table");
@@ -908,6 +914,7 @@ static void cmd_echo(char *arg) {
 /* ---------- NIGHT-P3 UX: unknown-command suggestion ------------------ */
 static const char *BUILTIN_NAMES[] = {
     "help", "lang", "export", "setenv", "env", "unset", "alias", "df",
+    "mount", "umount",
     "unalias", "clear", "cls", "gfx", "vbe", "gfx24", "vbe24",
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
@@ -919,6 +926,7 @@ static const char *BUILTIN_NAMES[] = {
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
     "faultinfo", "fsck", "color",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
+    "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
     0
 };
 /* tiny Levenshtein for short command words */
@@ -1879,6 +1887,7 @@ static void cmd_format(void) {    vga_write(tr(L_FORMAT_CONFIRM));
         vga_write("Top-level dirs: /dev /etc /bin /sbin /lib /usr /home\n");
         vga_write("                /root /tmp /var /proc /sys /mnt /boot\n");
         ce_install_builtins();      /* put /bin apps + /appdevelop docs on disk */
+        ce_install_pkg_repo();      /* NIGHT-P4: seed /pkg/ local repo after format */
     } else {
         vga_write(tr(L_FORMAT_CANCEL));
     }
@@ -2783,6 +2792,383 @@ static void cmd_mv(char *arg) {
     else              vga_write("mv: move failed mid-way\n");
 }
 
+/* ==================== NIGHT-P4: package manager ============================
+ * Local package repository on the FAT volume under /pkg/:
+ *   /pkg/PKGS.TXT  line index: name|version|desc|file
+ *   pkg/*.catpkg  packaged CE apps (container format, see tools/mkpkg.py)
+ *
+ * `pkg install` validates the container and drops its payload into
+ * /bin/<name>.ce; `pkg remove` deletes that copy.  No network involved
+ * (the guest boots with -net none); the repo is seeded from blobs embedded
+ * in the kernel image by gen_builtin.py.
+ *
+ * .catpkg layout (mirrors kernel_v25/tools/mkpkg.py, keep in sync):
+ *   0    magic[8]   "CPKG01\0"
+ *   8    name[16]
+ *   24   version[16]
+ *   40   cmd[16]    installed command -> /bin/<cmd>.ce
+ *   56   desc[80]
+ *   136  payload_len u32 LE
+ *   140  payload (raw CE01 image)
+ * ------------------------------------------------------------------------- */
+#define PKG_DIR        "/pkg"
+#define PKG_INDEX      "/pkg/PKGS.TXT"
+#define PKG_HDR_SIZE   140
+#define PKG_BUF_MAX    16384
+
+typedef struct {
+    char name[16];
+    char version[16];
+    char desc[80];
+    char file[16];
+} pkg_rec_t;
+
+static char pkg_idx_buf[2048];
+static char pkg_payload[PKG_BUF_MAX];
+
+static void pk_pad_copy(char *dst, int cap, const char *src, int width) {
+    int i = 0;
+    while (i < width && i < cap - 1 && src[i]) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+/* Parse /pkg/PKGS.TXT into recs; returns count (0 = no repo yet). */
+static int pkg_load_index(pkg_rec_t *recs, int max) {
+    int len = fs_read_text(PKG_INDEX, pkg_idx_buf, (int)sizeof(pkg_idx_buf) - 1);
+    if (len <= 0) return 0;
+    pkg_idx_buf[len] = 0;
+    int n = 0;
+    char *p = pkg_idx_buf;
+    while (*p && n < max) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p) *p++ = 0;
+        char *e = line + slen_(line);
+        if (e > line && e[-1] == '\r') e[-1] = 0;
+        if (!*line || line[0] == '#') continue;
+
+        char *fields[4] = { line, 0, 0, 0 };
+        int fi = 0;
+        for (char *q = line; *q && fi < 3; q++) {
+            if (*q == '|') { *q = 0; fields[++fi] = q + 1; }
+        }
+        if (!fields[0] || !*fields[0] || !fields[3] || !*fields[3]) continue;
+        pk_pad_copy(recs[n].name,    sizeof(recs[n].name),    fields[0], 15);
+        pk_pad_copy(recs[n].version,sizeof(recs[n].version),fields[1], 15);
+        pk_pad_copy(recs[n].desc,    sizeof(recs[n].desc),    fields[2], 79);
+        pk_pad_copy(recs[n].file,   sizeof(recs[n].file),     fields[3], 15);
+        n++;
+    }
+    return n;
+}
+
+static int pkg_find(const char *name, pkg_rec_t *recs, int n) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp_(recs[i].name, name)) return i;
+    return -1;
+}
+
+static int pkg_installed(const pkg_rec_t *r) {
+    char p[FS_PATH_MAX];
+    p[0] = 0;
+    strcat_b(p, sizeof(p), "/bin/");
+    strcat_b(p, sizeof(p), r->name);
+    strcat_b(p, sizeof(p), ".ce");
+    uint32_t c = 0, s = 0;
+    return fs_resolve_file(p, &c, &s) == 0;
+}
+
+static void pkg_dst_path(const pkg_rec_t *r, char *out, int cap) {
+    out[0] = 0;
+    strcat_b(out, cap, "/bin/");
+    strcat_b(out, cap, r->name);
+    strcat_b(out, cap, ".ce");
+}
+
+static void cmd_pkg_list(void) {
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    if (n == 0) { vga_write("pkg: no package repository (/pkg/PKGS.TXT missing)\n"); return; }
+    vga_write("Package repository (/pkg/):\n");
+    for (int i = 0; i < n; i++) {
+        vga_write("  ");
+        vga_write(recs[i].name);
+        vga_write("  ["); vga_write(recs[i].version); vga_write("]");
+        vga_write(pkg_installed(&recs[i]) ? " installed" : " available");
+        vga_write("  - "); vga_write(recs[i].desc); vga_write("\n");
+    }
+}
+
+static void cmd_pkg_info(const char *name) {
+    if (!*name) { vga_write("usage: pkg info NAME\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+    vga_write("name:    "); vga_write(recs[i].name); vga_write("\n");
+    vga_write("version: "); vga_write(recs[i].version); vga_write("\n");
+    vga_write("desc:    "); vga_write(recs[i].desc); vga_write("\n");
+    vga_write("file:    "); vga_write(recs[i].file); vga_write("\n");
+    vga_write("status:  ");
+    vga_write(pkg_installed(&recs[i]) ? "installed" : "available");
+    vga_write("\n");
+}
+
+static void cmd_pkg_install(const char *name) {
+    if (!*name) { vga_write("usage: pkg install NAME\n"); return; }
+    if (!fs_fs_ready()) { vga_write("pkg: no FAT32 volume\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+
+    char cpath[FS_PATH_MAX];
+    cpath[0] = 0;
+    strcat_b(cpath, sizeof(cpath), PKG_DIR);
+    strcat_b(cpath, sizeof(cpath), "/");
+    strcat_b(cpath, sizeof(cpath), recs[i].file);
+
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(cpath, &clus, &sz) != 0) {
+        vga_write("pkg: payload missing: "); vga_write(cpath); vga_write("\n"); return;
+    }
+    if (sz > PKG_BUF_MAX) { vga_write("pkg: package too large\n"); return; }
+    int rd = fs_read_at(cpath, pkg_payload, 0, (int)sz);
+    if (rd <= 0) { vga_write("pkg: read error\n"); return; }
+
+    /* validate magic: "CPKG01\0" */
+    if (rd < PKG_HDR_SIZE ||
+        pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
+        pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
+        pkg_payload[4] != '0' || pkg_payload[5] != '1') {
+        vga_write("pkg: bad package magic (not a .catpkg)\n"); return;
+    }
+
+    char cmd[16];
+    pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
+    uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
+                    ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
+                    ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
+                    ((uint32_t)(unsigned char)pkg_payload[139] << 24);
+    if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
+        vga_write("pkg: corrupt package (length mismatch)\n"); return;
+    }
+
+    char dst[FS_PATH_MAX];
+    dst[0] = 0;
+    strcat_b(dst, sizeof(dst), "/bin/");
+    strcat_b(dst, sizeof(dst), cmd);
+    strcat_b(dst, sizeof(dst), ".ce");
+
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("pkg: permission denied writing to /bin\n"); return;
+    }
+    /* truncate-replace, matching fs_copy_file's installed-app semantics */
+    if (fs_write_raw_mode(dst, pkg_payload + PKG_HDR_SIZE, plen, 0) != 0) {
+        vga_write("pkg: install failed (disk full?)\n"); return;
+    }
+    acl_set(dst, g_uid, g_gid, 0755);
+    vga_write("pkg: installed "); vga_write(recs[i].name);
+    vga_write(" -> "); vga_write(dst); vga_write("\n");
+}
+
+static void cmd_pkg_remove(const char *name) {
+    if (!*name) { vga_write("usage: pkg remove NAME\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+
+    char dst[FS_PATH_MAX];
+    pkg_dst_path(&recs[i], dst, sizeof(dst));
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(dst, &clus, &sz) != 0) {
+        vga_write("pkg: "); vga_write(recs[i].name);
+        vga_write(" is not installed\n"); return;
+    }
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("pkg: permission denied\n"); return;
+    }
+    if (fs_delete(dst) != 0) { vga_write("pkg: remove failed\n"); return; }
+    acl_unset(dst);
+    vga_write("pkg: removed "); vga_write(recs[i].name); vga_write("\n");
+}
+
+static void cmd_pkg(char *arg) {
+    char sub[16];
+    int k = 0;
+    while (*arg == ' ') arg++;
+    while (*arg && *arg != ' ' && k < (int)sizeof(sub) - 1) sub[k++] = *arg++;
+    sub[k] = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(sub, "list"))       cmd_pkg_list();
+    else if (!strcmp_(sub, "info"))  cmd_pkg_info(arg);
+    else if (!strcmp_(sub, "install")) cmd_pkg_install(arg);
+    else if (!strcmp_(sub, "remove") || !strcmp_(sub, "rm")) cmd_pkg_remove(arg);
+    else {
+        vga_write("usage: pkg list | info NAME | install NAME | remove NAME\n");
+    }
+}
+
+/* ==================== NIGHT-P4: migrated common tools =====================
+ * head / tail / wc / tree: shell builtins over the FAT32 raw read API.
+ * Files are small (editor limit 4 KiB, CE payloads a few KiB), so a
+ * 16 KiB static ring0 buffer per command is enough, matching cmd_cat.
+ * ------------------------------------------------------------------------- */
+#define TOOL_BUF_MAX 49152
+static char tool_buf[TOOL_BUF_MAX];
+
+/* Parse a leading [-n N] option; returns the file argument, sets *def_n. */
+static const char *tool_parse_headtail(char *arg, int *def_n) {
+    *def_n = 10;
+    while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'n' || arg[1] == 'N')) {
+        arg += 2;
+        while (*arg == ' ') arg++;
+        int v = 0;
+        while (*arg >= '0' && *arg <= '9') { v = v * 10 + (*arg - '0'); arg++; }
+        if (v > 0) *def_n = v;
+        while (*arg == ' ') arg++;
+    }
+    return arg;
+}
+
+static int tool_read_whole(const char *path) {
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(path, &clus, &sz) != 0) return -1;
+    if (sz > TOOL_BUF_MAX) return -2;
+    int rd = fs_read_at(path, tool_buf, 0, (int)sz);
+    if (rd <= 0) return -1;
+    tool_buf[rd] = 0;
+    return rd;
+}
+
+static void cmd_head(char *arg) {
+    int def_n;
+    const char *path = tool_parse_headtail(arg, &def_n);
+    if (!*path) { vga_write("usage: head [-n N] FILE\n"); return; }
+    int rd = tool_read_whole(path);
+    if (rd == -1) { vga_write("head: no such file\n"); return; }
+    if (rd == -2) { vga_write("head: file too large\n"); return; }
+
+    int lines = 0, cut = 0;
+    for (int i = 0; i < rd; i++) {
+        if (tool_buf[i] == '\n') {
+            lines++;
+            if (lines >= def_n) { cut = i + 1; break; }
+        }
+        cut = i + 1;
+    }
+    tool_buf[cut] = 0;
+    vga_write(tool_buf);
+    if (cut && tool_buf[cut - 1] != '\n') vga_write("\n");
+}
+
+static void cmd_tail(char *arg) {
+    int def_n;
+    const char *path = tool_parse_headtail(arg, &def_n);
+    if (!*path) { vga_write("usage: tail [-n N] FILE\n"); return; }
+    int rd = tool_read_whole(path);
+    if (rd == -1) { vga_write("tail: no such file\n"); return; }
+    if (rd == -2) { vga_write("tail: file too large\n"); return; }
+
+    int lines = 0, start = rd;
+    for (int i = rd - 1; i >= 0; i--) {
+        if (tool_buf[i] == '\n') {
+            lines++;
+            if (lines >= def_n) { start = i + 1; break; }
+        }
+        start = i;
+    }
+    vga_write(tool_buf + start);
+    if (start < rd && tool_buf[rd - 1] != '\n') vga_write("\n");
+}
+
+static void cmd_wc(char *arg) {
+    int f_lines = 0, f_words = 0, f_bytes = 0;
+    int any_flag = 0;
+    while (*arg == ' ') arg++;
+    while (arg[0] == '-' && arg[1]) {      /* collect flags: -l -w -c */
+        any_flag = 1;
+        for (int q = 1; arg[q] && arg[q] != ' '; q++) {
+            if (arg[q] == 'l') f_lines = 1;
+            else if (arg[q] == 'w') f_words = 1;
+            else if (arg[q] == 'c') f_bytes = 1;
+        }
+        while (*arg && *arg != ' ') arg++;
+        while (*arg == ' ') arg++;
+    }
+    if (!any_flag) f_lines = f_words = f_bytes = 1;   /* default: all */
+    if (!*arg) { vga_write("usage: wc [-l] [-w] [-c] FILE\n"); return; }
+
+    int rd = tool_read_whole(arg);
+    if (rd == -1) { vga_write("wc: no such file\n"); return; }
+    if (rd == -2) { vga_write("wc: file too large\n"); return; }
+
+    int lines = 0, words = 0, in_word = 0;
+    for (int i = 0; i < rd; i++) {
+        char c = tool_buf[i];
+        if (c == '\n') lines++;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') in_word = 0;
+        else if (!in_word) { in_word = 1; words++; }
+    }
+    if (rd > 0 && tool_buf[rd - 1] != '\n') lines++;
+
+    if (f_lines) { print_int(lines); vga_write("  "); }
+    if (f_words) { print_int(words); vga_write("  "); }
+    if (f_bytes) { print_int(rd); vga_write("  "); }
+    vga_write(arg); vga_write("\n");
+}
+
+/* tree: explicit-path recursion via fs_enum_entries, depth-capped at 6. */
+static void tree_walk(const char *dir, int depth) {
+    char names[24][FS_NAME_MAX];
+    int n = fs_enum_entries(dir, names, 24);
+    for (int i = 0; i < n; i++) {
+        const char *nm = names[i];
+        int is_dir = nm[slen_(nm) - 1] == '/';
+        char leaf[FS_NAME_MAX];
+        int li = 0;
+        for (int q = 0; nm[q] && li < (int)sizeof(leaf) - 1; q++) {
+            if (nm[q] == '/') continue;
+            leaf[li++] = nm[q];
+        }
+        leaf[li] = 0;
+        if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
+        for (int d = 0; d < depth; d++) vga_write("  ");
+        vga_write(is_dir ? "+- " : "- ");
+        vga_write(leaf);
+        if (is_dir) vga_write("/");
+        vga_write("\n");
+        if (is_dir && depth < 6) {
+            char child[FS_PATH_MAX];
+            child[0] = 0;
+            strcat_b(child, sizeof(child), dir);
+            if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
+            strcat_b(child, sizeof(child), leaf);
+            tree_walk(child, depth + 1);
+        }
+    }
+}
+
+static void cmd_tree(char *arg) {
+    while (*arg == ' ') arg++;
+    char dir[FS_PATH_MAX];
+    if (!*arg) { fs_pwd(dir, sizeof(dir)); }
+    else {
+        if (arg[0] == '/') strcat_b(dir, sizeof(dir), arg);
+        else {
+            char pwd[FS_PATH_MAX];
+            fs_pwd(pwd, sizeof(pwd));
+            strcat_b(dir, sizeof(dir), pwd);
+            if (pwd[slen_(pwd) - 1] != '/') strcat_b(dir, sizeof(dir), "/");
+            strcat_b(dir, sizeof(dir), arg);
+        }
+    }
+    vga_write(dir); vga_write("\n");
+    tree_walk(dir, 0);
+}
+
 /* ---------- v2.23 environment variables (session table + /etc/env) -------
  * Windows/Linux both expose process/session environment variables; CatOS's
  * shell is ring0 and single-session, so a flat table is honest here.
@@ -3386,9 +3772,9 @@ static const char *sh_cmds[] = {
     "color","cp","curl","date","dir","display","dns","echo","edit","env",
     "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
-    "netcfg","netdiag","palette","passwd","ping","ps","reboot","rgb","rm","run",
+    "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","run",
     "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
-    "touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
+    "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vbe","vbe24","vdiag","whoami",
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
@@ -3573,6 +3959,7 @@ void shell_run(void) {
         vga_write(tr(L_NO_FAT32));
     else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
+        ce_install_pkg_repo();      /* NIGHT-P4: seed /pkg/ local repo + index */
         /* v2.17: boot output now comes from /etc/autostart scripts
          * (echo lines) instead of a hardcoded banner.  Falls back to a
          * seeded default script on a fresh volume. */
@@ -3693,6 +4080,12 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);
         else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
         else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
+        /* NIGHT-P4: package manager + migrated common tools */
+        else if (!strcmp_(cmd, "pkg"))         cmd_pkg(arg);
+        else if (!strcmp_(cmd, "head"))       cmd_head(arg);
+        else if (!strcmp_(cmd, "tail"))       cmd_tail(arg);
+        else if (!strcmp_(cmd, "wc"))         cmd_wc(arg);
+        else if (!strcmp_(cmd, "tree"))       cmd_tree(arg);
         else if (!strcmp_(cmd, "format")) {
             /* v2.25: fine-grained split -- CAP_FSADMIN (broad) or the
              * new CAP_FORMAT successor both grant mkfs. */

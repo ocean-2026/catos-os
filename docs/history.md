@@ -112,3 +112,10 @@ CatOS[易错点] qemu_regress.py 启动时会 glob 删除 tests/qemu_shots/*.png
 CatOS[易错点] fortune 类随机源若只取 RTC 秒/分，同一秒内连续调用会落到同一格言；熵要混入 timer_ticks（10ms 刻度）与单调递增序列计数器（乘 2654435761 散列）。
 CatOS[易错点] 80 列文本终端里气泡/格言文案超过约 72 字节会折行，折行段丢失左右边框；内置长文案按字节长度裁剪，中文 UTF-8 每字 3 字节要计入宽度。
 CatOS[易错点] 前台 Bash 跑长 QEMU 探针偶发 exit 143（SIGTERM）且无输出；改 nohup 后台跑 + 日志文件即可复现，不是内核或探针逻辑崩溃。
+CatOS[易错点] .catpkg 定长头 MAGIC 槽位宽度必须与实际字节数一致：mkpkg.py 声明 magic[8] 却只写了 7 字节（"CPKG01\0"），打包断言 len(header)==HEADER_SIZE 直接失败；定长头字段要在打包/解包两侧用同一常量核对，新增字段先改头布局再改两侧。
+CatOS[易错点] 包构建顺序：gen_builtin.py 嵌入 .catpkg 之前，build.sh 必须先跑 mkpkg.py 生成容器；顺序反了会嵌入旧负载或缺文件，gen_builtin 直接 ERROR 退出。
+CatOS[易错点] FAT32 无 LFN，包名/命令名/容器扩展名必须 8.3 友好（stem≤8、ext≤3）；P4 容器扩展名取 .catpkg（CAT），命令名 bc/stats/rps 均在 8 字符内。
+CatOS[易错点] shell 内建工具整文件读缓冲要按最大目标文件预留：API.TXT 约 34.9 KiB，16 KiB 缓冲会误报 "file too large"；bss 静态缓冲不占镜像体积，可放大到 48 KiB。
+CatOS[易错点] 并行分片共用 qemu_driver._stage_image 的 /tmp/catos_qemu_stage 目录，文件名固定 catos.iso/qemu_disk.img，并发 agent 互相覆盖；本分片曾因此启动别人陈旧内核，shell 新增命令全部报 "unknown command"。端到端驱动必须用私有舞台目录（/tmp/catos_p4_stage），iso 与磁盘两份都要私有复制。
+CatOS[易错点] QEMU OFD 写锁：舞台目录若放在工作区 hpvs_fs（/home/user/...）上，文件系统不支持 flock，镜像一打开即 "Failed to get write lock"，qemu rc=1 退出；即使是私有目录也不能放工作区，舞台必须落在 /tmp（overlay，支持 flock）。
+CatOS[易错点] 诊断"命令表加了命令却 unknown command"：先 strings 核对本地 kernel.bin 与 catos.iso 是否真含新命令串；镜像含串而 guest 不认，基本是舞台目录被并发覆盖（陈旧内核），不是内核代码缺陷。

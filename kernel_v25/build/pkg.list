@@ -1,0 +1,14 @@
+# P4 package index source (single source of truth for packaged CE apps).
+#
+# Columns, pipe-separated:  name|version|description|file|cmd
+#   name   : package key used by `pkg install/remove/info`
+#   version: free-form version string
+#   desc   : one-line description (no '|' inside)
+#   file   : .catpkg payload in /pkg/ on the guest volume
+#   cmd    : installed command -> /bin/<cmd>.ce
+#
+# These apps live in extapp/ but are deliberately NOT in build/apps.list:
+# builtins go straight to /bin, packages only reach /bin after `pkg install`.
+bc|1.0|tiny integer calculator (A op B)|bc.catpkg|bc
+stats|1.0|lines/words/bytes text statistics|stats.catpkg|stats
+rps|1.0|rock-paper-scissors one round vs cpu|rps.catpkg|rps
