@@ -888,6 +888,14 @@ int fs_mount(const char *spec, const char *dir) {
         if (!g_mnt[i].used) { mi = i; break; }
     if (mi < 0) return -11;
 
+    /* #142: refuse mounting the same partition a second time at another
+     * point -- two volume slots over one LBA would keep diverging FAT caches.
+     * The check covers the root volume slot 0 as well: re-binding the boot
+     * partition under a second mount point is the same cache-divergence risk. */
+    char dev[16];
+    part_devname(p, dev, sizeof(dev));
+    if (fat_volume_owns(p->drive, p->start)) return -15;
+
     int vol = -1;
     if (fat_mount_partition(p->drive, p->start, p->size, &vol) != 0)
         return -12;
@@ -898,7 +906,7 @@ int fs_mount(const char *spec, const char *dir) {
     g_mnt[mi].vol = vol;
     g_mnt[mi].letter = (char)(ROOT_LETTER + 1 + n);
     scpy(g_mnt[mi].mnt, abs);
-    part_devname(p, g_mnt[mi].dev, sizeof(g_mnt[mi].dev));
+    scpy(g_mnt[mi].dev, dev);
 
     fat_activate(0);                             /* back to the root volume */
     return FS_OK;

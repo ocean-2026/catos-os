@@ -65,6 +65,8 @@ int  fat_mount_partition(uint8_t drive, uint32_t part_lba, uint32_t size,
 void fat_activate(int slot);
 /* Current active volume slot. */
 int  fat_active_slot(void);
+/* #142+: true if any volume slot (root included) already maps this partition. */
+int  fat_volume_owns(uint8_t drive, uint32_t part_lba);
 /* Release a probed extra volume slot so it can be probed again. */
 void fat_release_slot(int slot);
 

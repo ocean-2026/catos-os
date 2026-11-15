@@ -788,7 +788,8 @@ static int cal_wday(int y, int m, int d) {
     return r < 0 ? r + 7 : r;
 }
 static void cal_build_month(int y, int m, char rows[7][22]) {
-    for (int i = 0; i < 7; i++) rows[i][0] = 0;
+    for (int i = 0; i < 7; i++)
+        for (int k = 0; k < 22; k++) rows[i][k] = 0;   /* #143: clear stale cells */
     int o = 0;
     rows[0][o++] = ' '; rows[0][o++] = ' ';
     const char *mn = CAL_MON[m - 1];
@@ -805,8 +806,9 @@ static void cal_build_month(int y, int m, char rows[7][22]) {
     int row = 2;
     for (int d = 1; d <= dim; d++) {
         int off = col * 3;
-        char db[4]; itoa(d, db, 2);
-        rows[row][off] = db[0]; rows[row][off + 1] = db[1];
+        char db[4]; itoa(d, db, 0);
+        if (d < 10) { rows[row][off] = ' '; rows[row][off + 1] = db[0]; }
+        else        { rows[row][off] = db[0]; rows[row][off + 1] = db[1]; }
         rows[row][off + 2] = ' ';
         col++;
         if (col == 7) { col = 0; row++; }
@@ -3016,7 +3018,7 @@ static void cmd_pkg(char *arg) {
  * 16 KiB static ring0 buffer per command is enough, matching cmd_cat.
  * ------------------------------------------------------------------------- */
 #define TOOL_BUF_MAX 49152
-static char tool_buf[TOOL_BUF_MAX];
+static char tool_buf[TOOL_BUF_MAX + 1];   /* +1 for the trailing NUL */
 
 /* Parse a leading [-n N] option; returns the file argument, sets *def_n. */
 static const char *tool_parse_headtail(char *arg, int *def_n) {
@@ -3037,8 +3039,9 @@ static int tool_read_whole(const char *path) {
     uint32_t clus = 0, sz = 0;
     if (fs_resolve_file(path, &clus, &sz) != 0) return -1;
     if (sz > TOOL_BUF_MAX) return -2;
+    if (sz == 0) { tool_buf[0] = 0; return 0; }   /* empty file: resolve OK, no bytes */
     int rd = fs_read_at(path, tool_buf, 0, (int)sz);
-    if (rd <= 0) return -1;
+    if (rd < 0) return -1;
     tool_buf[rd] = 0;
     return rd;
 }
@@ -3727,6 +3730,7 @@ static void cmd_mount(char *arg) {
     case -11: vga_write("mount: no free mount slot\n"); break;
     case -12: vga_write("mount: failed to probe a FAT32 volume there\n"); break;
     case -13: vga_write("mount: target directory is not empty\n"); break;
+    case -15: vga_write("mount: partition already mounted elsewhere\n"); break;
     default:  vga_write("mount: failed\n"); break;
     }
 }
@@ -3768,14 +3772,14 @@ static void bar_put_str(char *b, int *n, const char *s) {
  * parsing).  Multiple matches go into the candidate bar (the row under
  * the input line), exactly one replacement goes back into the line. */
 static const char *sh_cmds[] = {
-    "about","alias","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
-    "color","cp","curl","date","dir","display","dns","echo","edit","env",
-    "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "about","alias","autostart","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
+    "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
+    "export","faultinfo","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","run",
-    "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
+    "setenv","size","sl","sndinfo","sndtest","style","su","sudo","svgainfo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vbe","vbe24","vdiag","whoami",
+    "users","vbe","vbe24","vdiag","whoami","yes",
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 

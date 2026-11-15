@@ -122,3 +122,7 @@ CatOS[易错点] 诊断"命令表加了命令却 unknown command"：先 strings 
 CatOS[易错点] 整目录 `ls` 条目数超过 25 行文本屏后，早期安装的条目会滚出可见帧缓冲；回归若靠整屏抓名字做断言会假阴性（heap_regress ls-bin 踩过）。查单文件存在性走 `ls -l /bin/<file>` 单条目分支（每条一行不滚动），不要依赖整屏可见列表。
 CatOS[易错点] 屏幕回显断言不能用 `text.rstrip().endswith(值)`：命令执行后尾随重绘的 shell prompt 会占末行，把值顶掉（size_regress size-persisted 踩过）。按命令回显位置用正则取值，例如 `/etc/size\s+0(?!\d)`。
 CatOS[易错点] 回归驱动的 Python stdout 是块缓冲落盘，分步 PASS 行滞后于 guest 实际状态；日志短时不刷新不等于卡死，判读以进程退出码和汇总行（steps=/PASS=）为准。
+CatOS[易错点] 探针清屏前的旧回显会留在 25 行网格里：umount 后 ls /docs、umount 后 df 这类"目录已空/行已消失"断言，若不先 `clear`，substring 会匹配到上一屏残留文本造成假阴性；清屏后再抓当前帧。
+CatOS[易错点] mount 要求挂载点目录已预建：目录不存在时先返回 "target directory not found"，走不到去重/非空/占用判定；测重复挂载、根卷重绑前先 mkdir 各测试点。
+CatOS[易错点] 控制台回滚查看器只画最近 rows-1 条存档行：help 顶部彩蛋行滚出后无法在真机回看，help 是否登记要靠源码 help_row 调用点 + kernel.bin rodata 字符串交叉取证，不能只看可见帧。
+CatOS[易错点] `strings` 默认最小长度 4，2~3 字符命令名（sl/wc/df）抓不到；核对短串用 `strings -n 2`。

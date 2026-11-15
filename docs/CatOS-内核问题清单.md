@@ -750,5 +750,11 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 139 | 低（测试基建） | heap_regress `ls-bin` 假阴性：`/bin` 已播种约 38 个条目，整目录列举超过 25 行文本屏，早期安装的 allocprobe.ce/heaptest.ce 滚出可见帧缓冲，screen_text 抓不到名字；目录条目实际存在，`run /bin/allocprobe.ce`、`run /bin/heaptest.ce` 真机均 PASS | 测试断言依赖整屏可见性，未考虑目录条目数超过单屏；与内核目录列举无关 | v2.43：步骤改为定向查询单条目分支 `ls -l /bin/<file>`（每条目一行，不滚动），复跑 4/4 PASS（测试基建，不改内核） | ✅ 已修 |
 | 140 | 低（测试基建） | size_regress `size-persisted` 假阴性：`cat /etc/size` 回显后尾随重绘的 shell prompt，`text.rstrip().endswith("0")` 匹配到 prompt 而非文件内容；实测文件内容为 compact 档 `0`，落盘正确 | 断言把屏幕末行当作文件值，未剥离尾随 prompt | v2.43：改用正则 `/etc/size\s+0(?!\d)` 匹配命令回显后的数值，复跑 7/7 PASS（测试基建，不改内核） | ✅ 已修 |
 | 141 | 低（内核 UX） | 目录列举/help 等输出超过 25 行文本屏时，顶部条目离开实时网格后无法回看：无内部分页暂停、屏幕回滚缓冲深度不足（与 #135 同源）；条目增多后整屏列举只能看到末尾一段 | 文本前端无 scrollback/分页机制，CON_SB_ROWS 存档深度有限 | 本轮测试侧绕开（定向单条目查询）；后续可在 `ls`/`help` 加分页暂停或加深回滚缓冲 | ⏳ 已知限制 |
+| 142 | 中 | 同一分区可被挂载到第二个挂载点：两个卷槽打开同一 LBA，各自缓存 FAT，写入后两份缓存可能分叉（v2.43 审查实测 hd0p2 同时挂 /docs 与 /docs2） | fs_mount 只查挂载点占用与目录非空，未按设备名去重 | v2.44：初版按 g_mnt[] 同 dev 拒绝；#146 进一步按「驱动+LBA」对全部卷槽去重，返回 -15 `mount: partition already mounted elsewhere`；挂载表只保留单条 hd0p2 | ✅ 已修 |
+| 143 | 低（审美） | `cal` 年视图未用单元格残留：月块行只清首字节，三栏复用的栈行带上一组月的数字；单日个位写 NUL 渲染成 `?`/`?,` 杂符 | cal_build_month 行未整体清零；单日用 width-2 itoa 补零后把 '0' 写进个位格 | v2.44：7 行 ×22 列整体清零；单日左补空格、改用宽度 0 itoa；年视图无 `?`/杂符 | ✅ 已修 |
+| 144 | 中 | head/tail/wc 读 0 字节文件被当成 `no such file`：fs_read_at 在 max=0 时返回 -1，工具把 rd<=0 一律判为读取失败（实测 touch 出的空文件 ls 可见、wc/head/tail 均报不存在） | tool_read_whole 未区分「解析成功的空文件」与「读取错误」 | v2.44：resolve 成功且 sz==0 直接返回 0（空缓冲）；仅 rd<0 报错；tool_buf 加 1 字节尾 NUL 位，消除恰好 48KiB 文件的越界写 | ✅ 已修 |
+| 145 | 低 | TAB 命令补全表 sh_cmds[] 漏收 P3 彩蛋（cowsay/sl/fortune/cal/yes）与 df：help 行与建议表 BUILTIN_NAMES 都有，补全表只并了 P4 工具 | 五片人工语义合并时 P3 彩蛋与 df 未并入补全表 | v2.44：六个命令补入 sh_cmds[]，并补收别名 cls/su；实测 TAB `cows`→cowsay、`df`、`cl`→clear/cls、`su`→su/sudo 均可补全 | ✅ 已修 |
+| 146 | 中 | #142 初版去重只扫附加卷槽（g_mnt[]），根分区（卷槽 0）仍可被二次绑定到另一挂载点：同样是两个 FAT 缓存覆盖同一 LBA 的分叉风险 | 去重判定未覆盖根卷槽；g_vol[] 不对外暴露归属信息 | v2.44：新增 `fat_volume_owns(drive,lba)` 遍历全部卷槽（含槽 0）比对驱动+LBA，fs_mount 据此拒绝；实机 `mount 1 /docs2`（根 P1）被拒，P2 重复挂载仍被拒，挂载表仅一条 hd0p2 | ✅ 已修 |
+| 147 | 低（潜在） | pkg install 按 CPKG 头 `cmd` 字段落盘 `/bin/<cmd>.ce`，而 pkg_installed/pkg_dst_path 按索引 `name` 字段查 `/bin/<name>.ce`；播种包 name==cmd 无差异，若日后发布 name≠cmd 的包，remove 将找不到已安装文件 | 安装/卸载两侧取名字段不一致 | 本轮播种三包 name/cmd 对齐，实机 install/reinstall/remove 闭环 PASS；后续可让卸载侧也读包内 cmd 头字段，或索引直接携带落盘文件名 | ⏳ 建议项 |
 
-*本节后继续编号为 #142+。*
+*本节后继续编号为 #148+。*

@@ -1200,6 +1200,18 @@ void fat_activate(int slot) {
 
 int fat_active_slot(void) { return g_active; }
 
+/* #142+: does any probed volume slot (root slot 0 included) already own
+ * this (drive, LBA) pair?  Mounting the same partition twice -- even the
+ * root volume -- would open a second FAT cache over one LBA that can
+ * diverge from the first. */
+int fat_volume_owns(uint8_t drive, uint32_t part_lba) {
+    for (int i = 0; i < FAT_VOL_MAX; i++)
+        if (g_vol[i].d_present &&
+            g_vol[i].d_drive == drive && g_vol[i].d_start == part_lba)
+            return 1;
+    return 0;
+}
+
 void fat_release_slot(int slot) {
     if (slot <= 0 || slot >= FAT_VOL_MAX) return;
     if (g_active == slot) g_active = 0;
