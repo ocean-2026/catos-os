@@ -1,15 +1,24 @@
 /* paging.c - the memory-management pillar of CatOS.
  *
- * The kernel identity-maps the low 64 MiB with 4 MiB PSE pages
- * (supervisor-only).  Every ring3 task gets its own page directory that
- * copies the kernel entries but replaces the 32..36 MiB entry (PDE 8)
- * with a private 4 KiB page table: the task's image, bss, vsyscall page,
- * heap and stack live there with user permissions, so tasks are fully
- * isolated from each other AND from the kernel.
+ * The kernel identity-maps the installed RAM with 4 MiB PSE pages
+ * (supervisor-only).  v2.38 P0: the managed range follows the multiboot
+ * mem_upper report instead of being clamped to the low 64 MiB; the ceiling
+ * is the 4 GiB 32-bit physical address space.  Every ring3 task gets its own
+ * page directory that copies the kernel entries but replaces the 32..36 MiB
+ * entry (PDE 8) with a private 4 KiB page table: the task's image, bss,
+ * vsyscall page, heap and stack live there with user permissions, so tasks
+ * are fully isolated from each other AND from the kernel.
  *
  * Physical frames come from a bitmap allocator over the free RAM between
- * the kernel image and the top of (low) memory.  The PCnet DMA area at
+ * the kernel image and the top of reported memory.  The PCnet DMA area at
  * 0x500000..0x510000 is reserved (net.c parks its rings there).
+ *
+ * Known boundary limit (see docs/ROADMAP honest list): this still assumes
+ * "kernel virtual == physical" for every allocated frame; RAM sitting
+ * above the PCI hole (a second multiboot mmap region on large guests) is
+ * not enumerated, and a true 4 GiB guest can place PCI BARs inside the
+ * last 4 GiB block -- those cases need the per-frame kernel window that
+ * belongs to the deferred memory-dynamicization work.
  */
 
 #include "paging.h"
@@ -17,7 +26,8 @@
 #include "vga.h"
 
 #define KBASE        0x1000000u     /* kernel link base  */
-#define MEM_TOP      0x4000000u     /* we manage the low 64 MiB only   */
+#define MEM_TOP      0x4000000u     /* legacy fallback: low 64 MiB      */
+#define MAX_PHY      0x100000000ull /* 4 GiB physical address ceiling    */
 #define PDE_USER     8u             /* 32..36 MiB = task arena         */
 #define DMA_LO       0x500000u      /* PCnet DMA area (see net.c)      */
 /* 0x510000..0x528000 is the SB16 ISA DMA buffer (SND_DMA_PHYS in
@@ -30,7 +40,7 @@
 
 extern char _bss_end[];             /* end of the flat kernel image     */
 
-/* ---- kernel directory: 16 PSE entries, identity map 0..64 MiB -------- */
+/* ---- kernel directory: PSE entries identity-mapping the installed RAM -- */
 
 static uint32_t kdir[1024] __attribute__((aligned(4096)));
 
@@ -64,12 +74,18 @@ void paging_sync_lfb_dir(uint32_t dir_phys) {
 
 /* ---- frame allocator --------------------------------------------------- */
 
+/* bitmap sized for the full 4 GiB space: 1 MiB frames / 32 bits = 32768
+ * words (128 KiB BSS).  Only frames_base..mem_top are ever touched. */
+#define FRAME_MAX   (MAX_PHY / 4096u)
+
 static uint32_t frames_base;                  /* first managed frame   */
 static uint32_t frames_count;
-static uint32_t bitmap[MEM_TOP / (4096 * 32)];
+static uint32_t mem_top;                     /* exclusive phys bound  */
+static uint32_t bitmap[FRAME_MAX / 32u];
 
 static void mark_frame(uint32_t pa, int used) {
     uint32_t idx = (pa - frames_base) >> 12;
+    if (idx >= frames_count) return;
     if (used) bitmap[idx >> 5] |= 1u << (idx & 31);
     else      bitmap[idx >> 5] &= ~(1u << (idx & 31));
 }
@@ -85,7 +101,7 @@ uint32_t frame_alloc(void) {
 }
 
 void frame_free(uint32_t pa) {
-    if (pa < frames_base || pa >= frames_base + (frames_count << 12)) return;
+    if (pa < frames_base || pa >= mem_top) return;
     mark_frame(pa, 0);
 }
 
@@ -93,17 +109,33 @@ void frame_free(uint32_t pa) {
 
 void paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb) {
     (void)mem_lower_kb;
-    uint32_t top = 0x100000u + (mem_upper_kb ? mem_upper_kb << 10 : MEM_TOP - 0x100000u);
-    if (top > MEM_TOP) top = MEM_TOP;
+    /* KB -> bytes in 64-bit math: near 4 GiB, mem_upper_kb << 10 would
+     * overflow a 32-bit unsigned.  mem_upper counts RAM above 1 MiB. */
+    uint64_t top64;
+    if (mem_upper_kb)
+        top64 = 0x100000ull + (uint64_t)mem_upper_kb * 1024ull;
+    else
+        top64 = MEM_TOP;                       /* legacy fallback */
+    if (top64 > MAX_PHY) top64 = MAX_PHY;
+    /* 4 GiB itself is not representable in a 32-bit byte address; clamp to
+     * the last accessible 4 KiB page. */
+    uint32_t top = (top64 >= MAX_PHY) ? 0xFFFFF000u : (uint32_t)top64;
 
-    /* identity-map 0..64 MiB with 4 MiB supervisor pages (P=1 RW=1 PS=1) */
-    for (int i = 0; i < 16; i++)
+    /* identity-map the installed RAM with 4 MiB supervisor PSE pages
+     * (P=1 RW=1 PS=1).  The trailing partial 4 MiB block is mapped whole,
+     * matching the old 16-PSE behavior; the allocator never hands out
+     * frames at/above `top`, so that tail is never touched. */
+    uint32_t pse_blocks = top >> 22;
+    if (top & 0x3FFFFFu) pse_blocks++;
+    if (pse_blocks > 1024) pse_blocks = 1024;
+    for (uint32_t i = 0; i < pse_blocks; i++)
         kdir[i] = (i << 22) | 0x083u;
 
     /* frames start after the kernel image (bss included) */
     frames_base = ((uint32_t)_bss_end + 0xFFF) & ~0xFFFu;
     if (frames_base < DMA_HI + 0x1000u) frames_base = DMA_HI;  /* (never on this kernel) */
-    frames_count = (top - frames_base) >> 12;
+    mem_top = top;
+    frames_count = (top > frames_base) ? (top - frames_base) >> 12 : 0;
 
     /* the PCnet DMA area must never be handed out */
     for (uint32_t pa = frames_base; pa < DMA_HI; pa += 4096) {
@@ -154,7 +186,10 @@ int  task_space_create(task_space_t *s) {
     for (int i = 0; i < 1024; i++) d[i] = 0;
     for (int i = 0; i < 1024; i++) t[i] = 0;
     for (int i = 0; i < 1024; i++) t2[i] = 0;
-    for (int i = 0; i < 16; i++) d[i] = kdir[i];        /* kernel, supervisor */
+    /* mirror every kernel PDE (low PSE RAM map + any high LFB PTs); the
+     * copied entries stay supervisor-only (no US bit).  The two user PDEs
+     * are replaced below with this task's private page tables. */
+    for (int i = 0; i < 1024; i++) d[i] = kdir[i];
     d[PDE_USER]     = s->pt  | 0x007u;                   /* P RW US */
     d[PDE_USER_EXT] = s->pt2 | 0x007u;                   /* P RW US */
     /* New directory, not loaded yet: mirror but do NOT flush TLB. */
@@ -230,11 +265,12 @@ void *kzalloc_frame(void) {
 }
 
 /* ---- VBE linear framebuffer -------------------------------------------
- * The low 64 MiB is 16 PSE (4 MiB) pages.  A VBE LFB lives far above it
- * (PCI BAR0 at 0xfd000000 on QEMU std VGA), so it needs its own 4 KiB
- * page tables.  We never split PDEs 0..15.  Since v2.12 the high PDEs
- * are mirrored into every task directory as SUPERVISOR-ONLY entries so
- * the kernel can draw while running on a ring3 caller's CR3. */
+ * The installed RAM is mapped with PSE (4 MiB) pages.  A VBE LFB lives in
+ * the PCI hole, above the RAM top (PCI BAR0 at 0xfd000000 on QEMU std
+ * VGA), so it needs its own 4 KiB page tables.  A PSE PDE that already
+ * backs RAM is never split.  Since v2.12 the high PDEs are mirrored into
+ * every task directory as SUPERVISOR-ONLY entries so the kernel can draw
+ * while running on a ring3 caller's CR3. */
 void *vbe_lfb_map(uint32_t phys, uint32_t size) {
     if (!phys || !size) return 0;
     uint32_t pa  = phys & ~0xFFFu;

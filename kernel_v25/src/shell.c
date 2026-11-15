@@ -598,6 +598,13 @@ static void cmd_mem(void) {
         vga_write("Total approx         : ");
         print_int((mbi->mem_lower + mbi->mem_upper) / 1024);
         vga_write(" MB\n");
+        /* PMM view: frames the allocator actually manages (after the kernel
+         * image and reserved DMA areas), not the raw bootloader report. */
+        vga_write("PMM allocator        : used ");
+        print_int(hw_num(HW_MEM_USED_KB) / 4);
+        vga_write(" / free ");
+        print_int(hw_num(HW_MEM_FREE_KB) / 4);
+        vga_write(" frames (4K pages)\n");
     } else {
         vga_write("Memory info not provided by GRUB.\n");
     }
@@ -2503,6 +2510,10 @@ static void env_expand(char *line, int cap) {
 
 static void cmd_export(char *arg) {
     if (!arg || !*arg) { env_list(); return; }
+    /* #122: the env table is global and persisted to /etc/env; mutating it
+     * is a system-config write, so it goes through the same admin gate as
+     * useradd/chcaps.  (There is no per-session env store yet.) */
+    if (!session_is_admin()) { vga_write("export: permission denied\n"); return; }
     char *eq = arg;
     while (*eq && *eq != '=') eq++;
     if (!*eq) { vga_write("usage: export KEY=VALUE | export KEY= | export | env\n"); return; }
@@ -2518,6 +2529,8 @@ static void cmd_export(char *arg) {
 }
 
 static void cmd_unset(char *arg) {
+    /* #122: global persisted env -- admin gate, same rationale as export. */
+    if (!session_is_admin()) { vga_write("unset: permission denied\n"); return; }
     if (!arg || !*arg) { vga_write("usage: unset KEY\n"); return; }
     char key[ENV_KEY_MAX];
     int i = 0;
@@ -2539,7 +2552,11 @@ static const char *size_name(int s) {
 }
 
 static void size_apply(int s) {
-    if (con_set_cell_size(s) == 0) {
+    if (con_set_cell_size(s) != 0) return;
+    /* #122: the cell-size default is a global persisted preference
+     * (/etc/size); only admins may write it.  The current session still
+     * switches scale for non-root, it just is not saved across reboots. */
+    if (session_is_admin()) {
         char b[2] = { (char)('0' + s), 0 };
         fs_write_text("/etc/size", b, 1);
     }

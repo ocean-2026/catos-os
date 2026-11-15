@@ -174,9 +174,10 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
     outb(g_base + 7, CMD_READ);
 
     for (int s = 0; s < count; s++) {
-        if (ata_wait_drq() != 0) {
-
-        }
+        /* #123: a DRQ timeout/error must abort the read and surface -1,
+         * symmetric with ata_write_sectors(); continuing to clock the data
+         * port would hand the caller stale/garbage sectors as "success". */
+        if (ata_wait_drq() != 0) return -1;
         uint16_t *w = (uint16_t *)(p + s * ATA_SECTOR_SIZE);
         for (int i = 0; i < 256; i++) w[i] = inw(g_base);
     }

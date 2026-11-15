@@ -93,3 +93,8 @@ CatOS[易错点] v2.37 改终端主题只动 render.c clut_init() 的 vga16 表�
 CatOS[易错点] v24_set_scale 只改网格 cols/rows/字号不清 LFB，切换 size 档位后旧 demo 像素会残留在新网格外；必须在 set_scale 布局完成后整帧 gfx24_clear(主题底色)。
 CatOS[易错点] fsrec_regress 偶发 exit 143（SIGTERM）多为上一个 qemu 进程没退干净、占用磁盘镜像，并非内核回归；先 pkill -x qemu-system-i386 再重跑即过，勿误判成新缺陷。
 CatOS[易错点] 端口段：本代理独占 4570-4585，4444-4539 与 4586-4599 是并行审美代理保留段；gfx24_regress 硬编码 4462 落在保留段，本轮冒烟不要启动它，避免撞 monitor。
+CatOS[易错点] 云端 Ubuntu 主机 cgroup memory.max≈4GiB、总内存 3.9GiB，QEMU `-m 4096` 启动即 "Cannot allocate memory"；实测可行上限约 3840MiB，且客户机 multiboot mem_upper 仍被 PCI hole 截到 ~3071MiB。大内存验证按主机余量降档（256/1024/3840），不要照搬 -m 4096，也不要把 mem_upper 小于 -m 标称值当成内存泄漏。
+CatOS[易错点] 32 位内核做 KB→字节换算：mem_upper_kb<<10 在近 4GiB 会 uint32 回绕；必须用 uint64 中间量 `(uint64_t)kb*1024ull` 算完再截到 32 位物理地址，4GiB 本身不可表示，封顶到 0xFFFFF000。
+CatOS[易错点] `pkill -f qemu-system-i386` 或 `pkill -f 端口号` 会匹配 `bash -c` 包装进程自身的命令行，把自己 shell 杀掉（exit 143）；清理 guest 只按 PID kill_qemu(proc)，不要用 -f 全命令行匹配。
+CatOS[易错点] env_regress.py / size_regress.py 第一个位置参数是 catos.iso 路径，`--qemu` 是其后选项；把 --qemu 放首位会被当成 iso 路径，报 FileNotFoundError。
+CatOS[易错点] size_regress.py 的绿带检测常量 GREEN=(0x55,0xFF,0x55) 是旧主题值；现代主题强调绿已是 #7EE787=(126,231,135)，基线（未改源码）跑同样 normal/compact/large-band FAIL。遇到该脚本 band 失败先 A/B 对照基线，勿误判成新回归；/etc/size 持久化检查在无磁盘镜像的 size_regress 流程里也会失败，属脚本未挂盘的既有现象。

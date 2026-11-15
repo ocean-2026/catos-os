@@ -456,3 +456,26 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
   40 字符超长路径正确拒绝（路径限制按设计生效）。
 - **环境事件**：QEMU 二进制中途消失（Ubuntu 环境重置），表现为回归
   FATAL——重装 qemu-system-x86 后全套回归复测全绿，确认非内核回归。
+
+## 二十五、v2.38 P0 4GB 内存支持（跨夜分片）
+
+- **设计权衡（务实落地，未做内存动态化重构）**：沿用既有“内核虚拟地址
+  = 物理地址”恒等映射假设，把 PSE 恒等映射范围从固定低 64MiB 扩展到
+  multiboot mem_upper 实际报告的 RAM 上界，封顶 4GiB；帧分配器位图按
+  4GiB 上限静态预留（32768 字 / 128KiB BSS），只管理 frames_base..mem_top。
+  不引入每帧内核窗口、不取消恒等映射（ROADMAP 诚实清单 #1/#3 的重构项
+  仍 deferred）。
+- **32 位边界处理**：KB→字节用 uint64 中间量换算，避免 mem_upper<<10
+  在近 4GiB 回绕；4GiB 本身不可表示，上界封顶 0xFFFFF000。
+- **探测链路排查**：截断点共两处——hw.c HW_MEM_TOTAL_KB 钳到 63MiB、
+  paging.c top 钳到 64MiB；均已去除。shell `mem` 命令直读 mbi 本来就如实，
+  仅补打 PMM used/free 帧。
+- **已知限制（遗留）**：① multiboot mem_upper 只统计 1MiB 以上的连续低
+  内存，PCI hole 之上的第二段 RAM（mmap 表区域）本内核未解析，大内存
+  客户机显示总量仍小于 `-m` 标称值，属如实反映；② 真 4GiB 客户机可能把
+  PCI BAR 放进最后 4GiB 块，当前恒等映射未避让 MMIO，需后续内核窗口方案；
+  ③ 本机 cgroup 内存上限 4GiB，无法实跑 `-m 4096`，最大验证档 3840MiB
+  （客户机报告低内存 ~3071MiB，PCI hole 所致）。
+- **遗留项 #122/#123**：#123 ata_read_sectors DRQ 失败改为返回 -1（与写
+  路径对称）；#122 export/unset 加管理员闸门，/etc/size 落盘需管理员
+  （会话内仍可临时切字号）。详见 docs/night-P0-report.md。

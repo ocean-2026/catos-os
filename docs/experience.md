@@ -42,3 +42,6 @@ CatOS[经验] 审查 ring0 shell 权限面的高效手法：按 fs_touch/fs_mkdi
 CatOS[经验] QEMU UHCI 热插拔时序：monitor device_add usb-kbd 后，内核靠 100 tick 轮询挂起 pending_attach、由键盘等待循环里的 usb_service() 触发扫描+端口复位；枚举/复位需要 1~2s 窗口，探针延迟太短会读到 "no device found" 误判为驱动缺陷。端口状态 bit7(0x0080) 在 QEMU 实连时置位，可作端口有效位判据。
 CatOS[经验] 终端现代主题整改的最低风险路径：以 16 色 CLUT 为唯一语义映射层——bg=#0C0C0C、正文=#DCDCDC、次要=#8B949E、强调绿=#7EE787、路径蓝=#60A5FA、语义红=#F85149/黄=#E3B341/青=#39C5CF/成功绿=#56D364，分别映射到 CON_BLACK/LIGHT_GREY/DARK_GREY/LIGHT_GREEN/LIGHT_BLUE/LIGHT_RED/YELLOW/LIGHT_CYAN/GREEN；shell 侧提示符/错误/成功只引用索引，不改硬编码 RGB，换肤只需改一张表。
 CatOS[经验] 帮助/清单两列对齐：写一个 help_row(cmd,desc) 小助手，先把命令左对齐补齐到固定宽度（24）再写分隔与描述列（第 26 列起），比在超长静态字符串里手工数空格稳健；命令超宽时补齐循环自然跳过、描述退一格不崩溃。
+CatOS[经验] 扩展恒等映射覆盖范围时，把“映射上界”和“分配器上界”分开维护：PSE 尾块可整块映射（沿用旧 16-PSE 行为），但分配器只发 < mem_top 的帧，尾块内不存在的 RAM/hole 永远不会被触达；任务目录镜像要复制全部 1024 个内核 PDE（不能只拷前 16 个），高 LFB PT PDE 随 kdir 一起镜像且保持 supervisor-only（无 US 位），ring3 仍不可触达。
+CatOS[经验] 排查内存类回归先画探测链路再动手：GRUB mbi.mem_lower/mem_upper → kernel.c 透传 → hw_mem_boot/hw_num 显示 → paging_init 的 PMM 上界；逐段确认有无二次截断（本轮截断点在 hw.c 总量钳到 63MiB、paging.c top 钳到 64MiB 两处），其余消费方（shell mem 命令直读 mbi、hwinfo/top 走 hw_num）无需改。
+CatOS[经验] 区分“既有环境问题”与“新引入回归”的最快办法是 A/B：git stash 源码改动 → 重建 iso → 同一条回归脚本跑基线 → 比对失败集合；本轮 size_regress 三档 band 在基线同样 FAIL，根因是检测色值常量滞后于现代主题配色，与内存改动无关。
