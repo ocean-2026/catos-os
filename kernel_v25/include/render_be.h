@@ -87,6 +87,12 @@ typedef struct render_be {
     int  (*scroll)(int n, uint32_t bg_rgb);
     void (*draw_cursor)(int x, int y, uint32_t fg_rgb);
     void (*diag)(void);
+
+    /* v2.25: adjustable glyph scale (vbe24 only today).  NULL = fixed
+     * 8x16 cell.  A backend implementing set_scale MUST also update its
+     * own cols/rows/cell_w/cell_h before returning 0. */
+    uint16_t    cell_w, cell_h;     /* current cell size in pixels       */
+    int  (*set_scale)(int s);       /* 0 compact / 1 normal / 2 large    */
 } render_be_t;
 
 extern render_be_t be_text;

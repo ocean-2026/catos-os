@@ -66,6 +66,18 @@ static uint32_t g_pitch  = GFX24_PITCH;
 static uint8_t  g_stride = 3;
 static uint8_t  g_r = 2, g_g = 1, g_b = 0, g_x = 3;
 
+/* v2.25 adjustable glyph scale (the ASCII font is natively 8x8; the
+ * normal mode just stretches every row twice):
+ *   0 compact  cell  8x8   grid 100x75  ASCII 8x8      CJK 16x8 squeezed
+ *   1 normal   cell  8x16  grid 100x37  ASCII 8x16     CJK 16x16
+ *   2 large    cell 16x32  grid  50x18  ASCII 16x32    CJK 32x32
+ * A hanzi stays TWO columns x ONE row in every scale, so the grid-level
+ * WIDE_L/WIDE_R invariant survives (dense mode vertically squeezes the
+ * 16x16 glyph into 16x8 instead of re-flowing the grid). */
+static int font_scale = 1;
+static int v24_cw(void) { return (font_scale == 2) ? 16 : 8; }
+static int v24_ch(void) { return 8 << font_scale; }
+
 static void dispi_write(uint16_t idx, uint16_t val) {
     outw(DISPI_INDEX_PORT, idx);
     outw(DISPI_DATA_PORT, val);
@@ -135,13 +147,7 @@ static inline void put3(int x, int y, uint32_t c) {
     if (g_stride == 4u) p[g_x] = 0xFFu;
 }
 
-/* A10: the bounds test used to run in int.  x = INT_MAX reached from a
- * user gfx_rect() syscall, *x + *w wrapped negative, the clamp was
- * skipped and fill() computed the LFB offset with x = 0x7FFFFFFF ->
- * ring0 #PF -> permanent halt.  Do all the arithmetic in int64_t so an
- * attacker coordinate cannot wrap the comparison; after clipping the
- * surviving values are inside [0, GFX24_W/H] and safe to narrow back. */
-static int clip(int64_t *x, int64_t *y, int64_t *w, int64_t *h) {
+static int clip(int *x, int *y, int *w, int *h) {
     if (*x < 0) { *w += *x; *x = 0; }
     if (*y < 0) { *h += *y; *y = 0; }
     if (*x + *w > GFX24_W) *w = GFX24_W - *x;
@@ -150,10 +156,7 @@ static int clip(int64_t *x, int64_t *y, int64_t *w, int64_t *h) {
 }
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
-    if (!lfb) return;
-    int64_t lx = x, ly = y, lw = w, lh = h;
-    if (!clip(&lx, &ly, &lw, &lh)) return;
-    x = (int)lx; y = (int)ly; w = (int)lw; h = (int)lh;
+    if (!lfb || !clip(&x, &y, &w, &h)) return;
     uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
     for (int j = 0; j < h; j++) {
         volatile uint8_t *p = lfb + (uint32_t)(y + j) * g_pitch
@@ -221,7 +224,7 @@ void gfx24_demo(void) {
         0x000000, 0xFF0000, 0x00FF00, 0xFFFF00,
         0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF
     };
-    gfx24_clear(0x102040);                      /* dark blue backdrop */
+    gfx24_clear(0x0C0C0C);                      /* v2.37 unified theme backdrop */
     gfx24_rect(100, 120, 100, 100, 0xFF0000);  /* red   */
     gfx24_rect(250, 120, 100, 100, 0x00FF00);  /* green */
     gfx24_rect(100, 270, 100, 100, 0x0000FF);  /* blue  */
@@ -276,7 +279,7 @@ static int v24_enter_bochs(void) {
             return -3;
         }
         active = 1;
-        gfx24_clear(0x000000);
+        gfx24_clear(0x0C0C0C);
         return 0;
     }
     return -1;
@@ -295,7 +298,7 @@ static int v24_enter_svga(void) {
     g_r = s.off_r; g_g = s.off_g; g_b = s.off_b; g_x = s.off_x;
     svga_backend = 1;
     active = 1;
-    gfx24_clear(0x000000);
+    gfx24_clear(0x0C0C0C);
     svga_flush();
     return 0;
 }
@@ -338,54 +341,68 @@ static void resolve_colors(const con_cell_t *c, uint32_t *f, uint32_t *b) {
 
 static void draw_narrow(int ox, int oy, const con_cell_t *c,
                         uint32_t f, uint32_t b) {
-    /* #58: 7x15 inked box inside the 8x16 cell -> one blank pixel of
-     * letter/line spacing, same treatment as be_gfx. */
-    fill(ox, oy, 8, 16, b);
+    /* #58: inked box inside the cell with blank spacing, at every scale.
+     * Source glyph is 8x8; dest cell = cw x ch = (8 or 16) x (8/16/32). */
+    int cw = v24_cw(), ch = v24_ch();
+    int hx = cw / 8;               /* horizontal stretch factor          */
+    fill(ox, oy, cw, ch, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
-        for (int j = 0; j < 15; j++) {
-            unsigned row = g[j >> 1];
-            int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
+        for (int j = 0; j < ch; j++) {
+            unsigned row = g[j >> font_scale];
+            int shift = (c->attrs & CON_ATTR_ITALIC) &&
+                        (j >> font_scale) < 5 ? hx : 0;
             for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
-                int dx = i + shift;
-                if (dx >= 7) continue;
-                put3(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
-                    put3(ox + dx + 1, oy + j, f);
+                for (int sx = 0; sx < hx; sx++) {
+                    int dx = i * hx + sx + shift;
+                    if (dx >= 7 * hx) continue;
+                    put3(ox + dx, oy + j, f);
+                    if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7 * hx)
+                        put3(ox + dx + 1, oy + j, f);
+                }
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + 15, 8, 1, f);
-    if (c->attrs & CON_ATTR_STRIKE)    fill(ox, oy + 10, 8, 1, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + ch - 1, cw, 1, f);
+    if (c->attrs & CON_ATTR_STRIKE)
+        fill(ox, oy + (ch * 10) / 16, cw, 1, f);
 }
 
 static void draw_wide(int ox, int oy, const con_cell_t *c,
                       uint32_t f, uint32_t b) {
     const uint8_t *g = render_font_hz(c->cp);
-    fill(ox, oy, 16, 16, b);
+    /* Cell footprint is ALWAYS 2 cols x 1 row.  Scale 0 squeezes the
+     * 16x16 glyph vertically to 16x8; scale 2 doubles both axes. */
+    int cw = v24_cw(), ch = v24_ch();
+    int w = cw * 2, hx = cw / 8;
+    fill(ox, oy, w, ch, b);
     if (g) {
-        for (int j = 0; j < 16; j++) {
-            unsigned row = ((unsigned)g[2 * j] << 8) | g[2 * j + 1];
+        for (int j = 0; j < ch; j++) {
+            int src = (font_scale == 0) ? j * 2 : j >> (font_scale - 1);
+            unsigned row = ((unsigned)g[2 * src] << 8) | g[2 * src + 1];
             for (int i = 0; i < 16; i++) {
                 if (!(row & (1u << (15 - i)))) continue;
-                put3(ox + i, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && i + 1 < 16)
-                    put3(ox + i + 1, oy + j, f);
+                for (int sx = 0; sx < hx; sx++) {
+                    put3(ox + i * hx + sx, oy + j, f);
+                    if ((c->attrs & CON_ATTR_BOLD) && i * hx + sx + 1 < w)
+                        put3(ox + i * hx + sx + 1, oy + j, f);
+                }
             }
         }
     }
-    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + 15, 16, 1, f);
-    if (c->attrs & CON_ATTR_STRIKE)    fill(ox, oy + 8, 16, 1, f);
+    if (c->attrs & CON_ATTR_UNDERLINE) fill(ox, oy + ch - 1, w, 1, f);
+    if (c->attrs & CON_ATTR_STRIKE)    fill(ox, oy + ch / 2, w, 1, f);
 }
 
 static void v24_draw_cell(int gx, int gy, const con_cell_t *c) {
     if (!lfb) return;
-    if (gx < 0 || gx >= GFX24_W / 8 || gy < 0 || gy >= GFX24_H / 16) return;
+    if (gx < 0 || gx * v24_cw() >= GFX24_W ||
+        gy < 0 || gy * v24_ch() >= GFX24_H) return;
     if (c->flags == CELL_F_WIDE_R) return;
     uint32_t f, b;
     resolve_colors(c, &f, &b);
-    int ox = gx * 8, oy = gy * 16;
+    int ox = gx * v24_cw(), oy = gy * v24_ch();
     if (c->flags == CELL_F_WIDE_L) draw_wide(ox, oy, c, f, b);
     else                           draw_narrow(ox, oy, c, f, b);
 }
@@ -395,7 +412,21 @@ static void v24_draw_cursor(int x, int y, uint32_t fg_rgb) {
     /* v2.21: EMPTY cell -> 1 px UNDERLINE on the cell's last scanline
      * (not the old #58 8x8 block).  render.c draws a glyph cell as
      * reverse video instead, and blinks this underline every 0.5 s. */
-    fill(x * 8, y * 16 + 15, 8, 1, fg_rgb & 0x00FFFFFFu);
+    fill(x * v24_cw(), y * v24_ch() + v24_ch() - 1, v24_cw(), 1,
+         fg_rgb & 0x00FFFFFFu);
+}
+
+/* v2.25: change the glyph scale at runtime.  Updates this backend's
+ * grid metrics; render.c does the reflow and full redraw. */
+static int v24_set_scale(int s) {
+    if (s < 0 || s > 2) return CON_EINVAL;
+    font_scale = s;
+    be_vbe24.cols = (uint16_t)(GFX24_W / v24_cw());
+    be_vbe24.rows = (uint16_t)(GFX24_H / v24_ch());
+    be_vbe24.cell_w = (uint16_t)v24_cw();
+    be_vbe24.cell_h = (uint16_t)v24_ch();
+    gfx24_clear(0x0C0C0C);      /* v2.37: wipe old-scale demo pixels full-frame */
+    return 0;
 }
 static void v24_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;          /* truecolour: no hardware CLUT */
@@ -408,7 +439,7 @@ static void v24_diag(void) {
     else
         con_write("vbe24 backend: Bochs dispi 800x600x24bpp LFB\n"
                   "3 B/px BGR, pitch=2400 fb=1440000 B, no pan / no MTRR\n");
-    con_write("100x37 8x16 text cells; gfx_info/gfx_rect/gfx_blit (kernel writes)\n");
+    con_write("vbe24 text cells: scale 0=100x75 8x8, 1=100x37 8x16, 2=50x18 16x32\n(`size small|normal|large`); gfx_info/gfx_rect/gfx_blit (kernel writes)\n");
     con_write("pitch=0x");
     char b[2];
     for (int i = 7; i >= 0; i--) {
@@ -453,5 +484,7 @@ render_be_t be_vbe24 = {
     .set_palette= v24_set_palette,
     .scroll     = 0,                    /* front-end full re-render */
     .draw_cursor= v24_draw_cursor,
-    .diag       = v24_diag
+    .diag       = v24_diag,
+    .cell_w     = 8, .cell_h = 16,
+    .set_scale  = v24_set_scale
 };

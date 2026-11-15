@@ -17,6 +17,7 @@
 #include "es1371.h"     /* v2.21 #56: ES1370/1371 PCI audio IRQ top half */
 #include "e1000.h"      /* v2.21 #55: Intel e1000 PCI NIC IRQ top half */
 #include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
+#include "usb.h"        /* v2.26 UHCI/HID keyboard polling */
 #include "task.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
 
@@ -197,6 +198,7 @@ void isr_irq(int_frame_t *f) {
         timer_ticks++;
         svga_tick();                         /* SVGA II FIFO UPDATE (25 Hz) */
         con_tick();                          /* BLINK phase + software cursor */
+        usb_poll();                          /* v2.26 UHCI/HID keyboard polling */
         task_tick_wake();                    /* wake sleepers, set need_resched */
         break;
     case 1:

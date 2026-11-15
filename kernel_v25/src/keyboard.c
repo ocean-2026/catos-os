@@ -48,6 +48,15 @@ void kb_irq(void) {
     console_wake_all();                 /* wake tasks blocked for a key */
 }
 
+/* Feed a scancode from the USB HID path into the same ring buffer;
+ * usb_poll() calls this rather than calling kb_irq(), keeping IRQ1
+ * and USB input on the same consumer path (kb_getkey / rl_hist). */
+void kb_usb_feed(uint8_t sc) {
+    uint32_t n = (scq_head + 1) % SCQ_SZ;
+    if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
+    console_wake_all();
+}
+
 static int scq_pop(void) {
     if (scq_tail == scq_head) return -1;
     uint8_t sc = scq[scq_tail];

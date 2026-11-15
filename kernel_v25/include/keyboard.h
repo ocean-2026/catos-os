@@ -42,6 +42,8 @@
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */
+/* v2.26: same ring-buffer enqueue for the USB HID path (usb_poll). */
+void kb_usb_feed(uint8_t sc);
 int  kb_peek(void);           /* non-blocking: a scancode is pending */
 int  kb_getkey_timed(uint32_t ticks);  /* real key within N ticks, else -1 */
 /* Blocking: returns one key as either an ASCII code (0..255, Ctrl+letter
