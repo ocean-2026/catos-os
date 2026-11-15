@@ -101,3 +101,8 @@ CatOS[易错点] size_regress.py 的绿带检测常量 GREEN=(0x55,0xFF,0x55) �
 CatOS[易错点] PE/COFF 段头（section header）开头有 8 字节 Name 字段，内核镜像结构体 pe_section_t 不能省：漏写 Name 后 VirtualSize/VirtualAddress/SizeOfRawData/PointerToRawData 整体错位 8 字节，字段读出全错、边界校验直接返回 -5，且编译期不报错；解析二进制格式时结构体字段顺序/偏移必须与磁盘布局逐字段对齐，最好用 objdump -h 与 Python 解包双重复核。
 CatOS[易错点] qemu_driver._stage_image() 把 iso/磁盘拷到 /tmp/catos_qemu_stage 并在进程退出后删除，跨两遍 guest 的格式化/注入写入不会落回原始磁盘；自己写两遍驱动必须把磁盘暂存到本地 /tmp 目录，并在阶段间显式拷回原始磁盘再注入。工作区文件系统（hpvs_fs）不支持 QEMU image flock，直接在工作区路径起 guest 会报 "Failed to get write lock"，磁盘镜像必须放本地 /tmp。
 CatOS[易错点] shell 交互询问可能是多步（PE->CE 先问 y/n，再问保存文件名，回车用默认）；自动化驱动必须对每一步提示各发一次按键，漏掉第二问会卡在文件名 readline，后续命令全部丢失。format 命令同理需要 y 后再回车。
+CatOS[易错点] 并行分片共享 /tmp 暂存目录时，_stage_image 按同一 basename 拷贝镜像，QEMU 的 OFD write lock 会拒绝第二台 guest（"Failed to get write lock"，monitor 起不来，脚本误报 "could not reach the QEMU monitor"）；暂存目录必须按 PID（或分片 id）建独立子目录，磁盘副本也要用不同文件名。
+CatOS[易错点] 用 C 宏把旧全局几何变量映射到卷结构体字段时，结构体成员名不能与宏同名——否则成员声明 `uint32_t part_start;` 会被预处理展开成 `uint32_t (V()->part_start);` 这类非法表达式；结构体字段改用 d_ 前缀（d_start/d_fatsz...），宏再映射过去。
+CatOS[易错点] shell 自定义负数返回码不能撞 fs.h 既有 FS_ERR_* 段（NOENT=-1/NOTDIR=-2/INVAL=-3/FULL=-4/EXIST=-5）；否则 switch 出现 duplicate case value。mount/umount 的细分错误码从 -10 起避让。
+CatOS[易错点] qemu_regress 启动时会清空 SHOTS/*.png，跨分片或跨轮次连续跑回归会把上一轮的证据截图一并删掉；验收截图必须在所有回归跑完之后再生成最后一轮，不要提前留存。
+CatOS[易错点] 回归脚本硬编码 monitor 端口，并行分片各占一段；端口被占表现为连接 refused / "could not reach monitor"，不是内核故障。给 disk_regress、fsrec_regress 补 --port 覆盖，用本分片端口段（4720-4729）。

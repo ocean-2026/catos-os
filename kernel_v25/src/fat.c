@@ -41,13 +41,40 @@ struct __attribute__((packed)) dent {
     uint32_t size;
 };
 
-/* ---------- volume state (geometry is dynamic) ---------- */
+/* ---------- volume state (geometry is dynamic) ----------
+ * P2: geometry lives in a per-volume slot; the FAT cache and the
+ * write journal are shared and belong to the ACTIVE volume.  Switching
+ * volumes (fat_activate) reloads that volume's FAT #1 from disk. */
+typedef struct {
+    uint8_t  d_drive;
+    uint32_t d_start;        /* partition LBA */
+    uint32_t d_fatsz;       /* sectors per FAT */
+    uint32_t d_data;        /* LBA of cluster 2 */
+    uint32_t d_root;        /* root directory cluster */
+    uint32_t d_next;        /* allocation hint */
+    uint32_t d_vcl;         /* usable clusters */
+    uint32_t d_maxc;        /* FAT entries capacity */
+    uint32_t d_vtot;        /* drive sectors (IDENTIFY) */
+    uint32_t d_spc;         /* sectors per cluster */
+    uint8_t  d_present;
+} fat_vol_t;
+
+static fat_vol_t g_vol[FAT_VOL_MAX];
+static int       g_active = 0;
+static fat_vol_t *V(void) { return &g_vol[g_active]; }
+
+#define part_start   (V()->d_start)
+#define fat_sz       (V()->d_fatsz)
+#define data_start   (V()->d_data)
+#define root_clus    (V()->d_root)
+#define next_free    (V()->d_next)
+#define vol_clusters (V()->d_vcl)
+#define max_clus     (V()->d_maxc)
+#define vol_total    (V()->d_vtot)
+#define spc          (V()->d_spc)
+#define cur_drive    (V()->d_drive)
+
 static uint8_t  fat_cache[FAT_CACHE_MAX];   /* whole FAT #1 cached */
-static uint32_t part_start   = PART_START;
-static uint32_t fat_sz       = 0;           /* sectors per FAT */
-static uint32_t data_start   = 0;           /* LBA of cluster 2 */
-static uint32_t root_clus    = ROOT_CLUS;
-static uint32_t next_free    = 3;           /* allocation hint */
 /* #48 deep fix (v2.5.4): per-entry FAT write journal.  fat_flush() used to
  * rewrite whole FAT sectors from the in-memory cache, silently wiping
  * host-side injected FAT entries that share a sector with kernel-modified
@@ -62,10 +89,6 @@ static uint32_t fat_journal[FAT_JOURNAL_MAX];         /* modified entries */
 static uint8_t  fat_jsec[(FAT_CACHE_MAX / 512) / 8];  /* dirty sector map */
 static int      fat_journal_n   = 0;
 static int      fat_journal_ovf = 0;
-static uint32_t vol_clusters = 0;           /* usable clusters */
-static uint32_t max_clus     = 0;           /* FAT entries (fat_sz*512/4) */
-static uint32_t vol_total    = 0;           /* drive sectors (IDENTIFY) */
-static uint32_t spc          = 8;           /* sectors per cluster */
 
 static uint32_t clus_lba(uint32_t c) { return data_start + (c - 2) * spc; }
 /* v2.34 (#118): valid cluster numbers end at vol_clusters+1.  max_clus
@@ -122,7 +145,7 @@ static void write_fat_region(uint32_t start) {
     while (done < fat_sz) {
         uint32_t n = fat_sz - done;
         if (n > 128) n = 128;
-        ata_write_sectors(start + done, (uint8_t)n, fat_cache + done * 512);
+        ata_write(cur_drive, start + done, (uint8_t)n, fat_cache + done * 512);
         done += n;
     }
 }
@@ -132,7 +155,7 @@ static int read_fat_region(void) {
     while (done < fat_sz) {
         uint32_t n = fat_sz - done;
         if (n > 128) n = 128;
-        if (ata_read_sectors(part_start + RESERVED + done, (uint8_t)n,
+        if (ata_read(cur_drive, part_start + RESERVED + done, (uint8_t)n,
                              fat_cache + done * 512) != 0) return -1;
         done += n;
     }
@@ -164,14 +187,14 @@ static void fsinfo_update(void) {
     sec[0x1EE] = (uint8_t)((nf >> 16) & 0xFF);
     sec[0x1EF] = (uint8_t)((nf >> 24) & 0xFF);
     sec[0x1FC] = 0x00; sec[0x1FD] = 0x00; sec[0x1FE] = 0x55; sec[0x1FF] = 0xAA;
-    ata_write_sectors(part_start + 1, 1, sec);
+    ata_write(cur_drive, part_start + 1, 1, sec);
 }
 
 /* patch one sector of one FAT with the journaled entries (RMW).  Returns
  * 0 ok / -1 read or write failure (journal is kept for a retry). */
 static int fat_flush_sector(uint32_t fatbase, uint32_t sec) {
     uint8_t disk[512];
-    if (ata_read_sectors(fatbase + sec, 1, disk) != 0) return -1;
+    if (ata_read(cur_drive, fatbase + sec, 1, disk) != 0) return -1;
     for (int j = 0; j < fat_journal_n; j++) {
         uint32_t c = fat_journal[j];
         if ((c >> 7) != sec) continue;
@@ -181,7 +204,7 @@ static int fat_flush_sector(uint32_t fatbase, uint32_t sec) {
         disk[off + 2] = fat_cache[c * 4 + 2];
         disk[off + 3] = fat_cache[c * 4 + 3];
     }
-    return ata_write_sectors(fatbase + sec, 1, disk);
+    return ata_write(cur_drive, fatbase + sec, 1, disk);
 }
 
 static void fat_flush(void) {
@@ -217,7 +240,7 @@ uint32_t fat_alloc(void) {
         for (; c < clus_hi(); c++) {
             if (fat_get(c) != 0) continue;
             uint8_t sec[512];
-            if (ata_read_sectors(part_start + RESERVED + (c >> 7), 1, sec) != 0)
+            if (ata_read(cur_drive, part_start + RESERVED + (c >> 7), 1, sec) != 0)
                 break;                                  /* ATA trouble: stop allocating */
             uint32_t off = (c & 127) * 4;
             uint32_t dv = (uint32_t)sec[off]
@@ -248,12 +271,12 @@ void fat_free_chain(uint32_t clus) {
 
 int fat_read_cluster(uint32_t clus, uint8_t *out) {
     if (clus < 2) return -1;
-    return ata_read_sectors(clus_lba(clus), (uint8_t)spc, out);
+    return ata_read(cur_drive, clus_lba(clus), (uint8_t)spc, out);
 }
 
 int fat_write_cluster(uint32_t clus, const uint8_t *buf) {
     if (clus < 2) return -1;
-    return ata_write_sectors(clus_lba(clus), (uint8_t)spc, buf);
+    return ata_write(cur_drive, clus_lba(clus), (uint8_t)spc, buf);
 }
 
 /* ---------- names ---------- */
@@ -1050,16 +1073,16 @@ int fat_verify_mirror(void) {
         }
         if (!dirty) continue;
         uint8_t d1[512], d2[512];
-        if (ata_read_sectors(part_start + RESERVED + sec, 1, d1) != 0) {
+        if (ata_read(cur_drive, part_start + RESERVED + sec, 1, d1) != 0) {
             fat_mirror_last = -1; return -1;
         }
-        if (ata_read_sectors(part_start + RESERVED + fat_sz + sec, 1, d2) != 0) {
+        if (ata_read(cur_drive, part_start + RESERVED + fat_sz + sec, 1, d2) != 0) {
             fat_mirror_last = -1; return -1;
         }
         int same = 1;
         for (int k = 0; k < 512; k++) if (d1[k] != d2[k]) { same = 0; break; }
         if (same) continue;
-        if (ata_write_sectors(part_start + RESERVED + fat_sz + sec, 1, d1) != 0) {
+        if (ata_write(cur_drive, part_start + RESERVED + fat_sz + sec, 1, d1) != 0) {
             fat_mirror_last = -1; return -1;
         }
         fixed++;
@@ -1068,28 +1091,14 @@ int fat_verify_mirror(void) {
     return fixed;
 }
 
-int fat_probe(void) {
-    uint8_t mbr[512], dbr[512];
+/* Probe one FAT32 volume at `drive` LBA `part_lba` into volume slot
+ * `slot`, activate it and cache its FAT #1.  0 ok / -1 failure. */
+static int probe_volume(int slot, uint8_t drive, uint32_t part_lba) {
+    uint8_t dbr[512];
+    g_active = slot;
+    g_vol[slot].d_drive = drive;
 
-    /* discover the IDE slot and drive size first */
-    uint32_t sec = 0;
-    if (ata_identify(&sec) != 0 || sec == 0) return -1;
-
-    if (ata_read_sectors(0, 1, mbr) != 0) return -1;
-    if (!(mbr[510] == 0x55 && mbr[511] == 0xAA)) return -1;
-
-    int found = -1;
-    for (int i = 0; i < 4; i++) {
-        uint8_t *e = mbr + 446 + i * 16;
-        if (e[4] == 0x0B || e[4] == 0x0C) { found = i; break; }
-    }
-    if (found < 0) return -1;
-
-    uint32_t part = (uint32_t)mbr[446 + found * 16 + 8]
-                  | ((uint32_t)mbr[446 + found * 16 + 9] << 8)
-                  | ((uint32_t)mbr[446 + found * 16 + 10] << 16)
-                  | ((uint32_t)mbr[446 + found * 16 + 11] << 24);
-    if (ata_read_sectors(part, 1, dbr) != 0) return -1;
+    if (ata_read(drive, part_lba, 1, dbr) != 0) return -1;
     if (!(dbr[510] == 0x55 && dbr[511] == 0xAA)) return -1;
 
     uint16_t bps = (uint16_t)(dbr[0x0B] | (dbr[0x0C] << 8));
@@ -1116,13 +1125,13 @@ int fat_probe(void) {
 
     if (root < 2) return -1;
     if (total32 <= rsvd + nfats * fatsz) return -1;  /* underflow guard */
-    part_start = part;
+    part_start = part_lba;
     spc = s;
     fat_sz = fatsz;
-    data_start = part + rsvd + nfats * fatsz;
+    data_start = part_lba + rsvd + nfats * fatsz;
     root_clus = root;
     max_clus = fatsz * 512 / 4;
-    vol_total = total32 + part;
+    vol_total = total32 + part_lba;
     vol_clusters = (total32 - (rsvd + nfats * fatsz)) / spc;
 
     if (read_fat_region() != 0) return -1;
@@ -1137,7 +1146,64 @@ int fat_probe(void) {
      * can allocate through the stale copy. */
     if (fat_verify_mirror() > 0)
         vga_write("fsck: FAT mirror was inconsistent, repaired from FAT #1\n");
+    g_vol[slot].d_present = 1;
     return 0;
+}
+
+int fat_probe(void) {
+    uint8_t mbr[512];
+
+    /* discover the IDE slots first */
+    if (ata_scan() == 0) return -1;
+
+    if (ata_read(0, 0, 1, mbr) != 0) return -1;
+    if (!(mbr[510] == 0x55 && mbr[511] == 0xAA)) return -1;
+
+    int found = -1;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        if (e[4] == 0x0B || e[4] == 0x0C) { found = i; break; }
+    }
+    if (found < 0) return -1;
+
+    uint32_t part = (uint32_t)mbr[446 + found * 16 + 8]
+                  | ((uint32_t)mbr[446 + found * 16 + 9] << 8)
+                  | ((uint32_t)mbr[446 + found * 16 + 10] << 16)
+                  | ((uint32_t)mbr[446 + found * 16 + 11] << 24);
+    return probe_volume(0, 0, part);
+}
+
+int fat_mount_partition(uint8_t drive, uint32_t part_lba, uint32_t size,
+                        int *out_slot) {
+    (void)size;
+    int slot = -1;
+    for (int i = 1; i < FAT_VOL_MAX; i++) {
+        if (!g_vol[i].d_present) { slot = i; break; }
+    }
+    if (slot < 0) return -1;
+    if (probe_volume(slot, drive, part_lba) != 0) {
+        g_vol[slot].d_present = 0;
+        if (g_vol[0].d_present) fat_activate(0);
+        return -1;
+    }
+    if (out_slot) *out_slot = slot;
+    return 0;
+}
+
+void fat_activate(int slot) {
+    if (slot < 0 || slot >= FAT_VOL_MAX || !g_vol[slot].d_present) return;
+    if (g_active == slot) return;
+    g_active = slot;
+    /* reload this volume's FAT #1 into the shared cache; reset journal */
+    read_fat_region();
+}
+
+int fat_active_slot(void) { return g_active; }
+
+void fat_release_slot(int slot) {
+    if (slot <= 0 || slot >= FAT_VOL_MAX) return;
+    if (g_active == slot) g_active = 0;
+    g_vol[slot].d_present = 0;
 }
 
 /* ---------- mkfs (geometry from ATA IDENTIFY) ---------- */

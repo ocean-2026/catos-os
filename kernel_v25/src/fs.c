@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "fat.h"
+#include "part.h"
 #include "vga.h"
 static void fs_dbg2(const char *tag, uint32_t v) {
     (void)tag; (void)v;  /* v2.5 debug: no-op */
@@ -13,6 +14,19 @@ static int      fs_ready = 0;
 static uint32_t g_cwd;                  /* FAT cluster of current dir */
 static char     cwd_path[FS_PATH_MAX];  /* absolute path, e.g. "/etc" */
 static fs_entry_t g_ent;                /* single open-file buffer */
+
+/* P2: mount table.  Volume slot 0 is the implicit root volume (letter
+ * 'A'); g_mnt[] holds the manually mounted extra partitions. */
+#define VFS_MAX_MOUNTS (FAT_VOL_MAX - 1)
+struct vfs_mount {
+    uint8_t used;
+    char    mnt[FS_PATH_MAX];   /* absolute mount point, e.g. "/docs" */
+    int     vol;                /* fat volume slot */
+    char    letter;             /* drive suffix, e.g. 'B' */
+    char    dev[16];            /* device name, e.g. "hd0p2" */
+};
+static struct vfs_mount g_mnt[VFS_MAX_MOUNTS];
+static const char ROOT_LETTER = 'A';
 
 /* ---------- tiny string helpers ---------- */
 static int slen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
@@ -96,12 +110,53 @@ static void abs_path(const char *p, char *out) {
     path_norm(tmp, out);
 }
 
+/* P2: find the mount entry whose mount point owns `abs` (longest prefix
+ * match).  Returns the g_mnt index, or -1 when the path lives on the
+ * root volume. */
+static int mount_for(const char *abs) {
+    int best = -1, bestlen = 0;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        const char *m = g_mnt[i].mnt;
+        int ml = slen(m);
+        int match = 0;
+        if (scmp(abs, m) == 0) match = 1;
+        else if (abs[ml] == '/') {
+            int k = 0;
+            for (; k < ml; k++) if (abs[k] != m[k]) break;
+            if (k == ml) match = 1;
+        }
+        if (match && ml > bestlen) { best = i; bestlen = ml; }
+    }
+    return best;
+}
+
+/* does `abs` sit inside (or equal) mount point `m`? */
+static int path_under(const char *abs, const char *m) {
+    int ml = slen(m);
+    if (scmp(abs, m) == 0) return 1;
+    if (abs[ml] != '/') return 0;
+    for (int k = 0; k < ml; k++) if (abs[k] != m[k]) return 0;
+    return 1;
+}
+
 /* resolve an absolute path (must start with '/'); returns FAT cluster of
- * the final component, or 0 on error. */
+ * the final component, or 0 on error.  Walks through mount points: once a
+ * prefix matches a mount entry, resolution continues inside that volume. */
 static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
+    int mi = mount_for(abs);
+    const char *rel = abs;
+    if (mi >= 0) {
+        fat_activate(g_mnt[mi].vol);
+        int ml = slen(g_mnt[mi].mnt);
+        rel = abs + ml;
+        if (*rel == '/') rel++;
+    } else {
+        fat_activate(0);
+    }
     uint32_t cur = fat_root();
     int filled = 0;
-    const char *p = abs;
+    const char *p = rel;
     if (*p == '/') p++;
     while (*p) {
         while (*p == '/') p++;
@@ -131,7 +186,9 @@ static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
 
 /* ---------- lifecycle ---------- */
 void fs_init(void) {
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) g_mnt[i].used = 0;
     fs_ready = (fat_probe() == 0);
+    if (fs_ready) part_scan();     /* enumerate MBR partitions for mount */
     g_cwd = fat_root();
     scpy(cwd_path, "/");
     memz(&g_ent, sizeof(g_ent));
@@ -276,10 +333,30 @@ int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     return u.count;
 }
 
-struct list_ud { int count; int longfmt; };
+/* P2: if `name` inside `parent_abs` is a mount point, fill `suf` with
+ * "(X:)" (drive letter) and return 1; otherwise leave it empty. */
+static int mount_suffix(const char *parent_abs, const char *name, char *suf) {
+    char full[FS_PATH_MAX];
+    if (!scmp(parent_abs, "/")) { scpy(full, "/"); scat(full, name); }
+    else { scpy(full, parent_abs); scat(full, "/"); scat(full, name); }
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (g_mnt[i].used && !scmp(g_mnt[i].mnt, full)) {
+            suf[0] = '('; suf[1] = g_mnt[i].letter; suf[2] = ':';
+            suf[3] = ')'; suf[4] = 0;
+            return 1;
+        }
+    }
+    suf[0] = 0;
+    return 0;
+}
+
+struct list_ud { int count; int longfmt; const char *parent; };
 static void list_cb(const char *name, uint8_t attr,
                     uint32_t clus, uint32_t size, void *ud) {
     struct list_ud *u = (struct list_ud *)ud;
+    char suf[8];
+    int ismount = ((attr & FAT_ATTR_DIR) != 0) &&
+                  mount_suffix(u->parent, name, suf);
     if (u->longfmt) {
         /* v2.34: ls -l -- perms, size, name (ls -l <file> also works) */
         int isdir = (attr & FAT_ATTR_DIR) != 0;
@@ -297,8 +374,9 @@ static void list_cb(const char *name, uint8_t attr,
         vga_write("  ");
         vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
         vga_write(name);
+        if (ismount) vga_write(suf);
         vga_set_fg(VGA_WHITE);
-        vga_write(isdir ? "/\n" : "\n");
+        vga_write((isdir && !ismount) ? "/\n" : "\n");
         u->count++;
         return;
     }
@@ -306,7 +384,9 @@ static void list_cb(const char *name, uint8_t attr,
         vga_set_fg(VGA_LIGHT_CYAN);
         vga_write("[DIR ] ");
         vga_write(name);
-        vga_write("/\n");
+        if (ismount) vga_write(suf);
+        else vga_write("/");
+        vga_write("\n");
     } else {
         vga_set_fg(VGA_LIGHT_GREY);
         vga_write("[FILE] ");
@@ -338,14 +418,14 @@ void fs_list(const char *path) {
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
     if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write("catos: dir: not a directory\n"); return; }
 
-    struct list_ud u; u.count = 0; u.longfmt = longfmt;
+    struct list_ud u; u.count = 0; u.longfmt = longfmt; u.parent = abs;
     if (longfmt && !(e.attr & FAT_ATTR_DIR)) {
         /* v2.34: ls -l <file> -- show just that entry */
         const char *nm = abs;
         for (const char *p = abs; *p; p++) if (*p == '/') nm = p + 1;
         uint32_t fsize = e.size;
         vga_write("perms      size     name\n");
-        struct list_ud one; one.count = 0; one.longfmt = 1;
+        struct list_ud one; one.count = 0; one.longfmt = 1; one.parent = abs;
         list_cb(nm, e.attr, 0, fsize, &one);
         return;
     }
@@ -767,4 +847,124 @@ int fs_delete(const char *path) {
     if (e.attr & FAT_ATTR_DIR) return -1;
     fat_free_chain(e.cluster);
     return fat_delete_name(pclus, leaf);
+}
+
+/* ---------- P2: mount table (Linux-style bind of a partition) ---------- */
+
+struct empty_ud { int count; };
+static void empty_cb(const char *name, uint8_t attr,
+                     uint32_t clus, uint32_t size, void *ud) {
+    (void)attr; (void)clus; (void)size;
+    struct empty_ud *u = (struct empty_ud *)ud;
+    if (scmp(name, ".") && scmp(name, "..")) u->count++;
+}
+
+int fs_mount(const char *spec, const char *dir) {
+    if (!fs_ready) return FS_ERR_NOENT;
+    if (!spec || !*spec || !dir || !*dir) return FS_ERR_INVAL;
+
+    int pi = part_lookup(spec);
+    if (pi < 0) return FS_ERR_INVAL;
+    const part_t *p = part_get(pi);
+    if (p->extended) return -10;  /* EBR chains unsupported */
+    if (!p->fat32)  return -10;
+
+    char abs[FS_PATH_MAX];
+    abs_path(dir, abs);
+    if (!scmp(abs, "/")) return FS_ERR_INVAL;    /* root is never a mountpoint */
+
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus) return FS_ERR_NOENT;
+    if (!(e.attr & FAT_ATTR_DIR)) return FS_ERR_NOTDIR;
+    if (mount_for(abs) >= 0) return FS_ERR_EXIST;
+
+    struct empty_ud u = { 0 };
+    fat_list_dir(clus, empty_cb, &u);
+    if (u.count) return -13;                      /* target directory not empty */
+
+    int mi = -1;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++)
+        if (!g_mnt[i].used) { mi = i; break; }
+    if (mi < 0) return -11;
+
+    int vol = -1;
+    if (fat_mount_partition(p->drive, p->start, p->size, &vol) != 0)
+        return -12;
+
+    int n = 0;
+    for (int j = 0; j < VFS_MAX_MOUNTS; j++) if (g_mnt[j].used) n++;
+    g_mnt[mi].used = 1;
+    g_mnt[mi].vol = vol;
+    g_mnt[mi].letter = (char)(ROOT_LETTER + 1 + n);
+    scpy(g_mnt[mi].mnt, abs);
+    part_devname(p, g_mnt[mi].dev, sizeof(g_mnt[mi].dev));
+
+    fat_activate(0);                             /* back to the root volume */
+    return FS_OK;
+}
+
+int fs_umount(const char *dir) {
+    if (!fs_ready) return FS_ERR_NOENT;
+    if (!dir || !*dir) return FS_ERR_INVAL;
+    char abs[FS_PATH_MAX];
+    abs_path(dir, abs);
+
+    int mi = -1;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++)
+        if (g_mnt[i].used && !scmp(g_mnt[i].mnt, abs)) { mi = i; break; }
+    if (mi < 0) return FS_ERR_NOENT;
+
+    if (path_under(cwd_path, abs)) return -14;    /* cwd is inside: busy */
+
+    if (fat_active_slot() == g_mnt[mi].vol) fat_activate(0);
+    fat_release_slot(g_mnt[mi].vol);
+    g_mnt[mi].used = 0;
+    return FS_OK;
+}
+
+void fs_mount_list(void) {
+    vga_write("Filesystem  Mounted on\n");
+    vga_write("hd0          /\n");
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        vga_write(g_mnt[i].dev);
+        vga_write("          ");
+        vga_write(g_mnt[i].mnt);
+        vga_write("  (");
+        vga_putc(g_mnt[i].letter);
+        vga_write(":)\n");
+    }
+}
+
+/* one df row for volume `vol` mounted at `mnt` (device `dev`) */
+static void df_row(const char *dev, const char *mnt, int vol) {
+    fat_activate(vol);
+    uint32_t cs  = fat_cluster_size();
+    uint32_t tot = fat_total_clusters();
+    uint32_t fre = fat_free_clusters();
+    uint32_t used = tot > fre ? tot - fre : 0;
+    uint32_t tot_k = (uint32_t)(((uint64_t)tot * cs) / 1024);
+    uint32_t use_k = (uint32_t)(((uint64_t)used * cs) / 1024);
+    uint32_t fre_k = (uint32_t)(((uint64_t)fre * cs) / 1024);
+    vga_write(dev);
+    for (int p = slen(dev); p < 12; p++) vga_putc(' ');
+    print_int((int)tot_k); vga_write("K  ");
+    print_int((int)use_k); vga_write("K  ");
+    print_int((int)fre_k); vga_write("K  ");
+    print_int(tot ? (int)(used * 100 / tot) : 0);
+    vga_write("%  ");
+    vga_write(mnt);
+    vga_write("\n");
+}
+
+void fs_df(void) {
+    if (!fs_ready) { vga_write("df: no FAT32 volume\n"); return; }
+    vga_write("Filesystem  total      used      free  use%  Mounted on\n");
+    df_row("hd0", "/", 0);
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        df_row(g_mnt[i].dev, g_mnt[i].mnt, g_mnt[i].vol);
+    }
+    fat_activate(0);
 }

@@ -105,7 +105,11 @@ def _stage_image(path):
             probe.close()
         except OSError:
             pass
-    stage = os.path.join(tempfile.gettempdir(), "catos_qemu_stage")
+    # P2: per-process staging subdir.  Parallel CatOS shards share /tmp and
+    # would otherwise stage images under the same basename; QEMU's OFD write
+    # lock then refuses the second guest with "Failed to get write lock".
+    stage = os.path.join(tempfile.gettempdir(),
+                         "catos_qemu_stage_%d" % os.getpid())
     os.makedirs(stage, exist_ok=True)
     dst = os.path.join(stage, os.path.basename(path))
     shutil.copy2(path, dst)

@@ -89,6 +89,15 @@ int  fs_set_attr(const char *path, uint8_t attr);
 int  fs_read_at(const char *path, char *buf, int offset, int max);
 int  fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mode);
 int  fs_delete(const char *path);
+/* P2: Linux-style mounting.  fs_mount() binds a probed partition (spec:
+ * partition number on drive 0, or "hd<d>p<e>") to an existing empty
+ * directory.  fs_umount detaches it.  fs_mount_list() prints the mount
+ * table; fs_df() prints per-mountpoint usage. */
+int  fs_mount(const char *spec, const char *dir);
+int  fs_umount(const char *dir);
+void fs_mount_list(void);
+void fs_df(void);
+
 /* v2.24 directory recursion support */
 int  fs_is_dir(const char *path);            /* 1 = resolved path is a dir */
 int  fs_rmdir(const char *path);             /* remove an EMPTY directory:

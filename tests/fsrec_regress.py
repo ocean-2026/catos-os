@@ -57,7 +57,11 @@ def main():
     iso = os.path.abspath(sys.argv[1])
     qemu = find_qemu(sys.argv[sys.argv.index("--qemu") + 1]
                      if "--qemu" in sys.argv else None)
-    proc, sock = boot(qemu, iso, PORT,
+    port = PORT
+    if "--port" in sys.argv:
+        i = sys.argv.index("--port")
+        port = int(sys.argv[i + 1])
+    proc, sock = boot(qemu, iso, port,
                       disk=os.path.abspath(os.path.join(
                           os.path.dirname(HERE),
                           "kernel_v25", "catos_disk.img")))

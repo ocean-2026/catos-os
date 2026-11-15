@@ -184,6 +184,10 @@ static void cmd_help(void) {
     help_row("mv SRC DST",  "move a file (copy + delete)");
     help_row("format",      "erase the FAT32 volume (y/n confirm)");
     help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
+    help_row("mount",       "list the mount table");
+    help_row("mount <1..4|hd0pN> DIR", "bind a FAT32 partition to an empty dir");
+    help_row("umount DIR",  "detach the partition bound to DIR");
+    help_row("df",          "per-mountpoint volume usage");
     help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
     help_row("edit FILE",   "nano-style full-screen editor");
     help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
@@ -2959,22 +2963,49 @@ static void cmd_unalias(char *arg) {
     al_count--;
 }
 
-/* v2.34: df -- FAT32 volume usage */
+/* v2.34: df -- volume usage, one row per mount point (P2) */
 static void cmd_df(void) {
-    if (!fs_fs_ready()) { vga_write("df: no FAT32 volume\n"); return; }
-    uint32_t cs = fat_cluster_size();
-    uint32_t tot = fat_total_clusters();
-    uint32_t fre = fat_free_clusters();
-    uint32_t used = tot > fre ? tot - fre : 0;
-    uint32_t tot_k = (uint32_t)(((uint64_t)tot * cs) / 1024);
-    uint32_t use_k = (uint32_t)(((uint64_t)used * cs) / 1024);
-    uint32_t fre_k = (uint32_t)(((uint64_t)fre * cs) / 1024);
-    vga_write("Filesystem     total      used      free  use%\n");
-    vga_write("/dev/ide0  ");
-    print_int((int)tot_k); vga_write("K  ");
-    print_int((int)use_k); vga_write("K  ");
-    print_int((int)fre_k); vga_write("K  ");
-    print_int(tot ? (int)(used * 100 / tot) : 0); vga_write("%\n");
+    fs_df();
+}
+
+/* P2: mount <partition|device> <empty-dir>; bare `mount` lists the table.
+ * spec: partition number 1..4 on drive 0, or "hd<d>p<e>" (e.g. hd0p2). */
+static void cmd_mount(char *arg) {
+    if (!*arg) { fs_mount_list(); return; }
+    char *argv[4];
+    int argc = split_words(arg, argv, 3);
+    if (argc < 2) { vga_write("usage: mount <1..4|hd0pN> <empty-dir>\n"); return; }
+    int rc = fs_mount(argv[0], argv[1]);
+    switch (rc) {
+    case FS_OK:
+        vga_write("mount: "); vga_write(argv[1]); vga_write(" mounted\n");
+        break;
+    case FS_ERR_NOENT:  vga_write("mount: target directory not found\n"); break;
+    case FS_ERR_NOTDIR: vga_write("mount: target is not a directory\n"); break;
+    case FS_ERR_INVAL:  vga_write("mount: bad spec (partition 1..4 or hd0pN)\n"); break;
+    case FS_ERR_EXIST:  vga_write("mount: directory is already a mount point\n"); break;
+    case -10: vga_write("mount: unsupported partition (extended or non-FAT32)\n"); break;
+    case -11: vga_write("mount: no free mount slot\n"); break;
+    case -12: vga_write("mount: failed to probe a FAT32 volume there\n"); break;
+    case -13: vga_write("mount: target directory is not empty\n"); break;
+    default:  vga_write("mount: failed\n"); break;
+    }
+}
+
+/* P2: umount <directory> -- detach the partition bound there. */
+static void cmd_umount(char *arg) {
+    if (!*arg) { vga_write("usage: umount <directory>\n"); return; }
+    char *argv[4];
+    int argc = split_words(arg, argv, 1);
+    if (argc < 1) { vga_write("usage: umount <directory>\n"); return; }
+    int rc = fs_umount(argv[0]);
+    switch (rc) {
+    case FS_OK:         vga_write("umount: detached\n"); break;
+    case FS_ERR_NOENT:  vga_write("umount: not a mount point\n"); break;
+    case FS_ERR_INVAL:  vga_write("umount: bad argument\n"); break;
+    case -14:           vga_write("umount: busy (current directory is inside)\n"); break;
+    default:            vga_write("umount: failed\n"); break;
+    }
 }
 
 static char input[256];
@@ -3001,7 +3032,7 @@ static const char *sh_cmds[] = {
     "about","alias","autostart","caps","cat","cd","chcaps","chmod","chown","clear",
     "color","cp","curl","date","dir","display","dns","echo","edit","env",
     "export","faultinfo","format","fsck","gfx","gfx24","hang","help","hwinfo",
-    "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mv",
+    "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","palette","passwd","ping","ps","reboot","rgb","rm","run",
     "setenv","size","sndinfo","sndtest","style","sudo","svgainfo","text","top",
     "touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
@@ -3246,6 +3277,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "unset"))     cmd_unset(arg);
         else if (!strcmp_(cmd, "alias"))     cmd_alias(arg);
         else if (!strcmp_(cmd, "df"))        cmd_df();
+        else if (!strcmp_(cmd, "mount"))     cmd_mount(arg);
+        else if (!strcmp_(cmd, "umount"))     cmd_umount(arg);
         else if (!strcmp_(cmd, "unalias"))   cmd_unalias(arg);
         else if (!strcmp_(cmd, "clear"))      vga_clear();
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();

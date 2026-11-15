@@ -46,11 +46,27 @@ typedef struct {
 } fat_dirent_t;
 
 /* probe the drive; returns 0 if a FAT32 volume is ready, -1 otherwise.
- * On success caches the FAT table and geometry. */
+ * On success caches the FAT table and geometry.  This binds volume
+ * slot 0 (the root volume) to the first FAT32 partition on drive 0. */
 int  fat_probe(void);
 /* build a fresh FAT32 volume (size from ATA IDENTIFY) and standard
  * top-level directories. */
 int  fat_mkfs(void);            /* v2.32: -1 = no IDE disk */
+
+/* P2: multi-volume support.  Up to FAT_VOL_MAX volumes can be probed;
+ * the active volume is what every fat_* operation touches. */
+#define FAT_VOL_MAX 4
+/* Probe a FAT32 volume at `drive` LBA `part_lba` (partition `size`
+ * sectors, informational).  On success fills *out_slot with the volume
+ * index and activates it.  0 ok / -1 failure. */
+int  fat_mount_partition(uint8_t drive, uint32_t part_lba, uint32_t size,
+                         int *out_slot);
+/* Switch the active volume and reload its FAT #1 into the shared cache. */
+void fat_activate(int slot);
+/* Current active volume slot. */
+int  fat_active_slot(void);
+/* Release a probed extra volume slot so it can be probed again. */
+void fat_release_slot(int slot);
 
 uint32_t fat_root(void);                    /* root directory cluster */
 uint32_t fat_cluster_size(void);            /* bytes per cluster */
