@@ -101,7 +101,9 @@ def main():
         clear()
         do("ls /bin", 1.5)
         txt = screen_text(s).lower()
-        ok = ("node.ce" in txt and "syn.go" in txt and "entries" in txt)
+        # v2.45: ls output is sorted alphabetically; check a tail-of-list
+        # name plus the entry count line (order-independent).
+        ok = ("zhdemo.ce" in txt and "entries" in txt)
         step("ls-bin", ok, "disk-sourced app listing")
 
         # 3) an app runs straight off the disk

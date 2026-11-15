@@ -96,7 +96,11 @@ static void help_row(const char *cmd, const char *desc) {
     vga_write(desc);
     vga_write("\n");
 }
-static void help_head(const char *s) { vga_write("  -- "); vga_write(s); vga_write(" --\n"); }
+static void help_head(const char *s) {
+    vga_set_fg(VGA_LIGHT_CYAN);
+    vga_write("  -- "); vga_write(s); vga_write(" --\n");
+    vga_set_fg(VGA_WHITE);
+}
 static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write("\n"); }
 
 static void cmd_help(void) {
@@ -576,6 +580,7 @@ static void cmd_svgainfo(void) {
 }
 
 static void cmd_about(void) {
+    vga_clear();
     vga_set_fg(VGA_LIGHT_CYAN);
     vga_write(
         "###          ##    ####   #####\n"
@@ -640,6 +645,20 @@ static const char *TUX_ART[] = {
     0
 };
 
+/* display width: ASCII 1, UTF-8 2-byte 1, 3-byte CJK 2, 4-byte 4.
+ * Used to size speech/quote boxes so CJK borders line up. */
+static int disp_width(const char *s) {
+    int w = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if ((*p & 0xE0) == 0xC0) { w += 1; p += 2; }
+        else if ((*p & 0xF0) == 0xE0) { w += 2; p += 3; }
+        else if ((*p & 0xF8) == 0xF0) { w += 2; p += 4; }
+        else { w += 1; p += 1; }
+    }
+    return w;
+}
+
 static void cmd_cowsay(const char *arg) {
     const char *role = "cow";
     const char *msg = arg;
@@ -663,14 +682,14 @@ static void cmd_cowsay(const char *arg) {
         k = 0; while (def[k] && k < 42) { mbuf[k] = def[k]; k++; }
         mbuf[k] = 0;
     }
-    int n = slen_(mbuf);
-    vga_write("  "); vga_putc(' ');
-    for (int i = 0; i < n + 2; i++) vga_putc('-');
-    vga_putc(' '); vga_write("\n");
+    int w = disp_width(mbuf);
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
     vga_write("  < "); vga_write(mbuf); vga_write(" >\n");
-    vga_write("  "); vga_putc(' ');
-    for (int i = 0; i < n + 2; i++) vga_putc('-');
-    vga_putc(' '); vga_write("\n");
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
     const char **art = !strcmp_(role, "tux") ? TUX_ART : COW_ART;
     for (int i = 0; art[i]; i++) { vga_write(art[i]); vga_write("\n"); }
 }
@@ -757,14 +776,16 @@ static void cmd_fortune(void) {
     uint32_t r = (uint32_t)t.second * 131u + (uint32_t)t.minute * 17u
                + timer_ticks + g_fortune_seq * 2654435761u;
     const char *q = FORTUNES[r % (uint32_t)NFORT];
-    int n = slen_(q);
-    vga_write("  "); vga_putc(' ');
-    for (int i = 0; i < n + 2; i++) vga_putc('-');
-    vga_putc(' '); vga_write("\n");
+    /* v2.45: border sized by display width (CJK counts 2) so the box
+     * lines up for non-ASCII quotes; kept single-line to stay within 80. */
+    int w = disp_width(q);
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
     vga_write("  | "); vga_write(q); vga_write(" |\n");
-    vga_write("  "); vga_putc(' ');
-    for (int i = 0; i < n + 2; i++) vga_putc('-');
-    vga_putc(' '); vga_write("\n");
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
 }
 
 /* ---------- NIGHT-P3: cal (month / year calendar) ------------------- */
@@ -791,7 +812,8 @@ static void cal_build_month(int y, int m, char rows[7][22]) {
     for (int i = 0; i < 7; i++)
         for (int k = 0; k < 22; k++) rows[i][k] = 0;   /* #143: clear stale cells */
     int o = 0;
-    rows[0][o++] = ' '; rows[0][o++] = ' ';
+    /* center the "Mon YYYY" title over the 21-column weekday grid */
+    for (int sp = 0; sp < 6; sp++) rows[0][o++] = ' ';
     const char *mn = CAL_MON[m - 1];
     rows[0][o++] = mn[0]; rows[0][o++] = mn[1]; rows[0][o++] = mn[2];
     rows[0][o++] = ' ';
@@ -2887,17 +2909,32 @@ static void pkg_dst_path(const pkg_rec_t *r, char *out, int cap) {
     strcat_b(out, cap, ".ce");
 }
 
+static void pkg_pad(const char *s, int width) {
+    int l = slen_(s);
+    vga_write(s);
+    for (int p = l; p < width; p++) vga_putc(' ');
+}
 static void cmd_pkg_list(void) {
     pkg_rec_t recs[16];
     int n = pkg_load_index(recs, 16);
     if (n == 0) { vga_write("pkg: no package repository (/pkg/PKGS.TXT missing)\n"); return; }
     vga_write("Package repository (/pkg/):\n");
     for (int i = 0; i < n; i++) {
+        int installed = pkg_installed(&recs[i]);
         vga_write("  ");
-        vga_write(recs[i].name);
-        vga_write("  ["); vga_write(recs[i].version); vga_write("]");
-        vga_write(pkg_installed(&recs[i]) ? " installed" : " available");
-        vga_write("  - "); vga_write(recs[i].desc); vga_write("\n");
+        vga_set_fg(VGA_LIGHT_BLUE);
+        pkg_pad(recs[i].name, 10);
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("[");
+        pkg_pad(recs[i].version, 8);
+        vga_write("]  ");
+        vga_set_fg(installed ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
+        pkg_pad(installed ? "installed" : "available", 11);
+        vga_set_fg(VGA_LIGHT_GREY);
+        vga_write("- ");
+        vga_write(recs[i].desc);
+        vga_set_fg(VGA_WHITE);
+        vga_write("\n");
     }
 }
 
@@ -2907,12 +2944,23 @@ static void cmd_pkg_info(const char *name) {
     int n = pkg_load_index(recs, 16);
     int i = pkg_find(name, recs, n);
     if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
-    vga_write("name:    "); vga_write(recs[i].name); vga_write("\n");
-    vga_write("version: "); vga_write(recs[i].version); vga_write("\n");
-    vga_write("desc:    "); vga_write(recs[i].desc); vga_write("\n");
-    vga_write("file:    "); vga_write(recs[i].file); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("name:    ");
+    vga_set_fg(VGA_LIGHT_BLUE); vga_write(recs[i].name); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("version: ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].version); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("desc:    ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].desc); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("file:    ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].file); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
     vga_write("status:  ");
+    vga_set_fg(pkg_installed(&recs[i]) ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
     vga_write(pkg_installed(&recs[i]) ? "installed" : "available");
+    vga_set_fg(VGA_WHITE);
     vga_write("\n");
 }
 
@@ -3140,8 +3188,16 @@ static void tree_walk(const char *dir, int depth) {
         if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
         for (int d = 0; d < depth; d++) vga_write("  ");
         vga_write(is_dir ? "+- " : "- ");
-        vga_write(leaf);
-        if (is_dir) vga_write("/");
+        if (is_dir) {
+            vga_set_fg(VGA_LIGHT_CYAN);
+            vga_write(leaf);
+            vga_putc('/');
+            vga_set_fg(VGA_WHITE);
+        } else {
+            vga_set_fg(VGA_LIGHT_GREY);
+            vga_write(leaf);
+            vga_set_fg(VGA_WHITE);
+        }
         vga_write("\n");
         if (is_dir && depth < 6) {
             char child[FS_PATH_MAX];
@@ -3902,6 +3958,7 @@ static void prompt(void) {
     vga_set_fg(VGA_LIGHT_BLUE);
     vga_write(":");
     vga_write(pwd);
+    vga_set_fg(VGA_LIGHT_GREEN);
     vga_write(g_uid == UID_ROOT ? "# " : "$ ");
     vga_set_fg(VGA_WHITE);
 }
@@ -4266,11 +4323,16 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
                 vga_set_fg(VGA_LIGHT_GREY);
-                /* NIGHT-P3: friendly nearest-command suggestion */
+                /* NIGHT-P3: friendly nearest-command suggestion (yellow hint) */
                 const char *sug = suggest_cmd(cmd);
                 if (sug) {
+                    vga_set_fg(VGA_YELLOW);
                     vga_write("catos: did you mean: ");
-                    vga_write(sug); vga_write(" ?\n");
+                    vga_set_fg(VGA_LIGHT_BLUE);
+                    vga_write(sug);
+                    vga_set_fg(VGA_YELLOW);
+                    vga_write("?\n");
+                    vga_set_fg(VGA_WHITE);
                 }
             }
         }

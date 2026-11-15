@@ -126,3 +126,8 @@ CatOS[易错点] 探针清屏前的旧回显会留在 25 行网格里：umount �
 CatOS[易错点] mount 要求挂载点目录已预建：目录不存在时先返回 "target directory not found"，走不到去重/非空/占用判定；测重复挂载、根卷重绑前先 mkdir 各测试点。
 CatOS[易错点] 控制台回滚查看器只画最近 rows-1 条存档行：help 顶部彩蛋行滚出后无法在真机回看，help 是否登记要靠源码 help_row 调用点 + kernel.bin rodata 字符串交叉取证，不能只看可见帧。
 CatOS[易错点] `strings` 默认最小长度 4，2~3 字符命令名（sl/wc/df）抓不到；核对短串用 `strings -n 2`。
+CatOS[易错点] 文本模式调色板：改了共享 CLUT 不等于文本后端生效——`be_text.c` 的 DAC 仍要在 `text_dac_reset()` 里从 `render_clut(i)` 重新写一遍 6-bit 寄存器；否则 text↔gfx 往返后文本模式会吃到 gfx 遗留的 256 色 DAC。
+CatOS[易错点] `render_rgb_to_vga` 阈值量化会把 `#60A5FA` 蓝判成青色槽（b/g 都≥128）；主题色要先在 CLUT 0..15 做最近邻匹配，命中就直接用槽号，别再走 3-bit BGR 阈值。
+CatOS[易错点] shell 内建树遍历/多行换行不要在栈上放大缓冲：`names[24][FS_NAME_MAX]` 再加递归前缀串和三行换行缓冲，在当前 shell 栈容量下会刷出同串 `?` 乱码并污染后续帧；条目收集应走静态 bss 或堆上缓冲，递归连接器同理。
+CatOS[易错点] 排序后回归断言不能再依赖 FAT 序的尾部条目：`disk_regress ls-bin` 原先抓 `node.ce`/`syn.go`（FAT 序尾部），字母序排序后尾部变为 zhdemo；断言要换成字母序末位或计数行，否则假阴性。
+CatOS[易错点] 框线长度要用显示宽度而不是字节数：UTF-8 CJK 一字三字节两列宽，按 slen 算边框会偏短、右侧竖条错位；写一个 disp_width() 按 lead 字节判 1/2 列宽。

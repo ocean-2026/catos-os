@@ -350,53 +350,97 @@ static int mount_suffix(const char *parent_abs, const char *name, char *suf) {
     return 0;
 }
 
-struct list_ud { int count; int longfmt; const char *parent; };
-static void list_cb(const char *name, uint8_t attr,
-                    uint32_t clus, uint32_t size, void *ud) {
-    struct list_ud *u = (struct list_ud *)ud;
+/* v2.45 aesthetic: collect entries first, sort dirs-first then
+ * case-insensitive name, then print -- matches the ordered column look
+ * of modern ls/eza instead of raw FAT directory order. */
+#define LS_MAX 96
+struct ls_ent { char name[FS_NAME_MAX]; uint8_t attr; uint32_t size; };
+static struct ls_ent ls_buf[LS_MAX];
+static int ls_n;
+
+static char ls_lc(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c; }
+static int ls_icmp(const char *a, const char *b) {
+    while (*a && *b) {
+        char x = ls_lc(*a), y = ls_lc(*b);
+        if (x != y) return x - y;
+        a++; b++;
+    }
+    return ls_lc(*a) - ls_lc(*b);
+}
+static void ls_collect(const char *name, uint8_t attr,
+                        uint32_t clus, uint32_t size, void *ud) {
+    (void)clus; (void)ud;
+    if (ls_n >= LS_MAX) return;
+    scpy(ls_buf[ls_n].name, name);
+    ls_buf[ls_n].attr = attr;
+    ls_buf[ls_n].size = size;
+    ls_n++;
+}
+static void ls_sort(void) {
+    for (int i = 1; i < ls_n; i++) {
+        struct ls_ent k = ls_buf[i];
+        int j = i - 1;
+        int kdir = (k.attr & FAT_ATTR_DIR) != 0;
+        while (j >= 0) {
+            int jdir = (ls_buf[j].attr & FAT_ATTR_DIR) != 0;
+            int swap = (jdir == kdir) ? ls_icmp(ls_buf[j].name, k.name) > 0
+                                      : (!jdir && kdir);
+            if (!swap) break;
+            ls_buf[j + 1] = ls_buf[j];
+            j--;
+        }
+        ls_buf[j + 1] = k;
+    }
+}
+static int ls_fmt_size(uint32_t size, char *out) {
+    char b[12]; int n = 0;
+    if (size == 0) out[n++] = '0';
+    else while (size > 0) { b[n++] = (char)('0' + size % 10); size /= 10; }
+    int i = 0;
+    while (n > 0) out[i++] = b[--n];
+    out[i] = 0;
+    return i;
+}
+static void ls_print_one(const struct ls_ent *e, const char *parent,
+                         int longfmt) {
     char suf[8];
-    int ismount = ((attr & FAT_ATTR_DIR) != 0) &&
-                  mount_suffix(u->parent, name, suf);
-    if (u->longfmt) {
-        /* v2.34: ls -l -- perms, size, name (ls -l <file> also works) */
-        int isdir = (attr & FAT_ATTR_DIR) != 0;
+    int isdir = (e->attr & FAT_ATTR_DIR) != 0;
+    int ismount = isdir && mount_suffix(parent, e->name, suf);
+    char sz[12];
+    int sn = ls_fmt_size(e->size, sz);
+    if (longfmt) {
         vga_write(isdir ? "drwxr-xr-x  " : "-rw-r--r--  ");
-        char sz[12];
-        int i = 0;
-        if (size == 0) { sz[i++] = '0'; }
-        else { char b[12]; int n = 0;
-               if (size == 0) b[n++] = '0';
-               while (size > 0) { b[n++] = (char)('0' + size % 10); size /= 10; }
-               while (n > 0) sz[i++] = b[--n]; }
-        sz[i] = 0;
-        for (int p = i; p < 8; p++) vga_write(" ");
+        for (int p = sn; p < 8; p++) vga_putc(' ');
         vga_write(sz);
         vga_write("  ");
         vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
-        vga_write(name);
+        vga_write(e->name);
         if (ismount) vga_write(suf);
         vga_set_fg(VGA_WHITE);
         vga_write((isdir && !ismount) ? "/\n" : "\n");
-        u->count++;
         return;
     }
-    if (attr & FAT_ATTR_DIR) {
+    if (isdir) {
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("[DIR] ");
         vga_set_fg(VGA_LIGHT_CYAN);
-        vga_write("[DIR ] ");
-        vga_write(name);
+        vga_write(e->name);
         if (ismount) vga_write(suf);
         else vga_write("/");
+        vga_set_fg(VGA_WHITE);
         vga_write("\n");
     } else {
-        vga_set_fg(VGA_LIGHT_GREY);
+        vga_set_fg(VGA_DARK_GREY);
         vga_write("[FILE] ");
-        vga_write(name);
-        vga_set_fg(VGA_WHITE);
+        vga_set_fg(VGA_LIGHT_GREY);
+        vga_write(e->name);
+        vga_set_fg(VGA_DARK_GREY);
         vga_write("  (");
-        print_int((int)size);
+        for (int p = sn; p < 8; p++) vga_putc(' ');
+        vga_write(sz);
         vga_write(" bytes)\n");
+        vga_set_fg(VGA_WHITE);
     }
-    u->count++;
 }
 
 void fs_list(const char *path) {
@@ -418,22 +462,24 @@ void fs_list(const char *path) {
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
     if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write("catos: dir: not a directory\n"); return; }
 
-    struct list_ud u; u.count = 0; u.longfmt = longfmt; u.parent = abs;
     if (longfmt && !(e.attr & FAT_ATTR_DIR)) {
         /* v2.34: ls -l <file> -- show just that entry */
         const char *nm = abs;
         for (const char *p = abs; *p; p++) if (*p == '/') nm = p + 1;
-        uint32_t fsize = e.size;
+        struct ls_ent one;
+        scpy(one.name, nm); one.attr = e.attr; one.size = e.size;
         vga_write("perms      size     name\n");
-        struct list_ud one; one.count = 0; one.longfmt = 1; one.parent = abs;
-        list_cb(nm, e.attr, 0, fsize, &one);
+        ls_print_one(&one, abs, 1);
         return;
     }
-    fat_list_dir(clus, list_cb, &u);
+    ls_n = 0;
+    fat_list_dir(clus, ls_collect, 0);
+    ls_sort();
+    for (int i = 0; i < ls_n; i++) ls_print_one(&ls_buf[i], abs, longfmt);
     vga_set_fg(VGA_WHITE);
     vga_write("--- ");
-    print_int(u.count);
-    vga_write(u.count == 1 ? " entry ---\n" : " entries ---\n");
+    print_int(ls_n);
+    vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
 }
 
 void fs_pwd(char *out, int outlen) {
@@ -931,13 +977,24 @@ int fs_umount(const char *dir) {
     return FS_OK;
 }
 
+static void df_put_k(uint32_t k) {
+    char b[12]; int n = 0;
+    if (k == 0) b[n++] = '0';
+    while (k > 0) { b[n++] = (char)('0' + k % 10); k /= 10; }
+    for (int p = n; p < 7; p++) vga_putc(' ');
+    while (n > 0) vga_putc(b[--n]);
+    vga_write("K");
+}
+
 void fs_mount_list(void) {
     vga_write("Filesystem  Mounted on\n");
-    vga_write("hd0          /\n");
+    vga_write("hd0");
+    for (int p = 3; p < 12; p++) vga_putc(' ');
+    vga_write("/\n");
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!g_mnt[i].used) continue;
         vga_write(g_mnt[i].dev);
-        vga_write("          ");
+        for (int p = slen(g_mnt[i].dev); p < 12; p++) vga_putc(' ');
         vga_write(g_mnt[i].mnt);
         vga_write("  (");
         vga_putc(g_mnt[i].letter);
@@ -957,10 +1014,15 @@ static void df_row(const char *dev, const char *mnt, int vol) {
     uint32_t fre_k = (uint32_t)(((uint64_t)fre * cs) / 1024);
     vga_write(dev);
     for (int p = slen(dev); p < 12; p++) vga_putc(' ');
-    print_int((int)tot_k); vga_write("K  ");
-    print_int((int)use_k); vga_write("K  ");
-    print_int((int)fre_k); vga_write("K  ");
-    print_int(tot ? (int)(used * 100 / tot) : 0);
+    df_put_k(tot_k); vga_write("  ");
+    df_put_k(use_k); vga_write("  ");
+    df_put_k(fre_k); vga_write("  ");
+    int pct = tot ? (int)(used * 100 / tot) : 0;
+    char pc[4]; int pn = 0;
+    if (pct == 0) pc[pn++] = '0';
+    while (pct > 0) { pc[pn++] = (char)('0' + pct % 10); pct /= 10; }
+    for (int p = pn; p < 3; p++) vga_putc(' ');
+    while (pn > 0) vga_putc(pc[--pn]);
     vga_write("%  ");
     vga_write(mnt);
     vga_write("\n");
@@ -968,7 +1030,7 @@ static void df_row(const char *dev, const char *mnt, int vol) {
 
 void fs_df(void) {
     if (!fs_ready) { vga_write("df: no FAT32 volume\n"); return; }
-    vga_write("Filesystem  total      used      free  use%  Mounted on\n");
+    vga_write("Filesystem   total    used    free   use%  Mounted on\n");
     df_row("hd0", "/", 0);
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!g_mnt[i].used) continue;

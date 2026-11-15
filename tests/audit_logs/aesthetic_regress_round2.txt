@@ -1,0 +1,7 @@
+PASS mount            no format needed, no fault
+PASS ls-bin           disk-sourced app listing
+PASS hello            run /bin/hello.ce
+PASS vprobe           run /bin/vprobe.ce fr
+PASS fsck             FAT #2 mirrors FAT #1
+steps=5 ok=5 fail=0
+=== size ===
