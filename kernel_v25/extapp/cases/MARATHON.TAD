@@ -1,0 +1,203 @@
+# Marathon Run
+title: Marathon Run
+bpm: 180
+tile 0
+tile 90
+tile 999
+tile 270
+tile 0
+tile 90
+tile 180
+tile 90
+tile 180
+tile 180 twirl
+tile 90
+tile 180
+tile 90
+tile 0 twirl
+tile 90 twirl
+tile 999
+tile 189
+tile 99 twirl
+tile 189
+tile 999
+tile 999 speed 130
+tile 9
+tile 99
+tile 0
+tile 180
+tile 270
+tile 90 twirl
+tile 0
+tile 90 twirl
+tile 999 twirl
+tile 270
+tile 999
+tile 180 twirl
+tile 270
+tile 0
+tile 90
+tile 180 twirl
+tile 90
+tile 0
+tile 270
+tile 270 speed 160
+tile 999 twirl
+tile 9
+tile 180
+tile 270
+tile 0
+tile 90
+tile 180
+tile 270 twirl
+tile 180
+tile 90
+tile 90
+tile 999 twirl
+tile 9
+tile 0 twirl
+tile 270
+tile 999
+tile 189 twirl
+tile 279
+tile 0
+tile 90 speed 140
+tile 180 twirl
+tile 90 twirl
+tile 180
+tile 270 twirl
+tile 999
+tile 189
+tile 999
+tile 189
+tile 99
+tile 90
+tile 0 twirl
+tile 90
+tile 90
+tile 180 twirl
+tile 270 twirl
+tile 999
+tile 9
+tile 99 twirl
+tile 999
+tile 999 speed 120
+tile 180
+tile 90 twirl
+tile 180
+tile 999 twirl
+tile 270 twirl
+tile 180 twirl
+tile 90
+tile 999
+tile 189
+tile 0
+tile 90
+tile 999 twirl
+tile 0 twirl
+tile 270
+tile 180
+tile 90
+tile 0
+tile 270
+tile 180
+tile 90 speed 100
+tile 270
+tile 180
+tile 270
+tile 180
+tile 90
+tile 0
+tile 90
+tile 0 twirl
+tile 90 twirl
+tile 0
+tile 270
+tile 0
+tile 0
+tile 270
+tile 180
+tile 0
+tile 270
+tile 90
+tile 0 twirl
+tile 90 speed 80
+tile 180
+tile 270 twirl
+tile 180
+tile 90
+tile 0
+tile 270
+tile 180
+tile 90
+tile 0
+tile 90
+tile 270
+tile 180
+tile 90 twirl
+tile 270 twirl
+tile 180
+tile 90
+tile 999
+tile 189
+tile 0
+tile 270 speed 100
+tile 180 twirl
+tile 270
+tile 0 twirl
+tile 180
+tile 90
+tile 999
+tile 999
+tile 189
+tile 99
+tile 90
+tile 180
+tile 90
+tile 0
+tile 90
+tile 270
+tile 180
+tile 180
+tile 90
+tile 0
+tile 999 speed 130
+tile 0
+tile 90
+tile 0
+tile 270
+tile 180
+tile 90
+tile 270 twirl
+tile 90
+tile 180 twirl
+tile 90
+tile 0
+tile 180
+tile 270 twirl
+tile 270 twirl
+tile 999
+tile 189 twirl
+tile 279 twirl
+tile 189
+tile 999 twirl
+tile 999 speed 110
+tile 90 twirl
+tile 0
+tile 270
+tile 90
+tile 0 twirl
+tile 90 twirl
+tile 0
+tile 999
+tile 270
+tile 180
+tile 0
+tile 270
+tile 180
+tile 90
+tile 0
+tile 270 twirl
+tile 0
+tile 270
+tile 0

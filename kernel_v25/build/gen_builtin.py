@@ -55,6 +55,10 @@ OPTIONAL = [
     ("/bin/MINI_GO.GO",        os.path.join(ROOT, "extapp", "cases", "MINI_GO.GO")),
     ("/bin/MINI_IN.GO",        os.path.join(ROOT, "extapp", "cases", "MINI_IN.GO")),
     ("/bin/SYN.GO",            os.path.join(ROOT, "extapp", "cases", "SYN.GO")),
+    ("/bin/EASY.TAD",          os.path.join(ROOT, "extapp", "cases", "EASY.TAD")),
+    ("/bin/NORMAL.TAD",        os.path.join(ROOT, "extapp", "cases", "NORMAL.TAD")),
+    ("/bin/HARD.TAD",          os.path.join(ROOT, "extapp", "cases", "HARD.TAD")),
+    ("/bin/MARATHON.TAD",      os.path.join(ROOT, "extapp", "cases", "MARATHON.TAD")),
 ]
 
 def c_ident(path):

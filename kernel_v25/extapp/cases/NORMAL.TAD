@@ -1,0 +1,135 @@
+# Normal Flow
+title: Normal Flow
+bpm: 120
+tile 270
+tile 0
+tile 90
+tile 180
+tile 270
+tile 0
+tile 90
+tile 0
+tile 90 twirl
+tile 0
+tile 270
+tile 180 twirl
+tile 180
+tile 270
+tile 270
+tile 0 speed 130
+tile 90
+tile 180
+tile 270 twirl
+tile 180
+tile 90 twirl
+tile 180
+tile 90
+tile 270
+tile 0
+tile 0
+tile 90
+tile 180
+tile 270
+tile 0
+tile 0 speed 110
+tile 90
+tile 90
+tile 180
+tile 270
+tile 0
+tile 90
+tile 180 twirl
+tile 90
+tile 0 twirl
+tile 90
+tile 180
+tile 270
+tile 0
+tile 90
+tile 0 speed 90
+tile 90
+tile 180
+tile 270
+tile 0
+tile 90
+tile 180
+tile 180
+tile 90
+tile 180
+tile 270
+tile 0
+tile 0
+tile 90
+tile 180
+tile 270 speed 110
+tile 0
+tile 90
+tile 90
+tile 180 twirl
+tile 90
+tile 0
+tile 270
+tile 180 twirl
+tile 180 twirl
+tile 90
+tile 0 twirl
+tile 0
+tile 90
+tile 180 twirl
+tile 0 speed 130
+tile 270 twirl
+tile 270 twirl
+tile 180
+tile 270
+tile 180
+tile 270
+tile 180
+tile 180
+tile 90
+tile 0
+tile 270
+tile 180
+tile 270
+tile 270
+tile 180 speed 150
+tile 90
+tile 90
+tile 0
+tile 90
+tile 0
+tile 0
+tile 270 twirl
+tile 0
+tile 90
+tile 999 twirl
+tile 189
+tile 0
+tile 270 twirl
+tile 0
+tile 90 speed 180
+tile 0
+tile 90
+tile 180
+tile 90 twirl
+tile 0
+tile 0
+tile 270
+tile 999
+tile 189
+tile 99
+tile 9
+tile 270
+tile 180
+tile 180
+tile 90 speed 200
+tile 0
+tile 270
+tile 180
+tile 90
+tile 0
+tile 270
+tile 180
+tile 90
+tile 0
+tile 270
+tile 180
