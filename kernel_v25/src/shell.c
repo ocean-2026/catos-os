@@ -106,13 +106,21 @@ static void cmd_help(void) {
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
     help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
-    help_row("echo TEXT",   "print text back");
+    help_row("echo TEXT",   "print text back (-n no newline, -c COLOR)");
+    help_row("cls",         "clear the screen (alias of clear)");
     help_row("about",       "system info banner");
     help_row("autostart",   "re-run /etc/autostart scripts");
     help_row("uname",       "print OS name");
     help_row("date",        "show RTC date/time");
     help_row("mem",         "show RAM size (multiboot)");
     help_row("color NUM",   "set foreground color (0..255; text mode maps to 16)");
+
+    help_head("fun (NIGHT-P3 Linux-style easter eggs)");
+    help_row("cowsay [-f tux] MSG", "ASCII cow (or Tux) says MSG");
+    help_row("sl",          "steam train drives by (CHOO CHOO)");
+    help_row("fortune",     "print a random fortune");
+    help_row("cal [YEAR]",  "month calendar, or full year with YEAR");
+    help_row("yes [TEXT]",  "repeat TEXT until Ctrl+C");
 
     help_head("display (front-end / back-ends)");
     help_row("gfx",         "graphics mode (256-color styled text)");
@@ -598,6 +606,351 @@ static void cmd_date(void) {
     print_pad(t.minute, 2); vga_write(":");
     print_pad(t.second, 2);
     vga_write("\n");
+}
+
+/* =====================================================================
+ * NIGHT-P3: Linux-style easter eggs + UX enhancements.
+ * All additions in this block are marked "// NIGHT-P3" so the main
+ * agent can spot merge conflicts in the shell command table.
+ * ===================================================================== */
+
+/* ---------- NIGHT-P3: cowsay ----------------------------------------- */
+static const char *COW_ART[] = {
+    "        ^__^",
+    "        (oo)\\_______",
+    "        (__)\\       )\\/\\",
+    "            ||----w |",
+    "            ||     ||",
+    0
+};
+static const char *TUX_ART[] = {
+    "        .--.",
+    "       |o_o |",
+    "       |:_/ |",
+    "      //   \\ \\",
+    "     (|     | )",
+    "     /'\\_   _/`\\",
+    "     \\___)=(___/",
+    0
+};
+
+static void cmd_cowsay(const char *arg) {
+    const char *role = "cow";
+    const char *msg = arg;
+    /* optional "-f tux" role selector */
+    if (msg[0] == '-' && msg[1] == 'f') {
+        const char *p = msg + 2;
+        while (*p == ' ') p++;
+        const char *r = p;
+        while (*p && *p != ' ') p++;
+        int rlen = (int)(p - r);
+        if (*p == ' ') { p++; while (*p == ' ') p++; }
+        if (rlen == 3 && r[0] == 't' && r[1] == 'u' && r[2] == 'x')
+            role = "tux";
+        msg = p;
+    }
+    char mbuf[44]; int k = 0;
+    while (*msg && k < 42) { mbuf[k++] = *msg++; }
+    mbuf[k] = 0;
+    if (!mbuf[0]) {
+        const char *def = !strcmp_(role, "tux") ? "Hello, I am Tux!" : "Moo!";
+        k = 0; while (def[k] && k < 42) { mbuf[k] = def[k]; k++; }
+        mbuf[k] = 0;
+    }
+    int n = slen_(mbuf);
+    vga_write("  "); vga_putc(' ');
+    for (int i = 0; i < n + 2; i++) vga_putc('-');
+    vga_putc(' '); vga_write("\n");
+    vga_write("  < "); vga_write(mbuf); vga_write(" >\n");
+    vga_write("  "); vga_putc(' ');
+    for (int i = 0; i < n + 2; i++) vga_putc('-');
+    vga_putc(' '); vga_write("\n");
+    const char **art = !strcmp_(role, "tux") ? TUX_ART : COW_ART;
+    for (int i = 0; art[i]; i++) { vga_write(art[i]); vga_write("\n"); }
+}
+
+/* ---------- NIGHT-P3: sl (steam train animation) -------------------- */
+static const char *SL_LOCO[] = {
+    "       [_]         ",
+    "    ___________    ",
+    "   |  O     O  |   ",
+    "   |___________|   ",
+    "  /|           |\\  ",
+    " (O)           (O) ",
+    0
+};
+static const char *SL_SMOKE[] = {
+    "  o          ",
+    "   o    o    ",
+    " o      o    ",
+    0
+};
+
+static void cmd_sl(void) {
+    for (int f = 0; f < 16; f++) {
+        vga_clear();
+        int col = 64 - f * 4;
+        if (col < 0) col = 0;
+        vga_write("\n\n\n");
+        vga_write("  ");
+        for (int i = 0; i < col; i++) vga_putc(' ');
+        vga_write(SL_SMOKE[f % 3]); vga_write("\n");
+        for (int r = 0; SL_LOCO[r]; r++) {
+            vga_write("  ");
+            for (int i = 0; i < col; i++) vga_putc(' ');
+            vga_write(SL_LOCO[r]); vga_write("\n");
+        }
+        if (f < 5) vga_write("\n  * CHOO CHOO! *\n");
+        task_sleep_ticks(6);   /* ~60 ms per frame, tick = 10 ms */
+    }
+}
+
+/* ---------- NIGHT-P3: fortune (random quotes) ------------------------ */
+static const char *FORTUNES[] = {
+    "The early bird catches the worm, but the second mouse gets the cheese.",
+    "Talk is cheap. Show me the code. -- Linus Torvalds",
+    "Simplicity is the soul of efficiency. -- Austin Freeman",
+    "Premature optimization is the root of all evil. -- Donald Knuth",
+    "Code should be written for humans first, computers second. -- M. Fowler",
+    "First, solve the problem. Then, write the code. -- John Johnson",
+    "Experience is the name everyone gives to their mistakes. -- Oscar Wilde",
+    "Life is what happens when you are busy planning. -- John Lennon",
+    "Stay hungry, stay foolish. -- Steve Jobs",
+    "The only way to do great work is to love what you do. -- Steve Jobs",
+    "In the middle of difficulty lies opportunity. -- Albert Einstein",
+    "However slow you go, do not stop. -- Confucius",
+    "The journey of a thousand miles begins with a single step. -- Lao Tzu",
+    "Knowledge is power. -- Francis Bacon",
+    "Well begun is half done. -- Aristotle",
+    "Where there is a will there is a way.",
+    "Practice makes perfect.",
+    "A bug in the hand is worth two in the backlog.",
+    "Hard things: cache invalidation, naming, off-by-one errors.",
+    "Hello, world.",
+    "千里之行，始于足下。—— 老子",
+    "学而不思则罔，思而不学则殆。—— 孔子",
+    "天行健，君子以自强不息。—— 《周易》",
+    "不积跬步，无以至千里。—— 荀子",
+    "路漫漫其修远兮，吾将上下而求索。—— 屈原",
+    "宝剑锋从磨砺出，梅花香自苦寒来。",
+    "读书破万卷，下笔如有神。—— 杜甫",
+    "业精于勤，荒于嬉。—— 韩愈",
+    "山重水复疑无路，柳暗花明又一村。—— 陆游",
+    "海内存知己，天涯若比邻。—— 王勃",
+    "只要功夫深，铁杵磨成针。",
+    "代码写完不是结束，测试通过才算开始。",
+    0
+};
+#define NFORT ((int)(sizeof(FORTUNES) / sizeof(FORTUNES[0])) - 1)
+
+static uint32_t g_fortune_seq = 0;   /* NIGHT-P3: breaks same-second repeats */
+static void cmd_fortune(void) {
+    rtc_time_t t; rtc_read(&t);
+    extern volatile uint32_t timer_ticks;
+    g_fortune_seq++;
+    uint32_t r = (uint32_t)t.second * 131u + (uint32_t)t.minute * 17u
+               + timer_ticks + g_fortune_seq * 2654435761u;
+    const char *q = FORTUNES[r % (uint32_t)NFORT];
+    int n = slen_(q);
+    vga_write("  "); vga_putc(' ');
+    for (int i = 0; i < n + 2; i++) vga_putc('-');
+    vga_putc(' '); vga_write("\n");
+    vga_write("  | "); vga_write(q); vga_write(" |\n");
+    vga_write("  "); vga_putc(' ');
+    for (int i = 0; i < n + 2; i++) vga_putc('-');
+    vga_putc(' '); vga_write("\n");
+}
+
+/* ---------- NIGHT-P3: cal (month / year calendar) ------------------- */
+static const char *CAL_MON[12] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+static int cal_leap(int y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+static int cal_days(int y, int m) {
+    static int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (m == 2) return cal_leap(y) ? 29 : 28;
+    return dm[m - 1];
+}
+/* Sakamoto: returns 0 = Sunday .. 6 = Saturday */
+static int cal_wday(int y, int m, int d) {
+    static int t[12] = {0,3,2,5,0,3,5,1,4,6,2,4};
+    if (m < 3) y--;
+    int r = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+    return r < 0 ? r + 7 : r;
+}
+static void cal_build_month(int y, int m, char rows[7][22]) {
+    for (int i = 0; i < 7; i++) rows[i][0] = 0;
+    int o = 0;
+    rows[0][o++] = ' '; rows[0][o++] = ' ';
+    const char *mn = CAL_MON[m - 1];
+    rows[0][o++] = mn[0]; rows[0][o++] = mn[1]; rows[0][o++] = mn[2];
+    rows[0][o++] = ' ';
+    char yb[6]; itoa(y, yb, 4);
+    for (int k = 0; yb[k]; k++) rows[0][o++] = yb[k];
+    rows[0][o] = 0;
+    const char *wd = "Su Mo Tu We Th Fr Sa";
+    for (int k = 0; wd[k]; k++) rows[1][k] = wd[k];
+    rows[1][20] = 0;
+    int col = cal_wday(y, m, 1);
+    int dim = cal_days(y, m);
+    int row = 2;
+    for (int d = 1; d <= dim; d++) {
+        int off = col * 3;
+        char db[4]; itoa(d, db, 2);
+        rows[row][off] = db[0]; rows[row][off + 1] = db[1];
+        rows[row][off + 2] = ' ';
+        col++;
+        if (col == 7) { col = 0; row++; }
+    }
+    for (int r = 2; r < 7; r++) rows[r][20] = 0;
+}
+static void cal_print_one(int y, int m) {
+    char rows[7][22];
+    cal_build_month(y, m, rows);
+    for (int r = 0; r < 7; r++) {
+        vga_write("  "); vga_write(rows[r]); vga_write("\n");
+    }
+}
+static void cal_print_year(int y) {
+    for (int g = 0; g < 4; g++) {
+        char blocks[3][7][22];
+        for (int k = 0; k < 3; k++)
+            cal_build_month(y, g * 3 + k + 1, blocks[k]);
+        for (int r = 0; r < 7; r++) {
+            vga_write("  ");
+            for (int k = 0; k < 3; k++) {
+                vga_write(blocks[k][r]);
+                int len = slen_(blocks[k][r]);
+                while (len < 21) { vga_putc(' '); len++; }
+                if (k < 2) vga_write("  ");
+            }
+            vga_write("\n");
+        }
+        vga_write("\n");
+    }
+}
+static void cmd_cal(const char *arg) {
+    rtc_time_t t; rtc_read(&t);
+    const char *p = arg;
+    while (*p == ' ') p++;
+    if (*p) {
+        int y = 0;
+        while (*p >= '0' && *p <= '9') { y = y * 10 + (*p - '0'); p++; }
+        if (y < 1970 || y > 2099) {
+            vga_write("cal: year out of range (1970..2099)\n");
+            return;
+        }
+        cal_print_year(y);
+    } else {
+        cal_print_one(t.year, t.month);
+    }
+}
+
+/* ---------- NIGHT-P3: yes (repeat, Ctrl+C aware) -------------------- */
+static void cmd_yes(const char *arg) {
+    const char *word = *arg ? arg : "y";
+    for (int i = 0; i < 600; i++) {
+        vga_write(word); vga_write("\n");
+        int k = kb_getkey_timed(1);   /* 1 tick = 10 ms poll */
+        if (k == 0x03) {              /* Ctrl+C */
+            vga_write("^C\n");
+            break;
+        }
+    }
+}
+
+/* ---------- NIGHT-P3 UX: echo with -n / -c COLOR --------------------- */
+static const struct { const char *name; uint8_t idx; } ECHO_COLORS[] = {
+    {"red",      VGA_LIGHT_RED},
+    {"green",    VGA_LIGHT_GREEN},
+    {"blue",     VGA_LIGHT_BLUE},
+    {"yellow",   VGA_YELLOW},
+    {"cyan",     VGA_LIGHT_CYAN},
+    {"magenta",  VGA_LIGHT_MAGENTA},
+    {"white",    VGA_WHITE},
+    {"grey",     VGA_LIGHT_GREY},
+    {"gray",     VGA_LIGHT_GREY},
+    {"darkgrey", VGA_DARK_GREY},
+    {"brown",    VGA_BROWN},
+    {0, 0}
+};
+static int echo_color_lookup(const char *s) {
+    for (int i = 0; ECHO_COLORS[i].name; i++)
+        if (!strcmp_(s, ECHO_COLORS[i].name)) return ECHO_COLORS[i].idx;
+    return -1;
+}
+static void cmd_echo(char *arg) {
+    int nl = 1, color = -1;
+    char *p = arg;
+    while (*p == '-') {
+        if (p[1] == 'n' && (p[2] == ' ' || p[2] == 0)) {
+            nl = 0; p += 2; while (*p == ' ') p++;
+        } else if (p[1] == 'c' && p[2] == ' ') {
+            char *q = p + 3;
+            while (*q == ' ') q++;
+            char *cn = q;
+            while (*q && *q != ' ') q++;
+            char save = *q; *q = 0;
+            color = echo_color_lookup(cn);
+            *q = save; p = q; while (*p == ' ') p++;
+        } else break;
+    }
+    uint8_t old = con_get_fg();
+    if (color >= 0) vga_set_fg((uint8_t)color);
+    vga_write(p);
+    if (nl) vga_write("\n");
+    vga_set_fg(old);
+}
+
+/* ---------- NIGHT-P3 UX: unknown-command suggestion ------------------ */
+static const char *BUILTIN_NAMES[] = {
+    "help", "lang", "export", "setenv", "env", "unset", "alias", "df",
+    "unalias", "clear", "cls", "gfx", "vbe", "gfx24", "vbe24",
+    "svgainfo", "text", "style", "rgb", "palette", "display", "size",
+    "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
+    "date", "mem", "reboot", "hang", "dir", "ls", "cd", "mkdir",
+    "touch", "cat", "rm", "cp", "mv", "format", "edit", "run", "sudo",
+    "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
+    "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
+    "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
+    "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
+    "faultinfo", "fsck", "color",
+    "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
+    0
+};
+/* tiny Levenshtein for short command words */
+static int cmd_lev(const char *a, const char *b) {
+    int la = slen_(a), lb = slen_(b);
+    int d[16][16];
+    for (int i = 0; i <= la; i++) d[i][0] = i;
+    for (int j = 0; j <= lb; j++) d[0][j] = j;
+    for (int i = 1; i <= la; i++)
+        for (int j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            d[i][j] = d[i - 1][j - 1] + cost;
+            if (d[i - 1][j] + 1 < d[i][j]) d[i][j] = d[i - 1][j] + 1;
+            if (d[i][j - 1] + 1 < d[i][j]) d[i][j] = d[i][j - 1] + 1;
+        }
+    return d[la][lb];
+}
+static const char *suggest_cmd(const char *cmd) {
+    const char *best = 0; int bestd = 99;
+    for (int i = 0; BUILTIN_NAMES[i]; i++) {
+        const char *name = BUILTIN_NAMES[i];
+        int d = cmd_lev(cmd, name);
+        /* typed a prefix of the real command -> strong match */
+        if (slen_(cmd) >= 2 && slen_(name) > slen_(cmd)) {
+            int ok = 1;
+            for (int k = 0; cmd[k]; k++)
+                if (cmd[k] != name[k]) { ok = 0; break; }
+            if (ok && d > 1) d = 1;
+        }
+        if (d < bestd) { bestd = d; best = name; }
+    }
+    return bestd <= 2 ? best : 0;
 }
 
 static void cmd_mem(void) {
@@ -3280,7 +3633,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "mount"))     cmd_mount(arg);
         else if (!strcmp_(cmd, "umount"))     cmd_umount(arg);
         else if (!strcmp_(cmd, "unalias"))   cmd_unalias(arg);
-        else if (!strcmp_(cmd, "clear"))      vga_clear();
+        else if (!strcmp_(cmd, "clear") ||
+                 !strcmp_(cmd, "cls"))      vga_clear();   /* NIGHT-P3: cls alias */
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
         else if (!strcmp_(cmd, "gfx24") ||
@@ -3305,7 +3659,13 @@ static void shell_exec(char *cmd, char *arg) {
             }
         }
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
-        else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
+        else if (!strcmp_(cmd, "echo"))      cmd_echo(arg);
+        /* NIGHT-P3: Linux-style easter eggs */
+        else if (!strcmp_(cmd, "cowsay"))    cmd_cowsay(arg);
+        else if (!strcmp_(cmd, "sl"))         cmd_sl();
+        else if (!strcmp_(cmd, "fortune"))    cmd_fortune();
+        else if (!strcmp_(cmd, "cal"))        cmd_cal(arg);
+        else if (!strcmp_(cmd, "yes"))        cmd_yes(arg);
         else if (!strcmp_(cmd, "about"))      cmd_about();
         else if (!strcmp_(cmd, "autostart"))  boot_autostart();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
@@ -3509,6 +3869,12 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
                 vga_set_fg(VGA_LIGHT_GREY);
+                /* NIGHT-P3: friendly nearest-command suggestion */
+                const char *sug = suggest_cmd(cmd);
+                if (sug) {
+                    vga_write("catos: did you mean: ");
+                    vga_write(sug); vga_write(" ?\n");
+                }
             }
         }
 }

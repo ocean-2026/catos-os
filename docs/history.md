@@ -106,3 +106,9 @@ CatOS[易错点] 用 C 宏把旧全局几何变量映射到卷结构体字段时
 CatOS[易错点] shell 自定义负数返回码不能撞 fs.h 既有 FS_ERR_* 段（NOENT=-1/NOTDIR=-2/INVAL=-3/FULL=-4/EXIST=-5）；否则 switch 出现 duplicate case value。mount/umount 的细分错误码从 -10 起避让。
 CatOS[易错点] qemu_regress 启动时会清空 SHOTS/*.png，跨分片或跨轮次连续跑回归会把上一轮的证据截图一并删掉；验收截图必须在所有回归跑完之后再生成最后一轮，不要提前留存。
 CatOS[易错点] 回归脚本硬编码 monitor 端口，并行分片各占一段；端口被占表现为连接 refused / "could not reach monitor"，不是内核故障。给 disk_regress、fsrec_regress 补 --port 覆盖，用本分片端口段（4720-4729）。
+CatOS[易错点] shell.c 新增命令函数若调用了文件中靠后定义的静态 helper（如 atoi_），编译器先按隐式非静态声明处理，后面 static 定义会报 "static declaration follows non-static declaration"；要么补前置声明，要么在新函数内手写数字解析，不要直接复用后置静态函数。
+CatOS[易错点] 给 shell 命令参数做临时分词（插 NUL 截断）时，形参必须是 char*（可变）；写成 const char* 后 *q=0 会报 "assignment of read-only location"。
+CatOS[易错点] qemu_regress.py 启动时会 glob 删除 tests/qemu_shots/*.png，探针后生成的截图会被回归步骤清掉；正确顺序是先跑回归、最后再截探针图，或把探针截图放到独立目录。
+CatOS[易错点] fortune 类随机源若只取 RTC 秒/分，同一秒内连续调用会落到同一格言；熵要混入 timer_ticks（10ms 刻度）与单调递增序列计数器（乘 2654435761 散列）。
+CatOS[易错点] 80 列文本终端里气泡/格言文案超过约 72 字节会折行，折行段丢失左右边框；内置长文案按字节长度裁剪，中文 UTF-8 每字 3 字节要计入宽度。
+CatOS[易错点] 前台 Bash 跑长 QEMU 探针偶发 exit 143（SIGTERM）且无输出；改 nohup 后台跑 + 日志文件即可复现，不是内核或探针逻辑崩溃。
