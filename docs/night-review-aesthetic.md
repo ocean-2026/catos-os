@@ -1,7 +1,7 @@
 # CatOS 双审闭环 · 第二审：终端界面审美审查报告
 
 - 审查轮次：跨夜迭代双审闭环第二审（审美审）
-- 基线 HEAD：`2c47238`（v2.44）；整改后版本 v2.45
+- 基线 HEAD：`2c47238`（v2.44）；整改后版本 v2.45，commit `e839830`（已推 GitHub main）
 - 审查方式：QEMU i386 实机（`-m 256`、纯 PS/2、`-display none`、monitor `screendump` → PNG），逐项截图 + 屏幕文本双取证，逐张 Read 核验
 - 对比基准：Windows Terminal Campbell 主题（底 `#0C0C0C` / 正文 `#DCDCDC` / 蓝 `#60A5FA` / 绿 `#7EE787` / 红 `#F85149` / 黄 `#E3B341`）、现代发行版默认终端 + eza/lsd 排版（目录排序、列对齐、目录着色、右对齐尺寸列）、oh-my-zsh 提示符配色
 - 取证脚本：`tests/aesthetic_probe.py`；截图目录 `tests/qemu_shots_aesthetic/`；文本取证 `tests/audit_logs/aesthetic_round1.txt` / `aesthetic_round2.txt`
