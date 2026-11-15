@@ -33,7 +33,9 @@ from gfx24_regress import Ppm
 
 PORT = 4492
 SHOT = os.path.join(HERE, "qemu_shots")
-GREEN = (0x55, 0xFF, 0x55)
+# v2.42: modern terminal theme accent green is #7EE787 (render.c CLUT),
+# the old 0x55FF55 predates the v2.37 palette and never matches the prompt.
+GREEN = (0x7E, 0xE7, 0x87)
 
 
 class R(object):
@@ -129,13 +131,23 @@ def alive(sock, tag):
 
 
 def main():
-    iso = os.path.abspath(sys.argv[1])
-    qemu = find_qemu(sys.argv[sys.argv.index("--qemu") + 1]
-                     if "--qemu" in sys.argv else None)
+    args = sys.argv[1:]
+    iso = None
+    if args and not args[0].startswith("--"):
+        iso = args.pop(0)
+    if iso is None:
+        iso = os.path.join(os.path.dirname(HERE), "kernel_v25", "catos.iso")
+    iso = os.path.abspath(iso)
+    qemu = find_qemu(args[args.index("--qemu") + 1]
+                     if "--qemu" in args else None)
+    # v2.42: attach the IDE disk image.  Without a volume the /etc/size
+    # persistence check (step -6) has nowhere to write and fails spuriously.
+    disk = os.path.abspath(os.path.join(
+        os.path.dirname(HERE), "kernel_v25", "catos_disk.img"))
     SERIAL = "/tmp/catos_serial_size.log"
     if os.path.exists(SERIAL):
         os.remove(SERIAL)
-    proc, sock = boot(qemu, iso, PORT,
+    proc, sock = boot(qemu, iso, PORT, disk=disk,
                       extra_args=["-serial", "file:" + SERIAL])
     r = R()
     os.makedirs(SHOT, exist_ok=True)
