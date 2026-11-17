@@ -625,9 +625,17 @@ int group_db_init(void) {
         *nl = 0;
         char *fld[3];
         if (split_fields(line, fld, 3) >= 2 && fld[0][0] && gn_groups < GROUP_MAX) {
+            int ngid = (int)parse_uint(fld[1], 10);
+            /* #187: reject duplicate gids at load time.  Two records with
+             * the same gid otherwise share one uid membership list through
+             * user_in_group, so members bleed across group names. */
+            int dup = 0;
+            for (int j = 0; j < gn_groups; j++)
+                if (ggroups[j].gid == ngid) { dup = 1; break; }
+            if (!dup) {
             int slot = gn_groups++;
             ucopy(ggroups[slot].name, fld[0], 16);
-            ggroups[slot].gid = (int)parse_uint(fld[1], 10);
+            ggroups[slot].gid = ngid;
             ggroups[slot].nmem = 0;
             /* #163: a two-field line (`grp:100`, no member column) leaves
              * fld[2] == NULL; skip the member list instead of dereferencing
@@ -641,6 +649,7 @@ int group_db_init(void) {
                 user_rec_t *u = user_by_name(m);
                 if (u) ggroups[slot].mem_uid[ggroups[slot].nmem++] = u->uid;
                 m = eom ? comma + 1 : 0;
+            }
             }
         }
         line = eol ? nl + 1 : 0;
