@@ -193,6 +193,7 @@ static void cmd_help(void) {
     help_row("touch FILE",  "create an empty file");
     help_row("cat FILE",    "print a file (text, up to 64 KiB)");
     help_row("rm FILE",     "delete a file");
+    help_row("rmdir DIR",   "remove an empty directory");
     help_row("cp SRC DST",  "copy a file");
     help_row("mv SRC DST",  "move a file (copy + delete)");
     /* NIGHT-P4: package manager + migrated tools */
@@ -944,7 +945,7 @@ static const char *BUILTIN_NAMES[] = {
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
     "date", "mem", "reboot", "hang", "dir", "ls", "cd", "mkdir",
-    "touch", "cat", "rm", "cp", "mv", "format", "edit", "run", "sudo",
+    "touch", "cat", "rm", "rmdir", "cp", "mv", "format", "edit", "run", "sudo",
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
     "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
@@ -2654,6 +2655,28 @@ static void rec_join(char *out, int cap, const char *dir, const char *leaf) {
 
 struct cp_ud { const char *dst; int depth; };
 
+/* v2.50: POSIX cp target normalization.  If DST is an existing directory,
+ * the source entry lands inside it under its own basename
+ * (`cp -r src existing_dir` -> `existing_dir/src`, merge semantics);
+ * otherwise DST is used verbatim as the rename/overwrite target. */
+static void cp_target(char *out, int cap, const char *dst, const char *src) {
+    if (!fs_is_dir(dst)) { rec_join(out, cap, "", dst); return; }
+    const char *bs = src;
+    for (const char *q = src; *q; q++) if (*q == '/') bs = q + 1;
+    rec_join(out, cap, dst, bs);
+}
+
+/* v2.50: ACL mode carried over by a copy.  Plain cp keeps the creator as
+ * owner (owner preservation, cp -p, is not implemented); only the mode
+ * bits transfer, so an executable .ce stays runnable and a restricted
+ * file keeps its bits.  No ACL entry falls back to the 0755 no-entry
+ * default used since v2.24. */
+static int cp_src_mode(const char *src) {
+    int fuid, fgid, fmode;
+    if (acl_lookup(src, &fuid, &fgid, &fmode) != 0) return 0755;
+    return fmode;
+}
+
 static int copy_rec(const char *src, const char *dst, int depth);
 
 /* src prefix for the current fs_foreach walk -- the shell is the only
@@ -2681,7 +2704,7 @@ static int copy_rec(const char *src, const char *dst, int depth) {
             return -13;
         int r = fs_mkdir(dst);
         if (r != FS_OK && r != FS_ERR_EXIST) return -2;
-        acl_set(dst, g_uid, g_gid, 0755);
+        acl_set(dst, g_uid, g_gid, cp_src_mode(src));
         const char *saved = cp_src_prefix;
         cp_src_prefix = src;
         struct cp_ud u = { dst, depth };
@@ -2715,7 +2738,7 @@ static int rm_rec(const char *path, int depth) {
     if (fs_perm_check(path, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     struct rm_ud u = { path, depth };
     fs_foreach(path, rm_cb, &u);
-    int r = fs_rmdir(path);
+    int r = fs_rmdir_force(path);
     if (r == 0) acl_unset(path);
     return r;
 }
@@ -2750,6 +2773,21 @@ static void cmd_rm(const char *arg) {
     vga_write("rm: no such file\n");
 }
 
+/* v2.50: rmdir DIR -- remove an EMPTY directory only (no -r; non-empty
+ * directories are refused, matching POSIX rmdir(2)). */
+static void cmd_rmdir(const char *arg) {
+    if (!*arg) { vga_write("usage: rmdir DIR\n"); return; }
+    char abs[FS_PATH_MAX];
+    fs_canon_path(arg, abs, sizeof(abs));
+    if (!strcmp_(abs, "/")) { vga_write("rmdir: refusing to remove /\n"); return; }
+    if (!fs_is_dir(arg)) { vga_write("rmdir: not a directory\n"); return; }
+    int r = fs_rmdir(arg);
+    if (r == 0) { acl_unset(arg); return; }
+    if (r == -3)      vga_write("rmdir: directory not empty\n");
+    else if (r == -2) vga_write("rmdir: not a directory or root\n");
+    else              vga_write("rmdir: no such directory\n");
+}
+
 /* shared copy core for cp / mv: read src in <=16 KiB chunks, append to a
  * freshly truncated dst.  Returns 0 ok, negative error code. */
 static int fs_copy_file(const char *src, const char *dst) {
@@ -2759,9 +2797,8 @@ static int fs_copy_file(const char *src, const char *dst) {
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     static char chunk[16384];     /* ring0 single shell: no reentry */
     if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
-    acl_set(dst, g_uid, g_gid, 0755);   /* creator owns it; 0755 matches
-                                     * the documented "no entry" default so a
-                                     * copied .ce stays runnable (v2.24) */
+    /* v2.50: carry the source mode bits over; creator stays owner. */
+    acl_set(dst, g_uid, g_gid, cp_src_mode(src));
     uint32_t off = 0;
     while (off < s) {
         uint32_t want = s - off;
@@ -2791,11 +2828,14 @@ static void cmd_cp(char *arg) {
     while (*arg && *arg != ' ') arg++;
     *arg = 0;
     if (!*src || !*dst) { vga_write("usage: cp [-r] SRC DST\n"); return; }
+    /* v2.50: if DST is an existing directory, merge SRC into DST/<basename> */
+    char dstn[FS_PATH_MAX];
+    cp_target(dstn, sizeof(dstn), dst, src);
     if (rec && fs_is_dir(src)) {
         char abs[FS_PATH_MAX];
         fs_canon_path(src, abs, sizeof(abs));
         if (!strcmp_(abs, "/")) { vga_write("cp: refusing to copy /\n"); return; }
-        int r = copy_rec(src, dst, 0);
+        int r = copy_rec(src, dstn, 0);
         if (r == 0) return;
         if (r == -13) vga_write("cp: permission denied\n");
         else if (r == -2) vga_write("cp: cannot create target directory\n");
@@ -2803,7 +2843,7 @@ static void cmd_cp(char *arg) {
         else              vga_write("cp: copy failed mid-way\n");
         return;
     }
-    int r = fs_copy_file(src, dst);
+    int r = fs_copy_file(src, dstn);
     if (r == 0) return;
     if (r == -13) vga_write("cp: permission denied\n");
     else if (r == -1) vga_write("cp: no such file\n");
@@ -3858,7 +3898,7 @@ static const char *sh_cmds[] = {
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
     "export","faultinfo","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
-    "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","run",
+    "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
     "setenv","size","sl","sndinfo","sndtest","style","su","sudo","svgainfo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vbe","vbe24","vdiag","whoami","yes",
@@ -4208,6 +4248,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
         else if (!strcmp_(cmd, "cat"))        cmd_cat(arg);
         else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);
+        else if (!strcmp_(cmd, "rmdir"))      cmd_rmdir(arg);
         else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
         else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
         /* NIGHT-P4: package manager + migrated common tools */

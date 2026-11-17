@@ -504,3 +504,13 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **首批改造 4 个典型应用**：`hello.c`、`spinner.c`、`sysinfo.c` 移除本地槽定义、改引 `ce_app.h`；`demo.c` 除槽收敛外，4 处字符串调用（strcpy/strlen/strcmp/atoi）切换到公共包装。其余 app 暂保持原样，weak 桥接保证链接不破；cc/cc_self/ocntools 等有自定义类型或双定义的特例本轮不动。
 - **测试**：全量重建 42 个 .ce 无重复定义/链接错误；真机探针 hello/spinner/sysinfo 三应用均正常出输出、无 fatal fault。
 - **回归**：本轮实测 qemu 12/12、fsrec 12/12（内含改造后 hello.ce 内容完整性校验）；纯用户态构建侧，未触内核。
+
+## 二十九、v2.50 递归操作语义补齐（shell.c / fs.c）
+
+- **覆盖/合并语义**：`cmd_cp` 新增 `cp_target()`——DST 为已存在目录时归一化为 `DST/<src 基名>`（POSIX 合并语义），文件/目录两分支都走归一化目标；否则原样作为覆盖/改名目标。
+- **权限位保留**：`cp_src_mode()` 查源 ACL 模式位，`copy_rec` 目录分支与 `fs_copy_file` 文件分支都把源模式位带到目标（owner 仍为创建者；`cp -p` owner 保留未实现）；无 ACL 条目回落 0755。
+- **rmdir 命令**：新增 `cmd_rmdir`，拒绝 `/` 与非目录；`fs_rmdir` 返回码映射 -3 非空 / -2 非目录或根 / -1 不存在；命令派发、help、两处补全表已接线。
+- **fs_rmdir 拆分 strict/force**：`fs_rmdir`（strict）供 `rmdir` 命令做非空拒绝；`fs_rmdir_force` 供 shell 既有 `rm -r` 后序清空器复用，行为与 v2.24 基线一致。
+- **未做 / deferred**：mtime 时间戳保留——fs/fat 层不暴露 mtime 读/写 API，`fs_entry_t` 无日期字段，ls 不显示时间；需新增 stat + set-time 接口（设计级，后续批次）。深度上限 `FSREC_DEPTH_MAX=6` 保留未放宽（放宽需先评估栈风险：每帧两个 FS_PATH_MAX 缓冲）。
+- **测试**：新增 `tests/recur_regress.py`（10 项：cp -r 合并嵌套、文件入目录、000 模式保留、对照保留执行位、rmdir 空目录删除 / 非空拒绝 / 文件拒绝、无 fatal fault），接入 `run_full_regress.sh`（端口 4713）。
+- **回归**：本轮实测 recur 10/10、fsrec 12/12；qemu 12/12 在 force 拆分前一轮实测通过（拆分后仅 rm_rec 切到 force 变体，未再单跑 qemu）。

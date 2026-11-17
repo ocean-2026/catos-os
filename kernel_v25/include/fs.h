@@ -103,5 +103,7 @@ int  fs_is_dir(const char *path);            /* 1 = resolved path is a dir */
 int  fs_rmdir(const char *path);             /* remove an EMPTY directory:
                                               * 0 ok, -1 bad/noent, -2 not a dir
                                               * (or root), -3 not empty */
+int  fs_rmdir_force(const char *path);       /* v2.50: skip the emptiness
+                                              * re-check; for rm -r only */
 
 #endif

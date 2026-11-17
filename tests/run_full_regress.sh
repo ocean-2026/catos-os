@@ -22,6 +22,7 @@ run qemu    tests/qemu_regress.py    "$ISO" --qemu "$Q" --port 4707
 run guess   tests/shell_guess_regress.py "$ISO" --qemu "$Q" --port 4450
 run fsrec   tests/fsrec_regress.py   "$ISO" --qemu "$Q" --port 4711
 run lfn     tests/lfn_regress.py     "$ISO" --qemu "$Q" --port 4712
+run recur   tests/recur_regress.py   "$ISO" --qemu "$Q" --port 4713
 run caps    tests/caps_regress.py    "$ISO" --qemu "$Q"
 run user    tests/user_regress.py    "$ISO" --qemu "$Q"
 run disk    tests/disk_regress.py    "$ISO" --qemu "$Q" --port 4714

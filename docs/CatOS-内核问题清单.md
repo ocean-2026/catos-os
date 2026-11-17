@@ -766,3 +766,4 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 154 | 低（已修） | GRUB 模板内嵌 `grub.cfg` `set timeout=5`，菜单倒计时占 pre-kernel 约 5s（v2.45 实测 pre-kernel ≈7.36s，其中 SeaBIOS+multiboot 仅约 2.4s） | 模板菜单默认等待用户选择，未针对光盘直接启动场景收敛 | v2.46：`patch_work_iso.py` 组装期把 `timeout=5` 替换为 `timeout=0`（pattern 唯一性断言，两者都不在则报错退出）；模板二进制不改 | ✅ 已修 |
 
 *本节后继续编号为 #155+。*
+| 155 | 中（latent，deferred） | 嵌套递归删除时 fat 层 delete-name 重入：rm -r 后序删除子目录条目时父目录 `fat_list_dir` 静态缓冲仍在活动，子目录条目墓碑化/簇释放后父目录重新列举仍计数到残留条目，条目属性/簇字段被破坏成不可解析（resolve 返回 -2 非目录） | 目录簇读缓冲（fat_list_dir/fat_delete_name/dir_walk 各自 static buf）在嵌套回调中被复用覆盖；删除条目与活动遍历共用缓冲 | 本批 v2.50 以 `fs_rmdir_force` 保持 rm -r 基线行为绕过；后续需把目录簇读缓冲改为调用方传入或堆上分配，消除嵌套重入；在此之前不要让 rm -r 依赖严格非空校验 | ⏳ deferred |

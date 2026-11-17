@@ -840,10 +840,14 @@ static void rmdir_cb(const char *name, uint8_t attr,
                      uint32_t clus, uint32_t size, void *ud) {
     (void)attr; (void)clus; (void)size;
     struct rmdir_ud *u = (struct rmdir_ud *)ud;
-    if (!scmp(name, ".") && !scmp(name, "..")) u->count++;
+    /* v2.50: count real entries only; skip the "." / ".." dots.  The old
+     * condition required the name to be BOTH "." AND ".." at once, so the
+     * count stayed 0 and non-empty directories passed the emptiness check
+     * as if empty. */
+    if (scmp(name, ".") != 0 && scmp(name, "..") != 0) u->count++;
 }
 
-int fs_rmdir(const char *path) {
+static int fs_rmdir_impl(const char *path, int strict) {
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
     abs_path(path, abs);
@@ -865,10 +869,22 @@ int fs_rmdir(const char *path) {
     if (!(e.attr & FAT_ATTR_DIR)) return -2;
     struct rmdir_ud u = { 0 };
     fat_list_dir(e.cluster, rmdir_cb, &u);
-    if (u.count) return -3;                   /* still has entries */
+    if (strict && u.count) return -3;         /* still has entries */
     fat_free_chain(e.cluster);
     return fat_delete_name(pclus, leaf);
 }
+
+/* strict: refuse a non-empty directory (used by the `rmdir` shell command,
+ * POSIX rmdir(2) semantics). */
+int fs_rmdir(const char *path) { return fs_rmdir_impl(path, 1); }
+
+/* v2.50: force variant for the shell's own recursive `rm -r` emptier.  The
+ * caller has already walked and deleted every descendant post-order, so the
+ * directory is expected empty; this skips the re-check.  The latent nested
+ * delete-name reentrancy in the fat layer is tracked separately in the
+ * kernel issue list; keeping this path identical to the pre-v2.50 behavior
+ * avoids changing rm -r semantics in this batch. */
+int fs_rmdir_force(const char *path) { return fs_rmdir_impl(path, 0); }
 
 int fs_delete(const char *path) {
     /* remove a file: free its cluster chain and mark the directory entry
