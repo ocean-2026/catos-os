@@ -54,6 +54,23 @@ static void emit_uint(char *out, uint32_t v, int base) {
     out[n] = 0;
 }
 
+/* #164/#178/#166: bounded append for the persistent DB save buffers.
+ * Every separator, digit and newline used to be written unconditionally
+ * at buf[o++] -- when a static save buffer approached its limit that
+ * spilled into adjacent bss.  These helpers stop appending once one byte
+ * short of the capacity; the caller still places the trailing NUL at
+ * buf[o].  Truncation (rather than overflow) is the safe fallback. */
+static inline int buf_put(char *buf, int *o, int cap, char c) {
+    if (*o < cap - 1) { buf[(*o)++] = c; return 1; }
+    return 0;
+}
+static inline void buf_str(char *buf, int *o, int cap, const char *s) {
+    while (s && *s) { if (!buf_put(buf, o, cap, *s++)) break; }
+}
+static inline void buf_num(char *buf, int *o, int cap, const char *num) {
+    while (num && *num) { if (!buf_put(buf, o, cap, *num++)) break; }
+}
+
 /* ---- user database ----------------------------------------------------- */
 static user_rec_t users[MAX_USERS];
 static int users_dirty;
@@ -327,26 +344,27 @@ int user_set_caps(const char *name, uint32_t caps) {
 
 int user_save(void) {
     static char buf[4096];
+    const int cap = (int)sizeof(buf);
     int o = 0;
     for (int i = 0; i < MAX_USERS; i++) {
         if (!users[i].used) continue;
         user_rec_t *u = &users[i];
         char num[12];
         /* name:uid:gid:home:shell:caps:pw (v2.22 salted or legacy hex) */
-        for (int j = 0; u->name[j] && o < 4000; j++) buf[o++] = u->name[j];
-        buf[o++] = ':';
-        emit_uint(num, u->uid, 10);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = ':';
-        emit_uint(num, u->gid, 10);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = ':';
-        for (int j = 0; u->home[j] && o < 4000; j++) buf[o++] = u->home[j];
-        buf[o++] = ':';
-        for (int j = 0; u->shell[j] && o < 4000; j++) buf[o++] = u->shell[j];
-        buf[o++] = ':';
-        emit_uint(num, u->caps, 16); for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = ':';
-        for (int j = 0; u->pw[j] && o < 4000; j++) buf[o++] = u->pw[j];
-        buf[o++] = '\n';
+        buf_str(buf, &o, cap, u->name);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, u->uid, 10);  buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, u->gid, 10);  buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, ':');
+        buf_str(buf, &o, cap, u->home);
+        buf_put(buf, &o, cap, ':');
+        buf_str(buf, &o, cap, u->shell);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, u->caps, 16); buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, ':');
+        buf_str(buf, &o, cap, u->pw);
+        buf_put(buf, &o, cap, '\n');
     }
     buf[o] = 0;
     (void)fs_delete("/etc/passwd");
@@ -495,19 +513,20 @@ int acl_default(const char *path, int uid, int gid, int mode) {
 
 int acl_save(void) {
     static char buf[4096];
+    const int cap = (int)sizeof(buf);
     int o = 0;
     for (int i = 0; i < ACL_MAX; i++) {
         if (!acl_tab[i].used) continue;
         acl_entry_t *a = &acl_tab[i];
         char num[12];
-        for (int j = 0; a->path[j] && o < 4000; j++) buf[o++] = a->path[j];
-        buf[o++] = ':';
-        emit_uint(num, a->uid, 10);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = ':';
-        emit_uint(num, a->gid, 10);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = ':';
-        emit_uint(num, a->mode, 8);  for (int j = 0; num[j]; j++) buf[o++] = num[j];
-        buf[o++] = '\n';
+        buf_str(buf, &o, cap, a->path);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, a->uid, 10);  buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, a->gid, 10);  buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(num, a->mode, 8);  buf_num(buf, &o, cap, num);
+        buf_put(buf, &o, cap, '\n');
     }
     buf[o] = 0;
     (void)fs_delete("/etc/acl");
@@ -646,21 +665,21 @@ int user_in_group(int uid, int gid) {
 
 int group_save(void) {
     static char buf[2048];
+    const int cap = (int)sizeof(buf);
     int o = 0;
     for (int i = 0; i < gn_groups; i++) {
-        int k = 0;
-        while (ggroups[i].name[k] && o < (int)sizeof(buf) - 8) buf[o++] = ggroups[i].name[k++];
-        buf[o++] = ':';
-        { char t[12]; emit_uint(t, (uint32_t)ggroups[i].gid, 10); k = 0; while (t[k]) buf[o++] = t[k++]; }
-        buf[o++] = ':';
+        char t[12];
+        buf_str(buf, &o, cap, ggroups[i].name);
+        buf_put(buf, &o, cap, ':');
+        emit_uint(t, (uint32_t)ggroups[i].gid, 10); buf_num(buf, &o, cap, t);
+        buf_put(buf, &o, cap, ':');
         for (int m = 0; m < ggroups[i].nmem; m++) {
             user_rec_t *u = user_by_uid(ggroups[i].mem_uid[m]);
             if (!u) continue;
-            if (m) buf[o++] = ',';
-            k = 0;
-            while (u->name[k] && o < (int)sizeof(buf) - 8) buf[o++] = u->name[k++];
+            if (m) buf_put(buf, &o, cap, ',');
+            buf_str(buf, &o, cap, u->name);
         }
-        buf[o++] = '\n';
+        buf_put(buf, &o, cap, '\n');
     }
     buf[o] = 0;
     (void)fs_delete("/etc/group");
