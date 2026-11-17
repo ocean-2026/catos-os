@@ -95,20 +95,36 @@ static void path_norm(const char *in, char *out) {
     out[o] = 0;
 }
 
-/* return the absolute path for a (possibly relative) input path */
-static void abs_path(const char *p, char *out) {
+/* return the absolute path for a (possibly relative) input path.
+ * #170: the old scpy/scat were unbounded, so a deep cwd plus a long
+ * relative name could overflow tmp[FS_PATH_MAX*2] on the stack.  The
+ * composition is now length-checked and bounded; returns 0 on success,
+ * -1 when the composed path would not fit (callers refuse the path). */
+static int abs_path(const char *p, char *out) {
     char tmp[FS_PATH_MAX * 2];
+    const int cap = (int)sizeof(tmp) - 1;
+    const char *base;
+    int o = 0;
     if (!p || !*p) {
-        scpy(tmp, cwd_path);
+        base = cwd_path;
+        int l = slen(base);
+        if (l > cap) return -1;
+        for (int i = 0; i < l; i++) tmp[o++] = base[i];
     } else if (p[0] == '/') {
-        scpy(tmp, p);
+        int l = slen(p);
+        if (l > cap) return -1;
+        for (int i = 0; i < l; i++) tmp[o++] = p[i];
     } else {
-        scpy(tmp, cwd_path);
-        int l = slen(tmp);
-        if (l > 0 && tmp[l - 1] != '/') scat(tmp, "/");
-        scat(tmp, p);
+        int cl = slen(cwd_path);
+        int pl = slen(p);
+        if (cl + 1 + pl > cap) return -1;
+        for (int i = 0; i < cl; i++) tmp[o++] = cwd_path[i];
+        if (o == 0 || tmp[o - 1] != '/') tmp[o++] = '/';
+        for (int i = 0; i < pl; i++) tmp[o++] = p[i];
     }
+    tmp[o] = 0;
     path_norm(tmp, out);
+    return 0;
 }
 
 /* P2: find the mount entry whose mount point owns `abs` (longest prefix
@@ -213,7 +229,7 @@ uint16_t fs_cwd_index(void) { return (uint16_t)g_cwd; }
 int fs_chdir(const char *path) {
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) return FS_ERR_NOENT;
@@ -229,7 +245,7 @@ static int create_path(const char *path, uint8_t type) {
     if (!path || !*path) return FS_ERR_INVAL;
 
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -270,7 +286,7 @@ int fs_mkdir(const char *path) {
 int fs_touch(const char *path) {
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (clus) {
@@ -315,7 +331,7 @@ static void enumf_cb(const char *name, uint8_t attr,
 int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
@@ -328,7 +344,7 @@ int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
 int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
@@ -461,7 +477,9 @@ void fs_list(const char *path) {
         if (!*path) path = 0;
     }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) {
+        vga_write("catos: path too long\n"); return;
+    }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
@@ -503,7 +521,7 @@ void fs_pwd(char *out, int outlen) {
 void fs_canon_path(const char *in, char *out, int outlen) {
     char abs[FS_PATH_MAX];
     if (!out || outlen < 1) return;
-    abs_path(in, abs);
+    if (abs_path(in, abs) != 0) { out[0] = 0; return; }
     int i = 0;
     for (; abs[i] && i < outlen - 1; i++) {
         char c = abs[i];
@@ -516,7 +534,7 @@ void fs_canon_path(const char *in, char *out, int outlen) {
 fs_entry_t *fs_open_file(const char *path) {
     if (!fs_ready) return 0;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return 0;
 
     /* split parent + leaf so we can remember the directory entry */
     const char *leaf = abs;
@@ -639,7 +657,7 @@ int fs_save(fs_entry_t *f) {
 int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -674,7 +692,7 @@ static void fe_cb(const char *name, uint8_t attr,
 int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
     if (!fs_ready || !cb) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path ? path : "/", abs);
+    if (abs_path(path ? path : "/", abs) != 0) return -1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) return -1;
@@ -712,7 +730,7 @@ int fs_write_text(const char *path, const char *data, uint32_t size) {
 int fs_write_raw(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -786,7 +804,7 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (mode != 0 && mode != 1) { fs_dbg2("[F1]",0); return -1; }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -826,7 +844,7 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
 int fs_is_dir(const char *path) {
     if (!fs_ready || !path || !*path) return 0;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return 0;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     return (clus && (e.attr & FAT_ATTR_DIR)) ? 1 : 0;
@@ -850,7 +868,7 @@ static void rmdir_cb(const char *name, uint8_t attr,
 static int fs_rmdir_impl(const char *path, int strict) {
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
     if (!*leaf) return -2;                    /* root: never deletable */
@@ -891,7 +909,7 @@ int fs_delete(const char *path) {
      * deleted.  Directories are not deletable through this API (v2.5). */
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -937,7 +955,7 @@ int fs_mount(const char *spec, const char *dir) {
     if (!p->fat32)  return -10;
 
     char abs[FS_PATH_MAX];
-    abs_path(dir, abs);
+    if (abs_path(dir, abs) != 0) return FS_ERR_INVAL;
     if (!scmp(abs, "/")) return FS_ERR_INVAL;    /* root is never a mountpoint */
 
     fat_dirent_t e;
@@ -983,7 +1001,7 @@ int fs_umount(const char *dir) {
     if (!fs_ready) return FS_ERR_NOENT;
     if (!dir || !*dir) return FS_ERR_INVAL;
     char abs[FS_PATH_MAX];
-    abs_path(dir, abs);
+    if (abs_path(dir, abs) != 0) return FS_ERR_INVAL;
 
     int mi = -1;
     for (int i = 0; i < VFS_MAX_MOUNTS; i++)
