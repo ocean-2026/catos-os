@@ -139,19 +139,65 @@
 
 ### 2.6 用户态 libc.a 静态库雏形
 
-> 待填充：现状（ce_stub.c 仅空桩；各应用手写 ABI 初始化与包装）/ 通用 OS 做法（静态归档库 + 统一头文件 + 启动样板）/ 评级 / 今夜可行性。
+**现状（已核实）**
+
+- `extapp/ce_stub.c`（20 行）仅提供 `__chkstk_ms()` 空桩（MinGW 栈探测消除）；其余 libgcc 辅助未收编。
+- 每个应用各自定义 `__ce_api` 槽并手写 vsyscall 包装（范例 `extapp/spinner.c` 开头：`catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;`）；字符串 / 内存 / 格式化等辅助函数走 vsyscall 或各 app 自行实现。
+- 无静态归档库（`.a`）、无统一应用头文件样板、无独立启动代码（`ce_main` 由链接脚本 `extapp/ce.ld` 定位到镜像偏移 0）。
+
+**通用 OS 做法**
+
+- libc.a 包含启动样板（crt0）、系统调用包装、libgcc 桩、字符串/内存/格式化等纯用户态函数；应用链接时归档并入；头文件单一来源；ABI 变更只改库不改各应用。
+
+**差距评级**：中。
+
+**今夜可行性**：**可增量**。先抽 `ce_app.c` / `ce_app.h`：API 槽初始化 + 常用包装（write/print_int/atoi/delay 等）与通用字符串/内存函数；第一步以源码并入方式落地，暂不做 ar 归档；归档格式与链接脚本改造为后续小设计。
+**工作量 / 风险**：小；风险低，纯用户态构建侧，不触内核。
 
 ### 2.7 递归文件操作：`cp -r` 与 `mkdir -p`
 
-> 待填充：现状（v2.24 已有 mkdir -p / rm -r / cp -r，深度受限）/ 通用 OS 做法（递归语义、合并/覆盖、权限时间戳保留、rmdir）/ 评级 / 今夜可行性。
+**现状（已核实）**
+
+- `mkdir -p`：`cmd_mkdir_p()`（`src/shell.c:1051–1087`）逐段创建，错误码映射 `FS_ERR_NOENT / NOTDIR / EXIST / INVAL / FULL`。
+- 递归助手（v2.24，2616–2656 行）：`rm -r` / `cp -r`，深度受限防栈溢出；目录复制走 `fs_mkdir(dst)`（2656 行）。
+- **缺口**：
+  1. `cp -r` 合并/覆盖语义、权限位与时间戳保留；目标目录已存在时的路径拼接规则。
+  2. 空目录删除 / `rmdir` 内建；长路径深度上限（与 #151 同源：shell 栈与静态缓冲）。
+  3. 递归列举受 `fs_enum_entries` 24 槽枚举限制（#151 遗留 L2/L3）。
+
+**通用 OS 做法**：`cp -r` 递归复制目录树并保留 mode/owner/mtime；`mkdir -p` 幂等、已存在不报错；`rmdir` 仅删空目录；路径先规范化再逐段操作。
+
+**差距评级**：低~中。
+
+**今夜可行性**：**可增量**：语义补齐与错误提示先行；条目收集缓冲改堆上 / 大静态缓冲属 #151 前置，不阻塞本批。
+**工作量 / 风险**：小；风险低。
 
 ### 2.8 spawn 执行权限检查
 
-> 待填充：现状（v2.15/#99 三轨统一 PERM_EXEC 闸口）/ 通用 OS 做法（x 位 + 文件能力 + noexec）/ 评级 / 今夜可行性。
+**现状（已核实，主路径已闭环）**
+
+- v2.15 / #99：`task_spawn_ce()`（`src/task.c:2360`）装载前统一闸口——`acl_lookup()` 查 0111 执行位（2380–2388 行，全无执行位直接 -13），`fs_perm_check(path, uid, gid, PERM_EXEC)`（2397 行）；CE / ELF / PE 三轨共用此闸口（2461 / 2469 行）；拒绝返回 -13 EACCES（与其他 syscall 拒绝码一致）。
+- 残留边角：ACL 缺省条目（`acl_default()`）执行位播种策略；root bypass 语义核对；无文件能力（file capabilities）概念——CatOS 用用户侧 caps 位表达特权。
+
+**通用 OS 做法**：x 位 + 文件能力（capabilities）+ 挂载 noexec；执行前校验进程凭据对目标路径的执行权限。
+
+**差距评级**：低（主路径已闭环，本项主要是补测试用例与边角核对）。
+
+**今夜可行性**：**可增量**（仅补测试与边角核对，无需新机制）。
 
 ### 2.9 多用户组支持（supplementary groups）
 
-> 待填充：现状（task_t / user_rec_t 单 gid，/etc/passwd 单 gid 字段，/etc/acl 单 gid）/ 通用 OS 做法（主组 + 附加组、group 数据库、组权限判定）/ 评级 / 今夜可行性。
+**现状（已核实）**
+
+- `task_t.gid` 单值（`include/task.h:48`）；`user_rec_t.gid` 单值（`include/user.h:48`）；`/etc/passwd` 单行单 gid 字段（`src/user.c:257–262` 保存、326 行解析）；`/etc/acl` 单 gid（`user.h:68`，`acl_lookup()` 356 行）；`fs_perm_check()` 只比对一个 gid（484 行，12-bit unix 位布局）。
+- 无 group 数据库（`/etc/group` 等价物）、无 supplementary groups 列表、无 `newgrp` / 组切换内建。
+
+**通用 OS 做法**：主组 + 附加组列表；进程凭据携带 gid + `ngroups[]`；组权限位匹配任一附加组即放行；`/etc/group` 维护组名 / GID / 成员列表；`newgrp` 切换主组。
+
+**差距评级**：中（教学内核单组可跑，多用户协作与组共享目录场景受限）。
+
+**今夜可行性**：**可增量**（小设计级，非重写）：`/etc/passwd` 追加附加组字段或独立 `/etc/group`；task 凭据带组数组；`fs_perm_check` 遍历组列表。需保证老 passwd/acl 记录向后兼容。
+**工作量 / 风险**：中；风险：配置格式兼容与权限回归测试。
 
 ## 3. 重写级三项（deferred，只给设计要点，禁止今夜强行开工）
 
