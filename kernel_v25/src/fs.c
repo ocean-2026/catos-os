@@ -251,8 +251,8 @@ static int create_path(const char *path, uint8_t type) {
     /* validate leaf name */
     if (!*leaf || !scmp(leaf, ".") || !scmp(leaf, "..")) return FS_ERR_INVAL;
     if (slen(leaf) >= FS_NAME_MAX) return FS_ERR_INVAL;
-    for (const char *q = leaf; *q; q++)
-        if (*q == '/' || *q < 32) return FS_ERR_INVAL;
+    /* v2.48: FAT reserved chars / control codes / trailing dot-space */
+    if (fat_name_illegal(leaf)) return FS_ERR_INVAL;
 
     fat_dirent_t tmp;
     uint8_t rn[11];

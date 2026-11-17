@@ -78,6 +78,9 @@ uint32_t fat_free_clusters(void);           /* scan FAT for zero entries  */
 
 /* convert a user name ("note", "a.txt") to an 8.3 padded 11-byte name */
 void fat_name83(const char *name, uint8_t out[11]);
+/* v2.48: 1 = name carries a FAT-forbidden character (control code,
+ * `" * / : < > ? \ |`, trailing space/dot) or is empty. */
+int  fat_name_illegal(const char *name);
 /* render an 8.3 name back to a human string (lower-case) */
 void fat_name_show(const uint8_t *n83, char *out);
 

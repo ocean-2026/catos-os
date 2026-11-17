@@ -136,3 +136,5 @@ CatOS[易错点] 全量回归一键脚本在 600s 前台预算内会被 SIGTERM�
 CatOS[易错点] `screen_text()` 只转储当前 25 行可视区：回放/提示后紧跟长列表（ls 18 条、/bin 三十余条）会把 shell 刚打印的 `-> <cmd>` 回显行滚出屏幕，断言回显标记会假阴性。选单行输出的建议目标（date/whoami）做回显断言；长列表用例改断言列表条目内容（如注入的 pesample.exe），不要追滚动中的提示行。
 CatOS[易错点] `pkill -f qemu-system-i386` 会匹配到执行该命令的自身 `bash -c` 命令行（串里含同样的二进制名），把当前 shell 一起杀掉，后台任务瞬间 exit 1、子进程群被连带回收；清残留要先 `pgrep -x qemu-system-i386` 按 PID 精确杀，或命令行里规避该子串。
 CatOS[易错点] pending 类交互状态（did-you-mean 待确认）的识别只能挂主提示符循环：命令内部的 y/n 问询（PE->CE offer、format 闸门、gfx consent、useradd wizard）走各自 `kb_readline`/`kb_getkey`，不经主循环，天然隔离；切勿把「输入是 y 就回放」下沉到 readline 全局层，否则会污染所有问询上下文。
+CatOS[易错点] extapp/build 残留半成品中间件会让全量重建在某应用上挂掉：上次被中断的 .exe 留下残缺 PE，下次 ld 覆盖前 nm/objdump 报 "file format not recognized"，继而 "ce_main not at image offset 0"；单独重编该 app 又能过，假象是偶发。整盘重建前先清 `extapp/build/*.exe *.o *.bin *.nobss.exe`。
+CatOS[易错点] LFN 条目读回保留原始大小写，只有无损 8.3 短条目路径才统一小写展示；回归断言混合大小写文件名时要分两条路径写期望（8.3→小写，LFN→原样），不能一律按小写 substring 匹配造成假阴性。

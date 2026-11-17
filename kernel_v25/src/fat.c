@@ -307,6 +307,52 @@ void fat_name_show(const uint8_t *n83, char *out) {
     out[o] = 0;
 }
 
+/* v2.48: FAT/VFAT forbidden-character check.  Control codes and the eight
+ * reserved punctuation marks may not appear in a directory entry name;
+ * trailing spaces and dots are stripped by every FAT implementation and
+ * must never reach disk.  Returns 1 = illegal. */
+int fat_name_illegal(const char *name) {
+    if (!name || !*name) return 1;
+    int n = 0;
+    for (const char *p = name; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 32) return 1;
+        if (c == '"' || c == '*' || c == '/' || c == ':' || c == '<'
+            || c == '>' || c == '?' || c == '\\' || c == '|') return 1;
+        n++;
+    }
+    if (name[n - 1] == ' ' || name[n - 1] == '.') return 1;
+    return 0;
+}
+
+/* v2.48: NT reserved (lcase) byte for a lossless 8.3 entry.  0x10 marks a
+ * lower-case base, 0x08 a lower-case extension; mixed-case or all-upper
+ * leaves the bits clear, per the FAT specification.  LFN aliases are
+ * uppercase, so their short entry always gets ntres = 0. */
+static uint8_t ntres_from_name(const char *name) {
+    uint8_t nt = 0;
+    const char *dot = 0;
+    for (const char *p = name; *p; p++) if (*p == '.') dot = p;
+    int bl = 0, bu = 0;
+    for (const char *p = dot ? name : name; *p && p != dot; p++) {
+        if (*p >= 'a' && *p <= 'z') bl = 1;
+        else if (*p >= 'A' && *p <= 'Z') bu = 1;
+    }
+    if (bl && !bu) nt |= 0x10;
+    if (dot) {
+        int el = 0, eu = 0;
+        for (const char *p = dot + 1; *p; p++) {
+            if (*p >= 'a' && *p <= 'z') el = 1;
+            else if (*p >= 'A' && *p <= 'Z') eu = 1;
+        }
+        if (el && !eu) nt |= 0x08;
+    }
+    return nt;
+}
+
+static int fat_mkdir_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres);
+static int fat_mkfile_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres);
+
 static int name83_eq(const uint8_t *a, const uint8_t *b) {
     for (int i = 0; i < 11; i++) if (a[i] != b[i]) return 0;
     return 1;
@@ -419,10 +465,12 @@ static void fat_stamp(uint16_t *dt, uint16_t *tm) {
 }
 
 static void dent_init(struct dent *d, const uint8_t *name83,
-                      uint8_t attr, uint32_t clus, uint32_t size) {
+                      uint8_t attr, uint32_t clus, uint32_t size,
+                      uint8_t ntres) {
     memz(d, sizeof(*d));
     memcpy_(d->name, name83, 11);
     d->attr = attr;
+    d->ntres = ntres;
     d->clus_lo = (uint16_t)(clus & 0xFFFF);
     d->clus_hi = (uint16_t)(clus >> 16);
     d->size = size;
@@ -625,26 +673,29 @@ notfound:
     return -1;
 }
 
-/* unique BODY~N.EXT alias for a name that needs an LFN */
+/* unique BODY~N.EXT alias for a name that needs an LFN.  The base takes
+ * the first six characters of the uppercased stem with dots and spaces
+ * removed (Windows short-name rule); every collision bumps ~N until free. */
 static int make_alias83(uint32_t parent, const char *name, uint8_t out[11]) {
     for (int i = 0; i < 11; i++) out[i] = ' ';
     const char *dot = 0;
     for (const char *p = name; *p; p++) if (*p == '.') dot = p;
-    int nlen = dot ? (int)(dot - name) : slen_(name);
-    if (nlen > 6) nlen = 6;
+    const char *stem_end = dot ? dot : name + slen_(name);
     int blen = 0;
-    for (int i = 0; i < nlen; i++) {
-        char c = name[i];
+    for (const char *p = name; p != stem_end && blen < 6; p++) {
+        char c = *p;
+        if (c == '.' || c == ' ') continue;       /* dots/spaces dropped */
         if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
         out[blen++] = (uint8_t)upper_(c);
     }
     if (blen == 0) { out[0] = 'N'; out[1] = 'E'; out[2] = 'W'; blen = 3; }
     if (dot) {
         int el = 0;
-        for (const char *p = dot + 1; *p && el < 3; p++, el++) {
+        for (const char *p = dot + 1; *p && el < 3; p++) {
             char c = *p;
+            if (c == '.' || c == ' ') continue;
             if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
-            out[8 + el] = (uint8_t)upper_(c);
+            out[8 + el++] = (uint8_t)upper_(c);
         }
     }
     fat_dirent_t tmp;
@@ -657,6 +708,8 @@ static int make_alias83(uint32_t parent, const char *name, uint8_t out[11]) {
             out[blen + 1] = (uint8_t)('0' + n / 10);
             out[blen + 2] = (uint8_t)('0' + n % 10);
         }
+        /* 8.3 short namespace collision: an existing LFN entry keeps its
+         * alias as the short entry, so fat_lookup() covers both layouts. */
         if (fat_lookup(parent, out, &tmp) != 0) return 0;
     }
     return -1;                                  /* 99 aliases taken */
@@ -675,7 +728,11 @@ static void lfn_fill_part(uint8_t *b, const uint16_t *u, int total, int base) {
 }
 
 /* write the LFN run + short entry at a (start_c, start_i) position that
- * may span directory clusters; every touched cluster is written back */
+ * may span directory clusters; every touched cluster is written back.
+ * v2.48: a mid-write ATA failure or overrun tombstones every slot written
+ * so far, so no dangling partial LFN run / half-written short entry stays
+ * visible to the read side. */
+#define PUTRUN_MAX_CL 32
 static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
                        int n, int nent, const uint8_t *alias, uint8_t attr,
                        uint32_t clus, uint32_t size) {
@@ -683,12 +740,17 @@ static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
     int per = (int)(spc * 512 / DENT_SIZE);
     uint32_t wc = start_c;
     int wi = start_i;
-    int loaded = 0, dirty = 0, rc = 0;
+    int loaded = 0, dirty = 0;
+    uint32_t touch_c[PUTRUN_MAX_CL];
+    int      touch_i[PUTRUN_MAX_CL];
+    int      touch_n[PUTRUN_MAX_CL];
+    int      tnc = 0;
     uint8_t sum = lfn_checksum(alias);
     for (int k = 0; k <= nent; k++) {
         if (!loaded) {
-            if (fat_read_cluster(wc, wbuf) != 0) return -1;
+            if (fat_read_cluster(wc, wbuf) != 0) goto fail;
             loaded = 1; dirty = 0;
+            touch_c[tnc] = wc; touch_i[tnc] = wi; touch_n[tnc] = 0; tnc++;
         }
         uint8_t *b = wbuf + wi * DENT_SIZE;
         if (k < nent) {
@@ -701,20 +763,33 @@ static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
             lfn_fill_part(b, ucs, n, (seq - 1) * 13);
         } else {
             struct dent *se = (struct dent *)b;
-            dent_init(se, alias, attr, clus, size);
+            dent_init(se, alias, attr, clus, size, 0);  /* alias: upper */
         }
+        touch_n[tnc - 1]++;
         dirty = 1;
         wi++;
         if (wi >= per) {
-            if (fat_write_cluster(wc, wbuf) != 0) return -1;
+            if (fat_write_cluster(wc, wbuf) != 0) goto fail;
             loaded = 0; dirty = 0;
             uint32_t nx = fat_get(wc);
-            if (nx < 2 || nx >= 0x0FFFFFF0) return -1;  /* run overran */
+            if (nx < 2 || nx >= 0x0FFFFFF0) goto fail;  /* run overran */
             wc = nx; wi = 0;
         }
     }
-    if (dirty && fat_write_cluster(wc, wbuf) != 0) return -1;
-    return rc;
+    if (dirty && fat_write_cluster(wc, wbuf) != 0) goto fail;
+    return 0;
+
+fail:
+    for (int t = 0; t < tnc; t++) {
+        static uint8_t rb[FAT_CLUSTER_SZ_MAX];
+        if (fat_read_cluster(touch_c[t], rb) != 0) continue;
+        for (int j = 0; j < touch_n[t]; j++) {
+            uint8_t *p = rb + (touch_i[t] + j) * DENT_SIZE;
+            p[0] = 0xE5;
+        }
+        fat_write_cluster(touch_c[t], rb);
+    }
+    return -1;
 }
 
 /* write alias + its LFN run into the first contiguous free window of
@@ -751,12 +826,19 @@ static int dir_write_lfn(uint32_t dirclus, const char *name,
         uint32_t nx = fat_get(c);
         if (nx < 2 || nx >= 0x0FFFFFF0) {
             /* chain exhausted: append a zeroed cluster (all slots free)
-             * and keep counting the run into it */
+             * and keep counting the run into it.  v2.48: a failed append
+             * unlinks the new cluster and frees it instead of leaving an
+             * orphan chain entry behind. */
+            uint32_t tail = (nx >= 2 && nx < 0x0FFFFFF0) ? nx : FAT_EOC;
             uint32_t nc = fat_alloc();
             if (!nc) return -1;
             fat_set(c, nc);
             memz(zbuf, sizeof(zbuf));
-            if (fat_write_cluster(nc, zbuf) != 0) return -1;
+            if (fat_write_cluster(nc, zbuf) != 0) {
+                fat_set(c, tail);
+                fat_free_chain(nc);
+                return -1;
+            }
             if (run == 0) { start_c = nc; start_i = 0; }
             c = nc;
             continue;
@@ -772,11 +854,16 @@ static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
     uint8_t rn[11];
     if (fat_lookup_name(parent, name, &tmp, rn) == 0) return -1;  /* exists */
 
+    /* v2.48: reject FAT-forbidden names before any cluster/dir slot is
+     * touched; the 8.3 conversion would otherwise embed reserved bytes. */
+    if (fat_name_illegal(name)) return -1;
+
     if (name_lossless83(name)) {
         uint8_t n83[11];
         fat_name83(name, n83);
-        if (attr == FAT_ATTR_DIR) return fat_mkdir(parent, n83);
-        return fat_mkfile(parent, n83);
+        uint8_t nt = ntres_from_name(name);
+        if (attr == FAT_ATTR_DIR) return fat_mkdir_nt(parent, n83, nt);
+        return fat_mkfile_nt(parent, n83, nt);
     }
 
     uint8_t alias[11];
@@ -792,8 +879,8 @@ static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
         dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
         struct dent *d0 = (struct dent *)zbuf;
         struct dent *d1 = (struct dent *)(zbuf + DENT_SIZE);
-        dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-        dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0);
+        dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+        dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0, 0);
         if (fat_write_cluster(nc, zbuf) != 0) return -1;
     } else {
         memz(zbuf, sizeof(zbuf));
@@ -902,7 +989,7 @@ void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
     }
 }
 
-int fat_mkdir(uint32_t parent, const uint8_t *name83) {
+static int fat_mkdir_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;   /* exists */
 
@@ -917,18 +1004,22 @@ int fat_mkdir(uint32_t parent, const uint8_t *name83) {
     dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
     struct dent *d0 = (struct dent *)buf;
     struct dent *d1 = (struct dent *)(buf + DENT_SIZE);
-    dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-    dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0);
+    dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+    dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0, 0);
     if (fat_write_cluster(nc, buf) != 0) return -1;
 
     struct dent de;
-    dent_init(&de, name83, FAT_ATTR_DIR, nc, 0);
+    dent_init(&de, name83, FAT_ATTR_DIR, nc, 0, ntres);
     if (dir_write_dent(parent, &de) != 0) return -1;
     fat_flush();
     return 0;
 }
 
-int fat_mkfile(uint32_t parent, const uint8_t *name83) {
+int fat_mkdir(uint32_t parent, const uint8_t *name83) {
+    return fat_mkdir_nt(parent, name83, 0);
+}
+
+static int fat_mkfile_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;
 
@@ -939,10 +1030,14 @@ int fat_mkfile(uint32_t parent, const uint8_t *name83) {
     fat_write_cluster(nc, buf);
 
     struct dent de;
-    dent_init(&de, name83, FAT_ATTR_FILE, nc, 0);
+    dent_init(&de, name83, FAT_ATTR_FILE, nc, 0, ntres);
     if (dir_write_dent(parent, &de) != 0) { fat_free_chain(nc); return -1; }
     fat_flush();
     return 0;
+}
+
+int fat_mkfile(uint32_t parent, const uint8_t *name83) {
+    return fat_mkfile_nt(parent, name83, 0);
 }
 
 int fat_update_entry(uint32_t dirclus, const uint8_t *name83,
@@ -1346,8 +1441,8 @@ int fat_mkfs(void) {
         dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
         struct dent *d0 = (struct dent *)rbuf;
         struct dent *d1 = (struct dent *)(rbuf + DENT_SIZE);
-        dent_init(d0, dotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
-        dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
+        dent_init(d0, dotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
+        dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
         ata_write_sectors(data_start, (uint8_t)spc, rbuf);   /* cluster 2 */
     }
 
@@ -1371,11 +1466,11 @@ int fat_mkfs(void) {
             dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
             struct dent *d0 = (struct dent *)rbuf;
             struct dent *d1 = (struct dent *)(rbuf + DENT_SIZE);
-            dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-            dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
+            dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+            dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
             if (fat_write_cluster(nc, rbuf) != 0) break;
             struct dent de;
-            dent_init(&de, n83, FAT_ATTR_DIR, nc, 0);
+            dent_init(&de, n83, FAT_ATTR_DIR, nc, 0, 0);
             if (dir_write_dent(ROOT_CLUS, &de) != 0) break;
         }
     }

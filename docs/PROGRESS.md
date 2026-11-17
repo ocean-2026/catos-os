@@ -486,3 +486,13 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **隔离**：pending 识别只挂主提示符循环；PE->CE offer、format 闸门、gfx consent、useradd wizard 等内部 y/n 问询走各自 `kb_readline`/`kb_getkey`，不持有 pending 状态，其回答不受影响；autostart 脚本模式（g_script_mode）不 arm。
 - **测试**：新增 `tests/shell_guess_regress.py`（两趟：format 后注入 mkpe 样本 PE），16 项断言覆盖 y 直跑、大写 Y、参数携带且不残留、无 pending 时 y 报 unknown、PE 问询 y 不误触发、连续两次错误 pending 覆盖；已接入 `tests/run_full_regress.sh`（端口 4450）。
 - **回归**：本轮实测 qemu 12/12、guess 16/16；改动为 shell 主循环附加状态机，未触碰解析/补全/路径查找，其余套件按 v2.46 基线（fsrec 12/12、caps 12/12、user 15/15、disk 5/5、env 13/13、heap 4/4、size 7/7；ce 11 FAIL 为 ce_sim 未建模既有基线）。
+
+## 二十七、v2.48 LFN 写侧健壮性（fat.c）
+
+- **非法字符过滤**：新增 `fat_name_illegal()`（fat.c/fat.h），拒绝控制码与 FAT 保留标点 `" * / : < > ? \ |`，以及尾随空格/点；`fs.c` `create_path()` 用户态入口与 `fat_create_nl()` 内核侧双重校验，非法名返回 `FS_ERR_INVAL`（shell 报 `invalid name`）。
+- **别名碰撞核对**：`make_alias83()` 按 Windows 短名规则从词干取前 6 字符时剔除点号/空格，非法可打印字符替换为 `_`；`~1..~99` 递增前逐个 `fat_lookup()` 核对 8.3 命名空间（既有 LFN 条目的别名即其短条目，8.3 扫描同时覆盖两种布局）；99 个别名耗尽返回失败。
+- **失败路径回滚安全**：`dir_put_run()` 记录每个已写簇与槽位区间；中途 ATA 失败或目录链越界时，把已写槽位逐个墓碑化为 `0xE5` 并重写回盘，不留悬挂的半截 LFN run / 半写短条目。`dir_write_lfn()` 链尾追加新目录簇失败时，解除父簇链接并释放新簇，不再留下孤儿链项；数据簇分配失败仍由调用方 `fat_free_chain()` 回收。
+- **lcase 字节（ntres, offset 12）**：新增 `ntres_from_name()`，无损 8.3 条目按原始大小写写 `0x10`（词干全小写）/`0x08`（扩展名全小写）；LFN 别名恒为大写、ntres=0。`dent_init()` 增加 ntres 参数，`fat_mkdir/fat_mkfile` 保留原签名并委托 `_nt` 变体。
+- **未做**：原生 rename（copy+delete 现状保留，批次 C）；LFN 上限 240 码元与规范 255 的差距未动；读侧展示仍统一小写（8.3 路径），LFN 路径保留原始大小写。
+- **测试**：新增 `tests/lfn_regress.py`（14 项：长名建/列/删往返、7 类保留字符拒绝、同词干别名碰撞共存、多点名往返、混合大小写 8.3 与 LFN 两路径、无致命 fault），接入 `run_full_regress.sh`（端口 4712）。
+- **回归**：本轮实测 lfn 14/14、qemu 12/12、fsrec 12/12；纯 fs 层改动，未触 CE ABI 与 shell 主循环。
