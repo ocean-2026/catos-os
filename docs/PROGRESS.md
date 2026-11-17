@@ -524,3 +524,9 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **兼容与透明升级**：v1 `$S$<8hex salt>$<8hex>` 旧记录用保留的 32 位混合校验，成功后原地重算 v2；legacy bare djb2 记录同样校验通过后升级。
 - **未做 / deferred**：Argon2/scrypt 等内存硬度方案（设计级，内核无 crypto 原语）；轮数运行时管理旋钮未接 CLI；v1/djb2 升级路径无金属探针（测试磁盘上无旧记录可注入，代码路径已评审）。
 - **测试**：`user_regress.py` 新增 5 项（set、v2 格式正则、错误口令拒绝、正确口令登录、会话身份），实测 20/20；qemu 12/12。
+
+## 三十一、批次 A 全量回归 sweep（v2.48–v2.51）
+
+- 逐套件前台分次跑，全绿：qemu 12/12、guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7。
+- ce_regress 11 FAIL 为 ce_sim 未建模既有基线，不计回归失败。
+- 四项 commit：ee6bfcd（v2.48）、80cb16a（v2.49）、ed61383（v2.50）、671c827（v2.51），均已推 origin/main。
