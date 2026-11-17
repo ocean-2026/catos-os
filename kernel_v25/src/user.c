@@ -673,6 +673,18 @@ int group_add(const char *name, const char *member) {
     return ggroups[slot].gid;
 }
 
+/* #186: remove a group slot.  Used to roll back a just-created group when
+ * member addition fails after the slot was created. */
+void group_remove(const char *name) {
+    for (int i = 0; i < gn_groups; i++) {
+        if (!useq(ggroups[i].name, name)) continue;
+        for (int j = i; j < gn_groups - 1; j++)
+            ggroups[j] = ggroups[j + 1];
+        gn_groups--;
+        return;
+    }
+}
+
 int user_in_group(int uid, int gid) {
     for (int i = 0; i < gn_groups; i++) {
         if (ggroups[i].gid != gid) continue;

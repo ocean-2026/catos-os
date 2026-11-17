@@ -104,6 +104,7 @@ void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      *
 int         group_db_init(void);                /* load /etc/group (or empty)   */
 int         group_add(const char *name, const char *member);
         /* create (next gid) and/or append a member; returns gid, negative err */
+void        group_remove(const char *name);     /* roll back a created group    */
 int         group_save(void);                   /* rewrite /etc/group           */
 int         user_in_group(int uid, int gid);    /* 1 = uid belongs to gid       */
 int         group_info(int idx, char *name_out, int nlen, int *gid_out);

@@ -2568,22 +2568,57 @@ static void cmd_login(char *arg, int as_su) {
 /* v2.53: groupadd G [MEMBER...] -- create /etc/group entry, append members */
 static void cmd_groupadd(char *arg) {
     if (!session_is_admin()) { vga_write("groupadd: permission denied\n"); return; }
-    char *argv[5];
-    int argc = split_words(arg, argv, 5);
+    /* #186: count tokens before split_words mutates the line; words beyond
+     * the argv capacity used to be silently dropped. */
+    int words = 0;
+    for (const char *q = arg; *q; ) {
+        while (*q == ' ') q++;
+        if (!*q) break;
+        words++;
+        while (*q && *q != ' ') q++;
+    }
+    char *argv[12];
+    int argc = split_words(arg, argv, 12);
     if (argc < 1) {
         vga_write("usage: groupadd GROUP [MEMBER USER...]\n");
         return;
     }
-    int gid = -1;
-    for (int i = 0; i < argc; i++) {
-        gid = group_add(argv[0], i >= 1 ? argv[i] : 0);
-        if (gid == -2) { vga_write("groupadd: group table full\n"); return; }
-        if (gid == -3) { vga_write("groupadd: unknown user '"); vga_write(argv[i]);
-                         vga_write("'\n"); return; }
-        if (gid == -4) { vga_write("groupadd: member list full for '");
-                         vga_write(argv[0]); vga_write("'\n"); return; }
+    if (words > argc)
+        vga_write("groupadd: too many arguments; trailing members ignored\n");
+    int nmem = argc - 1;
+    if (nmem > GROUP_MEMBERS) {
+        vga_write("groupadd: only "); print_int(GROUP_MEMBERS);
+        vga_write(" members supported; extra members ignored\n");
+        nmem = GROUP_MEMBERS;
     }
-    if (gid < 0) { vga_write("groupadd: failed\n"); return; }
+    /* #186: validate members BEFORE touching the group table, so an unknown
+     * user cannot leave an empty group slot that group_save would persist. */
+    for (int i = 1; i < argc; i++) {
+        if (!user_by_name(argv[i])) {
+            vga_write("groupadd: unknown user '"); vga_write(argv[i]);
+            vga_write("'\n");
+            return;
+        }
+    }
+    /* remember whether the group already existed, so a rollback below does
+     * not wipe an existing entry's members. */
+    int existed = 0;
+    char gnm[16];
+    for (int j = 0; group_info(j, gnm, 16, 0) >= 0; j++)
+        if (!strcmp_(gnm, argv[0])) { existed = 1; break; }
+    int gid = group_add(argv[0], 0);
+    if (gid == -2) { vga_write("groupadd: group table full\n"); return; }
+    if (gid < 0)   { vga_write("groupadd: failed\n"); return; }
+    int failed = 0;
+    for (int i = 1; i <= nmem; i++) {
+        int r = group_add(argv[0], argv[i]);
+        if (r == -4) { vga_write("groupadd: member list full\n"); failed = 1; break; }
+        if (r < 0)   { vga_write("groupadd: failed to add member\n"); failed = 1; break; }
+    }
+    if (failed) {
+        if (!existed) group_remove(argv[0]);   /* roll back the fresh slot */
+        return;
+    }
     if (group_save() != 0) { vga_write("groupadd: WARNING: could not persist\n"); return; }
     vga_write("group '"); vga_write(argv[0]); vga_write("' gid ");
     print_int(gid); vga_write("\n");
