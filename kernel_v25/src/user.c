@@ -366,10 +366,14 @@ static void user_seed_default(void) {
     user_save();
 }
 
-/* split a line into ':' fields; returns field count */
+/* split a line into ':' fields; returns field count.
+ * (#163) every slot is initialised NULL: a line with fewer fields than
+ * maxf must leave the unused entries as NULL instead of uninitialised
+ * stack garbage, so callers can safely test fld[k] == NULL. */
 static int split_fields(char *line, char *fld[], int maxf) {
     int n = 0;
     char *p = line;
+    for (int i = 0; i < maxf; i++) fld[i] = 0;
     fld[n++] = p;
     while (*p && n < maxf) {
         if (*p == ':') { *p = 0; fld[n++] = p + 1; }
@@ -587,6 +591,9 @@ int group_db_init(void) {
             ucopy(ggroups[slot].name, fld[0], 16);
             ggroups[slot].gid = (int)parse_uint(fld[1], 10);
             ggroups[slot].nmem = 0;
+            /* #163: a two-field line (`grp:100`, no member column) leaves
+             * fld[2] == NULL; skip the member list instead of dereferencing
+             * whatever stack garbage used to sit there. */
             char *m = fld[2];
             while (m && *m && ggroups[slot].nmem < GROUP_MEMBERS) {
                 char *comma = m;
