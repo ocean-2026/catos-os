@@ -772,3 +772,29 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 155 | 中（latent，deferred） | 嵌套递归删除时 fat 层 delete-name 重入：rm -r 后序删除子目录条目时父目录 `fat_list_dir` 静态缓冲仍在活动，子目录条目墓碑化/簇释放后父目录重新列举仍计数到残留条目，条目属性/簇字段被破坏成不可解析（resolve 返回 -2 非目录） | 目录簇读缓冲（fat_list_dir/fat_delete_name/dir_walk 各自 static buf）在嵌套回调中被复用覆盖；删除条目与活动遍历共用缓冲 | 本批 v2.50 以 `fs_rmdir_force` 保持 rm -r 基线行为绕过；后续需把目录簇读缓冲改为调用方传入或堆上分配，消除嵌套重入；在此之前不要让 rm -r 依赖严格非空校验 | ⏳ deferred |
 
 | 157 | 中（已修） | `fs_perm_check` 把 UNIX mode 三权限位（r=4,w=2,x=1）直接与内核 `PERM_READ=1/PERM_WRITE=2/PERM_EXEC=4` 位掩码做 `&` 比对：4xx 组/主读位 4 与 PERM_READ(1) 相与为 0 被误拒，执行位 1 又被当成 READ 误放；v2.53 附加组判定挂在组位分支上，该错误掩码把组/附加组可读访问全部误判成 permission denied | 两套位编码混用：文件 mode 是经典 12-bit octal triad，syscall need 是独立 1/2/4 位掩码，二者从未做翻译 | v2.53：组/主/other 取出 triad 后先翻译成 PERM_*（4→READ、2→WRITE、1→EXEC）再与 need 比对；group_regress 10/10（成员经附加组可读、非成员 640 被拒、追加成员可读、持久化复登） | ✅ 已修 |
+
+## 对抗测试 R1（蓝队修复轮次，2026-11-18）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 163 | 中（WHITE-008） | `group_db_init` 解析两字段行（如 `grp:100`，无第二个冒号）时 `fld[2]` 为未初始化栈指针被解引用 | `split_fields` 未用槽位未置 NULL；成员列空指针解引用 | `split_fields` 对未填字段一律置 NULL（根治）；`group_db_init` 对 `fld[2]==NULL` 跳过成员列。commit `0a49d9d`；离线注入两字段行磁盘副本实机启动无 #PF、组库正常降级 | ✅ 已修 |
+| 164 | 中（WHITE-009） | `group_save` 静态缓冲无界写：分隔符 ':'、十进制数字串、'\n' 均无条件 `buf[o++]` | 保存路径无边界检查，越界写 bss | 新增有界追加内联（`buf_put/buf_str/buf_num`，`o < sizeof(buf)-2` 才写，写满截断停止）；三处 save 统一改走有界写入。commit `3c1fc90` | ✅ 已修 |
+| 178 | 中（WHITE-026） | `acl_save` 同上静态缓冲无界写 | 同 #164 | 同 #164 有界追加。commit `3c1fc90` | ✅ 已修 |
+| 166 | 中（WHITE-011） | `user_save` 同上静态缓冲无界写 | 同 #164 | 同 #164 有界追加。commit `3c1fc90` | ✅ 已修 |
+| 167 | 中（WHITE-013） | `spawn_ce_redirect` 预截断/预建文件走 `fs_write_raw_mode` 绕过权限：非 root 会话可截断/创建受保护文件 | 重定向目标在子任务自身 SYS_WRITE 检查之前由 ring0 预建/截断，未做 `fs_perm_check` | 预截断/预建前用 `g_uid/g_gid` 对目标路径做 `fs_perm_check(PERM_WRITE)`；拒绝时杀掉已 spawn 任务且不触碰文件。commit `d415332` | ✅ 已修 |
+| 168 | 中（WHITE-014） | `cmd_rmdir` 完全缺权限检查，对照 `cmd_rm` 无 `PERM_WRITE` 闸门 | rmdir 路径漏接权限校验 | 补 `fs_perm_check(..., PERM_WRITE)`，与文件删除一致。commit `da89050` | ✅ 已修 |
+| 182 | 中（WHITE-030） | `cmd_edit` 打开/新建与 `ed_save` 保存均无权限检查；`pe_to_ce_file` 落盘同样无校验 | 编辑链路与 PE→CE 转换落盘未接属主/权限闸门 | 目标存在时 `fs_perm_check(PERM_WRITE)`，不存在时检查父目录写位；`ed_save` 保存前复核；`pe_to_ce_file` 增加 uid/gid 参数并在落盘前校验，shell 调用点传会话身份。commit `c2bd2d4` | ✅ 已修 |
+| 165 | 低（WHITE-010） | `group_save` 已删除首成员后留下前导逗号 | 逗号分隔用循环下标 `m` 判断首成员，下标 0 成员缺失时仍前置逗号 | 改用「已输出过成员」标志 `emitted` 决定是否先写逗号。commit `9988828` | ✅ 已修 |
+| 181 | 中（WHITE-029） | `cmd_chcaps`/`useradd` 能力授予无子集约束：USERADM 账户可自授 `CAP_ALL` | 授予方所持位与目标位无超集校验；root 豁免 | 非 root 时 `(want & ~g_caps) != 0` 拒绝；`ue_edit_caps` 持久化时按 `g_caps` 裁剪；root 例外豁免。commit `0b6db38` | ✅ 已修 |
+| 180 | 中（WHITE-028） | spawn 失败回滚路径（`fail_space4`/`fail_space6`）只 `task_space_destroy`，不释放 VMA 链表 | 加载失败分支对照 `task_cleanup` 漏做 `while (t->vm) vma_free` | 新增 `task_free_vma_list(t)`；ELF/PE 加载失败分支与两处回滚在 `task_space_destroy` 后释放 VMA 节点链表。commit `4de63b8` | ✅ 已修 |
+| 170 | 中（WHITE-017） | `fs.c` `abs_path` 无界 `scpy/scat` 拼接，撑爆 320 字节栈缓冲 | cwd + '/' + 相对名先拼进 `tmp[FS_PATH_MAX*2]`，未做长度校验，`path_norm` 有界输出之前栈已溢出 | 改为 int 返回（0 成功 / -1 超长拒绝），合成长度先校验再逐字节有界拷贝；全部内部调用点传播失败（int API 返回 `FS_ERR_INVAL`/-1，`fs_is_dir`→0，`fs_open_file`→NULL，`fs_list` 打印 path too long，`fs_canon_path` 出空 key）。commit `ff99325` | ✅ 已修 |
+| 184 | 高（RED-03） | shell `kill` 分发硬编码 `task_kill(tid, UID_ROOT)`，完全绕过 `task_kill` 属主/`CAP_KILL` 判定；caps=0 非 root 实证杀死 root 守护 | 分发未传入会话 `g_uid`，`task_kill` 的 `-2 not yours` 分支被绕过 | 改为以会话 `g_uid` 调用；`-2` 单独报 `permission denied`，`-1` 报 no such task。commit `b4e11c3`；复刻红队序列（root `useradd guest` → `daemon memlog` → `su guest` → `kill 1`）实机被拒、守护仍存活 | ✅ 已修 |
+| 185 | 中（RED-14） | `user_db_init` 口令归一化把「解析不出数字」与「哈希=0（开放账户）」混同：`xyz` 等非 hex 串被清空口令致账户解锁 | `parse_uint(pw,16)==0` 同时覆盖「值为 0」与「非数字」两种情形 | 仅 `"0"` 或合法 hex 且值为 0 才算 open；无法解析一律保留为已设未知口令，登录拒绝。commit `bc542d3`；`short:...:xyz` 实机 `login short wrongpw` 返回 incorrect password，会话仍为 root | ✅ 已修 |
+| 186 | 中（RED-06） | `groupadd` 成员校验失败回滚不撤空槽（空组经 `group_save` 持久化）；超容量成员 token 被 `split_words(...,5)` 静默丢弃 | 先建槽再循环加成员，失败不撤槽；参数表容量上限无告警 | 成员先对照 `/etc/passwd` 校验再触碰组表；失败时新增 `group_remove` 撤掉新建槽（已存在的组不回滚）；成员超 `GROUP_MEMBERS` 与参数过多均打印告警而非静默丢弃。commit `f6be766`；`groupadd gg1 nosuchuser` 实机报 unknown user，`groups` 无 gg1 槽 | ✅ 已修 |
+| 187 | 中（RED-05） | 磁盘 `/etc/group` 加载不做 gid 唯一性校验：重复 gid 两行经 `user_in_group(uid,gid)` 同时命中，成员串互相显 | `group_db_init` 无已见 gid 扫描；内存 `group_add` 避让 gid 但加载路径不避让 | 加载时遇已见 gid 跳过该行。commit `a7d475b`；离线注入 `dup1:103:root`/`dup2:103:u1`，`groups` 仅保留 dup1:root，无跨组串显 | ✅ 已修 |
+| 188 | 中（RED-02 / WHITE-001，deferred） | TID 槽位即时复用，无代际/已退出标记：旧 tid 引用静默命中新任务，脚本化按固定 tid 记账可能误杀复用后的新任务 | 槽位回收后 TID 立即复用，无代际号或「job already exited」语义 | 改动面大（任务表/作业控制/所有引用 tid 的命令），本轮登记 deferred；后续引入代际计数或退出标记 | ⏳ deferred |
+| 189 | 中（RED-09，deferred） | 守护任务存在绕过 ring 隔离的直写控制台路径：迭代计数/诊断行直刷前台，淹没交互提示符；同任务 heap 行经 SYS_WRITE 进 ring | 至少一条输出路径未走 `bg_mode` ring 分支；需先定位 memlog 计数走的是哪条 syscall/直写路径 | 本轮登记 deferred；定位直写控制台的 syscall 入口后统一并入 per-task 环形缓冲 | ⏳ deferred |
+| 190 | 中（RED-11，deferred） | 组件名超 `FS_NAME_MAX(48)` 未被拒绝，静默截断生成退化 8.3 别名，扩展名损坏/丢失 | `abs_path` 归一化先截断路径，`create_path` 拿到的 leaf 已短于 48，长度校验被绕过；`fat_name83` 截 ext 越界 | 与长名截断及 8.3 别名生成联动改动面较大，本轮登记 deferred；后续在写侧入口做组件名长度校验并拒绝超长 | ⏳ deferred |
+| 191 | 低（RED-15，deferred） | 对猜测回答 `n` 不会拒绝建议：`n` 被当作新未知命令重新最近邻 arm，后续 `y` 回放的是新猜测 | pending-guess 状态机未把「对当前 offer 的否定回答（n/no）」与「新命令行」区分开，`pend_clear` 消费旧 offer 后 `run_from_path` 失败又 `pend_arm` 新建议 | 属行为设计取舍，本轮登记 deferred；后续状态机显式识别 n/no 并清除待确认状态 | ⏳ deferred |
+| 192 | 中（WHITE-027，deferred） | 管道句柄全局命名空间，无属主校验：任意 ring3 任务可读写/关闭他人管道（句柄 `0x100+idx` 全局可见，`pipe_by_handle` 只判 `used`） | 管道模型缺 POSIX 式句柄私有归属；`PIPE_READ/WRITE/CLOSE` 不校验管道是否挂在调用者 `out_pipe/in_pipe` 上 | 本轮登记 deferred；后续为管道句柄加属主任务校验 | ⏳ deferred |
+| 193 | 低（RED-04 / WHITE-031，deferred） | `jobs`/`ps` 跨会话枚举其他属主的后台/守护任务（名称、状态、日志环字节数），为越权 kill 提供目标 tid 枚举 | 列表遍历全表，仅按 `bg_mode`/`T_STOPPED` 过滤，不校验 `t->uid` 与会话关系 | 信息泄露，不破坏内存；本轮登记 deferred；后续列表按属主过滤（root/会话属主/`CAP_KILL` 可见他人） | ⏳ deferred |
