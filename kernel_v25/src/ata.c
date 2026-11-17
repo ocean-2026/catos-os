@@ -1,6 +1,7 @@
 #include "ata.h"
 #include "task.h"
 #include "io.h"
+#include "hw.h"
 
 /* PIO ATA driver with channel/device discovery.
  *
@@ -16,6 +17,14 @@
 #define CMD_WRITE      0x30
 #define CMD_FLUSH      0xE7
 #define CMD_IDENTIFY   0xEC
+
+/* Probe-path wait budget.  A present drive raises BSY then DRQ (or ERR)
+ * within microseconds; the old 10M-iteration bound let an empty slot --
+ * whose status port returns a constant 0x00/0xFF with no BSY/ERR/DRQ --
+ * spin for >1 s per slot on every boot.  A short stable-no-signal run
+ * bails out early; the iteration ceiling stays as a backstop. */
+#define ATA_PROBE_WAIT_MAX    1000000
+#define ATA_PROBE_DEAD_SAMPLE 256
 
 typedef struct {
     uint16_t base;
@@ -63,9 +72,14 @@ static int ata_try_identify(uint16_t base, uint16_t ctrl,
     uint8_t st;
 
     /* wait for the bus to be idle before touching the slot */
-    for (int t = 0; t < 10000000; t++) {
-        st = inb(base + 7);
-        if (!(st & 0x80)) break;
+    {
+        int idle_dead = 0;
+        for (int t = 0; t < ATA_PROBE_WAIT_MAX; t++) {
+            st = inb(base + 7);
+            if (!(st & 0x80)) break;
+            /* open bus: BSY stuck high with no decoder behind the port */
+            if (st == 0xFF && ++idle_dead >= ATA_PROBE_DEAD_SAMPLE) break;
+        }
     }
 
     outb(base + 6, identify_dev);          /* select device */
@@ -77,11 +91,20 @@ static int ata_try_identify(uint16_t base, uint16_t ctrl,
     outb(base + 7, CMD_IDENTIFY);
 
     int got = 0;
-    for (int t = 0; t < 10000000; t++) {
+    int dead = 0;
+    for (int t = 0; t < ATA_PROBE_WAIT_MAX; t++) {
         st = inb(base + 7);
-        if (st & 0x80) continue;            /* busy */
-        if (st & 0x01) break;               /* error: no device here */
-        if (st & 0x08) { got = 1; break; }  /* DRQ: data ready */
+        if (st & 0x80) { dead = 0; continue; }  /* busy */
+        if (st & 0x01) break;                   /* error: no device here */
+        if (st & 0x08) { got = 1; break; }      /* DRQ: data ready */
+        /* No BSY/ERR/DRQ.  An empty slave/open bus leaves the status at
+         * a constant 0x00 or 0xFF; after a short stable run there is
+         * no device coming, so stop probing this slot. */
+        if (st == 0x00 || st == 0xFF) {
+            if (++dead >= ATA_PROBE_DEAD_SAMPLE) break;
+        } else {
+            dead = 0;
+        }
     }
     if (!got) return -1;
 
@@ -123,6 +146,7 @@ int ata_scan(void) {
         { 0x170, 0x376, 0xB0, 0xF0 },   /* secondary slave  */
     };
     g_count = 0;
+    btime_mark("A0 ata_scan 4 slots");
     for (int i = 0; i < ATA_DRIVES; i++) {
         uint32_t sec = 0;
         uint16_t id[256];
@@ -163,8 +187,15 @@ int ata_scan(void) {
             }
             g_count++;
         }
+        {
+            char tag[12];
+            tag[0] = 'A'; tag[1] = '1'; tag[2] = (char)('0' + i);
+            tag[3] = ' '; tag[4] = sec > 0 ? '1' : '0'; tag[5] = 0;
+            btime_mark(tag);
+        }
     }
     g_scanned = 1;
+    btime_mark("A2 ata_scan done");
     return g_count;
 }
 

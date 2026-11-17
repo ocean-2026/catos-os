@@ -38,6 +38,19 @@ assert_kernel_fresh()
 
 w = open(SRC, 'rb').read()
 kernel = open(KERNEL, 'rb').read()
+
+# v2.46: the embedded GRUB config waited `timeout=5` at the menu before
+# booting the default entry -- ~5 s of dead menu countdown on every boot.
+# Boot straight into CatOS.  The pattern is asserted unique so a GRUB
+# image upgrade that changes the config layout fails loudly here instead
+# of silently keeping the old delay.
+_old = b"set timeout=5"
+_new = b"set timeout=0"
+if w.count(_old) == 1:
+    w = w.replace(_old, _new)
+elif w.count(_new) == 0:
+    raise SystemExit("embedded grub.cfg: neither 'timeout=5' nor "
+                     "'timeout=0' pattern found; inspect the template")
 ksec = (len(kernel) + B - 1) // B
 kernel_lba = len(w) // B            # append after current volume
 newvol = kernel_lba + ksec

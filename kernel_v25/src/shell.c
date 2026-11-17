@@ -4005,29 +4005,39 @@ static void net_boot_status(void) {
 
 void shell_run(void) {
     mbi = (multiboot_info_t *)multiboot_info_ptr;
+    btime_mark("S0 shell_run enter");
 
     vga_clear();
     fs_init();
+    btime_mark("S1 fs_init done");
     lang_init();              /* v2.21 T50: load /etc/lang, default en */
+    btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
+    btime_mark("S3 env_init");
     ce_init();
+    btime_mark("S4 ce_init");
     /* v2.13: load the persistent user database + ACL (seeds root/user and
      * the default owner/group/other table when the files are absent) */
     user_db_init();
     acl_init();
     session_apply();                /* boot session = root (initial user) */
+    btime_mark("S5 user/acl/session");
     if (!fs_fs_ready())
         vga_write(tr(L_NO_FAT32));
     else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
+        btime_mark("S6 builtins installed");
         ce_install_pkg_repo();      /* NIGHT-P4: seed /pkg/ local repo + index */
+        btime_mark("S7 pkg repo seeded");
         /* v2.17: boot output now comes from /etc/autostart scripts
          * (echo lines) instead of a hardcoded banner.  Falls back to a
          * seeded default script on a fresh volume. */
         boot_autostart();
+        btime_mark("S8 autostart done");
     }
 
     kb_set_completer(sh_complete);        /* v2.28: TAB completion */
+    btime_mark("S9 shell prompt ready");
 
     while (1) {
         prompt();

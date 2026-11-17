@@ -131,3 +131,5 @@ CatOS[易错点] `render_rgb_to_vga` 阈值量化会把 `#60A5FA` 蓝判成青�
 CatOS[易错点] shell 内建树遍历/多行换行不要在栈上放大缓冲：`names[24][FS_NAME_MAX]` 再加递归前缀串和三行换行缓冲，在当前 shell 栈容量下会刷出同串 `?` 乱码并污染后续帧；条目收集应走静态 bss 或堆上缓冲，递归连接器同理。
 CatOS[易错点] 排序后回归断言不能再依赖 FAT 序的尾部条目：`disk_regress ls-bin` 原先抓 `node.ce`/`syn.go`（FAT 序尾部），字母序排序后尾部变为 zhdemo；断言要换成字母序末位或计数行，否则假阴性。
 CatOS[易错点] 框线长度要用显示宽度而不是字节数：UTF-8 CJK 一字三字节两列宽，按 slen 算边框会偏短、右侧竖条错位；写一个 disp_width() 按 lead 字节判 1/2 列宽。
+CatOS[易错点] 启动计时探针 read_screen 固定 2.0s 等待，会把 S9 之后的 harness 轮询粒度误判为内核耗时（约 2.15s 墙钟）；内核就绪必须以 S9 uptime 为准，墙钟三段拆分时要把 post-last-marker 单独标注为探测脚本 artifact，不能计入内核启动时间。
+CatOS[易错点] 全量回归一键脚本在 600s 前台预算内会被 SIGTERM（exit 143），size 套件环境侧 PPM 解析/monitor 往返慢（每步约 2 分钟）；长套件必须后台 nohup + 轮询日志，且按日志时间戳确认是本轮新鲜产物——旧基线日志（Nov16）不能复用，被中断的套件只跑了前几个检查点，重跑要数全 PASS 条数。

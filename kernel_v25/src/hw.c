@@ -17,6 +17,29 @@ extern void frame_stats(uint32_t *total, uint32_t *used);
 extern int  task_count(void);
 extern char _bss_end[];
 
+/* ---- v2.46 boot stage markers ---------------------------------------- */
+extern uint32_t uptime_ms(void);
+extern void ser_dbg(const char *s);
+
+static void btime_append_u32(char *b, int *n, uint32_t v) {
+    char t[10]; int k = 0;
+    if (v == 0) { b[(*n)++] = '0'; return; }
+    while (v) { t[k++] = (char)('0' + v % 10); v /= 10; }
+    while (k) b[(*n)++] = t[--k];
+}
+
+void btime_mark(const char *tag) {
+    char b[80]; int n = 0;
+    const char *p = "[btime] ";
+    while (*p) b[n++] = *p++;
+    btime_append_u32(b, &n, uptime_ms());
+    b[n++] = 'm'; b[n++] = 's'; b[n++] = ' ';
+    p = tag;
+    while (*p && n < (int)sizeof(b) - 2) b[n++] = *p++;
+    b[n++] = '\n'; b[n] = 0;
+    ser_dbg(b);
+}
+
 /* ---- CPUID ---------------------------------------------------------- */
 
 static char cpu_vendor[13];

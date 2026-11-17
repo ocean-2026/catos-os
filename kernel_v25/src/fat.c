@@ -3,6 +3,7 @@
 #include "ata.h"
 #include "io.h"
 #include "vga.h"        /* boot-time fsck notice */
+#include "hw.h"
 
 /* ---------- fixed layout constants ---------- */
 #define PART_START    1u        /* partition starts right after the MBR */
@@ -1095,6 +1096,7 @@ int fat_verify_mirror(void) {
  * `slot`, activate it and cache its FAT #1.  0 ok / -1 failure. */
 static int probe_volume(int slot, uint8_t drive, uint32_t part_lba) {
     uint8_t dbr[512];
+    btime_mark("V0 probe_volume enter");
     g_active = slot;
     g_vol[slot].d_drive = drive;
 
@@ -1135,6 +1137,7 @@ static int probe_volume(int slot, uint8_t drive, uint32_t part_lba) {
     vol_clusters = (total32 - (rsvd + nfats * fatsz)) / spc;
 
     if (read_fat_region() != 0) return -1;
+    btime_mark("V1 FAT cache loaded");
 
     /* find first free cluster as allocation hint */
     next_free = 3;
@@ -1146,6 +1149,7 @@ static int probe_volume(int slot, uint8_t drive, uint32_t part_lba) {
      * can allocate through the stale copy. */
     if (fat_verify_mirror() > 0)
         vga_write("fsck: FAT mirror was inconsistent, repaired from FAT #1\n");
+    btime_mark("V2 mirror verify done");
     g_vol[slot].d_present = 1;
     return 0;
 }

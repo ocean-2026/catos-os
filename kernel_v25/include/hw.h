@@ -50,4 +50,9 @@ void hw_calibrate_cpu(void);          /* after interrupts are on: measures
                                          the TSC against the PIT          */
 void hw_mem_boot(uint32_t lower_kb, uint32_t upper_kb);
 
+/* v2.46: boot stage breadcrumb -> COM1 (`[btime] <ms>ms <tag>`).  Used by
+ * tests/boot_time_probe.py to break the boot down into stages.  No-op cost
+ * on the normal path: one guarded serial write per marked stage. */
+void btime_mark(const char *tag);
+
 #endif

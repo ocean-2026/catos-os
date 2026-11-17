@@ -1,6 +1,7 @@
 #include "ce.h"
 #include "vga.h"
 #include "fs.h"
+#include "hw.h"
 #include "builtin_apps.inc"
 
 /* Copy the built-in CE apps and developer docs (embedded in the kernel
@@ -12,6 +13,7 @@
  */
 void ce_install_builtins(void) {
     if (!fs_fs_ready()) return;
+    btime_mark("B0 builtins resolve+seed");
     int n = (int)(sizeof(builtin_files) / sizeof(builtin_files[0]));
     int installed = 0;
     for (int i = 0; i < n; i++) {
@@ -31,6 +33,7 @@ void ce_install_builtins(void) {
     /* Quiet on the common path: boot must not claim it installed anything
      * when /bin came from the disk.  Only report real work. */
     if (installed) vga_write("Installed missing built-in app(s)/doc(s) from kernel image.\n");
+    btime_mark("B1 builtins done");
 }
 
 /* NIGHT-P4: seed the local package repository (/pkg/) on the FAT volume.
@@ -47,6 +50,7 @@ void ce_install_builtins(void) {
 void ce_install_pkg_repo(void) {
     if (!fs_fs_ready()) return;
     fs_mkdir("/pkg");
+    btime_mark("P0 pkg repo resolve+seed");
 
     int np = (int)(sizeof(pkg_files) / sizeof(pkg_files[0]));
     for (int i = 0; i < np; i++) {
@@ -82,4 +86,5 @@ void ce_install_pkg_repo(void) {
     idx[len] = 0;
     if (fs_write_raw("/pkg/PKGS.TXT", idx, (uint32_t)len) != 0)
         vga_write("pkg: could not write /pkg/PKGS.TXT\n");
+    btime_mark("P1 pkg repo done");
 }

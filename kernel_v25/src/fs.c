@@ -2,6 +2,7 @@
 #include "fat.h"
 #include "part.h"
 #include "vga.h"
+#include "hw.h"
 static void fs_dbg2(const char *tag, uint32_t v) {
     (void)tag; (void)v;  /* v2.5 debug: no-op */
 }
@@ -186,9 +187,13 @@ static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
 
 /* ---------- lifecycle ---------- */
 void fs_init(void) {
+    btime_mark("F0 fs_init enter");
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) g_mnt[i].used = 0;
+    btime_mark("F1 before fat_probe");
     fs_ready = (fat_probe() == 0);
+    btime_mark("F2 fat_probe done");
     if (fs_ready) part_scan();     /* enumerate MBR partitions for mount */
+    btime_mark("F3 part_scan done");
     g_cwd = fat_root();
     scpy(cwd_path, "/");
     memz(&g_ent, sizeof(g_ent));
