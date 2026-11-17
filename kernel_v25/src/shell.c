@@ -1329,6 +1329,18 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
             task_kill(tid, UID_ROOT);
             return;
         }
+        /* #167: the pre-create/truncate below runs in ring0 and used to
+         * skip fs_perm_check entirely; a non-root session could truncate or
+         * create a protected file before the child's own SYS_WRITE checks
+         * ran.  Re-check the target with the session identity up front, and
+         * refuse without touching the file at all. */
+        if (fs_perm_check(ab, g_uid, g_gid, PERM_WRITE) != 0) {
+            vga_write("run: permission denied: '");
+            vga_write(ab);
+            vga_write("'\n");
+            task_kill(tid, UID_ROOT);
+            return;
+        }
         int i;
         for (i = 0; ab[i] && i < (int)sizeof(tt->out_file) - 1; i++)
             tt->out_file[i] = ab[i];
