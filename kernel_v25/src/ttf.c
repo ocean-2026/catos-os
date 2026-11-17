@@ -322,9 +322,10 @@ static int read_simple(const ttf_font *f, unsigned goff, unsigned gsize,
 #define CF_WORDS      0x0001u
 #define CF_XY_VALUES  0x0002u
 #define CF_MORE       0x0020u
-#define CF_SCALE      0x0040u
-#define CF_XY_SCALE   0x0080u
-#define CF_2X2        0x0100u
+#define CF_SCALE      0x0008u /* WE_HAVE_A_SCALE (one F2Dot14) */
+#define CF_XY_SCALE   0x0040u /* WE_HAVE_AN_X_AND_Y_SCALE */
+#define CF_2X2        0x0080u /* WE_HAVE_A_TWO_BY_TWO */
+/* 0x0100 = WE_HAVE_INSTRUCTIONS: instructions follow all components */
 
 /* F2Dot14 multiply: a * (b/16384), rounding toward nearest */
 static int fmul(int a, int b) {
@@ -361,11 +362,12 @@ static int read_composite(const ttf_font *f, unsigned goff, unsigned gsize,
             p += 4;
             if (flags & CF_XY_VALUES) { cdx = (unsigned)(i16)cdx; cdy = (unsigned)(i16)cdy; }
         } else {
-            u32 a = rd16(f, p, &err);   if (err) return err;
-            u32 b = rd16(f, p + 2, &err); if (err) return err;
-            p += 4;
+            /* byte args: 2 bytes total */
+            u32 a = rd8(f, p, &err);   if (err) return err;
+            u32 b = rd8(f, p + 1, &err); if (err) return err;
+            p += 2;
             if (flags & CF_XY_VALUES) { cdx = (unsigned)(signed char)a; cdy = (unsigned)(signed char)b; }
-            else { cdx = a; cdy = b; } /* point-matching: args are point indices -- reject */
+            else { cdx = a; cdy = b; } /* point-matching: args are point indices -- rejected below */
         }
         if (!(flags & CF_XY_VALUES)) return TTF_ERR_FORMAT; /* minimal: XY only */
         if (flags & CF_SCALE) {

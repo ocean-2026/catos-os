@@ -25,6 +25,41 @@ FONTS = [
     ("liberation_sub", "kernel_v25/fonts/LiberationSans-subset.ttf"),
 ]
 CHARS = [0x41, 0x67]  # 'A', 'g'
+COMPOSITE_CHARS = [0xE9]  # 'e-acute': composite glyph (translation-only)
+
+
+def resolve_glyph(glyf, gname, dx, dy, m00, m01, m10, m11, depth):
+    """Independent (python) composite resolution: mirrors the TrueType spec
+    with the same transform order and F2Dot14 rounding our C parser uses,
+    so an agreement is a real crosscheck, not a tautology."""
+    if depth > 8:
+        raise SystemExit("composite depth exceeded")
+    g = glyf[gname]
+    pts = []
+    if g.numberOfContours >= 0:
+        for (x, y), fl in zip(g.coordinates, g.flags):
+            fx = (x * m00 + y * m10)  # F2Dot14: scale raw / 16384
+            fy = (x * m01 + y * m11)
+            X = (int(fx) + 8192) >> 14 if isinstance(fx, int) else fx
+            Y = (int(fy) + 8192) >> 14 if isinstance(fy, int) else fy
+            # m00 etc are F2Dot14 ints (16384 = 1.0)
+            X = (x * m00 + y * m10 + 8192) >> 14
+            Y = (x * m01 + y * m11 + 8192) >> 14
+            pts.append((X + dx, Y + dy, int(fl) & 1))
+        return pts
+    for c in g.components:
+        t = getattr(c, "transform", None) or (1.0, 0.0, 0.0, 1.0)
+        cm00, cm01, cm10, cm11 = (int(round(v * 16384)) for v in t)
+        cdx, cdy = int(c.x), int(c.y)
+        tdx = ((cdx * m00 + cdy * m10 + 8192) >> 14) + dx
+        tdy = ((cdx * m01 + cdy * m11 + 8192) >> 14) + dy
+        nm00 = (cm00 * m00 + cm01 * m10 + 8192) >> 14
+        nm01 = (cm00 * m01 + cm01 * m11 + 8192) >> 14
+        nm10 = (cm10 * m00 + cm11 * m10 + 8192) >> 14
+        nm11 = (cm10 * m01 + cm11 * m11 + 8192) >> 14
+        pts.extend(resolve_glyph(glyf, c.glyphName, tdx, tdy,
+                                 nm00, nm01, nm10, nm11, depth + 1))
+    return pts
 
 
 def dump_font(path):
@@ -33,17 +68,21 @@ def dump_font(path):
     hmtx = f["hmtx"]
     glyf = f["glyf"]
     out = {"upem": f["head"].unitsPerEm, "num_glyphs": f["maxp"].numGlyphs}
-    for cp in CHARS:
+    for cp in CHARS + COMPOSITE_CHARS:
+        if cp not in cmap:
+            continue   # subset assets cover ASCII only
         gname = cmap[cp]
         gid = f.getGlyphID(gname)
         adv, _lsb = hmtx[gname]
         g = glyf[gname]
         if g.numberOfContours < 0:
-            raise SystemExit("composite glyph in crosscheck set: " + gname)
-        coords = g.coordinates
-        flags = g.flags
-        pts = [(int(x), int(y), int(fl) & 1) for (x, y), fl in zip(coords, flags)]
-        out[cp] = {"gid": gid, "advance": int(adv), "ncontours": g.numberOfContours, "points": pts}
+            pts = resolve_glyph(glyf, gname, 0, 0, 16384, 0, 0, 16384, 0)
+            ncont = -1
+        else:
+            pts = [(int(x), int(y), int(fl) & 1)
+                   for (x, y), fl in zip(g.coordinates, g.flags)]
+            ncont = g.numberOfContours
+        out[cp] = {"gid": gid, "advance": int(adv), "ncontours": ncont, "points": pts}
     return out
 
 
@@ -63,14 +102,17 @@ def main():
         "typedef struct {",
         "    const char *path;",
         "    int upem, num_glyphs;",
-        "    const expect_glyph **g;   /* indexed: 0='A', 1='g' */",
+        "    int nchars;",
+        "    const expect_glyph **g;  /* 0='A', 1='g', 2=U+00E9 */",
         "} expect_font;",
         "",
     ]
     for name, path in FONTS:
         d = dump_font(path)
         glyph_names = []
-        for cp in CHARS:
+        for cp in CHARS + COMPOSITE_CHARS:
+            if cp not in d:
+                continue
             g = d[cp]
             parr = "expect_pts_%s_%02x" % (name, cp)
             L.append("static const expect_pt %s[] = {" % parr)
@@ -87,8 +129,8 @@ def main():
             "static const expect_glyph *expect_gL_%s[] = {%s};"
             % (name, ",".join("&" + n for n in glyph_names)))
         L.append(
-            'static const expect_font expect_%s = {"%s",%d,%d,expect_gL_%s};'
-            % (name, path, d["upem"], d["num_glyphs"], name))
+            'static const expect_font expect_%s = {"%s",%d,%d,%d,expect_gL_%s};'
+            % (name, path, d["upem"], d["num_glyphs"], len(d) - 2, name))
         L.append("")
     L += ["#endif /* TTF_EXPECT_H */", ""]
     with open(out_path, "w") as fh:

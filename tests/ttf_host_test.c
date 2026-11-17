@@ -54,15 +54,16 @@ static int test_font(const expect_font *ef) {
     snprintf(label, sizeof(label), "upem=%d numGlyphs=%d", ef->upem, ef->num_glyphs);
     check(label, (int)ttf_units_per_em(&font) == ef->upem && font.num_glyphs == (unsigned)ef->num_glyphs);
 
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < ef->nchars; i++) {  /* 0='A', 1='g', 2=U+00E9 composite (full fonts only) */
+        static const unsigned cps[3] = { 0x41, 0x67, 0xE9 };
         const expect_glyph *eg = ef->g[i];
         unsigned gid = 0, npts = 0;
         int advance = 0;
         ttf_point pts[1024];
         int k, ok = 1;
 
-        r = ttf_char_gid(&font, (i == 0) ? 0x41 : 0x67, &gid);
-        snprintf(label, sizeof(label), "cmap '%c' -> gid %d", (i == 0) ? 'A' : 'g', eg->gid);
+        r = ttf_char_gid(&font, cps[i], &gid);
+        snprintf(label, sizeof(label), "cmap U+%04X -> gid %d", cps[i], eg->gid);
         check(label, r == TTF_OK && gid == (unsigned)eg->gid);
         if (r != TTF_OK) ok_all = 0;
 

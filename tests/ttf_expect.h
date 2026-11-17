@@ -11,7 +11,8 @@ typedef struct {
 typedef struct {
     const char *path;
     int upem, num_glyphs;
-    const expect_glyph **g;   /* indexed: 0='A', 1='g' */
+    int nchars;
+    const expect_glyph **g;  /* 0='A', 1='g', 2=U+00E9 */
 } expect_font;
 
 static const expect_pt expect_pts_dejavu_41[] = {
@@ -72,8 +73,43 @@ static const expect_pt expect_pts_dejavu_67[] = {
     {1114,1120,1},
 };
 static const expect_glyph expect_g_dejavu_67 = {74,1300,2,41,expect_pts_dejavu_67};
-static const expect_glyph *expect_gL_dejavu[] = {&expect_g_dejavu_41,&expect_g_dejavu_67};
-static const expect_font expect_dejavu = {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",2048,6253,expect_gL_dejavu};
+static const expect_pt expect_pts_dejavu_e9[] = {
+    {1151,606,1},
+    {1151,516,1},
+    {305,516,1},
+    {317,326,0},
+    {522,127,0},
+    {705,127,1},
+    {811,127,0},
+    {1010,179,0},
+    {1108,231,1},
+    {1108,57,1},
+    {1009,15,0},
+    {801,-29,0},
+    {694,-29,1},
+    {426,-29,0},
+    {113,283,0},
+    {113,549,1},
+    {113,824,0},
+    {410,1147,0},
+    {662,1147,1},
+    {888,1147,0},
+    {1151,856,0},
+    {967,660,1},
+    {965,811,0},
+    {800,991,0},
+    {664,991,1},
+    {510,991,0},
+    {325,817,0},
+    {311,659,1},
+    {790,1638,1},
+    {989,1638,1},
+    {663,1262,1},
+    {510,1262,1},
+};
+static const expect_glyph expect_g_dejavu_e9 = {171,1260,-1,32,expect_pts_dejavu_e9};
+static const expect_glyph *expect_gL_dejavu[] = {&expect_g_dejavu_41,&expect_g_dejavu_67,&expect_g_dejavu_e9};
+static const expect_font expect_dejavu = {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",2048,6253,3,expect_gL_dejavu};
 
 static const expect_pt expect_pts_liberation_41[] = {
     {1167,0,1},
@@ -172,8 +208,55 @@ static const expect_pt expect_pts_liberation_67[] = {
     {822,429,0},
 };
 static const expect_glyph expect_g_liberation_67 = {74,1139,2,70,expect_pts_liberation_67};
-static const expect_glyph *expect_gL_liberation[] = {&expect_g_liberation_41,&expect_g_liberation_67};
-static const expect_font expect_liberation = {"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",2048,681,expect_gL_liberation};
+static const expect_pt expect_pts_liberation_e9[] = {
+    {276,503,1},
+    {276,418,0},
+    {311,275,0},
+    {384,172,0},
+    {498,115,0},
+    {578,115,1},
+    {695,115,0},
+    {836,209,0},
+    {861,281,1},
+    {1019,236,1},
+    {1002,191,0},
+    {941,100,0},
+    {839,27,0},
+    {686,-20,0},
+    {578,-20,1},
+    {338,-20,0},
+    {87,266,0},
+    {87,548,1},
+    {87,700,0},
+    {163,911,0},
+    {295,1043,0},
+    {471,1102,0},
+    {571,1102,1},
+    {707,1102,0},
+    {890,1014,0},
+    {1001,859,0},
+    {1048,649,0},
+    {1048,527,1},
+    {1048,503,1},
+    {862,641,1},
+    {847,812,0},
+    {703,969,0},
+    {568,969,1},
+    {523,969,0},
+    {424,940,0},
+    {340,866,0},
+    {282,739,0},
+    {278,641,1},
+    {440,1201,1},
+    {440,1221,1},
+    {657,1508,1},
+    {864,1508,1},
+    {864,1479,1},
+    {534,1201,1},
+};
+static const expect_glyph expect_g_liberation_e9 = {169,1139,-1,44,expect_pts_liberation_e9};
+static const expect_glyph *expect_gL_liberation[] = {&expect_g_liberation_41,&expect_g_liberation_67,&expect_g_liberation_e9};
+static const expect_font expect_liberation = {"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",2048,681,3,expect_gL_liberation};
 
 static const expect_pt expect_pts_dejavu_sub_41[] = {
     {700,1294,1},
@@ -234,7 +317,7 @@ static const expect_pt expect_pts_dejavu_sub_67[] = {
 };
 static const expect_glyph expect_g_dejavu_sub_67 = {53,1300,2,41,expect_pts_dejavu_sub_67};
 static const expect_glyph *expect_gL_dejavu_sub[] = {&expect_g_dejavu_sub_41,&expect_g_dejavu_sub_67};
-static const expect_font expect_dejavu_sub = {"kernel_v25/fonts/DejaVu-subset.ttf",2048,79,expect_gL_dejavu_sub};
+static const expect_font expect_dejavu_sub = {"kernel_v25/fonts/DejaVu-subset.ttf",2048,79,2,expect_gL_dejavu_sub};
 
 static const expect_pt expect_pts_liberation_sub_41[] = {
     {1167,0,1},
@@ -334,6 +417,6 @@ static const expect_pt expect_pts_liberation_sub_67[] = {
 };
 static const expect_glyph expect_g_liberation_sub_67 = {53,1139,2,70,expect_pts_liberation_sub_67};
 static const expect_glyph *expect_gL_liberation_sub[] = {&expect_g_liberation_sub_41,&expect_g_liberation_sub_67};
-static const expect_font expect_liberation_sub = {"kernel_v25/fonts/LiberationSans-subset.ttf",2048,73,expect_gL_liberation_sub};
+static const expect_font expect_liberation_sub = {"kernel_v25/fonts/LiberationSans-subset.ttf",2048,73,2,expect_gL_liberation_sub};
 
 #endif /* TTF_EXPECT_H */
