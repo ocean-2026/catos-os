@@ -357,6 +357,14 @@ static void task_cleanup(task_t *t) {
     if (console_owner_tid() == t->tid) console_wake_release(t->tid);
 }
 
+/* #180: release the VMA node list.  task_space_destroy frees the mapped
+ * frames but NOT the kzalloc_frame'd VMA nodes; a failed spawn that
+ * skipped this leaked nodes onto the slot, and the next reuse either
+ * orphaned the old chain or walked stale frames on it. */
+static void task_free_vma_list(task_t *t) {
+    while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
+}
+
 /* nobody is waiting for this task (background job): reclaim its slot
  * right away instead of leaking a zombie until the table fills up */
 static void maybe_autoreap(task_t *t) {
@@ -2545,6 +2553,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         int r = spawn_load_elf(t, clus, size, &entry);
         if (r != 0) {
             task_space_destroy(&t->space);
+            task_free_vma_list(t);            /* #180 */
             return r;
         }
     } else if (is_pe) {
@@ -2553,6 +2562,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         int r = spawn_load_pe(t, clus, size, &entry);
         if (r != 0) {
             task_space_destroy(&t->space);
+            task_free_vma_list(t);            /* #180 */
             return r;
         }
     } else {
@@ -2717,8 +2727,10 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * image/bss/vsyscall/stack frames plus the page-table frames. */
 fail_space4:
     task_space_destroy(&t->space);
+    task_free_vma_list(t);                /* #180 */
     return -4;
 fail_space6:
     task_space_destroy(&t->space);
+    task_free_vma_list(t);                /* #180 */
     return -6;
 }
