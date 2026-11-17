@@ -2962,6 +2962,12 @@ static void cmd_rmdir(const char *arg) {
     fs_canon_path(arg, abs, sizeof(abs));
     if (!strcmp_(abs, "/")) { vga_write("rmdir: refusing to remove /\n"); return; }
     if (!fs_is_dir(arg)) { vga_write("rmdir: not a directory\n"); return; }
+    /* #168: rmdir had no permission check at all (unlike cmd_rm).  Gate
+     * removal on PERM_WRITE for the session identity, the same check the
+     * file delete path applies. */
+    if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("rmdir: permission denied\n"); return;
+    }
     int r = fs_rmdir(arg);
     if (r == 0) { acl_unset(arg); return; }
     if (r == -3)      vga_write("rmdir: directory not empty\n");
