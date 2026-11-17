@@ -44,6 +44,19 @@ static uint32_t parse_uint(const char *s, int base) {
     return v;
 }
 
+/* #185: true only when every character is a hex digit.  parse_uint stops at
+ * the first non-digit and returns 0, so it alone cannot tell "value zero"
+ * from "not a number". */
+static int is_hex_word(const char *s) {
+    if (!s || !*s) return 0;
+    for (const char *q = s; *q; q++) {
+        char c = *q;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+
 static void emit_uint(char *out, uint32_t v, int base) {
     static const char hexd[] = "0123456789abcdef";
     char tmp[12];
@@ -428,8 +441,14 @@ void user_db_init(void) {
                 ucopy(u->shell, fld[4], 32);
                 u->caps = parse_uint(fld[5], 16);
                 ucopy(u->pw, fld[6], 64);
-                /* legacy "0" meant OPEN account; keep that meaning */
-                if (u->pw[0] != '$' && parse_uint(u->pw, 16) == 0)
+                /* #185: an open account is the explicit legacy marker "0"
+                 * (or a valid all-zero hex word).  A field that cannot be
+                 * parsed as hex (e.g. "xyz") used to be cleared here and
+                 * unlocked the account; keep it as a set-but-unknown
+                 * password so login is rejected instead. */
+                if (u->pw[0] != '$' &&
+                    (u->pw[0] == 0 ||
+                     (is_hex_word(u->pw) && parse_uint(u->pw, 16) == 0)))
                     u->pw[0] = 0;
                 u->used = 1;
                 restored++;
