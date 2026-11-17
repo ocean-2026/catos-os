@@ -673,11 +673,17 @@ int group_save(void) {
         buf_put(buf, &o, cap, ':');
         emit_uint(t, (uint32_t)ggroups[i].gid, 10); buf_num(buf, &o, cap, t);
         buf_put(buf, &o, cap, ':');
+        /* #165: comma follows the PREVIOUSLY EMITTED member, not the loop
+         * index.  When the first recorded member account was deleted
+         * (user_by_uid -> NULL, skipped), an index-based comma still
+         * prefixed the next name, leaving a malformed grp:100:,alice. */
+        int emitted = 0;
         for (int m = 0; m < ggroups[i].nmem; m++) {
             user_rec_t *u = user_by_uid(ggroups[i].mem_uid[m]);
             if (!u) continue;
-            if (m) buf_put(buf, &o, cap, ',');
+            if (emitted) buf_put(buf, &o, cap, ',');
             buf_str(buf, &o, cap, u->name);
+            emitted = 1;
         }
         buf_put(buf, &o, cap, '\n');
     }
