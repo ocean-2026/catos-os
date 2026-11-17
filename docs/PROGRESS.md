@@ -496,3 +496,11 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **未做**：原生 rename（copy+delete 现状保留，批次 C）；LFN 上限 240 码元与规范 255 的差距未动；读侧展示仍统一小写（8.3 路径），LFN 路径保留原始大小写。
 - **测试**：新增 `tests/lfn_regress.py`（14 项：长名建/列/删往返、7 类保留字符拒绝、同词干别名碰撞共存、多点名往返、混合大小写 8.3 与 LFN 两路径、无致命 fault），接入 `run_full_regress.sh`（端口 4712）。
 - **回归**：本轮实测 lfn 14/14、qemu 12/12、fsrec 12/12；纯 fs 层改动，未触 CE ABI 与 shell 主循环。
+
+## 二十八、v2.49 libc.a 雏形——公共 CE 应用层（ce_app.c/ce_app.h）
+
+- **现状收敛**：此前 32 个 CE 应用各自重复同一段入口样板（`__ce_api` 槽定义 + `#include ce_abi.h`），字符串/控制台辅助有的走 vsyscall 槽、有的 app 内手写。本轮抽出公共层 `extapp/ce_app.c` + `ce_app.h`：槽定义只留一份（weak 符号，未改造的旧 app 强定义覆盖之），头文件提供 `ce_write/ce_puts/ce_putc/ce_cls/ce_strlen/ce_strcmp/ce_strcpy/ce_atoi` 内联包装——优先走内核字符串槽，槽缺失时回落纯用户态实现。
+- **构建方式（取改动小的方案）**：暂不做 ar 归档与独立 crt0；`build_ce.sh` 在既有 `ce_stub.o` 旁多编一个 `ce_app.o` 链接进每个镜像。归档库（libc.a）与启动代码分离列为后续小设计。
+- **首批改造 4 个典型应用**：`hello.c`、`spinner.c`、`sysinfo.c` 移除本地槽定义、改引 `ce_app.h`；`demo.c` 除槽收敛外，4 处字符串调用（strcpy/strlen/strcmp/atoi）切换到公共包装。其余 app 暂保持原样，weak 桥接保证链接不破；cc/cc_self/ocntools 等有自定义类型或双定义的特例本轮不动。
+- **测试**：全量重建 42 个 .ce 无重复定义/链接错误；真机探针 hello/spinner/sysinfo 三应用均正常出输出、无 fatal fault。
+- **回归**：本轮实测 qemu 12/12、fsrec 12/12（内含改造后 hello.ce 内容完整性校验）；纯用户态构建侧，未触内核。

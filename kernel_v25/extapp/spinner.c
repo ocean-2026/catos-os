@@ -1,7 +1,4 @@
-#include "ce_abi.h"
-
-catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;
-
+#include "ce_app.h"
 
 /* spinner.ce - multitasking proof: prints a line every 500 ms for ~5 s.
  *   spinner &           (background, then use the shell while it runs)

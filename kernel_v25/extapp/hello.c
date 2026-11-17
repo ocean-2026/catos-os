@@ -1,6 +1,4 @@
-#include "ce_abi.h"
-
-catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;
+#include "ce_app.h"
 
 /* entry point: must be at image offset 0 (see ce.ld / build_ce.sh).
  * argc/argv carry the command line: `run /bin/hello.ce x y` */

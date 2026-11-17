@@ -138,3 +138,4 @@ CatOS[易错点] `pkill -f qemu-system-i386` 会匹配到执行该命令的自�
 CatOS[易错点] pending 类交互状态（did-you-mean 待确认）的识别只能挂主提示符循环：命令内部的 y/n 问询（PE->CE offer、format 闸门、gfx consent、useradd wizard）走各自 `kb_readline`/`kb_getkey`，不经主循环，天然隔离；切勿把「输入是 y 就回放」下沉到 readline 全局层，否则会污染所有问询上下文。
 CatOS[易错点] extapp/build 残留半成品中间件会让全量重建在某应用上挂掉：上次被中断的 .exe 留下残缺 PE，下次 ld 覆盖前 nm/objdump 报 "file format not recognized"，继而 "ce_main not at image offset 0"；单独重编该 app 又能过，假象是偶发。整盘重建前先清 `extapp/build/*.exe *.o *.bin *.nobss.exe`。
 CatOS[易错点] LFN 条目读回保留原始大小写，只有无损 8.3 短条目路径才统一小写展示；回归断言混合大小写文件名时要分两条路径写期望（8.3→小写，LFN→原样），不能一律按小写 substring 匹配造成假阴性。
+CatOS[易错点] 公共层把 __ce_api 槽收编成单个 .c 定义时，若用强符号链接进所有 app，未改造 app 本地的槽定义会撞 "multiple definition"；过渡期公共定义必须标 weak，旧 app 强定义自动覆盖，改造一个迁一个，最后再去掉 weak。
