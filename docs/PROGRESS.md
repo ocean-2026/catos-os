@@ -514,3 +514,13 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **未做 / deferred**：mtime 时间戳保留——fs/fat 层不暴露 mtime 读/写 API，`fs_entry_t` 无日期字段，ls 不显示时间；需新增 stat + set-time 接口（设计级，后续批次）。深度上限 `FSREC_DEPTH_MAX=6` 保留未放宽（放宽需先评估栈风险：每帧两个 FS_PATH_MAX 缓冲）。
 - **测试**：新增 `tests/recur_regress.py`（10 项：cp -r 合并嵌套、文件入目录、000 模式保留、对照保留执行位、rmdir 空目录删除 / 非空拒绝 / 文件拒绝、无 fatal fault），接入 `run_full_regress.sh`（端口 4713）。
 - **回归**：本轮实测 recur 10/10、fsrec 12/12；qemu 12/12 在 force 拆分前一轮实测通过（拆分后仅 rm_rec 切到 force 变体，未再单跑 qemu）。
+
+## 三十、v2.51 口令哈希加固（user.c）
+
+- **摘要加宽 32 → 128 位**：四条 FNV-1a 车道，各自独立种子常量，逐轮混入口令/盐/轮次，轮内做跨车道异或扩散（车道不是四条独立可并行碰撞的弱拼接），末轮逐车道 murmur3 fmix32 雪崩；记录 digest 32 hex。
+- **盐熵源加强**：旧 32 位盐（tick×质数 ^ 记录地址 ^ 口令地址）升级为 64 位双字，混入 IRQ0 tick 相位、RTC 年月日时分秒、记录/口令指针地址，两字分别过 `avalanche32`；盐 16 hex。
+- **轮数可配置化**：`PW_ROUNDS_DEFAULT=8192`，静态全局 `pw_rounds` 作为后续可调旋钮；本轮不改默认计算成本。
+- **记录格式**：v2 `$S$<16hex salt>$<32hex digest>`；`pw[]` 缓冲 24 → 64。
+- **兼容与透明升级**：v1 `$S$<8hex salt>$<8hex>` 旧记录用保留的 32 位混合校验，成功后原地重算 v2；legacy bare djb2 记录同样校验通过后升级。
+- **未做 / deferred**：Argon2/scrypt 等内存硬度方案（设计级，内核无 crypto 原语）；轮数运行时管理旋钮未接 CLI；v1/djb2 升级路径无金属探针（测试磁盘上无旧记录可注入，代码路径已评审）。
+- **测试**：`user_regress.py` 新增 5 项（set、v2 格式正则、错误口令拒绝、正确口令登录、会话身份），实测 20/20；qemu 12/12。

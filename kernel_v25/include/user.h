@@ -53,12 +53,16 @@ typedef struct {
      *   ""                        = open account (no password)
      *   "<8 hex>"                 = legacy djb2 (pre-v2.22, verified then
      *                               transparently upgraded on next login)
-     *   "$S$<8hex><8hex>"         = salted iterated FNV-1a (v2.22),
-     *                               8192 rounds, salt is 32-bit random.
-     * NOT cryptographic -- no crypto primitives in the kernel; the goal
-     * is to resist shoulder-surfing AND cheap offline dictionary scans
-     * (the old bare djb2 of a low-entropy password was instant to brute). */
-    char     pw[24];
+     *   "$S$<8hex salt>$<8hex>"   = v1 salted iterated FNV-1a (v2.22),
+     *                               32-bit digest, 32-bit salt; verified then
+     *                               transparently upgraded on next login.
+     *   "$S$<16hex salt>$<32hex>" = v2 salted iterated FNV-1a (v2.51),
+     *                               128-bit digest (four 32-bit lanes),
+     *                               64-bit salt, rounds configurable.
+     * NOT cryptographic -- no crypto primitives in the kernel; memory-hard
+     * schemes (Argon2/scrypt) are deferred by design.  The goal is to resist
+     * shoulder-surfing AND cheap offline dictionary scans. */
+    char     pw[64];
     int      used;
 } user_rec_t;
 

@@ -8,6 +8,7 @@
 #include "user.h"
 #include "task.h"
 #include "fs.h"
+#include "rtc.h"
 
 /* ---- tiny local string helpers (kernel has no libc) -------------------- */
 static int ustrlen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
@@ -67,17 +68,26 @@ uint32_t user_hash_pw(const char *pw) {
     return h;
 }
 
-/* v2.22 salted iterated hash.  Deliberately NOT cryptographic (no crypto
- * primitives in this kernel) -- but unlike the bare djb2 above, a leaked
- * /etc/passwd no longer yields password candidates in microseconds: each
- * guess costs 8192 mixing rounds and every record has its own random salt,
- * so identical passwords hash differently and precomputed tables are
- * useless.  Constants are FNV-1a; rounds fixed at 8192 (~ms on this CPU). */
-#define PW_ROUNDS 8192u
+/* v2.51: rounds are a tunable knob.  Default keeps the v2.22 cost (~ms on
+ * this CPU); a later admin/boot knob may raise pw_rounds without touching
+ * the record format.  Memory-hard schemes (Argon2/scrypt) are deferred by
+ * design -- this kernel has no crypto primitives. */
+#define PW_ROUNDS_DEFAULT 8192u
+static uint32_t pw_rounds = PW_ROUNDS_DEFAULT;
 
-static uint32_t pw_hash_salted(const char *pw, uint32_t salt) {
+static uint32_t avalanche32(uint32_t h) {
+    h ^= h >> 16; h *= 0x85ebca6bu;
+    h ^= h >> 13; h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h;
+}
+
+/* v1 (v2.22) 32-bit salted FNV-1a mix, retained ONLY to verify old $S$
+ * records; those are transparently upgraded to the v2 128-bit record on
+ * the next successful login. */
+static uint32_t pw_hash_salted32(const char *pw, uint32_t salt) {
     uint32_t h = 2166136261u ^ salt;
-    for (uint32_t r = 0; r < PW_ROUNDS; r++) {
+    for (uint32_t r = 0; r < PW_ROUNDS_DEFAULT; r++) {
         for (const char *p = pw; p && *p; p++) {
             h ^= (uint8_t)*p;
             h *= 16777619u;
@@ -88,11 +98,39 @@ static uint32_t pw_hash_salted(const char *pw, uint32_t salt) {
         h *= 16777619u;
         h ^= salt + r;
     }
-    /* final avalanche (murmur3 fmix32) */
-    h ^= h >> 16; h *= 0x85ebca6bu;
-    h ^= h >> 13; h *= 0xc2b2ae35u;
-    h ^= h >> 16;
-    return h;
+    return avalanche32(h);
+}
+
+/* v2.51 128-bit digest: four FNV-1a lanes with distinct seed constants, each
+ * mixed through password + salt + round counter, with per-round cross-lane
+ * diffusion so the lanes are not four independent hashes.  out[0..3] are the
+ * four 32-bit digest words. */
+static void pw_hash128(const char *pw, uint32_t s0, uint32_t s1,
+                       uint32_t out[4]) {
+    uint32_t h0 = 2166136261u ^ s0;
+    uint32_t h1 = 2166136261u ^ s1 ^ 0x9E3779B9u;
+    uint32_t h2 = 2166136261u ^ s0 ^ 0x85EBCA6Bu;
+    uint32_t h3 = 2166136261u ^ s1 ^ 0xC2B2AE35u;
+    for (uint32_t r = 0; r < pw_rounds; r++) {
+        for (const char *p = pw; p && *p; p++) {
+            uint8_t c = (uint8_t)*p;
+            h0 ^= c; h0 *= 16777619u;
+            h1 ^= c; h1 *= 16777619u;
+            h2 ^= c; h2 *= 16777619u;
+            h3 ^= c; h3 *= 16777619u;
+        }
+        h0 ^= (uint8_t)r;       h0 *= 16777619u;
+        h1 ^= (uint8_t)(r >> 8);  h1 *= 16777619u;
+        h2 ^= (uint8_t)(r >> 16); h2 *= 16777619u;
+        h3 ^= (uint8_t)(r >> 24); h3 *= 16777619u;
+        /* cross-lane diffusion */
+        h0 ^= h1; h1 *= 16777619u;
+        h1 ^= h2; h2 *= 16777619u;
+        h2 ^= h3; h3 *= 16777619u;
+        h3 ^= h0; h0 *= 16777619u;
+    }
+    out[0] = avalanche32(h0); out[1] = avalanche32(h1);
+    out[2] = avalanche32(h2); out[3] = avalanche32(h3);
 }
 
 static const char PWHEX[] = "0123456789abcdef";
@@ -115,21 +153,43 @@ static int pw_parse32(const char *s, uint32_t *out) {
     return 0;
 }
 
+/* v2.51: 64-bit salt from three independent sources mixed through an
+ * avalanche: IRQ0 tick phase, RTC wall-clock components, and the record /
+ * password pointer addresses.  The weak v2.22 salt was tick*prime ^ address
+ * only; RTC adds a wall-clock component the tick counter does not carry. */
+static void pw_salt_gen(const user_rec_t *u, const char *pw,
+                        uint32_t *lo, uint32_t *hi) {
+    rtc_time_t t;
+    rtc_read(&t);
+    uint32_t rtc = ((uint32_t)(t.year - 1980) << 26)
+                 ^ ((uint32_t)t.month << 22)
+                 ^ ((uint32_t)t.day << 17)
+                 ^ ((uint32_t)t.hour << 12)
+                 ^ ((uint32_t)t.minute << 6)
+                 ^ (uint32_t)t.second;
+    uint32_t a = timer_ticks * 2654435761u
+               ^ (uint32_t)(uintptr_t)u * 0x9E3779B9u
+               ^ (uint32_t)(uintptr_t)pw;
+    uint32_t b = rtc ^ (timer_ticks >> 13)
+               ^ (uint32_t)(uintptr_t)u * 0x85EBCA6Bu
+               ^ (uint32_t)(uintptr_t)pw * 0xC2B2AE35u;
+    *lo = avalanche32(a);
+    *hi = avalanche32(b);
+}
+
 void user_pw_set_rec(user_rec_t *u, const char *pw) {
-    /* salt: IRQ0 tick counter mixed with the record's address -- on this
-     * non-preemptible kernel the tick phase at password-set time is the
-     * best entropy available; enough to distinct two same-password users. */
-    uint32_t salt = timer_ticks * 2654435761u
-                  ^ (uint32_t)(uintptr_t)u * 0x9E3779B9u
-                  ^ (uint32_t)(uintptr_t)pw;
-    char d[8];
-    /* record = "$S$" + 8 hex salt + '$' + 8 hex digest  (20 chars + NUL) */
+    uint32_t sl, sh;
+    pw_salt_gen(u, pw, &sl, &sh);
+    uint32_t d[4];
+    pw_hash128(pw ? pw : "", sl, sh, d);
+    /* record = "$S$" + 16 hex salt (lo+hi) + '$' + 32 hex digest (4 words).
+     * 3+16+1+32 = 52 chars + NUL; pw[] holds 64. */
     u->pw[0] = '$'; u->pw[1] = 'S'; u->pw[2] = '$';
-    pw_emit32(salt, u->pw + 3);
-    u->pw[11] = '$';
-    pw_emit32(pw_hash_salted(pw, salt), d);
-    for (int i = 0; i < 8; i++) u->pw[12 + i] = d[i];
-    u->pw[20] = 0;
+    pw_emit32(sl, u->pw + 3);
+    pw_emit32(sh, u->pw + 11);
+    u->pw[19] = '$';
+    for (int i = 0; i < 4; i++) pw_emit32(d[i], u->pw + 20 + i * 8);
+    u->pw[52] = 0;
 }
 
 int user_pw_is_set(const user_rec_t *u) {
@@ -139,12 +199,30 @@ int user_pw_is_set(const user_rec_t *u) {
 int user_check_pw(user_rec_t *u, const char *pw) {
     if (!u) return -1;
     if (u->pw[0] == 0) return 0;               /* open account */
-    if (u->pw[0] == '$' && u->pw[1] == 'S' && u->pw[2] == '$' && u->pw[3] != '$') {
-        /* "$S$" + 8 hex salt + 8 hex digest */
-        uint32_t salt, want;
-        if (u->pw[11] != '$' || pw_parse32(u->pw + 3, &salt) != 0 ||
-            pw_parse32(u->pw + 12, &want) != 0) return -1;
-        return pw_hash_salted(pw ? pw : "", salt) == want ? 0 : -1;
+    if (u->pw[0] == '$' && u->pw[1] == 'S' && u->pw[2] == '$') {
+        if (u->pw[19] == '$') {
+            /* v2: "$S$" + 16 hex salt + '$' + 32 hex digest */
+            uint32_t s0, s1, w[4], d[4];
+            if (pw_parse32(u->pw + 3, &s0) != 0 ||
+                pw_parse32(u->pw + 11, &s1) != 0) return -1;
+            for (int i = 0; i < 4; i++)
+                if (pw_parse32(u->pw + 20 + i * 8, &w[i]) != 0) return -1;
+            pw_hash128(pw ? pw : "", s0, s1, d);
+            for (int i = 0; i < 4; i++) if (d[i] != w[i]) return -1;
+            return 0;
+        }
+        if (u->pw[11] == '$') {
+            /* v1: "$S$" + 8 hex salt + '$' + 8 hex digest.  Verify with the
+             * legacy 32-bit mix, then transparently upgrade to v2. */
+            uint32_t salt, want;
+            if (pw_parse32(u->pw + 3, &salt) != 0 ||
+                pw_parse32(u->pw + 12, &want) != 0) return -1;
+            if (pw_hash_salted32(pw ? pw : "", salt) != want) return -1;
+            user_pw_set_rec(u, pw);
+            users_dirty = 1;
+            return 0;
+        }
+        return -1;
     }
     /* legacy bare-djb2 record: verify, then upgrade in place */
     uint32_t want = parse_uint(u->pw, 16);
@@ -327,7 +405,7 @@ void user_db_init(void) {
                 ucopy(u->home, fld[3], 48);
                 ucopy(u->shell, fld[4], 32);
                 u->caps = parse_uint(fld[5], 16);
-                ucopy(u->pw, fld[6], 24);
+                ucopy(u->pw, fld[6], 64);
                 /* legacy "0" meant OPEN account; keep that meaning */
                 if (u->pw[0] != '$' && parse_uint(u->pw, 16) == 0)
                     u->pw[0] = 0;

@@ -141,3 +141,4 @@ CatOS[易错点] LFN 条目读回保留原始大小写，只有无损 8.3 短条
 CatOS[易错点] 公共层把 __ce_api 槽收编成单个 .c 定义时，若用强符号链接进所有 app，未改造 app 本地的槽定义会撞 "multiple definition"；过渡期公共定义必须标 weak，旧 app 强定义自动覆盖，改造一个迁一个，最后再去掉 weak。
 CatOS[易错点] `fs_rmdir` 非空判定回调 `rmdir_cb` 旧条件 `!scmp(name,".") && !scmp(name,"..")` 要求名字同时等于 "." 和 ".."，恒假，计数永远 0，非空目录被当成空目录放行；正确写法是 `scmp(name,".")!=0 && scmp(name,"..")!=0`（跳过两个点条目后计数真实条目）。
 CatOS[易错点] 严格化目录非空检查后，既有 `rm -r` 递归清空器暴露出 fat 层嵌套 delete-name 潜在重入问题（见问题清单 #155）；本批把 `fs_rmdir` 拆成 strict（rmdir 命令）/force（rm -r 后序清空器）两条路径，force 保持 v2.24 基线行为，不在本批改 fat 内部。
+CatOS[易错点] /etc/passwd 长口令记录在 VGA 按 80 列折行，回归抓屏文本里十六进制串会被换行/空格打断；正则匹配前先 `re.sub(r"\s+","",txt)` 归一化，否则 128 位 digest 的 32 hex 断言假阴性。
