@@ -162,6 +162,8 @@ static void cmd_help(void) {
     help_row("caps",        "capability bit legend + session caps");
     help_row("login U [PW]","switch session user ('su' = alias)");
     help_row("useradd N [UID [GID [CAPS]]]", "add user (CAP_USERADM)");
+    help_row("groupadd G [MEMBER]", "create group / append member (CAP_USERADM)");
+    help_row("groups", "list groups and members (v2.53 /etc/group)");
     help_row("userdel N | passwd N PW | chcaps HEX N", "manage accounts / caps");
     help_row("chmod OCT PATH | chown UID[:GID] PATH", "persistent /etc/acl");
     help_row("uptime",      "seconds since boot + task count");
@@ -2510,6 +2512,59 @@ static void cmd_login(char *arg, int as_su) {
  * With no CAPS_HEX argument the capability set is built interactively: one
  * yes/no prompt per capability bit (T52).  `useradd NAME UID GID CAPS` keeps
  * working for scripts and for the regression suite. */
+/* v2.53: groupadd G [MEMBER...] -- create /etc/group entry, append members */
+static void cmd_groupadd(char *arg) {
+    if (!session_is_admin()) { vga_write("groupadd: permission denied\n"); return; }
+    char *argv[5];
+    int argc = split_words(arg, argv, 5);
+    if (argc < 1) {
+        vga_write("usage: groupadd GROUP [MEMBER USER...]\n");
+        return;
+    }
+    int gid = -1;
+    for (int i = 0; i < argc; i++) {
+        gid = group_add(argv[0], i >= 1 ? argv[i] : 0);
+        if (gid == -2) { vga_write("groupadd: group table full\n"); return; }
+        if (gid == -3) { vga_write("groupadd: unknown user '"); vga_write(argv[i]);
+                         vga_write("'\n"); return; }
+        if (gid == -4) { vga_write("groupadd: member list full for '");
+                         vga_write(argv[0]); vga_write("'\n"); return; }
+    }
+    if (gid < 0) { vga_write("groupadd: failed\n"); return; }
+    if (group_save() != 0) { vga_write("groupadd: WARNING: could not persist\n"); return; }
+    vga_write("group '"); vga_write(argv[0]); vga_write("' gid ");
+    print_int(gid); vga_write("\n");
+}
+
+/* v2.53: groups -- list groups with member names */
+static void cmd_groups(void) {
+    char nm[16];
+    int i = 0, found = 0;
+    for (;;) {
+        int nmem = group_info(i, nm, sizeof(nm), 0);
+        if (nmem < 0) break;
+        found = 1;
+        vga_write(nm);
+        int gid = 0;
+        group_info(i, nm, sizeof(nm), &gid);
+        vga_write(" (gid "); print_int(gid); vga_write("): ");
+        /* members: re-read names from the db through user records */
+        int printed = 0;
+        for (int ui = 0; ui < MAX_USERS; ui++) {
+            user_rec_t *u = user_at(ui);
+            if (!u || !u->used) continue;
+            if (user_in_group(u->uid, gid)) {
+                if (printed) vga_write(" ");
+                vga_write(u->name);
+                printed++;
+            }
+        }
+        vga_write("\n");
+        i++;
+    }
+    if (!found) vga_write("no groups\n");
+}
+
 static void cmd_useradd(char *arg) {
     if (!session_is_admin()) { vga_write("useradd: permission denied\n"); return; }
     char *argv[5];
@@ -3986,7 +4041,7 @@ static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
     "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
-    "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
+    "groupadd","groups","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
     "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
@@ -4175,6 +4230,7 @@ void shell_run(void) {
      * the default owner/group/other table when the files are absent) */
     user_db_init();
     acl_init();
+    group_db_init();        /* v2.53 supplementary groups (/etc/group) */
     session_apply();                /* boot session = root (initial user) */
     btime_mark("S5 user/acl/session");
     if (!fs_fs_ready())
@@ -4388,6 +4444,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "login"))       cmd_login(arg, 0);
         else if (!strcmp_(cmd, "su"))          cmd_login(arg, 1);
         else if (!strcmp_(cmd, "useradd"))     cmd_useradd(arg);
+        else if (!strcmp_(cmd, "groupadd"))    cmd_groupadd(arg);
+        else if (!strcmp_(cmd, "groups"))      cmd_groups();
         else if (!strcmp_(cmd, "userdel"))     cmd_userdel(arg);
         else if (!strcmp_(cmd, "passwd"))      cmd_passwd(arg);
         else if (!strcmp_(cmd, "chcaps"))      cmd_chcaps(arg);

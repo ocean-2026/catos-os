@@ -144,3 +144,6 @@ CatOS[易错点] 严格化目录非空检查后，既有 `rm -r` 递归清空器
 CatOS[易错点] /etc/passwd 长口令记录在 VGA 按 80 列折行，回归抓屏文本里十六进制串会被换行/空格打断；正则匹配前先 `re.sub(r"\s+","",txt)` 归一化，否则 128 位 digest 的 32 hex 断言假阴性。
 CatOS[易错点] 任务退出路径先唤醒 parent 再 maybe_autoreap，父进程被置 READY 后 autoreap 判定「无人等待」把僵尸直接回收成 T_UNUSED；等待方若只认 ZOMBIE（如 task_wait_child_or_stop）就永远等一个已回收槽位死循环。退出路径必须「先 reap 判定（parent 仍在 WAIT_CHILD 才保留僵尸）、后唤醒 parent」，且 wait 类循环要防御性接受 T_UNUSED 作为子任务已退出。
 CatOS[易错点] QEMU 开机后立刻 sendkey/type_text，PS/2 控制器自检/初始化残留会产生幽灵按键（屏幕出现 18118128138 一类数字噪声）污染第一条命令；开机后先丢弃性 type 一次或等 1-2s 再开始正式断言输入，否则 argv 里混入垃圾尾巴导致 bg 解析、参数断言随机假阴性。
+CatOS[易错点] fs_perm_check 里文件 mode 是经典 octal triad（r=4/w=2/x=1），而 syscall need 是独立 PERM_READ=1/WRITE=2/EXEC=4 位掩码；直接 `(have & need)` 相与会把 4xx 读位误拒、把执行位 1 误当成 READ 放行。取出 triad 后必须先翻译成 PERM_* 再比对（见问题清单 #157）；附加组/组位分支挂在组位判定上，掩码翻译错了组可读访问会整体假阴性。
+CatOS[易错点] 附加组成员在磁盘 /etc/group 上按用户名存，加载时才对 /etc/passwd 解析成 uid；权限检查路径只能拿 uid 查组库（user_in_group），不能要求任务凭据里带附加组数组。老记录只有主 gid：组判定先比主 gid，未命中再遍历附加组，缺省组库为空时行为与单 gid 基线一致。
+CatOS[易错点] 后台/重定向 CE 应用（如 `hello > file`）是异步任务，chown/chmod 紧随重定向下发时应用可能还在写；抓屏断言要给足命令间隔，且 VGA 旧行残留会让上一条 permission denied 污染下一条断言，读取状态行前先 clear 或只取最后一条 jobs/结果行。

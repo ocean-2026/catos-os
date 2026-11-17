@@ -538,3 +538,11 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 前台 Ctrl+Z（0x1A）：SYS_GETCH 路径拦截，前台任务自挂起、^Z 不下发应用，CONT 后循环回读真实按键；后台任务保留原始字节。
 - 修复隐藏竞态（问题清单 #156）：`task_exit_current`/`task_die_fault`/`task_kill` 先 wake parent 再 `maybe_autoreap`，父进程被置 READY 后 autoreap 把僵尸直接回收成 T_UNUSED，新的 `task_wait_child_or_stop` 只认 ZOMBIE/STOPPED 导致 shell 永久等待已回收槽位（原 `task_wait_child` 接受 UNUSED 掩盖了该竞态）。修复为「先 reap 判定、后唤醒 parent」三处统一，wait 循环防御性接受 UNUSED。
 - 回归：新增 tests/jobctl_regress.py 12/12（bg 生成/jobs 状态流转/stop→bg→stop→fg 全闭环/无任务报错/垃圾参数/faultinfo），已接入 run_full_regress.sh；全量十二套全绿：qemu 12/12、guess 16/16、jobctl 12/12、recur 10/10、fsrec 12/12、lfn 14/14、user 20/20、caps 12/12、disk 5/5、env 13/13、heap 4/4、size 7/7。
+
+## 三十三、v2.53 多组支持：附加组 + 组数据库（user.h / user.c / shell.c）
+
+- 组数据库：常驻内存表 `ggroups[GROUP_MAX]`，持久化 `/etc/group`，行格式 `name:gid:member,...`；成员按用户名存，`group_db_init()` 加载期对 `/etc/passwd` 解析成 uid；`group_add()` 建组/追加成员，`group_save()` 重写磁盘，`group_info()` 供 `groups` 命令遍历，`user_in_group(uid,gid)` 反查。
+- 权限遍历：`fs_perm_check` 组分支先比主 gid，未命中再经 `user_in_group` 遍历任一附加组；owner / primary-gid / supplementary / other 四级。空组库与老单 gid 记录行为向后兼容，未做每任务附加组凭据数组（留作后续）。
+- shell：`groupadd GROUP [MEMBER...]`（CAP_USERADM，建组并/或追加成员，持久化）、`groups`（列组与成员名）；help/补全表接线。
+- 修复位编码混用（问题清单 #157）：文件 mode 是 octal triad（r=4/w=2/x=1），syscall need 是 PERM_READ=1/WRITE=2/EXEC=4；原先直接相与导致 4xx 读位误拒、执行位误放。取出 triad 先翻译成 PERM_* 再比对 need。
+- 回归：新增 tests/group_regress.py 10/10（建组列表/成员经附加组可读/非成员 640 被拒/追加第二成员可读/持久化复登/无 fatal），已接入 run_full_regress.sh；保护复绿：qemu 12/12、user 20/20。

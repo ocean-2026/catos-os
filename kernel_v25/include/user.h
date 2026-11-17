@@ -94,6 +94,21 @@ int         user_preset_caps(const char *preset, uint32_t *out);
 int         user_pw_is_set(const user_rec_t *u);/* non-empty password record    */
 void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      */
 
+/* ---- v2.53 supplementary groups (persistent /etc/group) ----
+ * Line format: name:gid:member,member,...  Members are stored as NAMES on
+ * disk and resolved to uids against /etc/passwd at load time.  The check
+ * path (fs_perm_check) consults the table by uid, so a task needs no
+ * per-task credential array; per-task supplementary sets are deferred. */
+#define GROUP_MAX      16
+#define GROUP_MEMBERS   8
+int         group_db_init(void);                /* load /etc/group (or empty)   */
+int         group_add(const char *name, const char *member);
+        /* create (next gid) and/or append a member; returns gid, negative err */
+int         group_save(void);                   /* rewrite /etc/group           */
+int         user_in_group(int uid, int gid);    /* 1 = uid belongs to gid       */
+int         group_info(int idx, char *name_out, int nlen, int *gid_out);
+        /* iterate used slots; returns member count, -1 past end              */
+
 /* ---- access control list (persistent /etc/acl) ---- */
 void        acl_init(void);
 int         acl_lookup(const char *path, int *uid, int *gid, int *mode);

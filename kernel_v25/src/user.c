@@ -559,6 +559,115 @@ void acl_init(void) {
 
 /* ---- the permission check used by every file syscall ------------------- */
 
+/* ---- v2.53 supplementary groups (persistent /etc/group) ---------------- */
+
+static struct {
+    char name[16];
+    int  gid;
+    int  nmem;
+    int  mem_uid[GROUP_MEMBERS];
+} ggroups[GROUP_MAX];
+static int gn_groups;
+
+int group_db_init(void) {
+    gn_groups = 0;
+    static char buf[2048];
+    int n = fs_read_text("/etc/group", buf, sizeof(buf));
+    if (n <= 0) return 0;                     /* no group db yet: empty table */
+    buf[n] = 0;
+    char *line = buf;
+    while (line && *line) {
+        char *nl = line;
+        while (*nl && *nl != '\n') nl++;
+        int eol = (*nl == '\n');
+        *nl = 0;
+        char *fld[3];
+        if (split_fields(line, fld, 3) >= 2 && fld[0][0] && gn_groups < GROUP_MAX) {
+            int slot = gn_groups++;
+            ucopy(ggroups[slot].name, fld[0], 16);
+            ggroups[slot].gid = (int)parse_uint(fld[1], 10);
+            ggroups[slot].nmem = 0;
+            char *m = fld[2];
+            while (m && *m && ggroups[slot].nmem < GROUP_MEMBERS) {
+                char *comma = m;
+                while (*comma && *comma != ',') comma++;
+                int eom = (*comma == ',');
+                *comma = 0;
+                user_rec_t *u = user_by_name(m);
+                if (u) ggroups[slot].mem_uid[ggroups[slot].nmem++] = u->uid;
+                m = eom ? comma + 1 : 0;
+            }
+        }
+        line = eol ? nl + 1 : 0;
+    }
+    return gn_groups;
+}
+
+int group_add(const char *name, const char *member) {
+    if (!name || !name[0]) return -1;
+    int slot = -1;
+    for (int i = 0; i < gn_groups; i++)
+        if (useq(ggroups[i].name, name)) { slot = i; break; }
+    if (slot < 0) {
+        if (gn_groups >= GROUP_MAX) return -2;  /* table full */
+        slot = gn_groups++;
+        ucopy(ggroups[slot].name, name, 16);
+        ggroups[slot].gid = 100;
+        for (int i = 0; i < gn_groups - 1; i++)
+            if (ggroups[i].gid >= ggroups[slot].gid) ggroups[slot].gid = ggroups[i].gid + 1;
+        ggroups[slot].nmem = 0;
+    }
+    if (member && member[0]) {
+        user_rec_t *u = user_by_name(member);
+        if (!u) return -3;                       /* unknown member */
+        for (int i = 0; i < ggroups[slot].nmem; i++)
+            if (ggroups[slot].mem_uid[i] == u->uid) return ggroups[slot].gid;
+        if (ggroups[slot].nmem >= GROUP_MEMBERS) return -4;
+        ggroups[slot].mem_uid[ggroups[slot].nmem++] = u->uid;
+    }
+    return ggroups[slot].gid;
+}
+
+int user_in_group(int uid, int gid) {
+    for (int i = 0; i < gn_groups; i++) {
+        if (ggroups[i].gid != gid) continue;
+        for (int m = 0; m < ggroups[i].nmem; m++)
+            if (ggroups[i].mem_uid[m] == uid) return 1;
+    }
+    return 0;
+}
+
+int group_save(void) {
+    static char buf[2048];
+    int o = 0;
+    for (int i = 0; i < gn_groups; i++) {
+        int k = 0;
+        while (ggroups[i].name[k] && o < (int)sizeof(buf) - 8) buf[o++] = ggroups[i].name[k++];
+        buf[o++] = ':';
+        { char t[12]; emit_uint(t, (uint32_t)ggroups[i].gid, 10); k = 0; while (t[k]) buf[o++] = t[k++]; }
+        buf[o++] = ':';
+        for (int m = 0; m < ggroups[i].nmem; m++) {
+            user_rec_t *u = user_by_uid(ggroups[i].mem_uid[m]);
+            if (!u) continue;
+            if (m) buf[o++] = ',';
+            k = 0;
+            while (u->name[k] && o < (int)sizeof(buf) - 8) buf[o++] = u->name[k++];
+        }
+        buf[o++] = '\n';
+    }
+    buf[o] = 0;
+    (void)fs_delete("/etc/group");
+    if (fs_write_raw("/etc/group", buf, (uint32_t)o) != 0) return -1;
+    return 0;
+}
+
+int group_info(int idx, char *name_out, int nlen, int *gid_out) {
+    if (idx < 0 || idx >= gn_groups) return -1;
+    ucopy(name_out, ggroups[idx].name, nlen);
+    if (gid_out) *gid_out = ggroups[idx].gid;
+    return ggroups[idx].nmem;
+}
+
 int fs_perm_check(const char *path, int uid, int gid, int need) {
     /* need is a bitmask of PERM_READ/WRITE/EXEC.  mode is the standard
      * 12-bit unix layout: owner bits 6-8, group 3-5, other 0-2. */
@@ -572,8 +681,17 @@ int fs_perm_check(const char *path, int uid, int gid, int need) {
     if (acl_lookup(key, &fuid, &fgid, &mode) == 0) {
         int have;
         if (uid == fuid)            have = (mode >> 6) & 7;   /* owner */
-        else if (gid == fgid)       have = (mode >> 3) & 7;   /* group */
+        /* v2.53: primary gid or any supplementary group of this uid */
+        else if (gid == fgid || user_in_group(uid, fgid))
+                                    have = (mode >> 3) & 7;   /* group */
         else                        have = mode & 7;          /* other */
+        /* v2.53 fix (#157): the mode triads are UNIX-encoded (r=4, w=2,
+         * x=1) while need/PERM_* use READ=1, WRITE=2, EXEC=4.  Masking them
+         * together silently denied READ on any 4xx triad and allowed EXEC
+         * on 4xx.  Translate the triad into PERM_* first. */
+        have = ((have & 4) ? PERM_READ  : 0)
+             | ((have & 2) ? PERM_WRITE : 0)
+             | ((have & 1) ? PERM_EXEC  : 0);
         return (have & need) == need ? 0 : -13;
     }
     /* no ACL entry: read/exec default allowed (0644/0755 semantics);
