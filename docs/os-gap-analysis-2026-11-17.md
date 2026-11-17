@@ -201,26 +201,105 @@
 
 ## 3. 重写级三项（deferred，只给设计要点，禁止今夜强行开工）
 
+> 本节三项均为**重写级（deferred）**：只给详细设计要点与前置依赖，**禁止今夜强行开工**。理由与 `docs/ROADMAP-通用操作系统.md` 第三节、问题清单 #128/#129 保持一致。
+
 ### 3.1 取消恒等映射 / 独立用户地址空间
 
-> 待填充：设计要点 + deferred 理由。
+**现状**：内核按"内核 = 物理内存"恒等映射运行；12+ 文件、147 处全局状态依赖该假设；#129 恒等映射未按 multiboot mmap 避让 PCI BAR/MMIO 区间。
+
+**设计要点（供后续设计文档展开）**
+
+- 页表分离：每任务独立用户页表，内核镜像高半区映射、用户态不可见；用户镜像基址与现有竞技场（`USER_IMAGE_BASE 0x2000000`、`USER_EXT_BASE 0x2400000`）重排。
+- 全局状态清点：把依赖恒等映射的全局指针 / 静态缓冲迁移到显式地址空间对象或 per-任务结构；`copy_from_user()` 快照边界（#78/#86 已落地）可作为用户态解引用的统一闸门复用。
+- 映射避让：页表建立时解析 multiboot mmap 表，避开 PCI BAR / MMIO 区间（#129 前置）。
+- 前置依赖：3.3 的 VMA / 帧分配抽象；回归面覆盖全部 CE/ELF/PE 三轨装载器。
+
+**deferred 理由**：教学阶段真实收益主要在 SMP 与防 ring3 探测内核布局；改动面 12+ 文件 147 处，回归成本远高于当前阶段收益。
 
 ### 3.2 SMP / 内核抢占
 
-> 待填充：设计要点 + deferred 理由。
+**现状**：`intr.c` 硬编码 IRQ；`g_in_syscall` 非抢占保证遍布 syscall；#86 依赖非抢占保证 static 缓冲安全；单 CPU 运行。
 
-### 3.3 内存动态化（COW / 换出 / 解除堆上限）
+**设计要点**
 
-> 待填充：设计要点 + deferred 理由。
+- APIC 中断分发与 per-CPU 中断路由；每 CPU 独立就绪队列与调度器；自旋锁 / 中断屏蔽规则覆盖全部共享数据。
+- 内核可抢占点：syscall 边界、长循环、阻塞原语处插入抢占检查；静态缓冲改为 per-CPU 变量或加锁保护（推翻 #86 现有安全假设前必须先完成这步）。
+- 前置依赖：3.1 独立地址空间（多 CPU 共享内核态前提）；每 CPU 变量抽象；中断控制器驱动重构。
+
+**deferred 理由**：抢占化连带推翻 #86 靠非抢占保住的 static 缓冲安全模型；单 CPU 教学内核无并行收益，风险/收益不匹配。
+
+### 3.3 内存动态化（COW / 换出 / 解除 512 KiB 堆上限）
+
+**现状**：`frame_alloc` 固定 64 MiB 框架；每 arena 单页表；用户堆上限 512 KiB；`src/vma.c`（261 行）已有 VMA 雏形；#128 第二段 RAM（PCI hole 之上）未枚举。
+
+**设计要点**
+
+- 页帧分配器：位图 / 空闲链表替代固定框架；补 multiboot mmap 表解析枚举全部 RAM（#128）。
+- VMA 抽象：进程地址空间按区间描述（已映射 / 已保留 / 权限），支撑动态扩展 arena 与解除堆上限。
+- COW：fork / 映射共享页时置只读，写时复制建私有页表项；换出：回收页帧到交换空间（当前 FAT32 盘上留交换区文件/分区）。
+- 前置依赖：3.1 独立地址空间；#86 裸指针类别已清零（已完成）是最危险前置。
+
+**deferred 理由**：重构级；在 3.1 落地前排期。最危险的前置（用户态裸解引用让内核停机）已消除。
 
 ## 4. 已完成项对照备查（避免重复派工）
 
-> 待填充：逐项列出本轮核实为「已落地」的能力与源码定位。
+以下能力本轮在源码中核实为**已落地**，差距分析不再重复立项：
+
+| 能力 | 现状定位 | 来源轮次 |
+|---|---|---|
+| 多用户 + 7 位能力位 + `/etc/passwd` + `/etc/acl` | `src/user.c`、`include/user.h`；`fs_perm_check()` 484 行 | #91 |
+| spawn 执行权限闸口（CE/ELF/PE 三轨） | `src/task.c:2369–2398`，-13 EACCES | v2.15 / #99 |
+| 口令带盐多轮哈希（legacy djb2 仅校验升级） | `src/user.c:62–151`，`$S$` 记录格式 | v2.22 |
+| LFN 读侧 + 基础写侧 / 删除回收 | `src/fat.c:435–866` | v2.18 |
+| `mkdir -p` / `rm -r` / `cp -r`（深度受限） | `src/shell.c:1051–1087`、2616–2656 | v2.24 |
+| 后台 `&` / `jobs` / `log TID` | `src/shell.c:1590–1643`、4272–4276 | v2.5 / #59 |
+| 管道 / 重定向 | shell.c `parse_redir()`、管道生产者后台 + 消费者等待 | v2.5 |
+| 崩溃诊断 + `faultinfo` + `panic()` + fsck | `src/diag.c` | #87/#88 |
+| 应用独立于内核镜像分发（预装 FAT32 盘为真实来源） | `build/apps.list` 单一来源 + 内嵌降级 | #90 |
+| 非阻塞按键 slot 64 `pollkey()`，ring0 直读 PS/2 退役 | `include/ce_abi.h` slot 64 | #92 |
 
 ## 5. 今夜实施优先级排序
 
-> 待填充：按工作量小、收益大、风险低排序，给出派工批次。
+排序原则：工作量小、收益大、风险低优先；每批附回归重点。
+
+### 批次 A — 小工作量、低风险、纯增量（建议先做）
+
+1. **LFN 写侧健壮性补全（2.1）**：非法字符过滤、别名碰撞规则核对、目录满/跨簇失败路径与错误提示；补读写往返单测。回归：`ls`/新建/删除长名文件。
+2. **libc.a 雏形第一步（2.6）**：抽 `ce_app.c/ce_app.h` 收敛 ABI 槽初始化与常用包装；先源码并入。回归：现有 CE 应用重建启动正常。
+3. **`cp -r` / `mkdir -p` 语义补齐（2.7）**：覆盖/合并规则、错误提示、`rmdir` 内建。回归：递归复制/删除用例。
+4. **口令哈希加固增量（2.5）**：摘要加宽到 128/256 bit、盐熵源加强、轮数上调；保留旧记录登录即升级路径。回归：登录 / 改密 / 旧 djb2 记录升级。
+
+### 批次 B — 中工作量、需小设计、重点回归调度与后台
+
+5. **作业控制最小闭环（2.4）**：`fg`/`bg` 内建 + task pgid + 最小信号枚举（SIGCONT/SIGTERM/SIGTSTP）。回归：管道、后台任务、`jobs/log`、`kill`。
+6. **多组支持（2.9）**：附加组存储（passwd 字段或 `/etc/group`）+ 凭据组数组 + `fs_perm_check` 遍历。回归：ACL 组位判定、老记录兼容。
+7. **轻量守护原语（2.3）**：通用事件等待/唤醒槽 + 自启清单；先不做完整会话/信号模型。回归：后台常驻任务唤醒与 `ps` 状态。
+
+### 批次 C — 设计文档先行，今夜不开工
+
+8. **动态链接路线 1（2.2）**：`mkpe.py` 离线 `.reloc` HIGHLOW 重定位 + 导入绑定 vsyscall 槽；运行时动态链接、共享页、模块生命周期 deferred。
+9. **原生 rename 路径（2.1 剩余）**：目录项原子改名 + LFN run 迁移，替代 copy+delete。
+
+### Deferred（重写级，见第 3 节，今夜禁止开工）
+
+- 3.1 取消恒等映射 / 独立用户地址空间；3.2 SMP / 内核抢占；3.3 内存动态化（COW / 换出 / 解除堆上限）。
 
 ## 附录 A：源码定位索引
 
-> 待填充。
+| 主题 | 文件 | 关键位置 |
+|---|---|---|
+| FAT LFN 读侧 | `kernel_v25/src/fat.c` | `lfn_acc_reset/feed` 520–545；`lfn_of_short` 549–552；`fat_list_dir` ~870 |
+| FAT LFN 写侧/删除 | `kernel_v25/src/fat.c` | `lfn_checksum` 448；`dir_write_lfn` 723–801；`fat_delete_name` 817–866 |
+| 任务状态机 | `kernel_v25/include/task.h` | `tstate_e` 30–37；`task_t.gid` 48 |
+| 调度/睡眠/唤醒 | `kernel_v25/src/task.c` | `task_sleep_ticks` 259；`SYS_DELAY` 1219 |
+| spawn 三轨装载 | `kernel_v25/src/task.c` | `task_spawn_ce` 2360；PERM_EXEC 闸口 2369–2398；`spawn_load_elf` 1933；`spawn_load_pe` 2086 |
+| 用户/口令/ACL | `kernel_v25/src/user.c` | `user_hash_pw` 62；`pw_hash_salted` 78；记录格式 119–130；校验 143–151；`fs_perm_check` 484 |
+| Shell 作业/后台 | `kernel_v25/src/shell.c` | `cmd_jobs` 1603；`log` 1634；`kill` 4221；`&` 解析 4272 |
+| 递归文件操作 | `kernel_v25/src/shell.c` | `cmd_mkdir_p` 1051；递归助手 2616–2656；`mv` 2792 |
+| CE ABI 槽位 | `kernel_v25/include/ce_abi.h` | `exit` 13；`delay` 17；`spawn` 46；`wait` 47；`pollkey` 64 |
+| 用户态桩/样板 | `kernel_v25/extapp/ce_stub.c`；`extapp/spinner.c` | `__chkstk_ms`；`__ce_api` 槽样板 |
+| 控制台前端 | `kernel_v25/src/render.c`；`include/render.h` | `cells`/`tmp_cells`/`painted` 双缓冲与脏追踪 30–80；scrollback 35–40 |
+| 字体 | `kernel_v25/src/render_font.c` | 8x8 ASCII + GB2312 16x16 位图；无轮廓字体 |
+| 内核问题历史项 | `docs/CatOS-内核问题清单.md` | #128/#129 内存与 MMIO；#130 PE 重定位；#151 缓冲遗留 |
+| 动态链接设计 | `docs/pe-dynamic-linking-design.md` | 三路线评估与内核缺口表 |
+| 路线图 | `docs/ROADMAP-通用操作系统.md` | 三档推进；重写级三项；P1/P2/P3 清单 |
