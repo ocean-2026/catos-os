@@ -55,6 +55,10 @@ def main():
         if i + 1 < len(args):
             qemu = args[i + 1]
 
+    port = MONITOR_PORT
+    if "--port" in args:
+        i = args.index("--port")
+        port = int(args[i + 1])
     iso = os.path.abspath(iso or os.path.join(REPO, "kernel_v25", "catos.iso"))
     qemu = find_qemu(qemu)
     if not qemu:
@@ -69,7 +73,7 @@ def main():
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    proc, s = _qemu_boot(qemu, iso, MONITOR_PORT, disk=disk)
+    proc, s = _qemu_boot(qemu, iso, port, disk=disk)
     results = []
 
     def step(name, ok, note):
