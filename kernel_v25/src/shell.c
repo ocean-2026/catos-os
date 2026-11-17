@@ -1433,7 +1433,8 @@ static void cmd_run(char *arg, int uid) {
                     kb_readline(name, sizeof(name));
                     const char *dst = name[0] ? name : def;
                     char cerr[64];
-                    int cr = pe_to_ce_file(file, dst, cerr, sizeof(cerr));
+                    int cr = pe_to_ce_file(file, dst, g_uid, g_gid,
+                                           cerr, sizeof(cerr));
                     if (cr == 0) {
                         vga_write("converted to "); vga_write(dst); vga_write("\n");
                     } else {
@@ -2129,6 +2130,9 @@ static void ed_load(fs_entry_t *f) {
 }
 
 static int ed_save(fs_entry_t *f) {
+    /* #182: re-check write permission at save time -- fs_save is a ring0
+     * write and must not hand a protected path back to the session. */
+    if (fs_perm_check(ed_fname, g_uid, g_gid, PERM_WRITE) != 0) return -1;
     int total = 0;
     for (int i = 0; i < ed_nlines; i++) total += ed_strlen(ed_lines[i]) + 1;
     if (total > FS_DATA_MAX) return -1;
@@ -2272,12 +2276,24 @@ static void cmd_edit(const char *arg) {
     if (!*arg) { vga_write("usage: edit FILE\n"); return; }
     /* refuse files exceeding the editor buffer: loading used
      * to silently truncate them and ^O then overwrote the file */
-    {
-        uint32_t cl = 0, sz = 0;
-        if (fs_resolve_file(arg, &cl, &sz) == 0 && sz >= FS_DATA_MAX) {
-            vga_write("edit: file too large for the editor;");
-            vga_write(" refusing (a save would truncate it)\n");
-            return;
+    uint32_t cl = 0, sz = 0;
+    int existed = fs_resolve_file(arg, &cl, &sz) == 0;
+    if (existed && sz >= FS_DATA_MAX) {
+        vga_write("edit: file too large for the editor;");
+        vga_write(" refusing (a save would truncate it)\n");
+        return;
+    }
+    /* #182: gate open/create on write permission.  An existing file needs
+     * PERM_WRITE on the entry itself; a new one needs write on its parent
+     * directory (the same rule touch/mkdir/cp apply). */
+    if (existed) {
+        if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
+            vga_write("edit: permission denied\n"); return;
+        }
+    } else {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+            vga_write("edit: permission denied\n"); return;
         }
     }
     fs_entry_t *f = fs_create_file(arg);

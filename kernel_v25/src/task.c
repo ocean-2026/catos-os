@@ -2291,10 +2291,17 @@ static void pe_ce_err(char *err, int errsz, const char *msg) {
     err[i] = 0;
 }
 
-int pe_to_ce_file(const char *pe_path, const char *ce_path, char *err, int errsz) {
+int pe_to_ce_file(const char *pe_path, const char *ce_path,
+                  int uid, int gid, char *err, int errsz) {
     uint32_t clus = 0, fsize = 0;
     if (!pe_path || !*pe_path || !ce_path || !*ce_path) {
         pe_ce_err(err, errsz, "bad path"); return -3;
+    }
+    /* #182: the flattened CE image is written through a ring0 raw write;
+     * check the target path with the session identity before any disk
+     * touch, the same gate SYS_FILE_SAVE applies. */
+    if (fs_perm_check(ce_path, uid, gid, PERM_WRITE) != 0) {
+        pe_ce_err(err, errsz, "permission denied"); return -13;
     }
     if (fs_resolve_file(pe_path, &clus, &fsize) != 0) {
         pe_ce_err(err, errsz, "source file not found"); return -2;

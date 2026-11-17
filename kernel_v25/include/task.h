@@ -103,9 +103,11 @@ task_t  *task_current(void);
 int      tasks_ready(void);
 int      task_spawn_ce(const char *path, int argc, char **argv, int uid);
 /* P1: flatten a supported PE32 into a CE01 .ce file (shell convert-on-run).
- * err/errsz receive a human-readable failure reason; returns 0 / negative. */
+ * err/errsz receive a human-readable failure reason; returns 0 / negative.
+ * uid/gid are the session identity used for the target-path write check
+ * (#182); the conversion never writes a path the caller may not write. */
 int      pe_to_ce_file(const char *pe_path, const char *ce_path,
-                       char *err, int errsz);
+                       int uid, int gid, char *err, int errsz);
 void     task_exit_current(int code) __attribute__((noreturn));
 int      task_kill(int tid, int by_uid);
 void     task_wait_child(task_t *child);
