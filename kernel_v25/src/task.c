@@ -2521,6 +2521,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->out_append = 0;
     /* #59: reused slots must not leak the previous job's captured output */
     t->bg_mode = 0;
+    t->daemon = 0;              /* v2.54: detached-service flag */
     t->pending_sig = 0;          /* v2.52: clear stale pending signal */
     t->log_head = 0;
     t->log_tail = 0;

@@ -147,3 +147,5 @@ CatOS[易错点] QEMU 开机后立刻 sendkey/type_text，PS/2 控制器自检/�
 CatOS[易错点] fs_perm_check 里文件 mode 是经典 octal triad（r=4/w=2/x=1），而 syscall need 是独立 PERM_READ=1/WRITE=2/EXEC=4 位掩码；直接 `(have & need)` 相与会把 4xx 读位误拒、把执行位 1 误当成 READ 放行。取出 triad 后必须先翻译成 PERM_* 再比对（见问题清单 #157）；附加组/组位分支挂在组位判定上，掩码翻译错了组可读访问会整体假阴性。
 CatOS[易错点] 附加组成员在磁盘 /etc/group 上按用户名存，加载时才对 /etc/passwd 解析成 uid；权限检查路径只能拿 uid 查组库（user_in_group），不能要求任务凭据里带附加组数组。老记录只有主 gid：组判定先比主 gid，未命中再遍历附加组，缺省组库为空时行为与单 gid 基线一致。
 CatOS[易错点] 后台/重定向 CE 应用（如 `hello > file`）是异步任务，chown/chmod 紧随重定向下发时应用可能还在写；抓屏断言要给足命令间隔，且 VGA 旧行残留会让上一条 permission denied 污染下一条断言，读取状态行前先 clear 或只取最后一条 jobs/结果行。
+CatOS[易错点] 探针驱动后台任务时，任务寿命必须覆盖全部断言窗口：`daemon memlog 6 500` 3 秒自退，dm-3 的 log 检查在 ~4.5s 必拿「no such task」；`spinner 4 &` 2 秒跑完，fg 到达时已被回收报「fg: no such job」。短寿命自退型任务一律换成 ≥ 断言总耗时的参数（memlog 60x500 / spinner 20），或默认无限循环由探针显式 kill。
+CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一并还原：v2.52 期间为 jobctl 放宽的 spinner 上限 8→60→200（未提交），v2.54 隔离验证后 spinner 回到 60，`spinner 180` 被钳到默认 8 tick 约 1-2 秒退出，jobctl 的 jobs-lists-running 随机假失败。从工作树复跑针对性套件前，先核对探针依赖的未提交源码还在不在（git diff 具体文件），而不是只看 HEAD 提交了什么。

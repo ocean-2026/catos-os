@@ -163,6 +163,7 @@ static void cmd_help(void) {
     help_row("login U [PW]","switch session user ('su' = alias)");
     help_row("useradd N [UID [GID [CAPS]]]", "add user (CAP_USERADM)");
     help_row("groupadd G [MEMBER]", "create group / append member (CAP_USERADM)");
+    help_row("daemon CMD [args]", "detach a service as a background daemon");
     help_row("groups", "list groups and members (v2.53 /etc/group)");
     help_row("userdel N | passwd N PW | chcaps HEX N", "manage accounts / caps");
     help_row("chmod OCT PATH | chown UID[:GID] PATH", "persistent /etc/acl");
@@ -1717,6 +1718,29 @@ static void cmd_stop(char *arg) {
     else if (r != 0) vga_write("stop: signal failed\n");
 }
 
+/* daemon CMD [args...] : spawn a detached service (v2.54).  Like a
+ * background job it returns to the shell at once and captures stdout to its
+ * log ring, but it is flagged as a daemon: it has no controlling interactive
+ * session and is listed with a `D` marker in `jobs`.  The event loop of a
+ * daemon sleeps on the existing timer/child/key wake sources; no POSIX
+ * session model or signal table is introduced here. */
+static void cmd_daemon(char *arg) {
+    char *argv[16];
+    int argc = split_words(arg, argv, 16);
+    if (argc < 1) {
+        vga_write("usage: daemon CMD [args...]\n");
+        return;
+    }
+    if (run_from_path(argv[0], argv, argc, 1, g_uid) != 0) {
+        vga_write("daemon: unknown command: "); vga_write(argv[0]); vga_write("\n");
+        return;
+    }
+    task_t *t = task_by_tid(g_last_bg_tid);
+    if (t) t->daemon = 1;
+    vga_write("[daemon tid "); print_int(g_last_bg_tid);
+    vga_write("] "); vga_write(argv[0]); vga_write("\n");
+}
+
 static void cmd_jobs(void) {
     int tid, state, uid, ring, found = 0;
     uint32_t cpu, pages;
@@ -1731,7 +1755,8 @@ static void cmd_jobs(void) {
         found = 1;
         vga_write("  "); print_int(tid);
         vga_write("   "); vga_write(job_state_name(state));
-        vga_write("    "); vga_write(nm);
+        vga_write(t->daemon ? " D  " : "    ");
+        vga_write(nm);
         vga_write("  "); print_int(task_log_pending(t));
         vga_write("B\n");
     }
@@ -4041,7 +4066,7 @@ static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
     "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
-    "groupadd","groups","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
+    "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
     "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
@@ -4446,6 +4471,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "useradd"))     cmd_useradd(arg);
         else if (!strcmp_(cmd, "groupadd"))    cmd_groupadd(arg);
         else if (!strcmp_(cmd, "groups"))      cmd_groups();
+        else if (!strcmp_(cmd, "daemon"))      cmd_daemon(arg);
         else if (!strcmp_(cmd, "userdel"))     cmd_userdel(arg);
         else if (!strcmp_(cmd, "passwd"))      cmd_passwd(arg);
         else if (!strcmp_(cmd, "chcaps"))      cmd_chcaps(arg);
@@ -4662,13 +4688,29 @@ static void boot_autostart(void) {
             char *lcmd = line;
             while (*lcmd == ' ' || *lcmd == '\t') lcmd++;
             if (!*lcmd || *lcmd == '#') continue;
+            /* v2.54: a leading '@' marks an autostart service: launched
+             * detached as a daemon instead of run in the boot script. */
+            int as_daemon = 0;
+            if (*lcmd == '@') { as_daemon = 1; lcmd++;
+                while (*lcmd == ' ' || *lcmd == '\t') lcmd++; }
             char *larg = lcmd;
             while (*larg && *larg != ' ' && *larg != '\t') larg++;
             if (*larg) {
                 *larg = 0; larg++;
                 while (*larg == ' ' || *larg == '\t') larg++;
             }
-            shell_exec(lcmd, larg);
+            if (as_daemon) {
+                char *dargv[16];
+                int dargc = 1;
+                dargv[0] = lcmd;
+                dargc += split_words(larg, dargv + 1, 15);
+                if (run_from_path(lcmd, dargv, dargc, 1, UID_ROOT) == 0) {
+                    task_t *dt = task_by_tid(g_last_bg_tid);
+                    if (dt) dt->daemon = 1;
+                }
+            } else {
+                shell_exec(lcmd, larg);
+            }
         }
         g_script_mode = 0;
     }

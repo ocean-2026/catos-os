@@ -11,7 +11,10 @@ int ce_main(int argc, char **argv) {
     int n = 8;
     if (argc >= 2) {
         int v = api->atoi(argv[1]);
-        if (v > 0 && v <= 60) n = v;
+        /* v2.54: accept up to 200 ticks — jobctl_regress drives `spinner 180`
+         * for its stop/fg/bg state machine (8-60 tick tasks finish before
+         * the probe can observe them in jobs). */
+        if (v > 0 && v <= 200) n = v;
     }
     api->write("[spinner tid=");
     api->print_int(api->gettid());

@@ -76,3 +76,4 @@ CatOS[经验] 递归文件操作语义分层：对外命令（rmdir）走严格�
 CatOS[经验] 口令摘要加宽保持可演进：旧混合函数保留下来仅用于校验旧记录，新记录走新格式；登录成功后原地重算新格式即透明升级，无需离线迁移工具。多车道摘要用独立 IV 种子 + 逐轮跨车道异或扩散，避免四条独立可并行碰撞的弱拼接。
 CatOS[经验] 调度类死锁用串口时序打点最快定位：`-serial file:/tmp/ser.log` + 内核侧 btime_mark()（自带 ms 时间戳），在 signal 投递/wait 进入/wake-parent/reap 四个点打标，一次运行即可看出「wake-parent 有、reaped 无」这类「被唤醒但永不调度回来/等待条件永不满足」的竞态，比反复抓屏猜测高效得多。
 CatOS[经验] 附加组最小落地不必给每个任务/用户凭据挂 supplementary 数组：内核维护一张常驻组库（内存表 + 持久化 /etc/group，行格式 name:gid:member,...，成员按名存、加载期解析 uid），权限检查在「主 gid 未命中」后用 uid 反查组库即可命中任一附加组。老单 gid 记录与空组库天然向后兼容；每任务附加组凭据缓存留作后续优化。
+CatOS[经验] 守护原语最小落地复用后台作业管线：task_t 加一个 daemon 标志 + spawn 复位 + jobs 加 D 列即可，事件等待复用既有 delay（timer 唤醒）/子退出/键入三唤醒源，不新增调度类、不引入 POSIX 会话/信号表；自启服务用 /etc/autoexec 行首 @ 前缀走同一 daemon 管线（uid=root）。示范守护（memlog 堆水位）周期写捕获 ring，log TID 读回、kill TID 停止，全部交互走 v2.51 既有命令。

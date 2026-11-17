@@ -89,6 +89,8 @@ typedef struct task {
      * scribbling over the shell prompt.  `log TID` drains it, `log -f TID`
      * follows it until the task exits. */
     int         bg_mode;        /* 1 = background job -> capture stdout */
+    int         daemon;         /* v2.54: detached service (survives session,
+                                   logged like a bg job; not an interactive job */
     uint16_t    log_head;       /* write index (bytes)                 */
     uint16_t    log_tail;       /* read index  (bytes)                 */
     uint32_t    log_lost;       /* bytes dropped because the ring was full */

@@ -546,3 +546,12 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - shell：`groupadd GROUP [MEMBER...]`（CAP_USERADM，建组并/或追加成员，持久化）、`groups`（列组与成员名）；help/补全表接线。
 - 修复位编码混用（问题清单 #157）：文件 mode 是 octal triad（r=4/w=2/x=1），syscall need 是 PERM_READ=1/WRITE=2/EXEC=4；原先直接相与导致 4xx 读位误拒、执行位误放。取出 triad 先翻译成 PERM_* 再比对 need。
 - 回归：新增 tests/group_regress.py 10/10（建组列表/成员经附加组可读/非成员 640 被拒/追加第二成员可读/持久化复登/无 fatal），已接入 run_full_regress.sh；保护复绿：qemu 12/12、user 20/20。
+
+## 三十四、v2.54 轻量守护原语：daemon 标记 + 自启服务（task.h / task.c / shell.c / extapp）
+
+- 任务层：`task_t` 新增 `daemon` 标志，`task_spawn_ce` 槽位复用时复位；守护进程沿用既有后台作业管线（输出捕获 ring + timer/子退出/键入三个既有唤醒源），不引入新调度类或 POSIX 会话模型。
+- shell：`daemon CMD [args...]` 内建（run_from_path 后台派生并打 daemon 标记）、`jobs` 列表加 `D` 状态列、help/补全表/dispatch 接线。
+- 自启服务：`/etc/autoexec` 行首 `@` 前缀标记守护启动（boot_autostart 走 run_from_path + daemon 标记，uid=UID_ROOT），普通行行为不变。
+- 示范守护：`extapp/memlog.c`（周期 `brk(0)` 查询堆水位写入捕获 ring，`log TID` 可读回，`kill TID` 停止）；spinner 上限 8/60→200（jobctl_regress 驱动 `spinner 180` 观测 stop/fg/bg 状态机所需）。
+- 回归：新增 tests/daemon_regress.py 5/5（公告 tid/jobs 带 D 标记/log 读回水位样本/kill 回收/无 fatal），已接入 run_full_regress.sh（端口 4467）。
+- 探针修复三则（均为断言侧，非内核语义）：开机后 PS/2 幽灵按键 settle（丢弃性 clear + 2.5s）；jobs/kill 断言前 clear 防全屏旧行污染（dm-3 的 log 输出、jc-2/3/4 的历史 jobs 行都含目标词）；短寿命后台任务在断言前自退——`daemon memlog 60 500`（30s）替代 `6 500`（3s），`fg` 目标 `spinner 20`（10s）替代 `spinner 4`（2s）。

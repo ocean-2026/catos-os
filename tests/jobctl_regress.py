@@ -71,6 +71,10 @@ def main():
     r = R()
     try:
         wait_for_prompt(sock)
+        # PS/2 ghost-keystroke settle (docs/history.md): discard-type once and
+        # wait for the controller to settle, or stray digits pollute argv and
+        # the assertion window of the first real command.
+        run(sock, "clear", 2.5)
 
         # jc-1: long spinner in background; jobs lists it alive
         t = run(sock, "spinner 180 &", 2.0)
@@ -80,25 +84,30 @@ def main():
         r.check("jobs-lists-running",
                 "spinner" in t and ("run" in t or "sleep" in t), t)
 
-        # jc-2: suspend
+        # jc-2: suspend (clear first: full-screen scans must not see stale
+        # lines from earlier checks, nor PS/2 ghost keystroke noise)
         run(sock, "stop %d" % tid, 1.5)
+        run(sock, "clear", 0.8)
         t = run(sock, "jobs", 1.5)
         r.check("jobs-shows-stopped", "stopped" in t and "spinner" in t, t)
 
         # jc-3: resume in background
         t = run(sock, "bg %d" % tid, 1.5)
         r.check("bg-resumes", "[bg tid" in t, t)
+        run(sock, "clear", 0.8)
         t = run(sock, "jobs", 1.5)
         r.check("jobs-running-again",
                 "stopped" not in t and "spinner" in t, t)
 
         # jc-4: reap via kill
         run(sock, "kill %d" % tid, 1.5)
+        run(sock, "clear", 0.8)
         t = run(sock, "jobs", 1.5)
         r.check("kill-reaps-job", "spinner" not in t, t)
 
-        # jc-5: fg a short background job and wait for exit
-        t = run(sock, "spinner 4 &", 2.0)
+        # jc-5: fg a short background job and wait for exit (20 ticks = 10s:
+        # a 4-tick task is reaped before fg can attach)
+        t = run(sock, "spinner 20 &", 2.0)
         tid2 = announce_tid(t)
         r.check("fg-target-spawned", tid2 > 0, t)
         run(sock, "fg %d" % tid2, 1.0)
