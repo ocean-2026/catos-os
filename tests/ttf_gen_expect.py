@@ -19,6 +19,10 @@ from fontTools.ttLib import TTFont
 FONTS = [
     ("dejavu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ("liberation", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+    # committed in-repo subset assets (kernel_v25/fonts/): what gfx24 will
+    # actually ship -- parser must handle them identically
+    ("dejavu_sub", "kernel_v25/fonts/DejaVu-subset.ttf"),
+    ("liberation_sub", "kernel_v25/fonts/LiberationSans-subset.ttf"),
 ]
 CHARS = [0x41, 0x67]  # 'A', 'g'
 

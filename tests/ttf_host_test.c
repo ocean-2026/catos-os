@@ -115,6 +115,8 @@ int main(void) {
     printf("== ttf host unit test ==\n");
     test_font(&expect_dejavu);
     test_font(&expect_liberation);
+    test_font(&expect_dejavu_sub);
+    test_font(&expect_liberation_sub);
     test_malformed();
     printf("== %s ==\n", fails ? "FAILED" : "ALL PASS");
     return fails ? 1 : 0;
