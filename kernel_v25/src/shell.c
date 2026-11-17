@@ -2678,6 +2678,12 @@ static void cmd_useradd(char *arg) {
         vga_write("       caps=0x"); print_hex(caps); vga_write("\n");
         }
     }
+    /* #181: newly created accounts are subject to the same subset rule:
+     * a non-root issuer cannot mint an account stronger than themselves. */
+    if (g_uid != UID_ROOT && (caps & ~g_caps) != 0) {
+        vga_write("useradd: cannot grant capabilities you do not hold\n");
+        return;
+    }
     char home[48];
     int o = 0;
     for (const char *q = "/home/"; *q && o < 47; q++) home[o++] = *q;
@@ -2738,7 +2744,15 @@ static void cmd_chcaps(char *arg) {
     if (!session_is_admin()) { vga_write("chcaps: permission denied\n"); return; }
     char *argv[3];
     if (split_words(arg, argv, 3) < 2) { vga_write("usage: chcaps CAPS_HEX NAME\n"); return; }
-    if (user_set_caps(argv[1], hex32_(argv[0])) != 0) {
+    uint32_t want = hex32_(argv[0]);
+    /* #181: a non-root issuer may only confer bits they already hold, so
+     * a CAP_USERADM account cannot self/other-grant CAP_ALL (CAP_KILL/
+     * DEVICE/SYS/REBOOT ...).  Root is exempt. */
+    if (g_uid != UID_ROOT && (want & ~g_caps) != 0) {
+        vga_write("chcaps: cannot grant capabilities you do not hold\n");
+        return;
+    }
+    if (user_set_caps(argv[1], want) != 0) {
         vga_write("chcaps: no such user\n");
         return;
     }
@@ -3873,6 +3887,9 @@ static void ue_edit_caps(const char *name) {
         else if (k == KB_DOWN) { if (++cur >= nb) cur = 0; }
         else if (k == ' ') caps ^= bits[cur];
         else if (k == 27 || k == '\n') {
+            /* #181: strip any bit the non-root issuer does not hold before
+             * persisting; the interactive toggle cannot mint new powers. */
+            if (g_uid != UID_ROOT) caps &= g_caps;
             user_set_caps(name, caps);
             if (user_save() != 0) vga_write("useredit: persist failed\n");
             return;
