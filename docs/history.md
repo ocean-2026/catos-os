@@ -142,3 +142,5 @@ CatOS[易错点] 公共层把 __ce_api 槽收编成单个 .c 定义时，若用�
 CatOS[易错点] `fs_rmdir` 非空判定回调 `rmdir_cb` 旧条件 `!scmp(name,".") && !scmp(name,"..")` 要求名字同时等于 "." 和 ".."，恒假，计数永远 0，非空目录被当成空目录放行；正确写法是 `scmp(name,".")!=0 && scmp(name,"..")!=0`（跳过两个点条目后计数真实条目）。
 CatOS[易错点] 严格化目录非空检查后，既有 `rm -r` 递归清空器暴露出 fat 层嵌套 delete-name 潜在重入问题（见问题清单 #155）；本批把 `fs_rmdir` 拆成 strict（rmdir 命令）/force（rm -r 后序清空器）两条路径，force 保持 v2.24 基线行为，不在本批改 fat 内部。
 CatOS[易错点] /etc/passwd 长口令记录在 VGA 按 80 列折行，回归抓屏文本里十六进制串会被换行/空格打断；正则匹配前先 `re.sub(r"\s+","",txt)` 归一化，否则 128 位 digest 的 32 hex 断言假阴性。
+CatOS[易错点] 任务退出路径先唤醒 parent 再 maybe_autoreap，父进程被置 READY 后 autoreap 判定「无人等待」把僵尸直接回收成 T_UNUSED；等待方若只认 ZOMBIE（如 task_wait_child_or_stop）就永远等一个已回收槽位死循环。退出路径必须「先 reap 判定（parent 仍在 WAIT_CHILD 才保留僵尸）、后唤醒 parent」，且 wait 类循环要防御性接受 T_UNUSED 作为子任务已退出。
+CatOS[易错点] QEMU 开机后立刻 sendkey/type_text，PS/2 控制器自检/初始化残留会产生幽灵按键（屏幕出现 18118128138 一类数字噪声）污染第一条命令；开机后先丢弃性 type 一次或等 1-2s 再开始正式断言输入，否则 argv 里混入垃圾尾巴导致 bg 解析、参数断言随机假阴性。

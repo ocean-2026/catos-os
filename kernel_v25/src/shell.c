@@ -23,6 +23,10 @@
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
+/* v2.52: tid of the newest '&' background job -- fg/bg/stop fall back to
+ * it when called without an argument. */
+static int g_last_bg_tid;
+
 /* ---------- tiny libc ---------- */
 static int strcmp_(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -165,6 +169,9 @@ static void cmd_help(void) {
     help_row("jobs",        "list background jobs ('run X &') with pending log");
     help_row("log TID",     "show a background job's captured output");
     help_row("log -f TID",  "follow that job until it exits");
+    help_row("fg [%]TID",   "resume a stopped/background job in foreground");
+    help_row("bg [%]TID",   "resume a stopped job in background");
+    help_row("stop [%]TID", "suspend a running job (SIGTSTP)");
 
     help_head("environment (v2.23, persisted in /etc/env)");
     help_row("export K=V",  "set variable (empty V deletes); env lists all");
@@ -1252,6 +1259,7 @@ void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int u
     if (bg) {
         task_t *bt = task_by_tid(tid);
         if (bt) bt->bg_mode = 1;      /* #59: capture stdout into the ring */
+        g_last_bg_tid = tid;          /* v2.52: fg/bg/stop no-arg default */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -1332,6 +1340,7 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
     if (in_pipe  >= 0) kpipe_assign_in(tid, in_pipe);
     if (!fg) {
         tt->bg_mode = 1;              /* #59: capture stdout into the ring */
+        g_last_bg_tid = tid;          /* v2.52: fg/bg/stop no-arg default */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -1623,8 +1632,87 @@ static const char *job_state_name(int st) {
     case T_WAIT_KB:    return "waitkey";
     case T_WAIT_CHILD: return "wait";
     case T_ZOMBIE:     return "done";
+    case T_STOPPED:    return "stopped";
     default:           return "?";
     }
+}
+
+/* v2.52: parse an optional leading '%' then a TID.  Returns tid >= 0 when
+ * the user named one, -1 when the argument is empty (caller falls back to
+ * the most recent background job), -2 on garbage. */
+static int parse_job_tid(const char *arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '%') arg++;
+    if (*arg == 0) return -1;
+    if (*arg < '0' || *arg > '9') return -2;
+    int tid = 0;
+    while (*arg >= '0' && *arg <= '9') tid = tid * 10 + (*arg++ - '0');
+    return tid;
+}
+
+/* resolve the fg/bg/stop target: explicit TID, else the most recent '&'
+ * job.  Rejects the shell itself (0) -- signaling the shell from its own
+ * prompt would stop the shell. */
+static task_t *job_lookup(char *arg, const char *who) {
+    int tid = parse_job_tid(arg);
+    if (tid == -1) tid = g_last_bg_tid;
+    if (tid < 0) {
+        vga_write(who); vga_write(": no current job\n");
+        return 0;
+    }
+    task_t *t = task_by_tid(tid);
+    if (!t || t->state == T_UNUSED || t == task_current()) {
+        vga_write(who); vga_write(": no such job\n");
+        return 0;
+    }
+    if (t->parent != task_current()) {
+        vga_write(who); vga_write(": not your job\n");
+        return 0;
+    }
+    if (t->state == T_ZOMBIE) {
+        vga_write(who); vga_write(": job already exited\n");
+        return 0;
+    }
+    return t;
+}
+
+/* fg [%]TID : resume a stopped/background job in the foreground and wait
+ *             for it to exit or stop again.
+ * bg [%]TID : resume a stopped job in the background.
+ * stop [%]TID: suspend a running job (shell-side SIGTSTP). */
+static void cmd_fg(char *arg) {
+    task_t *t = job_lookup(arg, "fg");
+    if (!t) return;
+    task_signal(t->tid, SIGCONT);
+    t->bg_mode = 0;                 /* foreground: output goes to the console */
+    int stopped = task_wait_child_or_stop(t);
+    vga_write(stopped ? "\n[stopped] " : "\n[done] ");
+    print_int(t->tid); vga_write(" "); vga_write(t->name); vga_write("\n");
+}
+
+static void cmd_bg(char *arg) {
+    task_t *t = job_lookup(arg, "bg");
+    if (!t) return;
+    if (t->state != T_STOPPED) {
+        vga_write("bg: job is not stopped\n");
+        return;
+    }
+    task_signal(t->tid, SIGCONT);
+    t->bg_mode = 1;                 /* background: capture stdout to the ring */
+    vga_write("[bg tid "); print_int(t->tid); vga_write("] ");
+    vga_write(t->name); vga_write("\n");
+}
+
+static void cmd_stop(char *arg) {
+    task_t *t = job_lookup(arg, "stop");
+    if (!t) return;
+    if (!t->bg_mode && t->state != T_STOPPED) {
+        vga_write("stop: not a background job\n");
+        return;
+    }
+    int r = task_signal(t->tid, SIGTSTP);
+    if (r == -3) vga_write("stop: job is blocked on I/O; try again later\n");
+    else if (r != 0) vga_write("stop: signal failed\n");
 }
 
 static void cmd_jobs(void) {
@@ -1636,7 +1724,8 @@ static void cmd_jobs(void) {
         if (!task_stat(slot, &tid, &cpu, &pages, &state, &uid, &ring,
                        nm, sizeof(nm))) continue;
         task_t *t = task_by_tid(tid);
-        if (!t || !t->bg_mode) continue;     /* background jobs only */
+        /* background jobs, plus stopped foreground jobs held by job control */
+        if (!t || (!t->bg_mode && t->state != T_STOPPED)) continue;
         found = 1;
         vga_write("  "); print_int(tid);
         vga_write("   "); vga_write(job_state_name(state));
@@ -3894,12 +3983,12 @@ static void bar_put_str(char *b, int *n, const char *s) {
  * parsing).  Multiple matches go into the candidate bar (the row under
  * the input line), exactly one replacement goes back into the line. */
 static const char *sh_cmds[] = {
-    "about","alias","autostart","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
+    "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
-    "export","faultinfo","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
-    "setenv","size","sl","sndinfo","sndtest","style","su","sudo","svgainfo","text","top",
+    "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vbe","vbe24","vdiag","whoami","yes",
 };
@@ -4318,6 +4407,9 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "top"))         cmd_top();
         else if (!strcmp_(cmd, "jobs"))        cmd_jobs();
         else if (!strcmp_(cmd, "log"))         cmd_log(arg);
+        else if (!strcmp_(cmd, "fg"))          cmd_fg(arg);
+        else if (!strcmp_(cmd, "bg"))         cmd_bg(arg);
+        else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo();
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);

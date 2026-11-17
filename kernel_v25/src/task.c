@@ -372,8 +372,8 @@ void task_die_fault(int_frame_t *f) {
     task_cleanup(t);
     t->exit_code = -1;
     t->state = T_ZOMBIE;
+    maybe_autoreap(t);                    /* v2.52: reap before waking parent */
     if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
-    maybe_autoreap(t);
     reschedule();
     __builtin_unreachable();
 }
@@ -385,8 +385,14 @@ void task_exit_current(int code) {
     t->state = T_ZOMBIE;
     w("[task "); wdec(t->tid); w(" '"); w(t->name); w("' exit(");
     wdec(code); w(")]\n");
-    if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
+    /* v2.52 fix: reap BEFORE waking the parent.  Waking first flipped the
+     * parent to T_READY, so maybe_autoreap() saw "nobody waits" and reaped
+     * the zombie out from under a shell blocked in task_wait_child*(),
+     * which then waited on a T_UNUSED slot forever. */
     maybe_autoreap(t);
+    if (t->parent && t->parent->state == T_WAIT_CHILD) {
+        t->parent->state = T_READY;
+    }
     reschedule();
     __builtin_unreachable();
 }
@@ -401,8 +407,8 @@ int task_kill(int tid, int by_uid) {
     task_cleanup(t);                      /* switches cr3 to the kernel dir */
     t->exit_code = -9;
     t->state = T_ZOMBIE;
+    maybe_autoreap(t);                    /* v2.52: reap before waking parent */
     if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
-    maybe_autoreap(t);
     /* the killer keeps the CPU: switch cr3 back to our own space */
     if (cur_task->space.dir)
         cpu_cr3_write(cur_task->space.dir);
@@ -416,6 +422,63 @@ void task_wait_child(task_t *child) {
     child->state = T_UNUSED;              /* reaped */
 }
 
+/* v2.52: wait until the child exits (reaped, 0) or stops (1).  A stopped
+ * child is left in T_STOPPED so `fg`/`bg` can resume it later. */
+int task_wait_child_or_stop(task_t *child) {
+    while (child->state != T_ZOMBIE && child->state != T_STOPPED &&
+           child->state != T_UNUSED)
+        task_block(T_WAIT_CHILD);
+    if (child->state == T_ZOMBIE) {
+        child->state = T_UNUSED;          /* reaped */
+        return 0;
+    }
+    return 1;
+}
+
+/* v2.52 minimal signal delivery for job control.
+ *   SIGCONT  : wake a stopped job back to READY
+ *   SIGTSTP  : suspend a running/runnable job (release the console)
+ *   SIGINT/TERM: terminate (minimal mapping onto the existing kill path)
+ *   SIGCHLD  : informational; parent re-checks its children on wake
+ */
+int task_signal(int tid, int sig) {
+    task_t *t = task_by_tid(tid);
+    if (!t || t->state == T_UNUSED) return -1;
+    if (t->state == T_ZOMBIE) return 0;
+    switch (sig) {
+    case SIGCONT:
+        if (t->state == T_STOPPED) {
+            t->state = T_READY;
+            t->pending_sig = 0;
+            need_resched = 1;
+        }
+        return 0;
+    case SIGTSTP:
+        if (t->state == T_STOPPED) return 0;
+        /* v2.52: only a runnable/sleeping job can be suspended cleanly.
+         * A job blocked in T_WAIT_KB / T_WAIT_CHILD resumed via SIGCONT
+         * would return from task_block() into "a key/child arrived" code
+         * paths that no longer hold, feeding the app a bogus key. */
+        if (t->state != T_READY && t->state != T_RUNNING &&
+            t->state != T_SLEEPING) return -3;
+        t->pending_sig = sig;
+        t->state = T_STOPPED;
+        if (console_owner_tid() == t->tid) console_wake_release(t->tid);
+        /* wake a waiting parent so the shell can observe the stopped job */
+        if (t->parent && t->parent->state == T_WAIT_CHILD)
+            t->parent->state = T_READY;
+        return 0;
+    case SIGINT:
+    case SIGTERM:
+        task_kill(tid, UID_ROOT);
+        return 0;
+    case SIGCHLD:
+        return 0;
+    default:
+        return -2;
+    }
+}
+
 int task_count(void) {
     int n = 0;
     for (int i = 0; i < MAX_TASKS; i++)
@@ -426,6 +489,7 @@ int task_count(void) {
 void task_ps_print(void) {
     static const char *names[] = {
         "UNUSED", "READY ", "RUN   ", "SLEEP ", "KB    ", "CHILD ", "ZOMBIE",
+        "STOP  ",
     };
     w("TID  UID   RING  STATE   NAME\n");
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -433,7 +497,7 @@ void task_ps_print(void) {
         wdec(i); w(i < 10 ? "    " : "   ");
         wdec(tasks[i].uid); w(tasks[i].uid < 10 ? "    " : "   ");
         w(tasks[i].ring0 ? "0    " : "3    ");
-        w(names[tasks[i].state <= T_ZOMBIE ? tasks[i].state : 0]); w("  ");
+        w(names[tasks[i].state <= T_STOPPED ? tasks[i].state : 0]); w("  ");
         w(tasks[i].name); w("\n");
     }
     w("--- "); wdec(task_count()); w(" task(s), uptime ");
@@ -1266,6 +1330,17 @@ void isr_syscall(int_frame_t *f) {
             task_block(T_WAIT_KB);
         }
         int k = kb_getkey();
+        /* v2.52: Ctrl-Z (0x1A) suspends the foreground job, mirroring the
+         * tty-generated SIGTSTP.  Background jobs keep the raw byte.  The
+         * ^Z itself is discarded: after SIGCONT the job loops back to
+         * waiting for a real key instead of returning ENOSYS. */
+        for (;;) {
+            if (k != 26 || t->bg_mode) break;
+            task_signal(t->tid, SIGTSTP);
+            while (t->state == T_STOPPED) task_block(T_STOPPED);
+            while (kb_peek() == 0) task_block(T_WAIT_KB);
+            k = kb_getkey();
+        }
         ret = (uint32_t)k;
         break;
     }
@@ -2446,6 +2521,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->out_append = 0;
     /* #59: reused slots must not leak the previous job's captured output */
     t->bg_mode = 0;
+    t->pending_sig = 0;          /* v2.52: clear stale pending signal */
     t->log_head = 0;
     t->log_tail = 0;
     t->log_lost = 0;
@@ -2612,6 +2688,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->wake_tick = 0;
     t->exit_code = 0;
     t->parent = cur_task;
+    t->pgid = slot;              /* v2.52: standalone job owns its group */
     t->heap_end = USER_HEAP_BASE;
     heap_free_root[slot] = 0;
     t->ls_count = 0;

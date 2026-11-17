@@ -530,3 +530,11 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 逐套件前台分次跑，全绿：qemu 12/12、guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7。
 - ce_regress 11 FAIL 为 ce_sim 未建模既有基线，不计回归失败。
 - 四项 commit：ee6bfcd（v2.48）、80cb16a（v2.49）、ed61383（v2.50）、671c827（v2.51），均已推 origin/main。
+
+## 三十二、v2.52 shell 作业控制最小闭环（task.h / task.c / shell.c）
+
+- 任务层：新增 `T_STOPPED` 状态、`pgid`（独立作业 == tid）与 `pending_sig`；最小信号抽象 `task_signal()`（SIGCONT/SIGTSTP/SIGINT/SIGTERM/SIGCHLD），TSTP 仅允许 READY/RUNNING/SLEEPING（I/O 等待态拒绝，防 CONT 恢复后误读键）。
+- shell 内建：`fg [%]TID`（恢复到前台并 wait，停止→前台运行→退出全程闭环）、`bg [%]TID`（后台续跑）、`stop [%]TID`（挂起）；无参数默认最近一个 `&` 任务（g_last_bg_tid）；拒绝对 shell 自身发信号；help/补全表/jobs 状态列（stopped）全部接线。
+- 前台 Ctrl+Z（0x1A）：SYS_GETCH 路径拦截，前台任务自挂起、^Z 不下发应用，CONT 后循环回读真实按键；后台任务保留原始字节。
+- 修复隐藏竞态（问题清单 #156）：`task_exit_current`/`task_die_fault`/`task_kill` 先 wake parent 再 `maybe_autoreap`，父进程被置 READY 后 autoreap 把僵尸直接回收成 T_UNUSED，新的 `task_wait_child_or_stop` 只认 ZOMBIE/STOPPED 导致 shell 永久等待已回收槽位（原 `task_wait_child` 接受 UNUSED 掩盖了该竞态）。修复为「先 reap 判定、后唤醒 parent」三处统一，wait 循环防御性接受 UNUSED。
+- 回归：新增 tests/jobctl_regress.py 12/12（bg 生成/jobs 状态流转/stop→bg→stop→fg 全闭环/无任务报错/垃圾参数/faultinfo），已接入 run_full_regress.sh；全量十二套全绿：qemu 12/12、guess 16/16、jobctl 12/12、recur 10/10、fsrec 12/12、lfn 14/14、user 20/20、caps 12/12、disk 5/5、env 13/13、heap 4/4、size 7/7。
