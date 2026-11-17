@@ -4562,8 +4562,15 @@ static void shell_exec(char *cmd, char *arg) {
             while (*arg >= '0' && *arg <= '9') { tid = tid * 10 + (*arg - '0'); arg++; }
             if (neg) tid = -tid;
             if (tid == 0) { vga_write("usage: kill TID\n"); }
-            else if (task_kill(tid, UID_ROOT) != 0)
-                vga_write("kill: no such task\n");
+            else {
+                /* #184: hand the session identity to task_kill so its owner /
+                 * CAP_KILL check actually runs.  The old UID_ROOT argument
+                 * bypassed that check entirely, letting a caps=0 non-root
+                 * session kill root-owned tasks. */
+                int kr = task_kill(tid, g_uid);
+                if (kr == -2) vga_write("kill: permission denied\n");
+                else if (kr != 0) vga_write("kill: no such task\n");
+            }
         }
         else if (!strcmp_(cmd, "curl"))        cmd_curl(arg);
         else if (!strcmp_(cmd, "ping"))        cmd_ping(arg);
