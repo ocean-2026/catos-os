@@ -479,3 +479,10 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - **遗留项 #122/#123**：#123 ata_read_sectors DRQ 失败改为返回 -1（与写
   路径对称）；#122 export/unset 加管理员闸门，/etc/size 落盘需管理员
   （会话内仍可临时切字号）。详见 docs/night-P0-report.md。
+
+## 二十六、v2.47 shell did-you-mean 一键确认（y 直跑）
+
+- **功能**：主提示符下 unknown-command 给出最近邻建议后，缓存该猜测命令（命令名 + 原始参数）；下一行裸 `y`/`Y` 即按与直接输入相同的 `shell_exec` 路径回放该命令行，回放前以 `-> <line>` 黄/蓝回显实际执行行；任意其他主循环行覆盖并清除 pending；回放一次性消费后立即清除。
+- **隔离**：pending 识别只挂主提示符循环；PE->CE offer、format 闸门、gfx consent、useradd wizard 等内部 y/n 问询走各自 `kb_readline`/`kb_getkey`，不持有 pending 状态，其回答不受影响；autostart 脚本模式（g_script_mode）不 arm。
+- **测试**：新增 `tests/shell_guess_regress.py`（两趟：format 后注入 mkpe 样本 PE），16 项断言覆盖 y 直跑、大写 Y、参数携带且不残留、无 pending 时 y 报 unknown、PE 问询 y 不误触发、连续两次错误 pending 覆盖；已接入 `tests/run_full_regress.sh`（端口 4450）。
+- **回归**：本轮实测 qemu 12/12、guess 16/16；改动为 shell 主循环附加状态机，未触碰解析/补全/路径查找，其余套件按 v2.46 基线（fsrec 12/12、caps 12/12、user 15/15、disk 5/5、env 13/13、heap 4/4、size 7/7；ce 11 FAIL 为 ce_sim 未建模既有基线）。

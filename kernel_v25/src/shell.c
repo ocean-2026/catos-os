@@ -110,6 +110,7 @@ static void cmd_help(void) {
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
     help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
+    help_note("after 'did you mean:', press y once to run that suggestion");
     help_row("echo TEXT",   "print text back (-n no newline, -c COLOR)");
     help_row("cls",         "clear the screen (alias of clear)");
     help_row("about",       "system info banner");
@@ -1141,6 +1142,31 @@ static int strcat_b(char *d, int size, const char *s) {
     while (*s && size > 1) { *d++ = *s++; size--; }
     *d = 0;
     return *s ? -1 : 0;
+}
+
+/* v2.47: pending-guess one-shot confirm.  Holds the last command the shell
+ * itself suggested after an unknown-command error on the MAIN prompt.  A
+ * bare y/Y at the next main-prompt line replays it; any other line consumes
+ * the offer.  In-command y/n prompts (PE->CE offer, format gate, gfx
+ * consent, useradd wizard) read through their own kb_readline/kb_getkey and
+ * never consult this state, so their answers follow the original path. */
+static char pend_cmd[FS_NAME_MAX];
+static char pend_arg[128];
+static int  pend_valid;
+
+static void pend_clear(void) {
+    pend_valid = 0;
+    pend_cmd[0] = 0;
+    pend_arg[0] = 0;
+}
+
+static void pend_arm(const char *cmd, const char *arg) {
+    if (g_script_mode) return;      /* no one to answer in scripts */
+    pend_valid = 1;
+    pend_cmd[0] = 0;
+    strcat_b(pend_cmd, sizeof(pend_cmd), cmd);
+    pend_arg[0] = 0;
+    strcat_b(pend_arg, sizeof(pend_arg), arg ? arg : "");
 }
 
 /* v2.23 environment variables (defined near the shell loop below) */
@@ -4058,6 +4084,39 @@ void shell_run(void) {
 
         if (!*cmd) continue;
 
+        /* v2.47: pending-guess one-shot confirm.  A bare y/Y (no trailing
+         * args) replays the suggested command line; anything else consumes
+         * the offer.  This check lives ONLY in the main prompt loop --
+         * in-command confirmations read their own input and never reach
+         * here, so their y/n answers follow the original path. */
+        if (pend_valid && !*arg &&
+            (!strcmp_(cmd, "y") || !strcmp_(cmd, "Y"))) {
+            char replay[256];
+            replay[0] = 0;
+            strcat_b(replay, sizeof(replay), pend_cmd);
+            if (*pend_arg) {
+                strcat_b(replay, sizeof(replay), " ");
+                strcat_b(replay, sizeof(replay), pend_arg);
+            }
+            pend_clear();               /* one-shot: consumed on replay */
+            /* echo the actual line being run so the replay is obvious */
+            vga_set_fg(VGA_YELLOW);
+            vga_write("-> ");
+            vga_set_fg(VGA_LIGHT_BLUE);
+            vga_write(replay);
+            vga_set_fg(VGA_YELLOW);
+            vga_write("\n");
+            vga_set_fg(VGA_WHITE);
+            char *rc = replay;
+            while (*rc == ' ') rc++;
+            char *ra = rc;
+            while (*ra && *ra != ' ') ra++;
+            if (*ra) { *ra = 0; ra++; while (*ra == ' ') ra++; }
+            shell_exec(rc, ra);
+            continue;
+        }
+        pend_clear();                   /* any other line covers the offer */
+
         /* v2.33: single-level alias expansion of the command word */
         int ai = alias_lookup(cmd);
         if (ai >= 0) {
@@ -4343,6 +4402,8 @@ static void shell_exec(char *cmd, char *arg) {
                     vga_set_fg(VGA_YELLOW);
                     vga_write("?\n");
                     vga_set_fg(VGA_WHITE);
+                    /* v2.47: arm the one-shot y-confirm for this guess. */
+                    pend_arm(sug, arg);
                 }
             }
         }

@@ -133,3 +133,6 @@ CatOS[易错点] 排序后回归断言不能再依赖 FAT 序的尾部条目：`
 CatOS[易错点] 框线长度要用显示宽度而不是字节数：UTF-8 CJK 一字三字节两列宽，按 slen 算边框会偏短、右侧竖条错位；写一个 disp_width() 按 lead 字节判 1/2 列宽。
 CatOS[易错点] 启动计时探针 read_screen 固定 2.0s 等待，会把 S9 之后的 harness 轮询粒度误判为内核耗时（约 2.15s 墙钟）；内核就绪必须以 S9 uptime 为准，墙钟三段拆分时要把 post-last-marker 单独标注为探测脚本 artifact，不能计入内核启动时间。
 CatOS[易错点] 全量回归一键脚本在 600s 前台预算内会被 SIGTERM（exit 143），size 套件环境侧 PPM 解析/monitor 往返慢（每步约 2 分钟）；长套件必须后台 nohup + 轮询日志，且按日志时间戳确认是本轮新鲜产物——旧基线日志（Nov16）不能复用，被中断的套件只跑了前几个检查点，重跑要数全 PASS 条数。
+CatOS[易错点] `screen_text()` 只转储当前 25 行可视区：回放/提示后紧跟长列表（ls 18 条、/bin 三十余条）会把 shell 刚打印的 `-> <cmd>` 回显行滚出屏幕，断言回显标记会假阴性。选单行输出的建议目标（date/whoami）做回显断言；长列表用例改断言列表条目内容（如注入的 pesample.exe），不要追滚动中的提示行。
+CatOS[易错点] `pkill -f qemu-system-i386` 会匹配到执行该命令的自身 `bash -c` 命令行（串里含同样的二进制名），把当前 shell 一起杀掉，后台任务瞬间 exit 1、子进程群被连带回收；清残留要先 `pgrep -x qemu-system-i386` 按 PID 精确杀，或命令行里规避该子串。
+CatOS[易错点] pending 类交互状态（did-you-mean 待确认）的识别只能挂主提示符循环：命令内部的 y/n 问询（PE->CE offer、format 闸门、gfx consent、useradd wizard）走各自 `kb_readline`/`kb_getkey`，不经主循环，天然隔离；切勿把「输入是 y 就回放」下沉到 readline 全局层，否则会污染所有问询上下文。
