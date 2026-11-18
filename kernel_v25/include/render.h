@@ -142,6 +142,11 @@ void        con_status_bar_off(void);
  * candidate list directly BELOW the input line).  Only one bar at a
  * time; switching rows restores the previous bar's row verbatim. */
 void        con_status_bar_at(int row, const char *s);
+/* v2.58: fixed two-row IME candidate area on the bottom two rows --
+ * separator row (rows-2) and candidate row (rows-1).  Both rows'
+ * original cells are saved and restored verbatim by con_status_bar_off.
+ * An empty `sep` fills the separator row with '-'. */
+void        con_status_bar2(const char *sep, const char *cand);
 
 /* ---- display policy / introspection ------------------------------------- */
 int         con_get_mode(void);
