@@ -9,6 +9,7 @@
 #include "hw.h"
 #include "snd.h"
 #include "usb.h"
+#include "mouse.h"
 
 uint32_t multiboot_info_ptr = 0;
 uint32_t multiboot_flags = 0;
@@ -114,6 +115,12 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
         vga_write("net: AMD PCnet-PCI up\n");
     }
     btime_mark("K7 net_init");
+
+    /* v2.57: PS/2 auxiliary mouse (IRQ12).  Must follow intr_enable() so
+     * intr_unmask_irq(12) sticks; an absent mouse is non-fatal, the init
+     * sequence simply sees no ACKs. */
+    mouse_init();
+    btime_mark("K7b mouse_init");
 
     shell_run();
 }

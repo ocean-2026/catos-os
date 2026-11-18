@@ -44,6 +44,7 @@
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */
+void kbd_feed_byte(uint8_t sc);/* v2.57: shared enqueue (PS/2 + aux routing) */
 void kb_usb_feed(uint8_t sc); /* USB HID: set-1 scancode from usb_uhci.c   */
 int  kb_peek(void);           /* non-blocking: a scancode is pending */
 int  kb_getkey_timed(uint32_t ticks);  /* real key within N ticks, else -1 */
