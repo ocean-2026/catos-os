@@ -26,6 +26,7 @@ run recur   tests/recur_regress.py   "$ISO" --qemu "$Q" --port 4713
 run jobctl  tests/jobctl_regress.py   "$ISO" --qemu "$Q" --port 4468
 run group   tests/group_regress.py    "$ISO" --qemu "$Q" --port 4469
 run daemon  tests/daemon_regress.py   "$ISO" --qemu "$Q" --port 4467
+run panic   tests/panic_regress.py     "$ISO" --qemu "$Q" --port 4546
 run caps    tests/caps_regress.py    "$ISO" --qemu "$Q"
 run user    tests/user_regress.py    "$ISO" --qemu "$Q"
 run disk    tests/disk_regress.py    "$ISO" --qemu "$Q" --port 4714
