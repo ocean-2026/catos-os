@@ -29,7 +29,10 @@
 volatile int g_in_panic;
 static int g_panic_depth;
 
-static int g_mode = BSOD_MODE_REBOOT;
+/* Development build default: WAIT (stay on the report; no auto reboot).
+ * /etc/panicmode overrides at boot; the crash path itself never opens a
+ * file.  Release builds may flip this default to REBOOT. */
+static int g_mode = BSOD_MODE_WAIT;
 static int g_timeout_sec = BSOD_TIMEOUT_SEC;
 
 /* Crash screen version tag, shown on the summary and in the panic record. */
@@ -280,6 +283,11 @@ static void draw_summary(const snap_t *s, const char *msg, int soft,
     vga_set_color(CON_WHITE, CON_BLUE);
     vga_clear();
 
+    /* P2-9 narrow screen: on a small/serial-only surface the wide layout
+     * would wrap off-grid.  Keep the core summary only: vector, EIP, reason,
+     * hint.  The serial channel already receives the same core breadcrumb. */
+    int narrow = con_cols() < 60;
+
     /* Title bar, inverse video so it stays legible without colour:
      * "!!! PANIC !!!" on a white/blue reversed row. */
     vga_set_color(CON_BLUE, CON_WHITE);
@@ -312,6 +320,15 @@ static void draw_summary(const snap_t *s, const char *msg, int soft,
     }
     line[o] = 0;
     dual_write_at(2, 10, line);
+
+    if (narrow) {
+        /* narrow / serial-only surface: core summary only, no two-column
+         * layout, no stack dump. */
+        vga_write_at(2, 11, "FATAL RECOVER: NO");
+        vga_write_at(2, 12, "EIP="); w_hex(6, 12, s->eip);
+        if (msg && msg[0]) vga_write_at(2, 13, msg);
+        return;
+    }
 
     /* STOP code on the same row, right-aligned */
     vga_write_at(40, 10, stop_code(s->intno));
@@ -358,9 +375,11 @@ static void draw_summary(const snap_t *s, const char *msg, int soft,
         vga_write_at(8, 19 + i, b);
     }
 
-    /* hint row + countdown */
+    /* hint row + countdown.  Narrow screen keeps a one-line hint only. */
     if (timed_out) {
         dual_write_at(2, 23, "auto-restart timeout reached.");
+    } else if (narrow) {
+        dual_write_at(2, 23, "R reboot; other keys unavailable on this view.");
     } else {
         dual_write_at(2, 23,
             "R reboot  D regs  S stack  M map  P dump  A cpus  C continue");
@@ -399,9 +418,24 @@ static int sc_to_ascii(uint8_t sc) {
     }
 }
 
+/* ---- SMP interface placeholders (UP build; deferred) ---------------------
+ *
+ * CatOS is still uniprocessor.  The crash screen reserves the per-CPU
+ * contract so an SMP port can fill these without touching the painter:
+ *   - per-CPU snapshot buffer: one snap_t per CPU, indexed by cpu#;
+ *   - NMI/IPI stop flag: other cores are parked via IPI before the first
+ *     core paints; each parked core sets its stop marker;
+ *   - line prefix "[CPU n]" on every dual-output breadcrumb.
+ * On the UP build only CPU 0 is ever sampled; draw_cpus_page() reports the
+ * deferred state explicitly.  No IPI/NMI code path is wired yet.
+ */
+static volatile uint8_t g_cpu_stop_flag[1] = { 0 };   /* placeholder array */
+
 /* ---- panic record (bss fixed area; no FS on the crash path) ------------- */
 
 static panic_record_t g_panic_record;   /* bss, fixed address, no allocation */
+
+static void panic_record_clear(void) { g_panic_record.magic = 0; }
 
 static void panic_record_save(const snap_t *s, const char *msg) {
     g_panic_record.magic  = PANIC_RECORD_MAGIC;
@@ -481,8 +515,11 @@ void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
     /* Persist the fixed-area record before painting (no FS write). */
     panic_record_save(&s, msg);
 
-    /* P0-1 dual output: breadcrumb the summary to COM1 as well. */
-    ser_write("\n[bsod] === PANIC: ");
+    /* P0-1 dual output: breadcrumb the summary to COM1 as well.
+     * P2-9 SMP placeholder: line prefix "[CPU n]". */
+    ser_write("\n[CPU ");
+    { static const char *d = "0123456789"; ser_putc(d[s.cpu % 10]); }
+    ser_write("] [bsod] === PANIC: ");
     ser_write(s.intno >= 0 ? "CPU EXCEPTION" : "MANUAL PANIC");
     ser_hex(" vector=", (uint32_t)s.intno);
     ser_hex("eip=", s.eip); ser_hex("err=", s.err);
@@ -562,6 +599,12 @@ void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
 
 soft_exit:
     if (soft_return) {
+        /* The soft test path leaves the crash screen and returns to the
+         * shell; clear the guard so a later deliberate crash does not look
+         * like a nested fault.  The hard paths below never reach here. */
+        g_in_panic = 0;
+        g_panic_depth = 0;
+        panic_record_clear();
         con_force_text();
         vga_clear();
         __asm__ volatile ("sti");
@@ -619,3 +662,5 @@ int bsod_mode(void) { return g_mode; }
 void bsod_set_mode(int mode) {
     g_mode = (mode == BSOD_MODE_HALT) ? BSOD_MODE_HALT : BSOD_MODE_REBOOT;
 }
+
+void bsod_set_wait(void) { g_mode = BSOD_MODE_WAIT; }

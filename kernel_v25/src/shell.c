@@ -2577,8 +2577,10 @@ static void cmd_crashlog(char *arg) {
 static void cmd_panicmode(char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
+        int m = bsod_mode();
         vga_write("panicmode: ");
-        vga_write(bsod_mode() == BSOD_MODE_HALT ? "halt" : "reboot");
+        vga_write(m == BSOD_MODE_HALT ? "halt" :
+                  m == BSOD_MODE_WAIT ? "wait" : "reboot");
         vga_write("\n");
         return;
     }
@@ -2589,11 +2591,14 @@ static void cmd_panicmode(char *arg) {
     if (!strcmp_(arg, "halt")) {
         bsod_set_mode(BSOD_MODE_HALT);
         fs_write_text("/etc/panicmode", "halt\n", 5);
+    } else if (!strcmp_(arg, "wait")) {
+        bsod_set_wait();
+        fs_write_text("/etc/panicmode", "wait\n", 5);
     } else if (!strcmp_(arg, "reboot")) {
         bsod_set_mode(BSOD_MODE_REBOOT);
         fs_write_text("/etc/panicmode", "reboot\n", 7);
     } else {
-        vga_write("panicmode: usage: panicmode [reboot|halt]\n");
+        vga_write("panicmode: usage: panicmode [reboot|halt|wait] [reboot:Ns]\n");
         return;
     }
     vga_write("panicmode: ");

@@ -35,6 +35,8 @@ void bsod_init(void);
 
 int  bsod_mode(void);
 void bsod_set_mode(int mode);
+/* P2-9: cache a `wait` mode from the shell builtin. */
+void bsod_set_wait(void);
 
 /*
  * Render the crash report.
