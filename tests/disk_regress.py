@@ -87,6 +87,14 @@ def main():
     def clear():
         do("clear", 0.6)
 
+    def drain_pager(wait=0.7, max_steps=10):
+        """v2.59: long output is paged; page through until the More bar is
+        gone so the tail of the listing (and its count line) is on screen."""
+        for _ in range(max_steps):
+            if "-- more" not in screen_text(s).lower():
+                return
+            sendkey(s, "spc", wait)
+
     try:
         force_text(s)          # v2.56: boot defaults to gfx24; text suite
         if not wait_for_prompt(s, timeout=120.0):
@@ -101,6 +109,7 @@ def main():
         # the 25-row screen, so assert on tail entries + the count line.
         clear()
         do("ls /bin", 1.5)
+        drain_pager()          # v2.59 pager: walk to the last page
         txt = screen_text(s).lower()
         # v2.45: ls output is sorted alphabetically; check a tail-of-list
         # name plus the entry count line (order-independent).
