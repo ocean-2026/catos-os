@@ -34,7 +34,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot, find_qemu, kill_qemu, screen_text, sendkey,
-                         type_text, wait_for_prompt)
+                         type_text, wait_for_prompt, force_text)
 
 PORT = 4551
 
@@ -215,6 +215,7 @@ def main():
     proc, sock = boot(qemu, iso, port, disk=dst_disk)
     r = R()
     try:
+        force_text(sock)
         wait_for_prompt(sock)
         type_text(sock, "clear")
         sendkey(sock, "ret")

@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot as _qemu_boot, find_qemu,  # noqa: E402
                          kill_qemu, screen_text, sendkey, type_text,
-                         wait_for_prompt)
+                         wait_for_prompt, force_text)
 
 REPO = os.path.dirname(HERE)
 MONITOR_PORT = 4463                 # this driver's own port; never 4444
@@ -72,6 +72,8 @@ def main():
         do("clear", 0.6)
 
     try:
+        # v2.56: boot defaults to gfx24; force text before reading 0xB8000.
+        force_text(s)
         if not wait_for_prompt(s, timeout=120.0):
             print("FATAL: shell prompt never appeared")
             return 3
