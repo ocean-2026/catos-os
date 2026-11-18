@@ -75,3 +75,9 @@ trash
 # disk image backups (huge, reproducible)
 kernel_v25/catos_disk.img.bak-*
 kernel_v25/catos_work_kernel.bin
+
+# ---- v2.59 pager/regress scratch artifacts (reproducible from tests) ----
+tests/guess_artifacts/
+tests/qemu_shots_guess/
+tests/regress_logs/
+tests/smoke_artifacts/
