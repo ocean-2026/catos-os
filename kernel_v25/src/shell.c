@@ -21,6 +21,7 @@
 #include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
 #include "lang.h"       /* v2.21 T50: en/zh user-visible messages      */
 #include "bsod.h"       /* v2.59 crash screen: bsod/blue + panicmode      */
+#include "keys.h"       /* centralized key-binding legend (keys command)  */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -111,6 +112,7 @@ static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write
 static void cmd_help(void) {
     vga_write("CatOS v0.3 (five-pillar kernel) - commands:\n");
     help_row("help",        "show this message");
+    help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
@@ -224,6 +226,40 @@ static void cmd_help(void) {
     help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
     help_row("edit FILE",   "nano-style full-screen editor");
     help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
+}
+
+/* v2.58: grouped key-binding legend.  The rows come straight from the
+ * centralized keys_desc table (keys_table.c) -- the same codes the
+ * keyboard decoder and dispatch branches act on, so adding a binding
+ * there shows up here automatically (no second hand-written list). */
+static void cmd_keys(void) {
+    for (int g = 0; g < KG__COUNT; g++) {
+        vga_set_fg(VGA_LIGHT_CYAN);
+        vga_write("  -- ");
+        vga_write(keys_group_name((enum keys_group)g));
+        vga_write(" --\n");
+        vga_set_fg(VGA_WHITE);
+        for (int i = 0; i < keys_desc_count; i++) {
+            const keys_desc_t *r = &keys_desc[i];
+            if (r->group != g) continue;
+            vga_write("  ");
+            char lab[24];
+            int n = 0;
+            for (const char *p = r->labels; *p && n < 22; ) lab[n++] = *p++;
+            lab[n] = 0;
+            vga_write(lab);
+            while (n < 22) { vga_putc(' '); n++; }
+            vga_write("  ");
+            vga_write(r->desc);
+            vga_write("  (");
+            vga_write(r->scene);
+            if (strcmp_(r->limit, "-") != 0) {
+                vga_write("; ");
+                vga_write(r->limit);
+            }
+            vga_write(")\n");
+        }
+    }
 }
 
 /* ---------- SB16 audio (v2.11) -----------------------------------------
@@ -4706,6 +4742,8 @@ void shell_run(void) {
  * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
+        else if (!strcmp_(cmd, "keys") ||
+                 !strcmp_(cmd, "shortcuts")) cmd_keys();
         else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
         else if (!strcmp_(cmd, "export") ||
                  !strcmp_(cmd, "setenv"))    cmd_export(arg);
