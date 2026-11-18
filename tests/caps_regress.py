@@ -17,7 +17,7 @@ import os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot, find_qemu, kill_qemu, screen_text, sendkey,
-                         type_text, wait_for_prompt)
+                         type_text, wait_for_prompt, force_text)
 
 PORT = 4505
 
@@ -55,6 +55,7 @@ def main():
     proc, sock = boot(qemu, iso, PORT)
     r = R()
     try:
+        force_text(sock)          # v2.56: boot defaults to gfx24; text suite
         wait_for_prompt(sock)
 
         # switch to the plain unprivileged account
