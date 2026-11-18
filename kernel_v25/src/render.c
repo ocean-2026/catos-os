@@ -67,7 +67,7 @@ static int dcx = -1, dcy = -1;  /* last software-cursor position */
 /* active text-mode font-slot map: gslot -> codepoint */
 static uint32_t hz_map[CON_TEXT_HZ_SLOTS];
 
-/* transient status bar row (pinyin IME) */
+/* transient status bar row (pinyin IME / tab completer, legacy single) */
 static con_cell_t saved_row[CON_MAX_COLS];
 static int        saved_row_valid;
 static int        saved_row_index = -1;   /* v2.25: WHICH row is barrowed */
@@ -81,6 +81,14 @@ static int sel_cx, sel_cy;         /* current endpoint cell              */
 static int paste_pending;          /* middle-click arms a paste          */
 static con_paste_fn paste_hook;
 static int sel_at(int x, int y);
+
+/* v2.58: two-row fixed IME candidate area -- separator row (rows-2) and
+ * candidate row (rows-1).  Both rows' original cells are saved verbatim
+ * and restored on `con_status_bar_off()`, so leaving the IME never
+ * scratches shell output or editor content (text slots rebuilt too). */
+#define SB2_ROWS 2
+static con_cell_t saved2[SB2_ROWS][CON_MAX_COLS];
+static int        saved2_valid;
 
 /* v2.25 dirty-CELL tracker (the CatOS dirty rectangle: our unit IS the
  * cell).  painted[] remembers the last PIXELS actually on screen for a
@@ -537,6 +545,7 @@ static int switch_backend(render_be_t *nb) {
     rows = be->rows;
     mouse_clamp((int)be->pixel_w, (int)be->pixel_h);
     saved_row_valid = 0;           /* bottom row changed size/position */
+    saved2_valid = 0;
     dcx = dcy = -1;
     sb_view = 0;                   /* archive rows never match the new grid */
     redraw_all();
@@ -592,6 +601,7 @@ void con_clear(void) {
     cur_x = cur_y = 0; u_need = 0;
     for (int i = 0; i < CON_TEXT_HZ_SLOTS; i++) hz_map[i] = 0;
     saved_row_valid = 0;
+    saved2_valid = 0;
     dcx = dcy = -1;
     redraw_all();
     sync_cursor(1);
@@ -733,8 +743,64 @@ void con_status_bar_at(int row, const char *s) {
     sync_cursor(1);
 }
 
+/* v2.58: fixed two-row IME area.  `sep` paints the separator row (rows-2)
+ * -- an empty string fills the whole row with '-' (U+2500 has no glyph in
+ * the built-in font; scheme A of ime-plan 3.1.2).  `cand` paints the
+ * candidate row (rows-1).  Original cells of BOTH rows are saved once
+ * and put back verbatim by con_status_bar_off(). */
+static void invalidate_row(int y) {
+    if (y < 0 || y >= rows) return;
+    for (int x = 0; x < cols; x++) painted_valid[y][x] = 0;
+}
+
+void con_status_bar2(const char *sep, const char *cand) {
+    if (!be || rows < 2) return;
+    con_status_bar_off();                 /* release a legacy single bar */
+    int r1 = rows - 2, r2 = rows - 1;
+    if (!saved2_valid) {
+        for (int x = 0; x < cols; x++) {
+            saved2[0][x] = cells[r1][x];
+            saved2[1][x] = cells[r2][x];
+        }
+        saved2_valid = 1;
+    }
+    /* Drop the dirty-cell cache for both borrowed rows: a repaint that
+     * shrinks the previous wide CJK block to a short ASCII line must not
+     * leave stale halves on screen. */
+    invalidate_row(r1);
+    invalidate_row(r2);
+    uint8_t old_attrs = s_attrs;
+    s_attrs |= CON_ATTR_INVERSE;
+    for (int x = 0; x < cols; x++) cell_blank(&cells[r1][x]);
+    if (sep && *sep) {
+        con_write_at_utf8(0, (uint8_t)r1, sep);
+    } else {
+        char dash[CON_MAX_COLS + 1];
+        for (int x = 0; x < cols; x++) dash[x] = '-';
+        dash[cols] = 0;
+        con_write_at((uint8_t)0, (uint8_t)r1, dash);
+    }
+    for (int x = 0; x < cols; x++) cell_blank(&cells[r2][x]);
+    if (cand && *cand) con_write_at_utf8(0, (uint8_t)r2, cand);
+    s_attrs = old_attrs;
+    for (int x = 0; x < cols; x++) { paint(x, r1); paint(x, r2); }
+    render_flush();
+    sync_cursor(1);
+}
+
 void con_status_bar_off(void) {
-    if (!saved_row_valid) return;
+    if (saved2_valid) {
+        int r1 = rows - 2, r2 = rows - 1;
+        if (r1 < 0) r1 = 0;
+        for (int x = 0; x < cols; x++) {
+            cells[r1][x] = saved2[0][x];
+            cells[r2][x] = saved2[1][x];
+        }
+        saved2_valid = 0;
+        if (be->mode == CON_MODE_TEXT) redraw_all();  /* rebuild CJK slots */
+        else for (int x = 0; x < cols; x++) { paint(x, r1); paint(x, r2); }
+    }
+    if (!saved_row_valid) { sync_cursor(1); return; }
     int row = saved_row_index >= 0 ? saved_row_index : rows - 1;
     for (int x = 0; x < cols; x++) cells[row][x] = saved_row[x];
     saved_row_valid = 0;
@@ -935,6 +1001,7 @@ int con_set_cell_size(int s) {
     cols = be->cols;
     rows = be->rows;
     saved_row_valid = 0;
+    saved2_valid = 0;
     dcx = dcy = -1;
     sb_view = 0;
     redraw_all();
@@ -962,6 +1029,7 @@ int con_screen_pop(void) {
     if (cur_y >= rows) cur_y = rows - 1;
     ui_backup_valid = 0;
     saved_row_valid = 0; saved_row_index = -1;
+    saved2_valid = 0;
     dcx = dcy = -1;
     redraw_all();
     sync_cursor(1);
