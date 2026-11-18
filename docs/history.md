@@ -152,3 +152,6 @@ CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一�
 CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
 CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
 CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。
+CatOS[易错点] dispi/LFB 图形模式下 0xB8000 文本平面不是可读镜像：be_text 独占的 VGA 文本窗口在 gfx/vbe/vbe24 后端下，CPU 写 0xB8000 的内容 monitor `xp /4000 0xb8000` 读回仍是空白（QEMU 文本平面在图形模式下与帧缓冲不在同一可观测窗口）。前端给图形后端加一层 0xB8000 文本镜像的方案验证不可行（写入落地但读不回），旧文本读屏测试不能靠内核镜像补救，只能：运行时盲发 `text`+Y consent 切回文本后端，或在磁盘上预置 /etc/videomode=text。
+CatOS[易错点] 启动早期打印的回退警告会被后面的 boot_autostart banner 滚出 25 行缓冲：先把警告文案存进全局备注，banner 跑完后再补打一行，否则回退原因在屏幕上不可见，验收时读 0xB8000 抓不到 WARNING。
+CatOS[易错点] 开机默认改 gfx24 后，面向文本屏的旧回归套件会在 wait_for_prompt/clean_run 处读空缓冲：驱动侧 force_text() 在 shell 就绪后盲发 `text`、回车、`y`、回车，并轮询提示符（最长 20s），首次 `text` 落在 shell 就绪前被吞掉时自动重发一次；不要把固定 sleep 当就绪判据。
