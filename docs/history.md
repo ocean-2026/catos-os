@@ -152,3 +152,6 @@ CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一�
 CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
 CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
 CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。
+CatOS[易错点] TSC 超时计算的单位倍率：cpu_mhz 是 cycles/1e6 秒（MHz），N 秒超时应读 `mhz*1000000u*N`；写成 `mhz*1000*N` 会把 N 秒缩成 N/1000 秒（30 s → 30 ms），进蓝屏立即判超时退出，按键分支根本走不到。定位手段：BSS 调试字在 enter/drawn/key/timeout 各阶段写不同值，monitor `xp` 读回即可看出落在哪条分支；校准值还要加 `mhz>0 && mhz<10000` 闸门防 bogus 除数。
+CatOS[易错点] 崩溃屏不要直写 0xB8000 帧缓冲再混前端写：前端 `render_flush()` 在写入 wide CJK 后若挂 `pending_wide` 会调 `redraw_all()`，`be->clear()` + 按 RAM grid 逐格重刷 VRAM；直写内容不在 grid 里，旧网格（prompt/空格）会把直写行整行盖掉，只有经过前端写的行幸存。紧急屏一律走纯前端路径：`vga_set_color` → `vga_clear()` → 全部 `vga_write_at`/`vga_write_at_utf8`，grid 与 VRAM 自洽。
+CatOS[易错点] 单行 ASCII 写接口不要喂 UTF-8 CJK 字节：`vga_write_at` 按单字节单格铺，中文三字节被拆成三个半宽格，后续 ASCII 被错位移到行右半截。含中文的行必须走 `vga_write_at_utf8`；纯英文注记行就不要夹带汉字，两段调用分开（前缀 ASCII 定位 + 后缀 utf8）。
