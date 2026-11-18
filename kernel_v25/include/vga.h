@@ -49,4 +49,9 @@ void vga_write_at(uint8_t x, uint8_t y, const char *s);
 void vga_write_n(const char *s, int n, int final);
 void vga_write_at_utf8(uint8_t x, uint8_t y, const char *s);
 
+/* v2.59: install/clear an optional stdout tee hook (per-character mirror).
+ * NULL disables it.  Used by the shell to capture ring0 builtin output for
+ * a plain file redirect; positioned editor/TUI writes are not mirrored. */
+void vga_set_tee(void (*hook)(char c));
+
 #endif
