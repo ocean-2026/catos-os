@@ -213,7 +213,7 @@ static void cmd_help(void) {
     help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
     help_row("tree [DIR]",  "directory tree listing");
     help_row("format",      "erase the FAT32 volume (y/n confirm)");
-    help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
+    help_row("fsck",        "check FAT mirror + scan dir tree; --purge wipes bad entries");
     help_row("mount",       "list the mount table");
     help_row("mount <1..4|hd0pN> DIR", "bind a FAT32 partition to an empty dir");
     help_row("umount DIR",  "detach the partition bound to DIR");
@@ -3490,9 +3490,10 @@ static void cmd_wc(char *arg) {
 }
 
 /* tree: explicit-path recursion via fs_enum_entries, depth-capped at 6. */
-static void tree_walk(const char *dir, int depth) {
+static void tree_walk(const char *dir, int depth, int *hidden) {
     char names[24][FS_NAME_MAX];
     int n = fs_enum_entries(dir, names, 24);
+    if (hidden) *hidden += fat_dir_hidden();
     for (int i = 0; i < n; i++) {
         const char *nm = names[i];
         int is_dir = nm[slen_(nm) - 1] == '/';
@@ -3523,13 +3524,81 @@ static void tree_walk(const char *dir, int depth) {
             strcat_b(child, sizeof(child), dir);
             if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
             strcat_b(child, sizeof(child), leaf);
-            tree_walk(child, depth + 1);
+            tree_walk(child, depth + 1, hidden);
+        }
+    }
+}
+
+static void tree_raw_hex(const uint8_t *raw) {
+    const char *hd = "0123456789ABCDEF";
+    for (int k = 0; k < 11; k++) {
+        vga_putc(hd[(raw[k] >> 4) & 0xF]);
+        vga_putc(hd[raw[k] & 0xF]);
+        vga_putc(' ');
+    }
+}
+
+/* tree --raw: enumerate every live entry, insane ones flagged with their
+ * cluster / slot offset / first byte / raw 8.3 bytes. */
+static void tree_walk_raw(const char *dir, int depth, int *hidden) {
+    struct fs_raw_ent names[24];
+    int h = 0;
+    int n = fs_enum_entries_raw(dir, names, 24, &h);
+    if (hidden) *hidden += h;
+    for (int i = 0; i < n; i++) {
+        const char *nm = names[i].name;
+        int is_dir = names[i].attr & FAT_ATTR_DIR;
+        char leaf[FS_NAME_MAX];
+        int li = 0;
+        for (int q = 0; nm[q] && li < (int)sizeof(leaf) - 1; q++) {
+            if (nm[q] == '/') continue;
+            leaf[li++] = nm[q];
+        }
+        leaf[li] = 0;
+        if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
+        for (int d = 0; d < depth; d++) vga_write("  ");
+        vga_write(is_dir ? "+- " : "- ");
+        if (names[i].insane) {
+            vga_set_fg(VGA_LIGHT_RED);
+            vga_write(leaf);
+            vga_write("  c="); print_int((int)names[i].cluster);
+            vga_write(" o="); print_int(names[i].slot * 32);
+            vga_write(" first=0x");
+            { const char *hd = "0123456789ABCDEF";
+              vga_putc(hd[(names[i].first >> 4) & 0xF]);
+              vga_putc(hd[names[i].first & 0xF]); }
+            vga_write(" raw="); tree_raw_hex(names[i].raw);
+            vga_set_fg(VGA_WHITE);
+        } else if (is_dir) {
+            vga_set_fg(VGA_LIGHT_CYAN);
+            vga_write(leaf);
+            vga_putc('/');
+            vga_set_fg(VGA_WHITE);
+        } else {
+            vga_set_fg(VGA_LIGHT_GREY);
+            vga_write(leaf);
+            vga_set_fg(VGA_WHITE);
+        }
+        vga_write("\n");
+        if (is_dir && depth < 6) {
+            char child[FS_PATH_MAX];
+            child[0] = 0;
+            strcat_b(child, sizeof(child), dir);
+            if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
+            strcat_b(child, sizeof(child), leaf);
+            tree_walk_raw(child, depth + 1, hidden);
         }
     }
 }
 
 static void cmd_tree(char *arg) {
+    int raw = 0;
     while (*arg == ' ') arg++;
+    if (arg[0] == '-' && arg[1] == '-' && arg[2] == 'r') {
+        raw = 1;
+        arg += 5;
+        while (*arg == ' ') arg++;
+    }
     char dir[FS_PATH_MAX];
     if (!*arg) { fs_pwd(dir, sizeof(dir)); }
     else {
@@ -3543,7 +3612,71 @@ static void cmd_tree(char *arg) {
         }
     }
     vga_write(dir); vga_write("\n");
-    tree_walk(dir, 0);
+    int hidden = 0;
+    if (raw) tree_walk_raw(dir, 0, &hidden);
+    else     tree_walk(dir, 0, &hidden);
+    if (!raw && hidden > 0) {
+        print_int(hidden);
+        vga_write(" hidden invalid entries (use tree --raw to show)\n");
+    }
+}
+
+/* ---------- v2.55: fsck directory integrity scan ---------------------- */
+struct fsck_ud { int bad; int repairable; int purge; };
+
+static void fsck_hexbyte(uint8_t b) {
+    const char *hd = "0123456789ABCDEF";
+    vga_putc(hd[(b >> 4) & 0xF]);
+    vga_putc(hd[b & 0xF]);
+}
+
+static const char *fsck_kind_name(int k) {
+    switch (k) {
+    case FSCK_BADNAME:    return "bad-name";
+    case FSCK_ORPHAN_LFN: return "orphan-lfn";
+    case FSCK_BADCLUST:   return "bad-cluster";
+    }
+    return "?";
+}
+
+static void fsck_report_cb(const fat_fsck_t *e, void *ud) {
+    struct fsck_ud *u = (struct fsck_ud *)ud;
+    u->bad++;
+    if (e->repairable) u->repairable++;
+    vga_write("fsck: ");
+    vga_write(e->path);
+    vga_write(" slot="); print_int(e->slot);
+    vga_write(" first=0x"); fsck_hexbyte(e->first);
+    vga_write(" attr=0x"); fsck_hexbyte(e->attr);
+    vga_write(" kind="); vga_write(fsck_kind_name(e->kind));
+    vga_write(" raw=");
+    for (int k = 0; k < 11; k++) { fsck_hexbyte(e->raw[k]); vga_putc(' '); }
+    vga_write(u->purge ? " [purged]\n" : "\n");
+}
+
+static void cmd_fsck(char *arg) {
+    int purge = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(arg, "--purge") || !strcmp_(arg, "-p")) purge = 1;
+
+    int r = fat_verify_mirror();
+    if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
+    else if (r == 0) vga_write("fsck: FAT mirror OK\n");
+    else {
+        vga_write("fsck: repaired "); print_int(r);
+        vga_write(" FAT sector(s) from mirror #1\n");
+    }
+
+    struct fsck_ud u = { 0, 0, purge };
+    int n = fat_fsck_scan(fat_root(), fsck_report_cb, &u, purge);
+    if (n == 0) {
+        vga_write("fsck: directory tree OK\n");
+    } else {
+        vga_write("fsck: "); print_int(u.bad);
+        vga_write(" bad entries, "); print_int(u.repairable);
+        vga_write(" repairable, "); print_int(u.bad - u.repairable);
+        vga_write(" need rebuild (suggest directory rebuild)\n");
+    }
 }
 
 /* ---------- v2.23 environment variables (session table + /etc/env) -------
@@ -4617,13 +4750,7 @@ static void shell_exec(char *cmd, char *arg) {
             if (!(session_is_fsadmin() || (g_caps & CAP_FSCK))) {
                 vga_write("fsck: permission denied (need CAP_FSADMIN or CAP_FSCK)\n");
             } else {
-            int r = fat_verify_mirror();
-            if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
-            else if (r == 0) vga_write("fsck: FAT mirror OK\n");
-            else {
-                vga_write("fsck: repaired "); print_int(r);
-                vga_write(" FAT sector(s) from mirror #1\n");
-            }
+                cmd_fsck(arg);
             }
         }
         else if (!strcmp_(cmd, "color")) {
