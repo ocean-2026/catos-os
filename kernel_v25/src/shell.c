@@ -222,6 +222,7 @@ static void cmd_help(void) {
     help_row("umount DIR",  "detach the partition bound to DIR");
     help_row("df",          "per-mountpoint volume usage");
     help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
+    help_row("crashlog",    "show the saved panic record (crashlog --full for raw)");
     help_row("edit FILE",   "nano-style full-screen editor");
     help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
 }
@@ -963,7 +964,7 @@ static const char *BUILTIN_NAMES[] = {
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
     "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
-    "faultinfo", "fsck", "color",
+    "faultinfo", "crashlog", "fsck", "color",
     "bsod", "blue", "panicmode",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
@@ -2495,6 +2496,84 @@ static void cmd_bsod(char *arg) {
 /* v2.59: read / set the post-crash action, persisted to /etc/panicmode.
  *   panicmode            -> show current setting
  *   panicmode reboot|halt */
+/* v2.59-crashscreen: read the fixed bss panic record saved on the last
+ * crash.  No FS read: the record lives in kernel bss from the crash path.
+ *   crashlog          -> symbolized summary (EIP/frames resolved by the
+ *                         same built-in symbol table the BSOD uses)
+ *   crashlog --full   -> raw fields, with a sensitive-data policy note */
+static void cmd_crashlog(char *arg) {
+    while (*arg == ' ') arg++;
+    const panic_record_t *r = panic_record_get();
+    if (!r || r->magic != PANIC_RECORD_MAGIC) {
+        vga_write("crashlog: no crash record\n");
+        return;
+    }
+    int full = !strcmp_(arg, "--full") || !strcmp_(arg, "-f");
+
+    vga_write("crashlog: saved panic record\n");
+    vga_write("version: "); vga_write(r->version); vga_write("\n");
+    vga_write("tick=");
+    { static const char *h = "0123456789abcdef";
+      vga_write("0x");
+      for (int i = 7; i >= 0; i--) vga_putc(h[(r->ticks >> (i * 4)) & 0xF]); }
+    vga_write(" vector=");
+    { static const char *h = "0123456789abcdef";
+      vga_write("0x");
+      for (int i = 7; i >= 0; i--) vga_putc(h[(r->intno >> (i * 4)) & 0xF]); }
+    vga_write("\n");
+
+    if (full) {
+        vga_write("[sensitive-data note: raw fields may contain pointers / "
+                  "stack residue; share with care]\n");
+        vga_write("EIP=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->eip >> (i * 4)) & 0xF]); }
+        vga_write(" CR2=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->cr2 >> (i * 4)) & 0xF]); }
+        vga_write(" ERR=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->err >> (i * 4)) & 0xF]); }
+        vga_write("\nEFLAGS=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->eflags >> (i * 4)) & 0xF]); }
+        vga_write(" ESP=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->esp_k >> (i * 4)) & 0xF]); }
+        vga_write("\n");
+        for (int i = 0; i < r->nframes; i++) {
+            vga_write("frame#");
+            { char b[4]; b[0] = (char)('0' + i); b[1] = 0; vga_write(b); }
+            vga_write("=");
+            { static const char *h = "0123456789abcdef";
+              vga_write("0x");
+              for (int d = 7; d >= 0; d--) vga_putc(h[(r->frames[i] >> (d * 4)) & 0xF]); }
+            vga_write("\n");
+        }
+    } else {
+        /* summary: EIP resolved to nearest symbol+offset via the same
+         * static .rodata symbol table the BSOD uses. */
+        char sym[44];
+        bsod_sym_fmt(sym, sizeof(sym), r->eip);
+        vga_write("EIP="); vga_write(sym);
+        vga_write(" CR2=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->cr2 >> (i * 4)) & 0xF]); }
+        vga_write("\nreason: "); vga_write(r->msg); vga_write("\n");
+        for (int i = 0; i < r->nframes && i < 3; i++) {
+            char fsym[44];
+            bsod_sym_fmt(fsym, sizeof(fsym), r->frames[i]);
+            vga_write("  #"); vga_write(fsym); vga_write("\n");
+        }
+    }
+}
+
 static void cmd_panicmode(char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
@@ -4411,7 +4490,7 @@ static void bar_put_str(char *b, int *n, const char *s) {
 static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
-    "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
@@ -4886,6 +4965,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "udp"))         cmd_udp(arg);
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
+        else if (!strcmp_(cmd, "crashlog"))    cmd_crashlog(arg);
         else if (!strcmp_(cmd, "fsck")) {
             if (!(session_is_fsadmin() || (g_caps & CAP_FSCK))) {
                 vga_write("fsck: permission denied (need CAP_FSADMIN or CAP_FSCK)\n");

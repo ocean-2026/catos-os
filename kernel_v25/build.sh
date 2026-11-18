@@ -126,6 +126,25 @@ for src in src/usb_uhci.c src/kernel.c src/vga.c src/render.c src/render_font.c 
     $CC $CFLAGS -c $src -o $obj
 done
 
+# v2.59-crashscreen: gen the CODE symbol table for the BSOD nearest-symbol
+# lookup.  bsod.c #includes src/symtab.inc, so it must exist before the C
+# compile above.  On a clean tree the previous PE is absent: fall back to a
+# temporary PE linked from the .o files that were just compiled, extract the
+# table from it, then do the real link below.  The .o set matches the final
+# link line one-for-one.
+if [ -n "$PY" ]; then
+    if [ ! -f build/kernel.pe ]; then
+        echo "== provisional link for symbol table =="
+        $LD -m i386pe -T pe.ld -o build/kernel.pe.tmp \
+            build/boot.o build/cpu.o build/usb_uhci.o build/kernel.o build/vga.o build/render.o build/render_font.o build/be_text.o build/be_gfx.o build/be_vbe.o build/be_vbe24.o build/svga.o build/stubs.o build/ime.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/part.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o build/snd.o build/diag.o build/bsod.o build/serial_log.o build/user.o build/lang.o build/e1000.o build/es1371.o 2>/dev/null || true
+        [ -f build/kernel.pe.tmp ] && mv build/kernel.pe.tmp build/kernel.pe
+    fi
+    if [ -f build/kernel.pe ]; then
+        echo "== generating kernel symbol table =="
+        NM=$NM "$PY" tools/gen_symtab.py build/kernel.pe src/symtab.inc
+    fi
+fi
+
 echo "== linking (PE/COFF) =="
 # NOTE: ld warns "section below image base" because our segments sit at
 # 0x100000 (the i386 kernel load address) while PE's default image base

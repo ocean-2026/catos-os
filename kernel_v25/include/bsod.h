@@ -49,6 +49,31 @@ void bsod_enter(const char *msg, const int_frame_t *frame, int soft_return);
 /* Idle timeout before the default action fires, in seconds. */
 #define BSOD_TIMEOUT_SEC  30
 
+/* ---- panic record (fixed bss area, no FS write on the crash path) ------ */
+#define PANIC_RECORD_MAGIC 0x43504E31u   /* "CPN1" */
+#define PANIC_FRAMES_MAX   5
+
+typedef struct {
+    uint32_t magic;
+    uint32_t ticks;
+    int      intno;
+    uint32_t eip, cr2, err, eflags, esp_k;
+    uint32_t frames[PANIC_FRAMES_MAX];
+    int      nframes;
+    char     version[24];
+    char     msg[64];
+} panic_record_t;
+
+/* Read-back accessors for the shell `crashlog` builtin.  Returns NULL /
+ * magic 0 when no panic record has been written this boot. */
+const panic_record_t *panic_record_get(void);
+uint32_t              panic_record_magic(void);
+
+/* Resolve an address to nearest built-in symbol + offset.  Writes a
+ * NUL-terminated string into `out` (max `n` chars).  Shared by the BSOD
+ * and the crashlog summary; no allocation. */
+void bsod_sym_fmt(char *out, int n, uint32_t addr);
+
 /* P0-2: nested-fault depth cap.  A second fatal fault while already in the
  * crash screen burns one level; past this count we stop painting and just
  * cli; hlt in a loop. */
