@@ -3,6 +3,7 @@
 #include "part.h"
 #include "vga.h"
 #include "hw.h"
+#include "pager.h"      /* v2.59 generic console pager */
 static void fs_dbg2(const char *tag, uint32_t v) {
     (void)tag; (void)v;  /* v2.5 debug: no-op */
 }
@@ -490,41 +491,53 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
     int ismount = isdir && mount_suffix(parent, e->name, suf);
     char sz[12];
     int sn = ls_fmt_size(e->size, sz);
+    char line[FS_NAME_MAX + 48];
+    int n = 0;
     if (longfmt) {
-        vga_write(isdir ? "drwxr-xr-x  " : "-rw-r--r--  ");
-        for (int p = sn; p < 8; p++) vga_putc(' ');
-        vga_write(sz);
-        vga_write("  ");
+        const char *perm = isdir ? "drwxr-xr-x  " : "-rw-r--r--  ";
+        for (const char *p = perm; *p; p++) line[n++] = *p;
+        for (int p = sn; p < 8; p++) line[n++] = ' ';
+        for (const char *p = sz; *p; p++) line[n++] = *p;
+        line[n++] = ' '; line[n++] = ' ';
+        for (const char *p = e->name; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+        if (ismount) for (const char *p = suf; *p; p++) line[n++] = *p;
+        if (isdir && !ismount) line[n++] = '/';
+        line[n] = 0;
         vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
-        vga_write(e->name);
-        if (ismount) vga_write(suf);
+        pager_line(line);
         vga_set_fg(VGA_WHITE);
-        vga_write((isdir && !ismount) ? "/\n" : "\n");
         return;
     }
     if (isdir) {
+        n = 0;
+        for (const char *p = "[DIR] "; *p; ) line[n++] = *p++;
+        for (const char *p = e->name; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+        if (ismount) for (const char *p = suf; *p; p++) line[n++] = *p;
+        else line[n++] = '/';
+        line[n] = 0;
         vga_set_fg(VGA_DARK_GREY);
         vga_write("[DIR] ");
         vga_set_fg(VGA_LIGHT_CYAN);
-        vga_write(e->name);
-        if (ismount) vga_write(suf);
-        else vga_write("/");
+        pager_line(line + 6);
         vga_set_fg(VGA_WHITE);
         if (raw && e->insane) ls_print_raw_detail(e);
-        vga_write("\n");
     } else {
+        n = 0;
+        for (const char *p = "[FILE] "; *p; ) line[n++] = *p++;
+        for (const char *p = e->name; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+        line[n++] = ' '; line[n++] = ' '; line[n++] = '(';
+        for (int p = sn; p < 8; p++) line[n++] = ' ';
+        for (const char *p = sz; *p; p++) line[n++] = *p;
+        line[n++] = ' '; line[n++] = 'b'; line[n++] = 'y'; line[n++] = 't'; line[n++] = 'e'; line[n++] = 's'; line[n++] = ')';
+        line[n] = 0;
         vga_set_fg(VGA_DARK_GREY);
         vga_write("[FILE] ");
         vga_set_fg(VGA_LIGHT_GREY);
         vga_write(e->name);
         vga_set_fg(VGA_DARK_GREY);
-        vga_write("  (");
-        for (int p = sn; p < 8; p++) vga_putc(' ');
-        vga_write(sz);
-        vga_write(" bytes)");
-        if (raw && e->insane) ls_print_raw_detail(e);
-        vga_write("\n");
+        pager_line(line + 7);
         vga_set_fg(VGA_WHITE);
+        if (raw && e->insane) ls_print_raw_detail(e);
     }
 }
 
@@ -562,23 +575,32 @@ void fs_list(const char *path) {
         struct ls_ent one;
         scpy(one.name, nm); one.attr = e.attr; one.size = e.size;
         one.cluster = 0; one.slot = 0; one.first = 0; one.insane = 0;
+        pager_begin(1);
         vga_write("perms      size     name\n");
         ls_print_one(&one, abs, 1, 0);
+        pager_end();
         return;
     }
     ls_n = 0;
     int hidden = 0;
     fat_list_dir_view(clus, ls_view_cb, 0, raw, &hidden);
     ls_sort();
-    for (int i = 0; i < ls_n; i++) ls_print_one(&ls_buf[i], abs, longfmt, raw);
-    vga_set_fg(VGA_WHITE);
-    vga_write("--- ");
-    print_int(ls_n);
-    vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
-    if (!raw && hidden > 0) {
-        print_int(hidden);
-        vga_write(" hidden invalid entries (use ls --raw to show)\n");
+    pager_begin(1);
+    for (int i = 0; i < ls_n; i++) {
+        if (pager_quit()) break;
+        ls_print_one(&ls_buf[i], abs, longfmt, raw);
     }
+    if (!pager_quit()) {
+        vga_set_fg(VGA_WHITE);
+        vga_write("--- ");
+        print_int(ls_n);
+        vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
+        if (!raw && hidden > 0) {
+            print_int(hidden);
+            vga_write(" hidden invalid entries (use ls --raw to show)\n");
+        }
+    }
+    pager_end();
 }
 
 void fs_pwd(char *out, int outlen) {

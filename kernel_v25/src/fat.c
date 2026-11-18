@@ -1027,8 +1027,12 @@ void fat_list_dir_view(uint32_t dirclus, fat_view_cb cb, void *ud,
                 shown = s83;
             }
             int sane = fat_83_sane(b) && (!has_lfn || fat_lfn_str_sane(lfn));
-            if (!sane) h++;
-            if (!sane && !raw) { slot++; continue; }
+            /* Skip the "." and ".." pseudo-entries; they are not real children.
+             * They carry the 0x10 dir bit and a leading '.', and are legal 8.3
+             * names, so the sanity check alone does not hide them. */
+            int is_dot = (b[0] == '.');
+            if (!is_dot && !sane) h++;
+            if (is_dot || (!sane && !raw)) { slot++; continue; }
             uint32_t cl = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
                         | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
             uint32_t sz = (uint32_t)b[28] | ((uint32_t)b[29] << 8)

@@ -24,6 +24,7 @@
 #include "clip.h"       /* v2.57 kernel clipboard */
 #include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
 #include "keys.h"       /* centralized key-binding legend (keys command)  */
+#include "pager.h"      /* v2.59 generic console pager                    */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -43,11 +44,105 @@ static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
  * runner (/etc/autostart scripts, v2.17) */
 static void shell_exec(char *cmd, char *arg);
 static void boot_autostart(void);
+static int  parse_redir(char *arg, char **out_redir, int *append, char **pipe_to);
 
 /* P1: set while /etc/autostart scripts run their commands.  Interactive
  * prompts (e.g. the PE->CE conversion offer in `run`) must default to
  * refusal in this mode -- a script cannot answer a keyboard question. */
 static int      g_script_mode = 0;
+
+static int g_uid;         /* session uid/gid (defined with the session code) */
+static int g_gid;         /* tentative decls: the real defs sit below */
+static int redir_abspath(const char *name, char *out, int outlen);
+
+/* v2.59: pager non-interactive latch.  Set around the dispatch of a line
+ * that is redirected to a file, piped, backgrounded, or running inside a
+ * script / non-tty session; the pager then streams the full output
+ * through without ever waiting for a key. */
+static int shell_line_noninteractive(char *arg,
+                                     char **out_redir, int *append,
+                                     char **pipe_to, int *out_bg) {
+    parse_redir(arg, out_redir, append, pipe_to);
+    int bg = 0;
+    /* trailing '&' background marker (mirrors the dispatcher's own check) */
+    char *tail = arg;
+    while (*tail) tail++;
+    while (tail > arg && tail[-1] == ' ') tail--;
+    if (tail > arg && tail[-1] == '&' &&
+        (tail - arg < 2 || tail[-2] == ' ')) bg = 1;
+    if (out_bg) *out_bg = bg;
+    return (*out_redir || *pipe_to || bg || g_script_mode) ? 1 : 0;
+}
+
+/* v2.59: ring0 builtin stdout redirection tee.
+ *
+ * Ring3 `.ce` programs already wire `>`/`>>` through the per-task
+ * `out_file` field consumed in SYS_WRITE (task.c).  The ring0 builtins
+ * (help/ls/echo/...) write straight through vga_write() and had no capture
+ * path, so `help > file` dropped the output on the floor.  This small tee
+ * mirrors every character the builtin prints into a per-command static
+ * buffer, and on command completion flushes it to the redirect target with
+ * the session's own write permission check (same gate as #167).  Pipes
+ * and `&` backgrounding stay on the existing task ring/pipe path; only a
+ * plain file redirect is mirrored here.  Buffer is capped so a runaway
+ * builtin cannot grow it without bound; overflow truncates the tail. */
+#define SH_REDIR_BUF 8192
+static char  g_redir_buf[SH_REDIR_BUF];
+static uint32_t g_redir_len;
+static int   g_redir_active;
+static char  g_redir_path[FS_PATH_MAX];
+static int   g_redir_append;
+
+static void redir_tee_char(char c) {
+    if (!g_redir_active) return;
+    if (g_redir_len < SH_REDIR_BUF - 1) g_redir_buf[g_redir_len++] = c;
+}
+
+/* Install the builtin redirect for this command line.  Returns 1 when a
+ * plain file redirect was armed (the tee then captures builtin output),
+ * 0 otherwise (pipe / background / none). */
+static int redir_arm(char *out_redir, int append, char *pipe_to) {
+    g_redir_active = 0;
+    g_redir_len = 0; g_redir_buf[0] = 0;
+    g_redir_path[0] = 0; g_redir_append = append;
+    if (!out_redir || !*out_redir || pipe_to) return 0;
+
+    char ab[FS_PATH_MAX];
+    if (redir_abspath(out_redir, ab, sizeof(ab)) != 0) {
+        vga_write("run: bad redirect path\n");
+        return 0;
+    }
+    /* #167 parity: ring0 pre-write must check the target with the session
+     * identity up front, instead of letting a non-root session truncate or
+     * create a protected file. */
+    if (fs_perm_check(ab, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("run: permission denied: '"); vga_write(ab); vga_write("'\n");
+        return 0;
+    }
+    int i;
+    for (i = 0; ab[i] && i < (int)sizeof(g_redir_path) - 1; i++)
+        g_redir_path[i] = ab[i];
+    g_redir_path[i] = 0;
+    g_redir_active = 1;
+    vga_set_tee(redir_tee_char);
+    return 1;
+}
+
+/* Flush the captured builtin output to the redirect target.  `>` truncates
+ * once up front, then every later chunk appends (v2.5.1 multi-line rule). */
+static void redir_flush(void) {
+    if (!g_redir_active) return;
+    g_redir_buf[g_redir_len] = 0;
+    if (g_redir_len > 0) {
+        if (!g_redir_append)
+            fs_write_raw_mode(g_redir_path, "", 0, 0);      /* truncate/create */
+        fs_write_raw_mode(g_redir_path, g_redir_buf, g_redir_len, 1);
+    }
+    g_redir_active = 0;
+    g_redir_len = 0; g_redir_buf[0] = 0;
+    g_redir_path[0] = 0;
+    vga_set_tee(0);
+}
 
 static void itoa(int v, char *out, int width) {
     char tmp[12]; int i = 0, neg = 0;
@@ -95,24 +190,37 @@ static multiboot_info_t *mbi;
 /* ---------- commands ---------- */
 /* v2.37 P0-4: fixed two-column help.  Command field is 24 chars wide,
  * description starts in column 26.  Section headers / notes print raw. */
+/* v2.59: paged help rows.  Each helper feeds the one line through the
+ * shared pager; once the user quits ('q') the rest is dropped and the
+ * helpers become no-ops until cmd_help() calls pager_end(). */
 static void help_row(const char *cmd, const char *desc) {
-    vga_write("  ");
+    if (pager_quit()) return;
+    char line[160];
+    line[0] = 0;
+    /* command field is 24 chars wide, description starts in column 26 */
     int n = 0;
-    for (const char *p = cmd; *p; p++) { vga_putc(*p); n++; }
-    while (n < 24) { vga_putc(' '); n++; }
-    vga_write("  ");
-    vga_write(desc);
-    vga_write("\n");
+    for (const char *p = cmd; *p; p++) { if (n < (int)sizeof(line)-1) line[n++] = *p; }
+    while (n < 24) line[n++] = ' ';
+    line[n++] = ' '; line[n++] = ' ';
+    for (const char *p = desc; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+    line[n] = 0;
+    pager_line(line);
 }
 static void help_head(const char *s) {
+    if (pager_quit()) return;
     vga_set_fg(VGA_LIGHT_CYAN);
-    vga_write("  -- "); vga_write(s); vga_write(" --\n");
+    char line[128];
+    int n = 0; line[n++] = ' '; line[n++] = '-'; line[n++] = ' ';
+    for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+    line[n++] = ' '; line[n++] = '-'; line[n] = 0;
+    pager_line(line);
     vga_set_fg(VGA_WHITE);
 }
-static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write("\n"); }
+static void help_note(const char *s)  { if (pager_quit()) return; char line[128]; line[0] = ' '; int n = 1; for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p; line[n] = 0; pager_line(line); }
 
 static void cmd_help(void) {
-    vga_write("CatOS v0.3 (five-pillar kernel) - commands:\n");
+    pager_begin(1);
+    pager_line("CatOS v0.3 (five-pillar kernel) - commands:");
     help_row("help",        "show this message");
     help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
@@ -229,6 +337,7 @@ static void cmd_help(void) {
     help_row("crashlog",    "show the saved panic record (crashlog --full for raw)");
     help_row("edit FILE",   "nano-style full-screen editor");
     help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
+    pager_end();
 }
 
 /* v2.58: grouped key-binding legend.  The rows come straight from the
@@ -1124,8 +1233,6 @@ static void cmd_cd(const char *arg) {
 }
 
 /* v2.24 forward declarations (helpers live across shell.c) */
-static int g_uid;         /* session uid/gid (defined with the session code) */
-static int g_gid;         /* tentative decls: the real defs sit below */
 static int fs_copy_file(const char *src, const char *dst);
 
 /* v2.24: write-permission check on the PARENT of a would-be entry -- the
@@ -1236,6 +1343,7 @@ static int split_words(char *s, char **out, int max) {
 
 /* bounded concatenation: never writes past d+size; returns 0 if it fit */
 static int strcat_b(char *d, int size, const char *s) {
+    if (!d || size <= 0) return -1;
     while (*d && size > 0) { d++; size--; }
     if (size <= 1) return -1;
     while (*s && size > 1) { *d++ = *s++; size--; }
@@ -3086,6 +3194,29 @@ static void cmd_chown(char *arg) {
 
 #define CAT_MAX_PRINT 65536u      /* cat: stop printing after 64 KiB */
 
+/* v2.59: shared pager interface for line-oriented file dumps.  Splits the
+ * buffered read on newlines and feeds each line through pager_line(); the
+ * pager itself streams straight through in non-interactive (redirect / pipe
+ * / bg / script) contexts, so no extra decision lives here. */
+static int pager_dump_text(const char *text, uint32_t len) {
+    uint32_t i = 0;
+    static char line[FS_PATH_MAX + 32];
+    int ln = 0;
+    while (i < len) {
+        char ch = text[i++];
+        if (ch == '\n') {
+            line[ln] = 0;
+            if (!pager_line(line)) return 0;
+            ln = 0;
+            continue;
+        }
+        if (ch == '\r') continue;
+        if (ln < (int)sizeof(line) - 1) line[ln++] = ch;
+    }
+    if (ln > 0) { line[ln] = 0; if (!pager_line(line)) return 0; }
+    return 1;
+}
+
 static void cmd_cat(const char *arg) {
     if (!*arg) { vga_write("usage: cat FILE\n"); return; }
     uint32_t c, s;
@@ -3093,22 +3224,25 @@ static void cmd_cat(const char *arg) {
     if (fs_perm_check(arg, g_uid, g_gid, PERM_READ) != 0) {
         vga_write("cat: permission denied\n"); return;
     }
+    pager_begin(1);
     static char buf[512];         /* ring0 single shell: no reentry */
     uint32_t off = 0;
+    int done = 1;
     while (off < s) {
         uint32_t want = s - off;
         if (want > sizeof(buf) - 1) want = sizeof(buf) - 1;
         int r = fs_read_at(arg, buf, (int)off, (int)want);
-        if (r <= 0) { vga_write("cat: read error\n"); return; }
+        if (r <= 0) { vga_write("cat: read error\n"); pager_end(); return; }
         buf[r] = 0;
-        vga_write(buf);
+        if (!pager_dump_text(buf, (uint32_t)r)) { done = 0; break; }
         off += (uint32_t)r;
         if (off >= CAT_MAX_PRINT && off < s) {
             vga_write("\n[cat: output truncated at 64 KiB]\n");
-            return;
+            break;
         }
     }
-    if (off) vga_write("\n");
+    (void)done;
+    pager_end();
 }
 
 /* v2.24 recursive helpers (rm -r / cp -r).  Depth-capped: every frame
@@ -3714,6 +3848,29 @@ static void cmd_wc(char *arg) {
     vga_write(arg); vga_write("\n");
 }
 
+/* v2.59: tree line buffer, accumulated per entry so one whole entry line
+ * feeds the shared pager as a single unit (indent + marker + leaf + size). */
+static char  g_tree_line[FS_NAME_MAX + 40];
+static int   g_tree_ln;
+
+static void tree_line_reset(void) { g_tree_line[0] = 0; g_tree_ln = 0; }
+static void tree_line_app(const char *s) {
+    while (*s && g_tree_ln < (int)sizeof(g_tree_line) - 1)
+        g_tree_line[g_tree_ln++] = *s++;
+    g_tree_line[g_tree_ln] = 0;
+}
+static void tree_line_raw(const uint8_t *raw, char *line, int cap, int *ln) {
+    const char *hd = "0123456789ABCDEF";
+    for (int k = 0; k < 11; k++) {
+        char byte[3];
+        byte[0] = hd[(raw[k] >> 4) & 0xF];
+        byte[1] = hd[raw[k] & 0xF];
+        byte[2] = 0;
+        (void)line; (void)cap;
+        if (*ln < cap - 2) { line[(*ln)++] = byte[0]; line[(*ln)++] = byte[1]; line[(*ln)] = 0; }
+    }
+}
+
 /* tree: explicit-path recursion via fs_enum_entries, depth-capped at 6. */
 static void tree_walk(const char *dir, int depth, int *hidden) {
     char names[24][FS_NAME_MAX];
@@ -3730,19 +3887,12 @@ static void tree_walk(const char *dir, int depth, int *hidden) {
         }
         leaf[li] = 0;
         if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
-        for (int d = 0; d < depth; d++) vga_write("  ");
-        vga_write(is_dir ? "+- " : "- ");
-        if (is_dir) {
-            vga_set_fg(VGA_LIGHT_CYAN);
-            vga_write(leaf);
-            vga_putc('/');
-            vga_set_fg(VGA_WHITE);
-        } else {
-            vga_set_fg(VGA_LIGHT_GREY);
-            vga_write(leaf);
-            vga_set_fg(VGA_WHITE);
-        }
-        vga_write("\n");
+        tree_line_reset();
+        for (int d = 0; d < depth; d++) tree_line_app("  ");
+        tree_line_app(is_dir ? "+- " : "- ");
+        tree_line_app(leaf);
+        if (is_dir) tree_line_app("/");
+        if (!pager_line(g_tree_line)) return;
         if (is_dir && depth < 6) {
             char child[FS_PATH_MAX];
             child[0] = 0;
@@ -3750,16 +3900,8 @@ static void tree_walk(const char *dir, int depth, int *hidden) {
             if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
             strcat_b(child, sizeof(child), leaf);
             tree_walk(child, depth + 1, hidden);
+            if (pager_quit()) return;
         }
-    }
-}
-
-static void tree_raw_hex(const uint8_t *raw) {
-    const char *hd = "0123456789ABCDEF";
-    for (int k = 0; k < 11; k++) {
-        vga_putc(hd[(raw[k] >> 4) & 0xF]);
-        vga_putc(hd[raw[k] & 0xF]);
-        vga_putc(' ');
     }
 }
 
@@ -3781,30 +3923,21 @@ static void tree_walk_raw(const char *dir, int depth, int *hidden) {
         }
         leaf[li] = 0;
         if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
-        for (int d = 0; d < depth; d++) vga_write("  ");
-        vga_write(is_dir ? "+- " : "- ");
+        tree_line_reset();
+        for (int d = 0; d < depth; d++) tree_line_app("  ");
+        tree_line_app(is_dir ? "+- " : "- ");
+        tree_line_app(leaf);
         if (names[i].insane) {
-            vga_set_fg(VGA_LIGHT_RED);
-            vga_write(leaf);
-            vga_write("  c="); print_int((int)names[i].cluster);
-            vga_write(" o="); print_int(names[i].slot * 32);
-            vga_write(" first=0x");
-            { const char *hd = "0123456789ABCDEF";
-              vga_putc(hd[(names[i].first >> 4) & 0xF]);
-              vga_putc(hd[names[i].first & 0xF]); }
-            vga_write(" raw="); tree_raw_hex(names[i].raw);
-            vga_set_fg(VGA_WHITE);
+            tree_line_app("  c=");
+            { char ib[12]; itoa((int)names[i].cluster, ib, 0); tree_line_app(ib); }
+            tree_line_app(" o=");
+            { char ob[12]; itoa(names[i].slot * 32, ob, 0); tree_line_app(ob); }
+            tree_line_app(" raw="); tree_line_raw(names[i].raw, g_tree_line,
+                                                   sizeof(g_tree_line), &g_tree_ln);
         } else if (is_dir) {
-            vga_set_fg(VGA_LIGHT_CYAN);
-            vga_write(leaf);
-            vga_putc('/');
-            vga_set_fg(VGA_WHITE);
-        } else {
-            vga_set_fg(VGA_LIGHT_GREY);
-            vga_write(leaf);
-            vga_set_fg(VGA_WHITE);
+            tree_line_app("/");
         }
-        vga_write("\n");
+        if (!pager_line(g_tree_line)) return;
         if (is_dir && depth < 6) {
             char child[FS_PATH_MAX];
             child[0] = 0;
@@ -3812,6 +3945,7 @@ static void tree_walk_raw(const char *dir, int depth, int *hidden) {
             if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
             strcat_b(child, sizeof(child), leaf);
             tree_walk_raw(child, depth + 1, hidden);
+            if (pager_quit()) return;
         }
     }
 }
@@ -3836,14 +3970,20 @@ static void cmd_tree(char *arg) {
             strcat_b(dir, sizeof(dir), arg);
         }
     }
-    vga_write(dir); vga_write("\n");
+    pager_begin(1);
+    { char root[FS_PATH_MAX + 2]; int rn = 0;
+      for (const char *p = dir; *p && rn < (int)sizeof(root) - 2; p++) root[rn++] = *p;
+      root[rn] = 0;
+      if (!pager_line(root)) { pager_end(); return; }
+    }
     int hidden = 0;
     if (raw) tree_walk_raw(dir, 0, &hidden);
     else     tree_walk(dir, 0, &hidden);
-    if (!raw && hidden > 0) {
-        print_int(hidden);
-        vga_write(" hidden invalid entries (use tree --raw to show)\n");
+    if (!pager_quit() && !raw && hidden > 0) {
+        char hb[12]; itoa(hidden, hb, 0);
+        pager_line(hb);
     }
+    pager_end();
 }
 
 /* ---------- v2.55: fsck directory integrity scan ---------------------- */
@@ -4881,6 +5021,21 @@ void shell_run(void) {
  * program and /bin PATH lookup.  Shared by the interactive loop and the
  * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
+    /* v2.59: parse the redirect/pipe/background marker ONCE, up front, before
+     * the line is truncated.  The same out_redir/append/pipe_to feed both the
+     * non-interactive pager latch and the builtin stdout tee below. */
+    char *out_redir = 0, *pipe_to = 0; int append = 0; int bg = 0;
+    int ni = shell_line_noninteractive(arg, &out_redir, &append, &pipe_to, &bg);
+    /* The pager latch follows THIS line's state exactly: a redirect, pipe,
+     * background job, or script/non-tty run streams straight through without
+     * ever parking on a More prompt.  Re-derive the boolean from the parsed
+     * pointers + bg + script state (not the helper's cached return) so a
+     * stale latch cannot leak across commands. */
+    ni = (out_redir || pipe_to || bg || g_script_mode) ? 1 : 0;
+    pager_set_noninteractive(ni);
+    /* v2.59: arm the ring0 builtin stdout tee for a plain file redirect.
+     * Pipes and `&` keep their existing task ring/pipe wiring below. */
+    redir_arm(out_redir, append, pipe_to);
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "keys") ||
                  !strcmp_(cmd, "shortcuts")) cmd_keys();
@@ -5165,6 +5320,8 @@ static void shell_exec(char *cmd, char *arg) {
                 }
             }
         }
+    /* v2.59: flush the builtin stdout tee to the redirect target, if armed. */
+    redir_flush();
 }
 
 /* ---------- v2.17 boot autostart (/etc/autoexec) ---------- */
