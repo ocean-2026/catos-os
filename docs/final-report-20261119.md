@@ -15,7 +15,7 @@
 | **D 中文输入法（阶段一）** | v2.58 | F2 开关；拼音串**内联在输入处**；候选区固定**最底两行**（倒数第二行整行横线、最后一行 `1.中 2.种 …`，按宽度自适应、整数算法不截半字）；`-`/`=`/`[`/`]` 与左右翻页；Esc 取消、空格/1-9 选字、Enter 上屏原串、Backspace 删拼音；text 与 gfx24 双模式；状态栏两行逐字保存/恢复（切换后端/清屏/改字号同步失效） | `ime_regress` **18/18**（text + gfx24 各一轮：F2、内联、候选、翻页、选字、Esc 无残影、原串上屏） |
 | **E 崩溃屏强化** | v2.59 | 纯 `vga_*` facade 自包含绘制（不触堆/FS/shell/IME/字体加载）；**COM1→VGA 双输出**（LSR.THRE 轮询，超时丢弃不阻塞）；**二次异常护栏**（`g_in_panic` + 深度上限 2，嵌套直接 `cli;hlt`）；分级表 `docs/panic-tiers.md`（L0 ring3 杀任务 / L1 受控终止 / L2 ring0 全屏）；摘要页（向量+十六进制/CPU/FATAL/RECOVER/ERR/EIP/CR2/RSP/EFLAGS/栈帧符号化/倒计时）；单键 `R/D/S/M/P/A/C`；bss panic record + `crashlog` / `crashlog --full`；`/etc/panicmode` 支持 `reboot|halt|wait` 与 `reboot:<Ns>` | `panic_regress` **19/19**（含串口内容断言、D/S/M/P/A 翻页、C 拒绝、ring3 隔离、crashlog 无记录、halt 留屏） |
 | **F 坏 FAT 目录项净化** | v2.59 | `fat_name_sane()`/`fat_83_sane()`/`fat_lfn_str_sane()` 统一判定；`ls`/`tree`/TAB 补全/`fs_enum_*` 全部走 `fat_list_dir_view()`，非法项默认隐藏并汇总 `N hidden invalid entries (use ls --raw to show)`；`ls --raw`/`tree --raw` 打印 `c=<cluster> o=<offset> first=<hex> raw=<11B>`；`fsck` 递归扫描（深度 6）分类 bad-name/orphan-lfn/bad-cluster，默认只报告、`--purge` 才墓碑化；0x05→0xE5 转义特例补齐 | `fs_badname_regress` **23/23**（四类坏项离线注入 + 默认隐藏计数 + --raw 字段 + fsck 分类 + purge 后 clean） |
-| **G 通用分页器** | v2.59 | `-- More` 分页核心（`pager.c`）：`help`/`cat`/`tree`/`ls`（含 `ls -l`）接入；Enter 前进一行、Space 前进一屏、q 退出；重定向/后台/管道/非 tty 直通不阻塞 | `pager_regress`（help 超屏 → More → Enter 逐行 → Space 整屏 → q 退出；0/1 行/正好一屏/超一屏边界；重定向无 More 且立即返回） |
+| **G 通用分页器** | v2.59 | `-- More (Enter=1 line, Space=1 page, q=quit) --` 分页核心（`pager.c`）：`help`/`cat`/`tree`/`ls`（含 `ls -l`）接入；**游标几何 + pending-park 前瞻模型**（不记账行数、不做除法，光标落到 `con_rows()-1` 只 arm 标记，下一行到来才 park）；Space 授整屏配额、Enter 单行、q 丢弃剩余；重定向/后台/管道/非 tty 直通不 park | `pager_regress` **27/27**（help 超屏 → More → Enter 逐行 → Space 整屏 → q 退出；0 行/1 行/正好一屏/超一屏一行四种边界都不误出 More；重定向无 More 且立即返回） |
 
 ---
 
@@ -75,6 +75,19 @@ cbf77c3..614b396  main -> main
 6193adf..074933b  main -> main
 ```
 远端校验：`git ls-remote origin main` 与本地 HEAD 一致（逐次核对）。
+
+---
+
+## 2.1 v2.57 滚动返工（线性逐行视口，2026-11-19 05:45 合入）
+
+首轮回溯实现是「归档行贴底生长 + 顶部恒定反色提示条」，与验收口径不符。返工（clone `CatOs-b`，commit `ee4c2f8`，merge `02c77e3`）改为：
+
+- 行序列 = `arch[count-1]…arch[0] | live[0]…live[rows-1]`，视口偏移 v 决定每行取 arch 还是 live；
+- `sb_step_older()`：**整屏逐行 memmove 下移一行**，顶行从归档补入；`sb_step_newer()` 反向、底行从序列补回；**无 `cell_blank` 全屏清空、无 `redraw_all`、无提示行**；
+- PgUp/PgDn = 循环 `con_rows()-1` 次单行位移（页高运行时读取，无硬编码 24）；到顶/到底停止，不重复不空行；离开回溯恢复 `sb_live` 快照；
+- 关键 bug：新填入行必须清 `painted_valid[y][x]`，否则 paint 脏跟踪跳过后归档行上不了帧缓冲（表现为顶上空白行）。
+
+证据：`shots-scrollfix-20261119/step0..3.png`（text，连按 3 次 Ctrl+↑，顶行 hl24→hl23→hl23…逐帧下移一行、顶行补入归档、无提示条无空行）、`gfx24_step3.png`（gfx24 同行为）；`mouse_regress` 的 `K=3 single-line steps shift rows by K`、`top boundary: no duplicate/blank history row` 两条断言直接比对行内容。
 
 ---
 
