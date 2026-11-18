@@ -710,6 +710,19 @@ static int disp_width(const char *s) {
     return w;
 }
 
+/* display width of the first n bytes (UTF-8 aware), for cursor placement. */
+static int disp_width_n(const char *s, int n) {
+    int w = 0, i = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (i < n && *p) {
+        if ((*p & 0xE0) == 0xC0) { w += 1; p += 2; i += 2; }
+        else if ((*p & 0xF0) == 0xE0) { w += 2; p += 3; i += 3; }
+        else if ((*p & 0xF8) == 0xF0) { w += 2; p += 4; i += 4; }
+        else { w += 1; p += 1; i += 1; }
+    }
+    return w;
+}
+
 static void cmd_cowsay(const char *arg) {
     const char *role = "cow";
     const char *msg = arg;
@@ -2224,7 +2237,16 @@ static void ed_redraw(void) {
     int scr_y = 1 + (ed_cy - ed_top);
     if (scr_y < 1) scr_y = 1;
     if (scr_y > last - 1) scr_y = last - 1;
-    vga_set_cursor((uint8_t)ed_cx, (uint8_t)scr_y);
+    /* v2.58: active IME composition follows the editor cursor inline. */
+    const char *comp = ime_composition();
+    int comp_w = 0;
+    if (comp && *comp) {
+        int px = disp_width_n(ed_lines[ed_cy], ed_cx);
+        vga_write_at_utf8((uint8_t)px, (uint8_t)scr_y, comp);
+        comp_w = disp_width(comp);
+    }
+    int cur_col = ed_cx + comp_w;
+    vga_set_cursor((uint8_t)cur_col, (uint8_t)scr_y);
 }
 
 static void ed_insert(char c) {
@@ -2356,7 +2378,7 @@ static void cmd_edit(const char *arg) {
 
         /* v2.9: F2 pinyin IME also works inside the editor */
         {
-            char han[5];
+            char han[IME_OUT_MAX];
             int ir = ime_feed(k, han);
             if (ir == IME_CONSUME) { ed_redraw(); ime_refresh(); continue; }
             if (ir == IME_COMMIT) {

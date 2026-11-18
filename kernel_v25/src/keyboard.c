@@ -289,6 +289,7 @@ static const char *rl_hist_get(int pos) {
 }
 
 static int rl_is_cont(unsigned char c) { return (c & 0xC0u) == 0x80u; }
+static int rl_strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 
 /* Display columns consumed by the first n bytes (CJK = 2 cells). */
 static int rl_width(const char *s, int n) {
@@ -385,6 +386,20 @@ static void rl_redraw(int x0, int y0, uint8_t base) {
         tok++;
         i = e;
     }
+    /* v2.58 stage-1: the active IME composition string is drawn inline at
+     * the cursor (it lives outside the fixed bottom candidate area). */
+    const char *comp = ime_composition();
+    if (comp && *comp) {
+        int cc = x0 + rl_width(line, line_cur);
+        if (cc >= cols) cc = cols - 1;
+        con_set_fg(base);
+        con_write_at_utf8((uint8_t)cc, (uint8_t)y0, comp);
+        int cw = rl_width(comp, rl_strlen(comp));
+        int cur_col = cc + cw;
+        if (cur_col >= cols) cur_col = cols - 1;
+        con_set_cursor((uint8_t)cur_col, (uint8_t)y0);
+        return;
+    }
     con_set_fg(base);
     int cur_col = x0 + rl_width(line, line_cur);
     if (cur_col >= cols) cur_col = cols - 1;
@@ -424,9 +439,9 @@ int kb_readline(char *buf, int len) {
         /* v2.9 pinyin IME: F2 toggles; a committed candidate is a 3-byte
          * UTF-8 hanzi, inserted at the cursor (not blindly appended). */
         {
-            char han[5];
+            char han[IME_OUT_MAX];
             int r = ime_feed(k, han);
-            if (r == IME_CONSUME) continue;
+            if (r == IME_CONSUME) { rl_redraw(x0, y0, base); continue; }
             if (r == IME_COMMIT) {
                 int n = 0;
                 while (han[n]) n++;
