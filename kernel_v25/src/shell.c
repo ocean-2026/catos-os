@@ -125,6 +125,12 @@ static int redir_arm(char *out_redir, int append, char *pipe_to) {
     g_redir_path[i] = 0;
     g_redir_active = 1;
     vga_set_tee(redir_tee_char);
+    /* v2.59: a builtin whose stdout goes to a file must never park on a
+     * More bar -- there is no terminal to answer it, and the bar text would
+     * otherwise be captured into the file by the tee.  Arm the pager latch
+     * here as well as per-line in shell_exec, so nested/wrapped dispatch
+     * paths (outer strip + inner re-entry) cannot miss it. */
+    pager_set_noninteractive(1);
     return 1;
 }
 

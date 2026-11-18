@@ -29,11 +29,14 @@
 #include "render.h"
 #include "keyboard.h"
 
-#define PAGER_BAR_TEXT "-- More (Enter=1行, Space=1屏, q=quit) --"
+#define PAGER_BAR_TEXT "-- More (Enter=1 line, Space=1 page, q=quit) --"
 
 static int g_enabled;        /* block pager is engaged (1) vs plain stream */
 static int g_quit;           /* user pressed q: drop the rest of output    */
-static int g_rows_left;      /* lines still printed before the next park   */
+static int g_rows_left;      /* lines still printable before the next park */
+static int g_pending_park;   /* screenful is full; park BEFORE the next   */
+                             /* line -- so "exactly one screen" never bars */
+static int g_free_lines;     /* lines still printable after a Space page  */
 static int g_noninter;       /* process-wide non-interactive latch         */
 
 void pager_set_noninteractive(int on) {
@@ -79,6 +82,7 @@ static int pager_wait_key(void) {
 
 int pager_begin(int interactive) {
     g_quit = 0;
+    g_pending_park = 0;
     g_enabled = interactive && !g_noninter;
     g_rows_left = 0;
     if (g_enabled) {
@@ -101,19 +105,34 @@ int pager_line(const char *line) {
     }
     if (g_quit) return 0;
 
+    /* Park BEFORE printing, not after: a block that is exactly one screen
+     * tall must finish silently, and a block with one extra line parks
+     * only when that extra line actually arrives. */
+    if (g_pending_park) {
+        int act = pager_wait_key();
+        if (act == 0) { g_quit = 1; return 0; }
+        /* Space keeps a whole page flowing (rows-1 lines) before the next
+         * park; Enter leaves g_free_lines at 0 so the very next line parks
+         * again (one line at a time). */
+        g_free_lines = (act == 1) ? (screenful() - 1) : 0;
+        if (g_free_lines < 0) g_free_lines = 0;
+        g_pending_park = 0;
+    }
+
     vga_write(line);
     vga_write("\n");
 
-    g_rows_left--;
-    if (g_rows_left > 0) return 1;
-
-    /* Screenful shown: park and wait.  A quit drops everything left. */
-    int act = pager_wait_key();
-    if (act == 0) { g_quit = 1; return 0; }
-    /* Re-read the screenful for this mode; a one-line advance always keeps
-     * a single line, a screen advance uses the fresh per-park count. */
-    int sf = screenful();
-    g_rows_left = (act == 2) ? 1 : (sf > 0 ? sf : 1);
+    /* Geometry, not a cached count: the console can be resized / switched
+     * between text and gfx24 at runtime, so ask the front-end where the
+     * cursor actually landed.  Sitting on the last row means the bar row
+     * is needed next: arm the park so the NEXT line parks first. */
+    if (g_free_lines > 0) {
+        g_free_lines--;                 /* still inside the granted page */
+        if (g_free_lines > 0) return 1;
+    }
+    int cx, cy, rows = con_rows();
+    con_get_cursor(&cx, &cy);
+    if (rows >= 2 && cy >= rows - 1) g_pending_park = 1;
     return 1;
 }
 
@@ -124,4 +143,5 @@ void pager_end(void) {
     g_enabled = 0;
     g_quit = 0;
     g_rows_left = 0;
+    g_pending_park = 0;
 }
