@@ -3935,6 +3935,84 @@ static void size_restore(void) {
     if (b[0] >= '0' && b[0] <= '2') con_set_cell_size(b[0] - '0');
 }
 
+/* ---------- v2.56 boot display mode (/etc/videomode) -----------------------
+ * One token per line: text | gfx | vbe | gfx24 (vbe24 accepted as an alias).
+ * Default is gfx24 (800x600x24).  The parser is deliberately fault-tolerant:
+ * a missing/empty file, an unknown value, an over-long line or binary bytes
+ * all fall back to the default instead of panicking.  Field lengths are
+ * bounded so a hostile file can never overflow the stack buffers. */
+#define VIDEOMODE_PATH "/etc/videomode"
+
+/* Re-printed after the autostart banner: a boot-time graphics fallback must
+ * stay visible on the text console, not scroll away under the banner. */
+static char g_fallback_note[128];
+
+static int videomode_parse(void) {
+    char buf[32];
+    int n = fs_read_text(VIDEOMODE_PATH, buf, (int)sizeof(buf) - 1);
+    if (n <= 0) return CON_MODE_VBE24;      /* absent / unreadable -> default */
+    buf[n] = 0;
+
+    int i = 0;
+    while (buf[i] && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' ||
+                      buf[i] == '\n' || (unsigned char)buf[i] < 0x20))
+        i++;
+
+    char tok[16];
+    int k = 0;
+    while (buf[i] && buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\r' &&
+           buf[i] != '\n' && (unsigned char)buf[i] >= 0x20) {
+        if (k < (int)sizeof(tok) - 1) tok[k++] = buf[i];
+        i++;                                /* overflow: keep skipping, cap */
+    }
+    tok[k] = 0;
+
+    if (!strcmp_(tok, "text")) return CON_MODE_TEXT;
+    if (!strcmp_(tok, "gfx"))  return CON_MODE_GFX;
+    if (!strcmp_(tok, "vbe"))  return CON_MODE_VBE;
+    if (!strcmp_(tok, "gfx24") || !strcmp_(tok, "vbe24")) return CON_MODE_VBE24;
+    return CON_MODE_VBE24;                  /* unknown/garbage -> default     */
+}
+
+/* Apply the persisted boot mode before the shell banner prints.  A graphics
+ * back-end that fails to probe (no VBE/SVGA: e.g. -vga cirrus or a VMware
+ * guest whose SVGA init fails) MUST land back in text with a reason on
+ * screen -- never a black, silent boot. */
+static void boot_apply_videomode(void) {
+    int want = videomode_parse();
+    if (want == CON_MODE_TEXT) return;      /* GRUB already set text mode 03 */
+
+    int r = con_request_mode(want, CON_ORIGIN_KERNEL);
+    if (r == 0) {
+        if (want == CON_MODE_VBE24) size_restore();
+        vga_write("[display] boot mode: ");
+        vga_write(con_mode_name(want));
+        vga_write("\n");
+        return;
+    }
+
+    /* switch_backend() already restored the previous (text) back-end when the
+     * new one's enter() failed; con_force_text() is the safety net for any
+     * other failure path so the console can never stay in a dead mode. */
+    con_force_text();
+    const char *why;
+    if (r == CON_ENODEV)      why = "no VBE/SVGA graphics device detected";
+    else if (r == CON_EINVAL) why = "invalid boot mode requested";
+    else                      why = "graphics back-end initialisation failed";
+    g_fallback_note[0] = 0;
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             "[display] WARNING: ");
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             con_mode_name(want));
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             " unavailable (");
+    strcat_b(g_fallback_note, sizeof(g_fallback_note), why);
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             "); safe fallback to 80x25 text mode.");
+    vga_write(g_fallback_note);
+    vga_write("\n");
+}
+
 static void cmd_size(const char *arg) {
     if (con_get_mode() != CON_MODE_VBE24) {
         vga_write("size: only supported in vbe24 mode (run `gfx24` first)\n");
@@ -4518,7 +4596,8 @@ void shell_run(void) {
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
-    bsod_init();              /* v2.59: cache /etc/panicmode (reboot|halt) */
+    boot_apply_videomode();   /* v2.56: /etc/videomode boot display mode, default gfx24 */
+    bsod_init();              /* v2.59: cache panic action config */
     ce_init();
     btime_mark("S4 ce_init");
     /* v2.13: load the persistent user database + ACL (seeds root/user and
@@ -4540,6 +4619,13 @@ void shell_run(void) {
          * seeded default script on a fresh volume. */
         boot_autostart();
         btime_mark("S8 autostart done");
+        /* Re-show the boot fallback warning below the banner so it does not
+         * scroll off the console before the user reads it. */
+        if (g_fallback_note[0]) {
+            vga_write("\n");
+            vga_write(g_fallback_note);
+            vga_write("\n");
+        }
     }
 
     kb_set_completer(sh_complete);        /* v2.28: TAB completion */

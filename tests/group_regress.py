@@ -17,7 +17,7 @@ import os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot, find_qemu, kill_qemu, screen_text, sendkey,
-                         type_text, wait_for_prompt)
+                         type_text, wait_for_prompt, force_text)
 
 PORT = 4466
 
@@ -65,6 +65,7 @@ def main():
                           "kernel_v25", "catos_disk.img")))
     r = R()
     try:
+        force_text(sock)
         wait_for_prompt(sock)
         # absorb boot-time PS/2 ghost keystrokes
         run(sock, "clear")

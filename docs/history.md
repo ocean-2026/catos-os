@@ -157,3 +157,6 @@ CatOS[易错点] 崩溃屏不要直写 0xB8000 帧缓冲再混前端写：前端
 CatOS[易错点] 单行 ASCII 写接口不要喂 UTF-8 CJK 字节：`vga_write_at` 按单字节单格铺，中文三字节被拆成三个半宽格，后续 ASCII 被错位移到行右半截。含中文的行必须走 `vga_write_at_utf8`；纯英文注记行就不要夹带汉字，两段调用分开（前缀 ASCII 定位 + 后缀 utf8）。
 CatOS[易错点] 递归遍历目录树时静态簇缓冲不能跨递归调用复用：子目录 `fat_read_cluster(child, buf)` 会覆盖外层同一个 static buf，返回后外层循环 `b = buf + i*32` 读到的是子目录内容，表现为外层目录只扫到前几个条目就中断、后续坏项全部漏报（本轮 fsck 扫描器实测根目录只进了 DEV 就停）。递归扫描必须按深度分缓冲 `bufs[depth]`；非递归的普通遍历器用单缓冲没问题。
 CatOS[易错点] 多 clone 并发跑回归时，部分套件的 monitor 端口是写死在脚本里的（size_regress PORT=4492），另一 clone 占用同端口后，本驱动会连到别人的 monitor，HMP 回复为空、`screendump` 落不了文件，报错看起来像「screendump produced no file」而不是端口冲突。先 `ps aux | grep qemu` 核对端口占用；临时把本 clone 套件 PORT 改到空闲口（4526 等）跑完，提交前还原，不要把端口改动带进 commit。
+CatOS[易错点] dispi/LFB 图形模式下 0xB8000 文本平面不是可读镜像：be_text 独占的 VGA 文本窗口在 gfx/vbe/vbe24 后端下，CPU 写 0xB8000 的内容 monitor `xp /4000 0xb8000` 读回仍是空白（QEMU 文本平面在图形模式下与帧缓冲不在同一可观测窗口）。前端给图形后端加一层 0xB8000 文本镜像的方案验证不可行（写入落地但读不回），旧文本读屏测试不能靠内核镜像补救，只能：运行时盲发 `text`+Y consent 切回文本后端，或在磁盘上预置 /etc/videomode=text。
+CatOS[易错点] 启动早期打印的回退警告会被后面的 boot_autostart banner 滚出 25 行缓冲：先把警告文案存进全局备注，banner 跑完后再补打一行，否则回退原因在屏幕上不可见，验收时读 0xB8000 抓不到 WARNING。
+CatOS[易错点] 开机默认改 gfx24 后，面向文本屏的旧回归套件会在 wait_for_prompt/clean_run 处读空缓冲：驱动侧 force_text() 在 shell 就绪后盲发 `text`、回车、`y`、回车，并轮询提示符（最长 20s），首次 `text` 落在 shell 就绪前被吞掉时自动重发一次；不要把固定 sleep 当就绪判据。
