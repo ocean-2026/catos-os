@@ -22,9 +22,15 @@
 
 #define BSOD_MODE_REBOOT  0
 #define BSOD_MODE_HALT    1
+#define BSOD_MODE_WAIT    2
 
-/* Read /etc/panicmode (reboot|halt, default reboot) into the cached mode.
- * Safe to call before the FS is ready: stays on the default. */
+/* P0-2 second-fault guard: 1 once the crash screen has been entered.
+ * Exposed so the exception dispatcher can take the hard `cli; hlt`
+ * shortcut instead of re-entering the BSOD. */
+extern volatile int g_in_panic;
+
+/* Read /etc/panicmode (reboot|halt|wait, optional `reboot:<seconds>`) into
+ * the cached mode.  Safe to call before the FS is ready: stays on default. */
 void bsod_init(void);
 
 int  bsod_mode(void);
@@ -42,5 +48,10 @@ void bsod_enter(const char *msg, const int_frame_t *frame, int soft_return);
 
 /* Idle timeout before the default action fires, in seconds. */
 #define BSOD_TIMEOUT_SEC  30
+
+/* P0-2: nested-fault depth cap.  A second fatal fault while already in the
+ * crash screen burns one level; past this count we stop painting and just
+ * cli; hlt in a loop. */
+#define BSOD_PANIC_DEPTH_MAX 2
 
 #endif /* CATOS_BSOD_H */

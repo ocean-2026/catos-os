@@ -16,11 +16,26 @@
 #include "fs.h"
 #include "hw.h"
 #include "diag.h"
+#include "serial_log.h"
 
 #define BSOD_COLS 80
 #define BSOD_ROWS 25
 
+/* P0-2 second-fault guard.  Plain bss, no lock: set once on entry and only
+ * read/incremented on the panic path.  The dispatcher treats any non-zero
+ * value as "already panicking" and takes the hard halt shortcut. */
+volatile int g_in_panic;
+static int g_panic_depth;
+
 static int g_mode = BSOD_MODE_REBOOT;
+static int g_timeout_sec = BSOD_TIMEOUT_SEC;
+
+/* P0-2: hard halt after a nested fatal fault.  No painting, no serial,
+ * no recursion into bsod_enter: mask IRQs and spin on hlt. */
+static void bsod_halt_loop(void) {
+    __asm__ volatile ("cli");
+    for (;;) __asm__ volatile ("hlt");
+}
 
 /* ---- tiny local strings (no libc on the crash path) ------------------- */
 
@@ -47,6 +62,20 @@ static void ncpy(char *d, const char *s, int n) {
     if (!s) { d[0] = 0; return; }
     while (i < n - 1 && s[i]) { d[i] = s[i]; i++; }
     d[i] = 0;
+}
+
+/* P0-1 dual output: the same line goes to COM1 first (polled, timeout
+ * drops the byte), then to the VGA facade.  Either channel failing must not
+ * disturb the other: ser_* already drops on guard exhaustion, and the VGA
+ * facade is the only rendering path allowed on this screen. */
+static void dual_write_at(int x, int y, const char *s) {
+    ser_write(s);
+    vga_write_at((uint8_t)x, (uint8_t)y, s);
+}
+
+static void dual_puts(const char *s) {
+    ser_write(s);
+    vga_write(s);
 }
 
 /* ---- STOP code mapping (fixed table, documented in docs/PROGRESS.md) --- */
@@ -198,6 +227,18 @@ static uint64_t rdtsc_(void) {
 void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
     __asm__ volatile ("cli");
 
+    /* P0-2 second-fault guard: if a fatal fault fires while we are already
+     * on the crash screen, do NOT re-enter the painter.  Burn one depth
+     * level; past the cap, or on any nested triple fault, hard halt. */
+    if (g_in_panic) {
+        g_panic_depth++;
+        if (g_panic_depth >= BSOD_PANIC_DEPTH_MAX) {
+            ser_write("[bsod] nested fault -> hard halt\n");
+            bsod_halt_loop();
+        }
+    }
+    g_in_panic = 1;
+
     /* If we are sitting in a graphics back-end, force the emergency switch
      * back to 80x25 text before painting.  The facade writes go through
      * whichever text surface ends up mapped. */
@@ -229,9 +270,9 @@ void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
 
     int mhz = hw_num(HW_CPU_MHZ);
     uint64_t t0 = rdtsc_();
-    /* MHz = millions of cycles / second; 30 s of TSC = mhz * 1e6 * 30. */
+    /* MHz = millions of cycles / second; N s of TSC = mhz * 1e6 * N. */
     uint64_t deadline = mhz > 0 && mhz < 10000
-        ? t0 + (uint64_t)mhz * 1000000u * BSOD_TIMEOUT_SEC : 0;
+        ? t0 + (uint64_t)mhz * 1000000u * (uint32_t)g_timeout_sec : 0;
 
     for (;;) {
         if (inb(0x64) & 1) {
@@ -258,7 +299,9 @@ void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
         return;
     }
 
-    if (g_mode == BSOD_MODE_HALT) {
+    if (g_mode == BSOD_MODE_HALT || g_mode == BSOD_MODE_WAIT) {
+        /* halt: stay on the report forever.  wait: same visible behaviour
+         * for the crash screen (no auto action); only a key can act. */
         __asm__ volatile ("cli");
         for (;;) __asm__ volatile ("hlt");
     }
@@ -273,8 +316,32 @@ void bsod_init(void) {
     int n = fs_read_text("/etc/panicmode", buf, (int)sizeof(buf) - 1);
     if (n <= 0) return;
     buf[n] = 0;
-    if (has_tok(buf, "halt"))        g_mode = BSOD_MODE_HALT;
-    else if (has_tok(buf, "reboot")) g_mode = BSOD_MODE_REBOOT;
+    /* P2-9: values are `reboot`, `halt`, `wait`, or `reboot:<seconds>`
+     * (e.g. `reboot:30s`).  Parsed once at boot; the crash path itself
+     * never opens a file.  Development builds default to WAIT. */
+    if (has_tok(buf, "halt")) {
+        g_mode = BSOD_MODE_HALT;
+    } else if (has_tok(buf, "wait")) {
+        g_mode = BSOD_MODE_WAIT;
+    } else if (has_tok(buf, "reboot")) {
+        g_mode = BSOD_MODE_REBOOT;
+        /* optional `reboot:<N>s` countdown override */
+        const char *p = buf;
+        while (*p) {
+            if (p[0] == 'r' && p[1] == 'e' && p[2] == 'b' && p[3] == 'o' &&
+                p[4] == 'o' && p[5] == 't' && p[6] == ':') {
+                const char *q = p + 7;
+                int sec = 0;
+                while (*q >= '0' && *q <= '9') {
+                    sec = sec * 10 + (*q - '0');
+                    q++;
+                }
+                if (sec >= 1 && sec <= 600) g_timeout_sec = sec;
+                break;
+            }
+            p++;
+        }
+    }
 }
 
 int bsod_mode(void) { return g_mode; }
