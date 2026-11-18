@@ -180,9 +180,19 @@ def main():
     def do(line, wait=1.5):
         type_text(s, line)
         sendkey(s, "ret", wait)
+        drain()                 # v2.59: never leave a More bar armed
 
     def txt():
         return screen_text(s)
+
+    def drain(wait=0.7, max_steps=12):
+        """v2.59: long output is paged.  Page through to the last screen so
+        (a) the tail of the output is visible for assertions and (b) the
+        pager never eats keystrokes meant for the guess state machine."""
+        for _ in range(max_steps):
+            if "-- more" not in screen_text(s).lower():
+                return
+            sendkey(s, "spc", wait)
 
     # Case 1: bare `y` replays the suggested command.  `dat` -> `date`
     # (one-line output, so the `-> date` echo stays on screen).
@@ -210,6 +220,7 @@ def main():
     t = txt()
     check("3a: suggest ls for `lx /bin`", "did you mean: ls" in t, t[:120])
     do("y", 2.0)
+    drain()                     # v2.59: `ls /bin` overflow pages; walk to tail
     t = txt()
     check("3b: replay carries `/bin` arg", "pesample.exe" in t, t[:120])
 
