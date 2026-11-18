@@ -197,4 +197,25 @@ int         con_get_cell_scale(void);
 int         con_screen_push(void);
 int         con_screen_pop(void);
 
+/* ---- v2.57: mouse glue (selection / wheel / middle-click paste) ---------
+ * con_mouse_poll() drains the PS/2 mouse event queue in normal kernel
+ * context: wheel notches scroll the console back, left button starts /
+ * extends / finalizes a cell selection, right cancels, middle arms the
+ * paste.  Text and gfx back-ends both consume wheel events; only the
+ * drawable gfx24 back-end paints a software pixel cursor. */
+void        con_mouse_poll(void);
+/* Consume the pending middle-click paste request (1 when armed). */
+int         con_mouse_paste_taken(void);
+/* Snapshot driver pixel position + button mask for diagnostics/tests. */
+void        con_mouse_state(int *x, int *y, uint8_t *buttons);
+/* 1 when a non-empty cell selection currently exists. */
+int         con_selection_nonempty(void);
+
+/* v2.57: middle-click paste hook.  The shell line editor registers its
+ * insert-and-redraw closure while a prompt is active; the console glue
+ * invokes it on a middle button press with the clipboard UTF-8.  Passing
+ * NULL detaches (and drains any pending paste). */
+typedef void (*con_paste_fn)(const char *s, int n);
+void        con_set_paste_hook(con_paste_fn fn);
+
 #endif /* RENDER_H */

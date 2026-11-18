@@ -169,6 +169,76 @@ static void fill(int x, int y, int w, int h, uint32_t c) {
     }
 }
 
+/* ---- v2.57: software pixel mouse cursor (dirty-rect save/restore) ------- */
+/* The arrow is a 12x12 outline; the pixels underneath it are saved before
+ * drawing and restored on erase/move, so a move only touches two small
+ * rects -- never a full-frame repaint.  Saved bytes follow the physical
+ * device layout (B,G,R,X) so the SVGA 4-byte stride path round-trips. */
+#define MC_W 12
+#define MC_H 12
+static int      mc_valid, mc_x, mc_y;
+static uint8_t  mc_save[MC_W * MC_H * 4];
+
+static const uint16_t MC_ARROW[MC_H] = {
+    0x800, 0xC00, 0xA00, 0x900, 0x880, 0x840,
+    0x820, 0x810, 0x888, 0x950, 0xC28, 0x880
+};
+
+static void mc_restore(void) {
+    if (!mc_valid || !lfb) return;
+    for (int j = 0; j < MC_H; j++) {
+        int dy = mc_y + j;
+        if (dy < 0 || dy >= GFX24_H) continue;
+        for (int i = 0; i < MC_W; i++) {
+            int dx = mc_x + i;
+            if (dx < 0 || dx >= GFX24_W) continue;
+            const uint8_t *s = mc_save + (j * MC_W + i) * 4;
+            volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                      + (uint32_t)dx * g_stride;
+            p[g_b] = s[0]; p[g_g] = s[1]; p[g_r] = s[2];
+            if (g_stride == 4u) p[g_x] = s[3];
+        }
+    }
+    mc_valid = 0;
+}
+
+static void mc_invalidate(void) { mc_valid = 0; }
+
+static void v24_mouse_cursor(int x, int y, int visible) {
+    if (!lfb) return;
+    mc_restore();
+    if (!visible) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > GFX24_W - MC_W) x = GFX24_W - MC_W;
+    if (y > GFX24_H - MC_H) y = GFX24_H - MC_H;
+    mc_x = x; mc_y = y;
+    for (int j = 0; j < MC_H; j++) {
+        int dy = y + j;
+        if (dy < 0 || dy >= GFX24_H) continue;
+        for (int i = 0; i < MC_W; i++) {
+            int dx = x + i;
+            if (dx < 0 || dx >= GFX24_W) continue;
+            uint8_t *s = mc_save + (j * MC_W + i) * 4;
+            volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                      + (uint32_t)dx * g_stride;
+            s[0] = p[g_b]; s[1] = p[g_g]; s[2] = p[g_r];
+            s[3] = (g_stride == 4u) ? p[g_x] : 0xFFu;
+        }
+    }
+    for (int j = 0; j < MC_H; j++) {
+        int dy = y + j;
+        if (dy < 0 || dy >= GFX24_H) continue;
+        for (int i = 0; i < MC_W; i++) {
+            if (!(MC_ARROW[j] & (1u << (11 - i)))) continue;
+            int dx = x + i;
+            if (dx < 0 || dx >= GFX24_W) continue;
+            put3(dx, dy, 0xFFFFFFu);
+        }
+    }
+    mc_valid = 1;
+}
+
 /* ---- public drawing API (gfx24.h) -------------------------------------- */
 int gfx24_active(void) { return active; }
 uint32_t gfx24_lfb_phys(void) { return lfb_phys; }
@@ -317,6 +387,7 @@ static int v24_enter(void) {
 static void v24_leave(void) {
     if (svga_backend) svga_mode_off();
     else              dispi_write(DISPI_ENABLE, 0);
+    mc_valid = 0;
     active = 0;
     lfb = (volatile uint8_t *)0;
     /* Keep the last pixel layout: `display` and gfx_info(BACKEND) can
@@ -324,7 +395,10 @@ static void v24_leave(void) {
      * always resets the layout before the next switch. */
 }
 
-static void v24_clear(uint32_t bg_rgb) { fill(0, 0, GFX24_W, GFX24_H, bg_rgb); }
+static void v24_clear(uint32_t bg_rgb) {
+    mc_invalidate();
+    fill(0, 0, GFX24_W, GFX24_H, bg_rgb);
+}
 
 static uint32_t dim_rgb(uint32_t c) {
     return CON_RGB(CON_RGB_R(c) >> 1, CON_RGB_G(c) >> 1,
@@ -484,6 +558,7 @@ render_be_t be_vbe24 = {
     .set_palette= v24_set_palette,
     .scroll     = 0,                    /* front-end full re-render */
     .draw_cursor= v24_draw_cursor,
+    .mouse_cursor = v24_mouse_cursor,
     .diag       = v24_diag,
     .cell_w     = 8, .cell_h = 16,
     .set_scale  = v24_set_scale

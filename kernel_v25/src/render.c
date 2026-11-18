@@ -21,6 +21,8 @@
 #include "render.h"
 #include "render_be.h"
 #include "keyboard.h"
+#include "mouse.h"
+#include "clip.h"
 #include "task.h"
 
 #define CON_MAX_COLS 100        /* 800 / 8, the widest (VBE) terminal */
@@ -69,6 +71,16 @@ static uint32_t hz_map[CON_TEXT_HZ_SLOTS];
 static con_cell_t saved_row[CON_MAX_COLS];
 static int        saved_row_valid;
 static int        saved_row_index = -1;   /* v2.25: WHICH row is barrowed */
+
+/* v2.57 mouse cell selection.  The bottom two rows are reserved for the
+ * IME candidate bar, so the selectable region is rows 0 .. rows-3. */
+static int sel_valid;              /* selection has an anchor + endpoint */
+static int sel_dragging;           /* left button still held             */
+static int sel_ax, sel_ay;         /* anchor cell                        */
+static int sel_cx, sel_cy;         /* current endpoint cell              */
+static int paste_pending;          /* middle-click arms a paste          */
+static con_paste_fn paste_hook;
+static int sel_at(int x, int y);
 
 /* v2.25 dirty-CELL tracker (the CatOS dirty rectangle: our unit IS the
  * cell).  painted[] remembers the last PIXELS actually on screen for a
@@ -185,6 +197,10 @@ static void paint(int x, int y) {
     con_cell_t t = *c;
     if (be->sw_blink && (t.attrs & CON_ATTR_BLINK) && !blink_phase)
         t.attrs |= CON_ATTR_HIDDEN;      /* software blink: hide text */
+    if (sel_at(x, y)) {                  /* v2.57 selection: inverse */
+        uint32_t f = t.fg, b = t.bg;
+        t.fg = b; t.bg = f;
+    }
     if (show_cur) {
         /* Desired terminal cursor: a cell with no glyph shows an UNDERLINE;
          * a cell that already holds a glyph shows a BACKGROUND-INVERSE
@@ -519,6 +535,7 @@ static int switch_backend(render_be_t *nb) {
     be = nb;
     cols = be->cols;
     rows = be->rows;
+    mouse_clamp((int)be->pixel_w, (int)be->pixel_h);
     saved_row_valid = 0;           /* bottom row changed size/position */
     dcx = dcy = -1;
     sb_view = 0;                   /* archive rows never match the new grid */
@@ -738,6 +755,112 @@ static void sb_repaint(void) {
     sync_cursor(1);
 }
 
+/* Archive index visible at grid row y.  The block holds the newest `show`
+ * archived rows (top = oldest of the visible window, bottom = newest):
+ * top row j=sb_view-1, bottom row j=sb_view-show. */
+static int sb_j_for_row(int y) {
+    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
+    int top = rows - show;
+    return sb_view - 1 - (y - top);
+}
+
+/* Copy archive row j (0 = newest archived) into cell row y. */
+static void sb_row_to_cell(int y, int j) {
+    int k = (sb_head - 1 - j + CON_SB_ROWS * 2) % CON_SB_ROWS;
+    for (int x = 0; x < cols; x++) cells[y][x] = sb[k][x];
+}
+
+/* Move one grid row src -> dst.  The destination's dirty tracker is
+ * invalidated so paint() actually redraws the moved-in content onto the
+ * framebuffer (copying the tracker would make paint skip a row whose
+ * pixels on screen are still the old destination row). */
+static void sb_move_row(int dst, int src) {
+    for (int x = 0; x < cols; x++) {
+        cells[dst][x]         = cells[src][x];
+        painted_valid[dst][x] = 0;
+    }
+}
+
+static void sb_paint_row(int y) {
+    for (int x = 0; x < cols; x++) paint(x, y);
+}
+
+static void sb_draw_hint_row(void) {
+    uint8_t old_attrs = s_attrs;
+    s_attrs |= CON_ATTR_INVERSE;
+    for (int x = 0; x < cols; x++) cell_blank(&cells[0][x]);
+    con_write_at_utf8(0, 0, "-- scrollback: Ctrl+Up/Down, any other key returns --");
+    s_attrs = old_attrs;
+}
+
+/* First entry into history: blank the live grid's body, draw the hint row
+ * and lay the newest `show` archived rows along the bottom.  This one
+ * transition repaints the block; every later step moves row by row. */
+static void sb_enter_history(int show) {
+    for (int y = 1; y < rows; y++)
+        for (int x = 0; x < cols; x++) {
+            cell_blank(&cells[y][x]);
+            painted_valid[y][x] = 0;
+        }
+    sb_draw_hint_row();
+    for (int i = 0; i < show; i++) {
+        int y = rows - show + i;
+        sb_row_to_cell(y, sb_j_for_row(y));
+    }
+    sb_repaint();
+}
+
+/* One single-row viewer transition.  dir +1 = older, -1 = newer.
+ * Returns 0 when the boundary is reached (no step taken).
+ *
+ * The history block maps row y to archive j = rows-1-y.  While the block
+ * GROWS (older, not yet full) the existing rows keep their content and only
+ * the new top row is filled; once the block is full an older step shifts the
+ * whole block down one row and drops the oldest.  The newer direction mirrors
+ * this: shrinking keeps the lower rows and blanks the vacated top slot; a
+ * full block shifts up one row and refreshes the bottom from archive j=0. */
+static int sb_step(int dir) {
+    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
+
+    if (dir > 0) {
+        if (sb_view >= sb_count) return 0;
+        int old_show = show;
+        sb_view++;
+        int new_show = sb_view < (rows - 1) ? sb_view : (rows - 1);
+        int top = rows - new_show;
+        if (new_show > old_show) {
+            /* Grow: insert one older row at the top, keep the rest. */
+            sb_row_to_cell(top, sb_j_for_row(top));
+            sb_paint_row(top);
+        } else {
+            /* Full block: shift down, drop the oldest, fill the top. */
+            for (int y = rows - 1; y > top; y--) sb_move_row(y, y - 1);
+            sb_row_to_cell(top, sb_j_for_row(top));
+            for (int y = top; y < rows; y++) sb_paint_row(y);
+        }
+    } else {
+        if (sb_view <= 0) return 0;
+        int old_show = show;
+        sb_view--;
+        int new_show = sb_view < (rows - 1) ? sb_view : (rows - 1);
+        int top = rows - new_show;
+        if (new_show < old_show) {
+            /* Shrink: drop the oldest top row, keep the lower block. */
+            for (int x = 0; x < cols; x++) {
+                cell_blank(&cells[top - 1][x]);
+                painted_valid[top - 1][x] = 0;
+            }
+            sb_paint_row(top - 1);
+        } else {
+            /* Full block: shift up, refresh the bottom row from its archive. */
+            for (int y = top; y < rows - 1; y++) sb_move_row(y, y + 1);
+            sb_row_to_cell(rows - 1, sb_j_for_row(rows - 1));
+            for (int y = top; y < rows; y++) sb_paint_row(y);
+        }
+    }
+    return 1;
+}
+
 int con_scrollback(int delta) {
     int want = sb_view + delta;
     if (want < 0) want = 0;
@@ -748,32 +871,25 @@ int con_scrollback(int delta) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) sb_live[y][x] = cells[y][x];
 
-    sb_view = want;
-    if (sb_view == 0) {
+    if (want == 0) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) cells[y][x] = sb_live[y][x];
+        sb_view = 0;
         sb_repaint();
         return 0;
     }
 
-    for (int y = 0; y < rows; y++)
-        for (int x = 0; x < cols; x++) cell_blank(&cells[y][x]);
-
-    /* Row 0 carries the hint; history occupies the bottom rows, newest at
-     * the bottom.  sb[sb_head-1-j] is the j-th most recent archived row. */
-    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
-    for (int i = 0; i < show; i++) {
-        int j = show - 1 - i;
-        int k = (sb_head - 1 - j + CON_SB_ROWS * 2) % CON_SB_ROWS;
-        int y = rows - show + i;
-        for (int x = 0; x < cols; x++) cells[y][x] = sb[k][x];
+    if (sb_view == 0) {
+        int show = want < (rows - 1) ? want : (rows - 1);
+        sb_view = want;
+        sb_enter_history(show);
     }
-    uint8_t old_attrs = s_attrs;
-    s_attrs |= CON_ATTR_INVERSE;
-    for (int x = 0; x < cols; x++) cell_blank(&cells[0][x]);
-    con_write_at_utf8(0, 0, "-- scrollback: Ctrl+Up/Down, any other key returns --");
-    s_attrs = old_attrs;
-    sb_repaint();
+
+    int dir = want > sb_view ? 1 : -1;
+    while (sb_view != want) {
+        if (!sb_step(dir)) break;
+    }
+    sync_cursor(1);
     return sb_view;
 }
 
@@ -909,3 +1025,176 @@ int con_force_text(void) {
 }
 
 void con_diag(void) { if (be->diag) be->diag(); }
+
+/* ---- v2.57: mouse glue (selection / wheel / paste) ---------------------- */
+
+static void sel_box(int *x0, int *y0, int *x1, int *y1) {
+    *x0 = sel_ax < sel_cx ? sel_ax : sel_cx;
+    *x1 = sel_ax < sel_cx ? sel_cx : sel_ax;
+    *y0 = sel_ay < sel_cy ? sel_ay : sel_cy;
+    *y1 = sel_ay < sel_cy ? sel_cy : sel_cy;
+}
+
+static int sel_at(int x, int y) {
+    if (!sel_valid) return 0;
+    int x0, y0, x1, y1;
+    sel_box(&x0, &y0, &x1, &y1);
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}
+
+static void sel_repaint_box(int x0, int y0, int x1, int y1) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            if (x >= 0 && x < cols && y >= 0 && y < rows) {
+                /* Force the dirty tracker to drop its cached appearance: the
+                 * selection inverse swaps fg/bg at draw time, so a plain
+                 * cell-content comparison would wrongly skip the repaint. */
+                painted_valid[y][x] = 0;
+                paint(x, y);
+            }
+}
+
+static void sel_clear(void) {
+    if (!sel_valid) return;
+    int x0, y0, x1, y1;
+    sel_box(&x0, &y0, &x1, &y1);
+    sel_valid = 0; sel_dragging = 0;
+    sel_repaint_box(x0, y0, x1, y1);
+}
+
+static void cell_of_pixel(int px, int py, int *cx, int *cy) {
+    int cw = be->cell_w ? (int)be->cell_w : 8;
+    int ch = be->cell_h ? (int)be->cell_h : 16;
+    int x = px / cw, y = py / ch;
+    if (x < 0) x = 0;
+    if (x >= cols) x = cols - 1;
+    if (y < 0) y = 0;
+    int ymax = rows - 3;                 /* bottom two rows: IME bar */
+    if (ymax < 0) ymax = 0;
+    if (y > ymax) y = ymax;
+    *cx = x; *cy = y;
+}
+
+static int utf8_encode_cp(uint32_t cp, uint8_t *out) {
+    if (cp < 0x80) { out[0] = (uint8_t)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (uint8_t)(0xC0 | (cp >> 6));
+        out[1] = (uint8_t)(0x80 | (cp & 0x3F)); return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (uint8_t)(0xE0 | (cp >> 12));
+        out[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (uint8_t)(0x80 | (cp & 0x3F)); return 3;
+    }
+    out[0] = (uint8_t)(0xF0 | (cp >> 18));
+    out[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (uint8_t)(0x80 | (cp & 0x3F)); return 4;
+}
+
+static void sel_serialize(void) {
+    if (!sel_valid) return;
+    int x0, y0, x1, y1;
+    sel_box(&x0, &y0, &x1, &y1);
+    uint8_t buf[CLIP_CAP];
+    int n = 0;
+    for (int y = y0; y <= y1; y++) {
+        if (y > y0 && n < CLIP_CAP - 1) buf[n++] = '\n';
+        int col0 = (y == y0) ? x0 : 0;
+        int col1 = (y == y1) ? x1 : cols - 1;
+        uint8_t rowtext[CON_MAX_COLS * 4];
+        int rn = 0;
+        for (int x = col0; x <= col1; x++) {
+            con_cell_t *c = &cells[y][x];
+            if (c->flags == CELL_F_WIDE_R) continue;
+            uint32_t cp = c->cp;
+            if (cp == 0) { rowtext[rn++] = ' '; continue; }
+            uint8_t tmp[4];
+            int k = utf8_encode_cp(cp, tmp);
+            for (int i = 0; i < k && rn < (int)sizeof(rowtext); i++)
+                rowtext[rn++] = tmp[i];
+        }
+        while (rn > 0 && rowtext[rn - 1] == ' ') rn--;
+        for (int i = 0; i < rn && n < CLIP_CAP - 1; i++) buf[n++] = rowtext[i];
+    }
+    clip_set(buf, n);
+}
+
+void con_mouse_poll(void) {
+    mouse_event_t e;
+    while (mouse_poll_event(&e)) {
+        /* Software pixel cursor: only the drawable gfx24 back-end hooks
+         * this; text mode draws no mouse cursor (wheel still scrolls). */
+        if (be->mouse_cursor) be->mouse_cursor(e.x, e.y, 1);
+
+        /* Button edges first, so a wheel packet that also carries a button
+         * change is not swallowed by the wheel branch. */
+        if (e.changed & MOUSE_BTN_MID && (e.down & MOUSE_BTN_MID)) {
+            if (paste_hook && !clip_empty()) paste_hook(clip_get(), clip_len());
+            else                              paste_pending = 1;
+        }
+        if (e.changed & MOUSE_BTN_RIGHT && (e.down & MOUSE_BTN_RIGHT)) {
+            sel_clear();
+            continue;
+        }
+        if (e.changed & MOUSE_BTN_LEFT) {
+            int cx, cy;
+            cell_of_pixel(e.x, e.y, &cx, &cy);
+            if (e.down & MOUSE_BTN_LEFT) {
+                int ox0, oy0, ox1, oy1;
+                if (sel_valid) sel_box(&ox0, &oy0, &ox1, &oy1);
+                else { ox0 = oy0 = ox1 = oy1 = -1; }
+                sel_ax = sel_cx = cx;
+                sel_ay = sel_cy = cy;
+                sel_valid = 1; sel_dragging = 1;
+                if (ox0 >= 0) sel_repaint_box(ox0, oy0, ox1, oy1);
+                sel_repaint_box(cx, cy, cx, cy);
+            } else {
+                sel_dragging = 0;
+                if (sel_valid) sel_serialize();
+            }
+            continue;
+        }
+
+        if (e.dz) {
+            /* 3 lines per notch; delta > 0 = older history. */
+            con_scrollback(e.dz > 0 ? 3 : -3);
+            continue;
+        }
+
+        if (sel_dragging) {
+            int cx, cy;
+            cell_of_pixel(e.x, e.y, &cx, &cy);
+            if (cx != sel_cx || cy != sel_cy) {
+                int ox0, oy0, ox1, oy1;
+                sel_box(&ox0, &oy0, &ox1, &oy1);
+                sel_cx = cx; sel_cy = cy;
+                sel_repaint_box(ox0, oy0, ox1, oy1);
+                sel_repaint_box(cx, cy, cx, cy);
+            }
+        }
+    }
+}
+
+int con_mouse_paste_taken(void) {
+    int v = paste_pending;
+    paste_pending = 0;
+    return v;
+}
+
+void con_set_paste_hook(con_paste_fn fn) {
+    paste_hook = fn;
+    if (!fn) { paste_pending = 0; return; }
+    if (paste_pending && !clip_empty()) {
+        paste_pending = 0;
+        paste_hook(clip_get(), clip_len());
+    }
+}
+
+void con_mouse_state(int *x, int *y, uint8_t *buttons) {
+    mouse_get_state(x, y, buttons);
+}
+
+int con_selection_nonempty(void) { return sel_valid && !clip_empty(); }

@@ -20,6 +20,8 @@
 #include "e1000.h"       /* v2.21 #55 e1000 NIC state for netdiag */
 #include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
 #include "lang.h"       /* v2.21 T50: en/zh user-visible messages      */
+#include "clip.h"       /* v2.57 kernel clipboard */
+#include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -924,6 +926,38 @@ static int echo_color_lookup(const char *s) {
         if (!strcmp_(s, ECHO_COLORS[i].name)) return ECHO_COLORS[i].idx;
     return -1;
 }
+/* v2.57: kernel clipboard.  `clip` prints the selection; `clip -c` /
+ * `clip clear` empties it.  Content is UTF-8 (may hold hanzi). */
+static void cmd_clip(char *arg) {
+    char *p = arg;
+    while (*p == ' ') p++;
+    if (!strcmp_(p, "-c") || !strcmp_(p, "clear")) {
+        clip_clear();
+        vga_write("clip: cleared\n");
+        return;
+    }
+    if (*p) { vga_write("clip: unknown argument\n"); return; }
+    if (clip_empty()) { vga_write("clip: (empty)\n"); return; }
+    vga_write(clip_get());
+    vga_putc('\n');
+}
+
+/* v2.57: mouse / scrollback diagnostic for tests and inspection.
+ * Prints absolute pixel position, button mask and scrollback view offset. */
+static void cmd_mouse(void) {
+    int x, y; uint8_t btn;
+    mouse_get_state(&x, &y, &btn);
+    vga_write("mouse: x="); print_int(x);
+    vga_write(" y="); print_int(y);
+    vga_write(" btn="); print_int(btn);
+    vga_write(" sb="); print_int(con_scrollback_view());
+    vga_write(" pk="); print_int((int)mouse_packet_count());
+    vga_write(" irq="); print_int((int)mouse_irq_count());
+    vga_write(" ab="); print_int((int)mouse_aux_bytes());
+    vga_write(" kb="); print_int((int)mouse_kbd_bytes_irq12());
+    vga_putc('\n');
+}
+
 static void cmd_echo(char *arg) {
     int nl = 1, color = -1;
     char *p = arg;
@@ -4473,6 +4507,8 @@ static void shell_exec(char *cmd, char *arg) {
         }
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
         else if (!strcmp_(cmd, "echo"))      cmd_echo(arg);
+        else if (!strcmp_(cmd, "clip"))      cmd_clip(arg);
+        else if (!strcmp_(cmd, "mouse"))     cmd_mouse();
         /* NIGHT-P3: Linux-style easter eggs */
         else if (!strcmp_(cmd, "cowsay"))    cmd_cowsay(arg);
         else if (!strcmp_(cmd, "sl"))         cmd_sl();

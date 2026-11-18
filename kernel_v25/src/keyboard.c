@@ -3,6 +3,8 @@
 #include "io.h"
 #include "vga.h"
 #include "ime.h"
+#include "mouse.h"
+#include "clip.h"
 #include "task.h"
 
 /* US QWERTY scancode set 1 (make codes, unshifted / shifted) */
@@ -40,12 +42,16 @@ static int  got_e0 = 0;          /* an 0xE0 prefix was just seen */
 static volatile uint8_t scq[SCQ_SZ];
 static volatile uint32_t scq_head, scq_tail;
 
+/* v2.57: one scancode enqueue, shared by the PS/2 IRQ1 drain and the
+ * PS/2-bit5 routing helper (ps2_drain) so an aux byte can never be
+ * enqueued as a key and vice versa. */
+void kbd_feed_byte(uint8_t sc) {
+    uint32_t n = (scq_head + 1) % SCQ_SZ;
+    if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
+}
+
 void kb_irq(void) {
-    while (inb(0x64) & 1) {
-        uint8_t sc = inb(0x60);
-        uint32_t n = (scq_head + 1) % SCQ_SZ;
-        if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
-    }
+    ps2_drain();                        /* routes 0x60 by status bit5 */
     console_wake_all();                 /* wake tasks blocked for a key */
 }
 
@@ -127,6 +133,7 @@ static int e0_map(int k, int ctrl_held) {
 static int kb_next_scancode(void) {
     for (;;) {
         usb_service();                     /* v2.29: latch hot-plug attach */
+        con_mouse_poll();                  /* v2.57: drain mouse events    */
         int sc = scq_pop();
         if (sc >= 0) return sc;
         /* poll, don't block: usb_service() must run even with no key
@@ -140,6 +147,7 @@ extern volatile uint32_t timer_ticks;
 static int kb_next_scancode_timed(uint32_t deadline) {
     for (;;) {
         usb_service();                     /* v2.29 */
+        con_mouse_poll();                  /* v2.57 */
         int sc = scq_pop();
         if (sc >= 0) return sc;
         if ((int32_t)(timer_ticks - deadline) >= 0) return -1;
@@ -345,6 +353,19 @@ static uint8_t rl_tok_color(const char *tok, int n, int index, uint8_t base) {
 static rl_complete_fn rl_completer;
 void kb_set_completer(rl_complete_fn fn) { rl_completer = fn; }
 
+/* v2.57: middle-click paste closure.  Registered only while kb_readline
+ * owns the input line; the console glue calls it with the clipboard UTF-8. */
+static int      rl_paste_x0, rl_paste_y0;
+static uint8_t  rl_paste_base;
+static void rl_redraw(int x0, int y0, uint8_t base);
+static void rl_paste_apply(const char *s, int n) {
+    if (n <= 0) return;
+    if (rl_width(line, line_len) + rl_width(s, n) < con_cols() - rl_paste_x0) {
+        rl_insert(s, n);
+        rl_redraw(rl_paste_x0, rl_paste_y0, rl_paste_base);
+    }
+}
+
 static void rl_redraw(int x0, int y0, uint8_t base) {
     int cols = con_cols();
     if (x0 >= cols) x0 = cols - 1;
@@ -401,6 +422,8 @@ int kb_readline(char *buf, int len) {
     int hist_pos = -1;                  /* -1 = the draft line being typed */
     char draft[KB_BUF];
     line_len = line_cur = 0; line[0] = 0;
+    rl_paste_x0 = x0; rl_paste_y0 = y0; rl_paste_base = base;
+    con_set_paste_hook(rl_paste_apply);
 
     while (1) {
         int k = kb_getkey();
@@ -414,12 +437,20 @@ int kb_readline(char *buf, int len) {
 
         if (k == KB_CTRL_UP   || k == KB_CTRL_DOWN ||
             k == KB_CTRL_PGUP || k == KB_CTRL_PGDN) {
+            /* Ctrl+Up/Down = 1 line per step; Ctrl+PgUp/PgDn = one full
+             * page (visible text rows - 1) per step.  text and gfx24 both
+             * go through the same con_scrollback() row-granular API. */
             int d = (k == KB_CTRL_UP || k == KB_CTRL_PGUP) ? 1 : -1;
             if (k == KB_CTRL_PGUP || k == KB_CTRL_PGDN)
-                d *= (con_rows() > 2 ? (con_rows() - 1) / 2 : 1);
+                d *= (con_rows() > 2 ? con_rows() - 1 : 1);
             con_scrollback(d);
             continue;
         }
+
+        /* v2.57: drain PS/2 mouse events (selection / wheel / middle-click
+         * paste) even while the line editor is waiting on a key.  Paste is
+         * applied through the registered rl_paste_apply hook. */
+        con_mouse_poll();
 
         /* v2.9 pinyin IME: F2 toggles; a committed candidate is a 3-byte
          * UTF-8 hanzi, inserted at the cursor (not blindly appended). */
@@ -443,6 +474,7 @@ int kb_readline(char *buf, int len) {
             rl_redraw(x0, y0, base);
             buf[0] = 0;
             con_set_fg(base);
+            con_set_paste_hook(0);
             return 2;
         }
         if (k == KB_TAB && rl_completer) {
@@ -473,6 +505,7 @@ int kb_readline(char *buf, int len) {
             con_set_cursor((uint8_t)end_col, (uint8_t)y0);
             con_putc('\n');
             line_len = line_cur = 0; line[0] = 0;
+            con_set_paste_hook(0);
             return 1;
         }
         if (k == KB_UP || k == KB_DOWN) {

@@ -86,6 +86,11 @@ typedef struct render_be {
      * read-modify-write of VRAM is poison under Write-Combining. */
     int  (*scroll)(int n, uint32_t bg_rgb);
     void (*draw_cursor)(int x, int y, uint32_t fg_rgb);
+    /* v2.57 optional: software pixel mouse cursor.  NULL = back-end does
+     * not draw one (text / mode13 / vbe32).  The hook saves the pixels
+     * under the arrow itself, so moving it restores the old dirty rect
+     * and repaints only the new one -- no full-frame redraw. */
+    void (*mouse_cursor)(int x, int y, int visible);
     void (*diag)(void);
 
     /* v2.25: adjustable glyph scale (vbe24 only today).  NULL = fixed

@@ -17,6 +17,7 @@
 #include "es1371.h"     /* v2.21 #56: ES1370/1371 PCI audio IRQ top half */
 #include "e1000.h"      /* v2.21 #55: Intel e1000 PCI NIC IRQ top half */
 #include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
+#include "mouse.h"      /* v2.57 PS/2 aux mouse, IRQ12 top half */
 #include "task.h"
 #include "usb.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
@@ -256,7 +257,14 @@ void isr_irq(int_frame_t *f) {
     /* v2.21: PCI IRQ lines.  Both handlers inspect their own status
      * register and return immediately for a foreign source, so sharing a
      * line is safe.  intr_unmask_irq() is called by the driver at probe. */
-    case 9: case 10: case 11: case 12: case 13: case 14: case 15:
+    case 12:
+        /* v2.57: PS/2 aux mouse top half; PCI NIC/audio can still share
+         * this line, so their self-guarding handlers run afterwards. */
+        mouse_irq();
+        es1371_irq();
+        e1000_irq();
+        break;
+    case 9: case 10: case 11: case 13: case 14: case 15:
         es1371_irq();
         e1000_irq();
         break;
