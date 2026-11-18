@@ -42,6 +42,7 @@ ring3 一律 L0 杀任务；ring0 一律 L2 全屏。
 ## 4. 崩溃屏（L2）输出契约
 
 - **双输出**：关键信息先写 COM1（0x3F8，轮询 `LSR.THRE`，守卫超时丢弃字节不阻塞），再写 VGA 文本缓冲；任一路失败不影响另一路。
-- **自包含**：蓝屏路径不调用 `kmalloc`、不持阻塞锁、不 `sleep`、不开 FS、不进 IME、不做 UTF-8 框线绘制。
+- **自包含**：蓝屏路径不调用 `kmalloc`、不持阻塞锁、不 `sleep`、不开 FS、不进 IME、不做 UTF-8 框线绘制。FS 调用只出现在 `bsod_init()`（启动期一次性缓存 `/etc/panicmode`），崩溃路径本身不开文件；`con_force_text()` 是内核态应急切文本后端，不经过 shell/FS。
+- **字模依赖证据（P0-4 核对）**：内核 CJK 位图来自编译期提交的常量表 `src/font_hz.inc`（`render_font.c` 顶部 `#include "font_hz.inc"` → 静态 `hz_font[]`，`render_font_hz()` 按 codepoint 二分查找），**不是**外部字体文件、不依赖运行时字体加载；ASCII 位图来自同文件内静态 `font8x8_basic[95][8]`。但该表是 GB2312 子集，缺部分常用汉字；崩溃屏又禁止触字体加载器，故标题/提示行按口径降级 ASCII（详见问题清单 #202）。崩溃屏本身不绘制任何 UTF-8 框线字符（`─│┌┐└┘`），全部为 ASCII 标点。
 - **护栏**：`g_in_panic` 置位后，任何再次进入的致命异常 / triple fault 直接 `cli; hlt`；panic 深度计数上限 `BSOD_PANIC_DEPTH_MAX = 2`，超限 halt。
 - **默认摘要页**：异常类型 + 十六进制向量、CPU 号、FATAL、RECOVER、简短原因、ERR、EIP、CR2（仅页错误）、RSP、EFLAGS、栈顶 3~5 帧、操作提示行、自动重启倒计时；默认**不显示**全量寄存器 / 日志 / 用户输入 / 剪贴板。

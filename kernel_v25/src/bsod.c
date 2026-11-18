@@ -174,7 +174,14 @@ static void draw_screen(const snap_t *s, const char *msg, int soft, int info) {
     vga_write_at(4, 5, "  ###    #");
     vga_write_at(4, 6, ":(");
 
-    vga_write_at_utf8(2, 8, "CatOS 遇到严重问题，需要重新启动。");
+    /* P0-4: title stays ASCII.  The built-in GB2312 hanzi subset
+     * (font_hz.inc) does not cover several glyphs in the previous Chinese
+     * title (遇/严/重/问/题/新/启/动/，), so those would have fallen
+     * back to '?' cells on the crash screen.  Per the deps checklist the
+     * crash path degrades to the English line instead of relying on a font
+     * that may be missing; evidence for the built-in table is in
+     * docs/panic-tiers.md §4 and docs/CatOS-内核问题清单.md entry #202. */
+    dual_write_at(2, 8, "CatOS has encountered a problem and needs to restart.");
 
     if (!info) {
         vga_write_at(2, 10, "STOP: ");
@@ -204,7 +211,7 @@ static void draw_screen(const snap_t *s, const char *msg, int soft, int info) {
         draw_info_page(s);
     }
 
-    vga_write_at_utf8(2, 23, "按任意键重新启动；按 F1 显示已保存崩溃信息。");
+    dual_write_at(2, 23, "Press a key to reboot; F1: saved crash info.");
     if (soft) vga_write_at(2, 24, "(--no-reboot: keypress returns to shell)");
 }
 
