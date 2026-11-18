@@ -152,3 +152,5 @@ CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一�
 CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
 CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
 CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。
+CatOS[易错点] 递归遍历目录树时静态簇缓冲不能跨递归调用复用：子目录 `fat_read_cluster(child, buf)` 会覆盖外层同一个 static buf，返回后外层循环 `b = buf + i*32` 读到的是子目录内容，表现为外层目录只扫到前几个条目就中断、后续坏项全部漏报（本轮 fsck 扫描器实测根目录只进了 DEV 就停）。递归扫描必须按深度分缓冲 `bufs[depth]`；非递归的普通遍历器用单缓冲没问题。
+CatOS[易错点] 多 clone 并发跑回归时，部分套件的 monitor 端口是写死在脚本里的（size_regress PORT=4492），另一 clone 占用同端口后，本驱动会连到别人的 monitor，HMP 回复为空、`screendump` 落不了文件，报错看起来像「screendump produced no file」而不是端口冲突。先 `ps aux | grep qemu` 核对端口占用；临时把本 clone 套件 PORT 改到空闲口（4526 等）跑完，提交前还原，不要把端口改动带进 commit。
