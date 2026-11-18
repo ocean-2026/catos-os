@@ -84,7 +84,7 @@
 
 - R1 修复后的全量终验回归由并行子代理执行，结果写入：
   `/home/user/Doubao/chats/38453665424926722/adversarial/regression_final.md`。
-- 截至本报告落笔，该终验仍在进行中，详见该文件（文件落盘后以其中套件 PASS/FAIL 计数为准）。
+- **终验已完成：152/152 PASS，0 FAIL / 0 WARN / 0 ERR，14 套件退出码全 0**（qemu 12、guess 16、fsrec 12、lfn 14、recur 10、jobctl 12、group 10、daemon 5、caps 12、user 20、disk 5、env 13、heap 4、size 7），未发现合流（3091719..86d0ab7）引入回归；被测代码态 86d0ab7（ea60ba9 仅 docs 不受影响）。原始日志 `tests/regress_logs/final_<suite>.log`。
 - 本轮开发期内既有套件基线：jobctl / group / daemon / lfn / user / gfx24 等针对性回归在各自落地 commit 时复跑通过；全量十二套 sweep 基线记录见 `docs/` 既有回归文档。
 
 ---
@@ -163,5 +163,5 @@
 ## 七、遗留与交接
 
 1. 工作树中 40 余个 `.ce`/`.catpkg` 改动为构建/测试产物噪声，保留未提交；zip 打包时已排除产物目录。
-2. 终验回归结果以 `adversarial/regression_final.md` 为准（本报告第四节为占位引用）。
+2. 终验回归已完成（152/152 全绿），详见 `adversarial/regression_final.md` 与本报告第四节。
 3. TTF 渲染集成、#188–#193 deferred 项、fat 嵌套删除重入（#155）列入下一轮路线。
