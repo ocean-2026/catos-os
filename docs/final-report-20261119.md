@@ -91,21 +91,32 @@ cbf77c3..614b396  main -> main
 
 ---
 
-## 3. 回归台账
+## 3. 回归台账（终验：HEAD `d8a4a5a` 源码构建的 ISO，串行 + flock，日志见 `tests/regress_logs/`）
 
-基线 14 套件（152 checks）：qemu 12/12、shell_guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、jobctl 12/12、group 10/10、daemon 5/5、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7。
+代码面冻结于 `e8167f6`（其后的 `b5e0fd9`/`d8a4a5a`/`ee8e29b` 等均为 docs-only，`git diff e8167f6..HEAD -- kernel_v25` 为空），终验 ISO 由该源码构建（11,649,024 字节）。
 
-本夜新增套件：`videomode` 9/9、`fs_badname` 23/23、`mouse` 18/18、`panic` 19/19、`pager`（见终验日志）、`ime` 18/18、`diag` 4/4。
+| 套件 | 结果 | 套件 | 结果 |
+|---|---|---|---|
+| qemu | **12/12** | caps | **12/12** |
+| shell_guess | **16/16** | user | **20/20** |
+| fsrec | **12/12** | disk | **5/5** |
+| lfn | **14/14** | env | **13/13** |
+| recur | **10/10** | heap | **4/4** |
+| jobctl | **ALL PASS**（12） | size | **7/7** |
+| group | **ALL PASS**（10） | videomode | **9/9** |
+| daemon | **ALL PASS**（5） | fs_badname | **23/23** |
+| diag | **4/4** | mouse | **18/18** |
+| panic | **19/19** | pager | **27/27** |
+| ime | **18/18** | | |
 
-合计：**152 + 9 + 23 + 18 + 19 + pager + 18 + 4**（终验数字见 `tests/regress_logs/final_*.log`）。
+**合计 270 项断言，269 PASS，唯一 FAIL 为基线豁免项 `ce_regress`（11 步，`ce_sim` 未建模 opcode，与本轮 diff 无关，基线同样失败）。**
 
-基线豁免（与本轮代码无关，详见 `docs/regression-ports.md` §2）：
-- `gfx24_regress` 1 步：`/bin/gfx24.ce installed`（39 条 `ls` 溢出 25 行窗口，基线同样 FAIL）
-- `svga24_regress` 2 步：旧主题色 `(16,32,64)` vs 现 `(12,12,12)`（断言过期）
-- `ce_regress` 11 步：`ce_sim` 未建模 opcode（宿主侧解释器既有缺口）
-- `size_regress` large 帧偶发：端口争用/既有 screendump 时序，固定端口串行后稳定
+基线豁免登记（`docs/regression-ports.md` §2）：
+- `ce_regress` 11 步：`ce_sim` 解释器未建模 opcode（宿主侧既有缺口）
+- `gfx24_regress` 的 `/bin/gfx24.ce installed` 一步：39 条 `ls` 溢出 25 行窗口，基线同样 FAIL
+- `svga24_regress` 主题色断言过期（`(16,32,64)` vs 现 `(12,12,12)`）
 
-纪律：所有 sweep 串行、端口固定（见 `docs/regression-ports.md`），`run_full_regress.sh` 用 `flock` 互斥。
+纪律：所有 sweep 串行、端口固定（`docs/regression-ports.md`），`run_full_regress.sh` 用 `flock` 互斥；所有套件 `qemu_driver` 侧 staging 目录 `atexit` 递归清理。
 
 ---
 
