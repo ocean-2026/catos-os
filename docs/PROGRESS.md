@@ -608,3 +608,8 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 
 ### 回归
 - `tests/panic_regress.py` 扩充至 19 步：摘要字段完整、D/S/M/P/A 各键翻页可见断言、C 拒绝、串口双输出抓取断言、ring3 隔离 + faultinfo、crashlog 无记录提示、P 仅 `dump queued`、halt 模式留屏。`tests/diag_regress.py` 补 `force_text` 盲切文本。
+
+#### 同 ISO 实机复核（2026-11-18，本工作仓 CatOs-f）
+- 全绿：panic_regress **19/19**、qemu_regress **12/12**、caps_regress **12/12**、user_regress **20/20**、fsrec_regress **12/12**、shell_guess_regress **16/16**；diag 4/4、lfn 14/14、badname 23/23、daemon 5/5、disk 5/5、env 13/13、heap 4/4、recur 10/10、jobctl 12/12、group 10/10。
+- `ce_regress` 11 FAIL 为既有基线（ce_sim 未建模），不计本轮回归失败。
+- **size_regress 未在本仓拿到 7/7**：卡在 `size large` 步 QEMU screendump 捕获（large.ppm 未刷新），本仓未改 `be_vbe24.c`/`render.c`/size 链路（diff 仅触及 bsod/serial_log/shell/intr/diag/gen_symtab 与测试）；主仓基线在同一步同样卡住，判定为既有 screendump 时序/争用问题，非本轮增量引入。端口写死 4492，复跑需避开外部 sweep 占用。
