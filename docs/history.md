@@ -152,3 +152,7 @@ CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一�
 CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
 CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
 CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。
+CatOS[易错点] PS/2 鼠标 8042 初始化末尾必须重新 0xAE 使能键盘：开头 0xAD 禁键盘后若不恢复，所有扫描码被 8042 门控，shell 看不到任何键入。IRQ12 与键盘共用 0x60 数据口，读 0x60 前必须先读 status bit5(0x20) 分流 aux/keyboard，否则鼠标包会被当成按键入队、按键被当成鼠标包解析。
+CatOS[易错点] 选择反色高亮不出现的根因是脏矩形跟踪器：选择态在绘制时才交换 fg/bg，而 paint() 的跳过比较发生在交换之前，内容未变就被误判为已画而跳过重绘。选择框重绘前必须先把对应格子的 painted_valid 置 0 失效，强制重绘。
+CatOS[易错点] 回溯视图内不能用「键入诊断命令」读 sb_view：readline 过滤块规定任意非回溯键都会退出视图并把 sb_view 复位 0，诊断首字符就把视图清掉。测试断言回溯偏移必须走 monitor `xp` 直读内核符号（nm 解析 PE VMA=物理地址），不能回 shell 打命令。
+CatOS[易错点] HMP 鼠标诊断行会在屏幕上残留多行，正则取第一个匹配会读到旧基线行；解析必须 findall 取最后一个。read_screen 定位输出行时要排除带提示符 '#' 的命令行（命令行也含标记子串）。
