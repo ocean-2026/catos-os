@@ -821,19 +821,37 @@ static void sb_repaint(void) {
     sync_cursor(1);
 }
 
-/* Archive index visible at grid row y.  The block holds the newest `show`
- * archived rows (top = oldest of the visible window, bottom = newest):
- * top row j=sb_view-1, bottom row j=sb_view-show. */
-static int sb_j_for_row(int y) {
-    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
-    int top = rows - show;
-    return sb_view - 1 - (y - top);
-}
+/* Linear viewport over the line sequence (oldest -> newest):
+ *   arch[sb_count-1] ... arch[1] arch[0]  live[0] ... live[rows-1]
+ * arch[0] is the most recently archived row; live[] is the verbatim live
+ * snapshot taken when the viewer was first entered.  At offset v the window
+ * holds rows v-1..0 from the archive followed by live rows 0..rows-1-v.
+ *
+ * A step moves the whole viewport by ONE row: the grid shifts by row memmove
+ * and only the newly filled edge row is sourced from the sequence.  There is
+ * no full-screen blank and no constant hint bar. */
 
 /* Copy archive row j (0 = newest archived) into cell row y. */
 static void sb_row_to_cell(int y, int j) {
     int k = (sb_head - 1 - j + CON_SB_ROWS * 2) % CON_SB_ROWS;
     for (int x = 0; x < cols; x++) cells[y][x] = sb[k][x];
+}
+
+/* Copy live snapshot row ly into cell row y. */
+static void sb_live_to_cell(int y, int ly) {
+    for (int x = 0; x < cols; x++) cells[y][x] = sb_live[ly][x];
+}
+
+/* Fill grid row y from whichever sequence line belongs to view v.  The
+ * row's dirty tracker is invalidated so paint() actually draws the new
+ * content (otherwise it matches the previously painted row and skips). */
+static void sb_fill_row(int y, int v) {
+    if (v - y > 0) {
+        sb_row_to_cell(y, v - y - 1);
+    } else {
+        sb_live_to_cell(y, y - v);
+    }
+    for (int x = 0; x < cols; x++) painted_valid[y][x] = 0;
 }
 
 /* Move one grid row src -> dst.  The destination's dirty tracker is
@@ -851,79 +869,25 @@ static void sb_paint_row(int y) {
     for (int x = 0; x < cols; x++) paint(x, y);
 }
 
-static void sb_draw_hint_row(void) {
-    uint8_t old_attrs = s_attrs;
-    s_attrs |= CON_ATTR_INVERSE;
-    for (int x = 0; x < cols; x++) cell_blank(&cells[0][x]);
-    con_write_at_utf8(0, 0, "-- scrollback: Ctrl+Up/Down, any other key returns --");
-    s_attrs = old_attrs;
+/* One row older: every visible line moves DOWN one row; the new top row is
+ * the next older archived line; the old bottom row leaves the window. */
+static int sb_step_older(void) {
+    if (sb_view >= sb_count) return 0;
+    for (int y = rows - 1; y >= 1; y--) sb_move_row(y, y - 1);
+    sb_view++;
+    sb_fill_row(0, sb_view);
+    for (int y = 0; y < rows; y++) sb_paint_row(y);
+    return 1;
 }
 
-/* First entry into history: blank the live grid's body, draw the hint row
- * and lay the newest `show` archived rows along the bottom.  This one
- * transition repaints the block; every later step moves row by row. */
-static void sb_enter_history(int show) {
-    for (int y = 1; y < rows; y++)
-        for (int x = 0; x < cols; x++) {
-            cell_blank(&cells[y][x]);
-            painted_valid[y][x] = 0;
-        }
-    sb_draw_hint_row();
-    for (int i = 0; i < show; i++) {
-        int y = rows - show + i;
-        sb_row_to_cell(y, sb_j_for_row(y));
-    }
-    sb_repaint();
-}
-
-/* One single-row viewer transition.  dir +1 = older, -1 = newer.
- * Returns 0 when the boundary is reached (no step taken).
- *
- * The history block maps row y to archive j = rows-1-y.  While the block
- * GROWS (older, not yet full) the existing rows keep their content and only
- * the new top row is filled; once the block is full an older step shifts the
- * whole block down one row and drops the oldest.  The newer direction mirrors
- * this: shrinking keeps the lower rows and blanks the vacated top slot; a
- * full block shifts up one row and refreshes the bottom from archive j=0. */
-static int sb_step(int dir) {
-    int show = sb_view < (rows - 1) ? sb_view : (rows - 1);
-
-    if (dir > 0) {
-        if (sb_view >= sb_count) return 0;
-        int old_show = show;
-        sb_view++;
-        int new_show = sb_view < (rows - 1) ? sb_view : (rows - 1);
-        int top = rows - new_show;
-        if (new_show > old_show) {
-            /* Grow: insert one older row at the top, keep the rest. */
-            sb_row_to_cell(top, sb_j_for_row(top));
-            sb_paint_row(top);
-        } else {
-            /* Full block: shift down, drop the oldest, fill the top. */
-            for (int y = rows - 1; y > top; y--) sb_move_row(y, y - 1);
-            sb_row_to_cell(top, sb_j_for_row(top));
-            for (int y = top; y < rows; y++) sb_paint_row(y);
-        }
-    } else {
-        if (sb_view <= 0) return 0;
-        int old_show = show;
-        sb_view--;
-        int new_show = sb_view < (rows - 1) ? sb_view : (rows - 1);
-        int top = rows - new_show;
-        if (new_show < old_show) {
-            /* Shrink: drop the oldest top row, keep the lower block. */
-            for (int x = 0; x < cols; x++) {
-                cell_blank(&cells[top - 1][x]);
-                painted_valid[top - 1][x] = 0;
-            }
-            sb_paint_row(top - 1);
-        } else {
-            /* Full block: shift up, refresh the bottom row from its archive. */
-            for (int y = top; y < rows - 1; y++) sb_move_row(y, y + 1);
-            sb_row_to_cell(rows - 1, sb_j_for_row(rows - 1));
-            for (int y = top; y < rows; y++) sb_paint_row(y);
-        }
-    }
+/* One row newer: every visible line moves UP one row; the new bottom row is
+ * sourced from the sequence; the old top row leaves the window. */
+static int sb_step_newer(void) {
+    if (sb_view <= 0) return 0;
+    for (int y = 0; y < rows - 1; y++) sb_move_row(y, y + 1);
+    sb_view--;
+    sb_fill_row(rows - 1, sb_view);
+    for (int y = 0; y < rows; y++) sb_paint_row(y);
     return 1;
 }
 
@@ -945,15 +909,10 @@ int con_scrollback(int delta) {
         return 0;
     }
 
-    if (sb_view == 0) {
-        int show = want < (rows - 1) ? want : (rows - 1);
-        sb_view = want;
-        sb_enter_history(show);
-    }
-
     int dir = want > sb_view ? 1 : -1;
     while (sb_view != want) {
-        if (!sb_step(dir)) break;
+        if (dir > 0) { if (!sb_step_older()) break; }
+        else         { if (!sb_step_newer()) break; }
     }
     sync_cursor(1);
     return sb_view;
