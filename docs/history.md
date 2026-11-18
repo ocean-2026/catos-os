@@ -149,3 +149,6 @@ CatOS[易错点] 附加组成员在磁盘 /etc/group 上按用户名存，加载
 CatOS[易错点] 后台/重定向 CE 应用（如 `hello > file`）是异步任务，chown/chmod 紧随重定向下发时应用可能还在写；抓屏断言要给足命令间隔，且 VGA 旧行残留会让上一条 permission denied 污染下一条断言，读取状态行前先 clear 或只取最后一条 jobs/结果行。
 CatOS[易错点] 探针驱动后台任务时，任务寿命必须覆盖全部断言窗口：`daemon memlog 6 500` 3 秒自退，dm-3 的 log 检查在 ~4.5s 必拿「no such task」；`spinner 4 &` 2 秒跑完，fg 到达时已被回收报「fg: no such job」。短寿命自退型任务一律换成 ≥ 断言总耗时的参数（memlog 60x500 / spinner 20），或默认无限循环由探针显式 kill。
 CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一并还原：v2.52 期间为 jobctl 放宽的 spinner 上限 8→60→200（未提交），v2.54 隔离验证后 spinner 回到 60，`spinner 180` 被钳到默认 8 tick 约 1-2 秒退出，jobctl 的 jobs-lists-running 随机假失败。从工作树复跑针对性套件前，先核对探针依赖的未提交源码还在不在（git diff 具体文件），而不是只看 HEAD 提交了什么。
+CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
+CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
+CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。

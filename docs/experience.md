@@ -77,3 +77,5 @@ CatOS[经验] 口令摘要加宽保持可演进：旧混合函数保留下来仅
 CatOS[经验] 调度类死锁用串口时序打点最快定位：`-serial file:/tmp/ser.log` + 内核侧 btime_mark()（自带 ms 时间戳），在 signal 投递/wait 进入/wake-parent/reap 四个点打标，一次运行即可看出「wake-parent 有、reaped 无」这类「被唤醒但永不调度回来/等待条件永不满足」的竞态，比反复抓屏猜测高效得多。
 CatOS[经验] 附加组最小落地不必给每个任务/用户凭据挂 supplementary 数组：内核维护一张常驻组库（内存表 + 持久化 /etc/group，行格式 name:gid:member,...，成员按名存、加载期解析 uid），权限检查在「主 gid 未命中」后用 uid 反查组库即可命中任一附加组。老单 gid 记录与空组库天然向后兼容；每任务附加组凭据缓存留作后续优化。
 CatOS[经验] 守护原语最小落地复用后台作业管线：task_t 加一个 daemon 标志 + spawn 复位 + jobs 加 D 列即可，事件等待复用既有 delay（timer 唤醒）/子退出/键入三唤醒源，不新增调度类、不引入 POSIX 会话/信号表；自启服务用 /etc/autoexec 行首 @ 前缀走同一 daemon 管线（uid=root）。示范守护（memlog 堆水位）周期写捕获 ring，log TID 读回、kill TID 停止，全部交互走 v2.51 既有命令。
+CatOS[经验] 二进制字体格式解析层最稳的落地路径：先用宿主侧脚本（fontTools）把参考字体的轮廓点/advance 生成 C 期望表入仓，再写 C 解析层逐点 diff；内核路径全定点 F2Dot14（raw/16384，四舍五入），每个多字节访问都过边界校验，截断/垃圾/空缓冲用例纳入单测。最易出错三处：cmap 子表偏移相对表起点而非文件绝对偏移；loca 表 short(×2)/long 双格式；简单字形 REPEAT 展开计数与 X/Y_SAME 零 delta 占 0 字节分支。
+CatOS[经验] 对抗测试闭环按红/白/蓝分工最清晰：红队一律磁盘副本隔离跑动态攻击（基础盘不污染），白队只读静态审查出条目并续号，蓝队按"有界写入/权限闸门/属主校验"优先修可落地项；改动面大或需专项设计的编号登记 deferred，不硬塞进本轮。findings 与证据目录归档，问题清单条目与 commit message 双向可查，收官报告按任务/版本链/统计/状态对照分层汇总。
