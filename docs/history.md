@@ -152,7 +152,20 @@ CatOS[易错点] 隔离实验 stash/checkout 会把未提交的配套改动一�
 CatOS[易错点] TTF 复合字形变换标志位：0x0100 是 WE_HAVE_INSTRUCTIONS（指令块在所有组件之后），不是 TWO_BY_TWO；三个缩放标志正确值是 WE_HAVE_A_SCALE=0x0008、WE_HAVE_AN_X_AND_Y_SCALE=0x0040、WE_HAVE_A_TWO_BY_TWO=0x0080。标志对错位会把后续组件字段当成 2×2 矩阵读，轮廓点整体错位且不报错。
 CatOS[易错点] TTF 复合组件无 CF_WORDS(0x0001) 标志时偏移参数是两个字节（rd8×2，游标推进 2），不是 rd16×2 推进 4；再按 CF_XY_VALUES(0x0002) 决定有符号/无符号，缺该标志属点匹配参数（本批解析层直接拒绝）。字节分支多读 2 字节会让后面所有组件的 gid/变换字段连环错读。
 CatOS[易错点] 多分支合并前先把已跟踪的构建产物 stash/移出工作树：带 .ce/.catpkg 本地改动的工作树 `merge --ff-only` 会被"本地修改会被覆盖"挡住；产物噪声不进 docs-only commit，打包时统一排除 */obj/*、*.ppm、*.bin、*/night/* 等目录。
+CatOS[易错点] TSC 超时计算的单位倍率：cpu_mhz 是 cycles/1e6 秒（MHz），N 秒超时应读 `mhz*1000000u*N`；写成 `mhz*1000*N` 会把 N 秒缩成 N/1000 秒（30 s → 30 ms），进蓝屏立即判超时退出，按键分支根本走不到。定位手段：BSS 调试字在 enter/drawn/key/timeout 各阶段写不同值，monitor `xp` 读回即可看出落在哪条分支；校准值还要加 `mhz>0 && mhz<10000` 闸门防 bogus 除数。
+CatOS[易错点] 崩溃屏不要直写 0xB8000 帧缓冲再混前端写：前端 `render_flush()` 在写入 wide CJK 后若挂 `pending_wide` 会调 `redraw_all()`，`be->clear()` + 按 RAM grid 逐格重刷 VRAM；直写内容不在 grid 里，旧网格（prompt/空格）会把直写行整行盖掉，只有经过前端写的行幸存。紧急屏一律走纯前端路径：`vga_set_color` → `vga_clear()` → 全部 `vga_write_at`/`vga_write_at_utf8`，grid 与 VRAM 自洽。
+CatOS[易错点] 单行 ASCII 写接口不要喂 UTF-8 CJK 字节：`vga_write_at` 按单字节单格铺，中文三字节被拆成三个半宽格，后续 ASCII 被错位移到行右半截。含中文的行必须走 `vga_write_at_utf8`；纯英文注记行就不要夹带汉字，两段调用分开（前缀 ASCII 定位 + 后缀 utf8）。
+CatOS[易错点] 递归遍历目录树时静态簇缓冲不能跨递归调用复用：子目录 `fat_read_cluster(child, buf)` 会覆盖外层同一个 static buf，返回后外层循环 `b = buf + i*32` 读到的是子目录内容，表现为外层目录只扫到前几个条目就中断、后续坏项全部漏报（本轮 fsck 扫描器实测根目录只进了 DEV 就停）。递归扫描必须按深度分缓冲 `bufs[depth]`；非递归的普通遍历器用单缓冲没问题。
+CatOS[易错点] 多 clone 并发跑回归时，部分套件的 monitor 端口是写死在脚本里的（size_regress PORT=4492），另一 clone 占用同端口后，本驱动会连到别人的 monitor，HMP 回复为空、`screendump` 落不了文件，报错看起来像「screendump produced no file」而不是端口冲突。先 `ps aux | grep qemu` 核对端口占用；临时把本 clone 套件 PORT 改到空闲口（4526 等）跑完，提交前还原，不要把端口改动带进 commit。
+CatOS[易错点] dispi/LFB 图形模式下 0xB8000 文本平面不是可读镜像：be_text 独占的 VGA 文本窗口在 gfx/vbe/vbe24 后端下，CPU 写 0xB8000 的内容 monitor `xp /4000 0xb8000` 读回仍是空白（QEMU 文本平面在图形模式下与帧缓冲不在同一可观测窗口）。前端给图形后端加一层 0xB8000 文本镜像的方案验证不可行（写入落地但读不回），旧文本读屏测试不能靠内核镜像补救，只能：运行时盲发 `text`+Y consent 切回文本后端，或在磁盘上预置 /etc/videomode=text。
+CatOS[易错点] 启动早期打印的回退警告会被后面的 boot_autostart banner 滚出 25 行缓冲：先把警告文案存进全局备注，banner 跑完后再补打一行，否则回退原因在屏幕上不可见，验收时读 0xB8000 抓不到 WARNING。
+CatOS[易错点] 开机默认改 gfx24 后，面向文本屏的旧回归套件会在 wait_for_prompt/clean_run 处读空缓冲：驱动侧 force_text() 在 shell 就绪后盲发 `text`、回车、`y`、回车，并轮询提示符（最长 20s），首次 `text` 落在 shell 就绪前被吞掉时自动重发一次；不要把固定 sleep 当就绪判据。
+CatOS[易错点] 崩溃屏二次异常护栏的「已在 panic」标志只在硬崩溃路径保持；软测试钩子（`bsod --no-reboot` 按键回 shell）退出蓝屏时必须复位 `g_in_panic`/深度计数/记录，否则本次启动内第二次主动蓝屏会被护栏误判为「蓝屏屏内嵌套致命异常」而直接 cli;hlt，后续隔离/诊断步骤全部落空。护栏标志的生命周期要区分「本次崩溃会话」与「整个启动周期」。
+CatOS[易错点] 回归磁盘镜像若是全零（MBR 无 55aa 签名），format 阶段 FAT 探测不出卷，shell 看似就绪但内置应用/CE 装不上，后续 ring3 用例全部 "killed=False"。跑套件前先 `xxd -l 512` 或 python 读 MBR 签名核对镜像是否已格式化；坏镜像用同套件已格式化的有效盘 `cp -a` 做种子。
+CatOS[易错点] 崩溃路径上的串口断言要在 boot() 传 extra_args `["-serial","file:/tmp/xxx.log"]`；driver 默认不带 -serial，串口面包屑写进了 QEMU 后端但不落盘，事后无法 grep 向量/EIP。断言文件需在 guest 退出后再读（file: 后端缓冲在进程结束时 flush）。
 CatOS[易错点] PS/2 鼠标 8042 初始化末尾必须重新 0xAE 使能键盘：开头 0xAD 禁键盘后若不恢复，所有扫描码被 8042 门控，shell 看不到任何键入。IRQ12 与键盘共用 0x60 数据口，读 0x60 前必须先读 status bit5(0x20) 分流 aux/keyboard，否则鼠标包会被当成按键入队、按键被当成鼠标包解析。
 CatOS[易错点] 选择反色高亮不出现的根因是脏矩形跟踪器：选择态在绘制时才交换 fg/bg，而 paint() 的跳过比较发生在交换之前，内容未变就被误判为已画而跳过重绘。选择框重绘前必须先把对应格子的 painted_valid 置 0 失效，强制重绘。
 CatOS[易错点] 回溯视图内不能用「键入诊断命令」读 sb_view：readline 过滤块规定任意非回溯键都会退出视图并把 sb_view 复位 0，诊断首字符就把视图清掉。测试断言回溯偏移必须走 monitor `xp` 直读内核符号（nm 解析 PE VMA=物理地址），不能回 shell 打命令。
 CatOS[易错点] HMP 鼠标诊断行会在屏幕上残留多行，正则取第一个匹配会读到旧基线行；解析必须 findall 取最后一个。read_screen 定位输出行时要排除带提示符 '#' 的命令行（命令行也含标记子串）。
+CatOS[易错点] 栈上字符缓冲拼多行文案后必须显式 NUL 终止：`char cand[240]; int n=0; bar_put(...)` 若某分支只填前缀就传给 `con_write_at_utf8`，缓冲尾部残留上一帧栈内容（旧候选串），写出的行会在短前缀后面拖一段旧文本，表现为候选行右侧残影/旧候选编号。每个提前 return 的分支都要补 `cand[n]=0;`；排查时先转储内核镜像行（而非只看 VRAM），镜像有残留即缓冲未收尾，镜像干净才是增量绘制脏格/宽字对问题。
+CatOS[易错点] 两行借用状态栏保存/恢复要覆盖两行：新增固定底部两行候选区时，保存槽、恢复循环、后端切换/清屏/改字号/弹屏等失效点都要同步清 `saved2_valid`，与既有单行 `saved_row` 并存；`off()` 先恢复两行再恢复单行，文本模式恢复后 `redraw_all()` 重建 CJK 字槽，否则旧字槽映射会串字。

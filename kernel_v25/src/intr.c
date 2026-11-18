@@ -21,6 +21,8 @@
 #include "task.h"
 #include "usb.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
+#include "bsod.h"       /* v2.59 full-screen crash report on ring0 fault */
+#include "serial_log.h" /* shared polled COM1 breadcrumb channel */
 
 /* ---- GDT -------------------------------------------------------------- */
 
@@ -114,32 +116,10 @@ static const char *exc_name[32];   /* forward: defined below */
 
 /* v2.25 #115: minimal COM1 logger.  The VGA screen dies with a triple
  * fault, but QEMU `-serial file:...` keeps every byte, so every
- * exception leaves a breadcrumb even when -no-reboot kills the guest. */
-static int ser_inited;
-static void ser_init(void) {
-    outb(0x3F8 + 1, 0x00);          /* no interrupts */
-    outb(0x3F8 + 3, 0x80);          /* DLAB */
-    outb(0x3F8 + 0, 0x01);          /* divisor 1 = 115200 */
-    outb(0x3F8 + 1, 0x00);
-    outb(0x3F8 + 3, 0x03);          /* 8N1 */
-    ser_inited = 1;
-}
-static void ser_putc(char c) {
-    if (!ser_inited) ser_init();
-    int guard = 10000;
-    while (!(inb(0x3F8 + 5) & 0x20) && --guard > 0) { }
-    outb(0x3F8, (uint8_t)c);
-}
-static void ser_write(const char *s) {
-    while (*s) ser_putc(*s++);
-}
+ * exception leaves a breadcrumb even when -no-reboot kills the guest.
+ * v2.59-crashscreen P0-1: the UART implementation moved to serial_log.c so
+ * the crash screen can dual-output through the same polled channel. */
 void ser_dbg(const char *s) { ser_write(s); }
-static void ser_hex(const char *tag, uint32_t v) {
-    static const char *h = "0123456789abcdef";
-    ser_write(tag);
-    for (int i = 7; i >= 0; i--) ser_putc(h[(v >> (i * 4)) & 0xF]);
-    ser_putc(' ');
-}
 static void ser_exc_log(int_frame_t *f) {
     ser_write("\n[intr] exc ");
     ser_write(f->intno < 32 ? exc_name[f->intno] : "?");
@@ -192,6 +172,13 @@ void exc_dump(int_frame_t *f) {
 }
 
 void isr_exception(int_frame_t *f) {
+    /* P0-2 second-fault guard: already on the crash screen -> hard halt,
+     * never recurse into the BSOD painter. */
+    if (g_in_panic) {
+        ser_write("[intr] nested fault while panicking -> halt\n");
+        __asm__ volatile ("cli");
+        for (;;) __asm__ volatile ("hlt");
+    }
     ser_exc_log(f);                 /* #115: breadcrumb survives any reset */
     if ((f->cs & 3) == 3) {
         /* ring3 fault:
@@ -205,24 +192,13 @@ void isr_exception(int_frame_t *f) {
                      f->cs, f->eflags);
         task_die_fault(f);
     }
-    /* ring0 kernel fault: record it, dump the frame, halt (no scheduler
-     * games in a broken kernel).  The record stays queryable in case a
-     * serial console or a second core ever inspects it. */
+    /* ring0 kernel fault: record it, then hand off to the full-screen
+     * BSOD (v2.59).  The record stays queryable via `faultinfo`; the
+     * serial breadcrumb above survives even a triple fault. */
     fault_record(f->intno, f->err, f->eip, cpu_cr2_read(), f->cs, f->eflags);
-    __asm__ volatile ("cli");
-    exc_dump(f);
-    if (f->intno == 14) {
-        vga_write("pf: ");
-        vga_write((f->err & 1) ? "present " : "not-present ");
-        vga_write((f->err & 2) ? "write " : "read ");
-        vga_write((f->err & 4) ? "user " : "supervisor ");
-        if (f->err & 8) vga_write("rsvd ");
-        if (f->err & 16) vga_write("instr-fetch ");
-        vga_write("\n");
-    }
-    vga_write("ring0 kernel fault - system halted\n");
-    ser_write("[intr] ring0 halt\n");
-    for (;;) __asm__ volatile ("hlt");
+    ser_write("[intr] ring0 -> bsod\n");
+    bsod_enter(exc_name[f->intno < 32 ? f->intno : 31], f, 0);
+    /* unreachable: bsod_enter() does not return on a fatal ring0 entry */
 }
 
 /* ---- IRQ dispatch ------------------------------------------------------ */
@@ -278,7 +254,6 @@ void isr_irq(int_frame_t *f) {
 /* ---- init --------------------------------------------------------------- */
 
 void intr_init(void) {
-    ser_init();
     ser_write("[intr] serial breadcrumb channel up\n");
     /* GDT: null, kcode, kdata, ucode, udata, tss */
     gdt_set(0, 0, 0, 0, 0);

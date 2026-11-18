@@ -39,7 +39,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot, find_qemu, kill_qemu, screen_text, sendkey,
-                         type_text, read_screen, wait_for_prompt, cmd)
+                         type_text, read_screen, wait_for_prompt, cmd,
+                         force_text)
 
 PAGE_LINES = 24          # con_rows()-1 in the 25-row text mode
 LINE_STEP = 1            # Ctrl+Up/Down = 1 line per press
@@ -133,6 +134,7 @@ def main():
     proc = sock = None
     try:
         proc, sock = boot(qemu, iso, port, monitor_wait=40)
+        force_text(sock)          # v2.56 baseline boots gfx24; need the text plane
         if not wait_for_prompt(sock, 60):
             print("FAIL: prompt never appeared")
             return 1

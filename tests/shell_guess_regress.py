@@ -34,7 +34,7 @@ ROOT = os.path.normpath(os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 
 from qemu_driver import (kill_qemu, cmd, find_qemu, screen_text, sendkey,
-                         type_text, wait_for_prompt)
+                         type_text, wait_for_prompt, force_text)
 
 PORT = 4450
 DISK = os.path.join(HERE, "qemu_disk_guess.img")
@@ -140,6 +140,7 @@ def main():
     fresh_disk()
     proc, s = boot_direct(qemu, port, disk=STAGE_DISK)
     print("monitor connected (pass 1: format)")
+    force_text(s)          # v2.56: boot defaults to gfx24; text suite
     if not wait_for_prompt(s):
         print("FATAL: prompt never appeared")
         kill_qemu(proc)
@@ -164,6 +165,7 @@ def main():
     shutil.copy2(DISK, STAGE_DISK)
     proc, s = boot_direct(qemu, port, disk=STAGE_DISK)
     print("monitor connected (pass 2: guess replay)")
+    force_text(s)          # v2.56: boot defaults to gfx24; text suite
     if not wait_for_prompt(s):
         print("FATAL: prompt never appeared in pass 2")
         kill_qemu(proc)

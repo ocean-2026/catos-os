@@ -1,5 +1,15 @@
 # CatOS 系统内测试文档
 
+## 本轮章节（2026-11-18，HEAD `aae8640`）
+
+> 本轮新增功能（视频模式持久化、鼠标/剪贴板、回溯翻页、v2.59 分页器、F2 两行候选区、`keys` 命令）的手工/脚本验收步骤与“输入/预期/实测结果”三列记录表，见独立文件：
+>
+> **[`系统内测试文档-2026-11-18.md`](./系统内测试文档-2026-11-18.md)**
+>
+> 自动化对照：`tests/videomode_regress.py`、`tests/mouse_regress.py`、`tests/pager_regress.py`（并行子代理实现中）；IME 候选区对应规划文档 `docs/ime-plan.md` 阶段一。下方为历史版本测试手册，口径沿用。
+
+---
+
 > 适用版本：v2.20（CE ABI 66 槽，含 VMware SVGA II 图形后端；`3ed5cad` v2.19 及以后）
 > 测试介质：`kernel_v25/catos.iso`（GRUB isohybrid，光驱或硬盘引导均可）
 > 数据盘：`kernel_v25/catos_disk.img`（FAT32，预装 24 个 CE 应用）

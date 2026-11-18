@@ -261,6 +261,31 @@ def clear_screen(s, wait=1.0):
     sendkey(s, "ret", wait)
 
 
+def force_text(s, settle=16.0):
+    """v2.56: the boot default is now gfx24.  Legacy text back-end drivers
+    switch the console back to text with the runtime `text` command and its
+    physical Y consent -- blind, because the prompt is only readable once the
+    text back-end owns 0xB8000.  The first `text` keystroke can land before
+    the shell is listening, so poll for the prompt and re-send the consent
+    once if the switch did not take.
+    """
+    time.sleep(settle)
+    pat = re.compile(r"catos:[^\n]*[\$#]")
+    for attempt in range(3):
+        type_text(s, "text")
+        sendkey(s, "ret", 1.0)
+        sendkey(s, "y", 0.5)
+        sendkey(s, "ret", 1.5)
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            try:
+                if pat.search(read_screen(s)):
+                    return
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+
 def wait_for_prompt(s, timeout=90.0, poll=2.0):
     """Wait until the CatOS shell prompt is on screen; return True/False.
 

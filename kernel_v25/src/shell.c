@@ -20,8 +20,11 @@
 #include "e1000.h"       /* v2.21 #55 e1000 NIC state for netdiag */
 #include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
 #include "lang.h"       /* v2.21 T50: en/zh user-visible messages      */
+#include "bsod.h"       /* v2.59 crash screen: bsod/blue + panicmode      */
 #include "clip.h"       /* v2.57 kernel clipboard */
 #include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
+#include "keys.h"       /* centralized key-binding legend (keys command)  */
+#include "pager.h"      /* v2.59 generic console pager                    */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -41,11 +44,105 @@ static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
  * runner (/etc/autostart scripts, v2.17) */
 static void shell_exec(char *cmd, char *arg);
 static void boot_autostart(void);
+static int  parse_redir(char *arg, char **out_redir, int *append, char **pipe_to);
 
 /* P1: set while /etc/autostart scripts run their commands.  Interactive
  * prompts (e.g. the PE->CE conversion offer in `run`) must default to
  * refusal in this mode -- a script cannot answer a keyboard question. */
 static int      g_script_mode = 0;
+
+static int g_uid;         /* session uid/gid (defined with the session code) */
+static int g_gid;         /* tentative decls: the real defs sit below */
+static int redir_abspath(const char *name, char *out, int outlen);
+
+/* v2.59: pager non-interactive latch.  Set around the dispatch of a line
+ * that is redirected to a file, piped, backgrounded, or running inside a
+ * script / non-tty session; the pager then streams the full output
+ * through without ever waiting for a key. */
+static int shell_line_noninteractive(char *arg,
+                                     char **out_redir, int *append,
+                                     char **pipe_to, int *out_bg) {
+    parse_redir(arg, out_redir, append, pipe_to);
+    int bg = 0;
+    /* trailing '&' background marker (mirrors the dispatcher's own check) */
+    char *tail = arg;
+    while (*tail) tail++;
+    while (tail > arg && tail[-1] == ' ') tail--;
+    if (tail > arg && tail[-1] == '&' &&
+        (tail - arg < 2 || tail[-2] == ' ')) bg = 1;
+    if (out_bg) *out_bg = bg;
+    return (*out_redir || *pipe_to || bg || g_script_mode) ? 1 : 0;
+}
+
+/* v2.59: ring0 builtin stdout redirection tee.
+ *
+ * Ring3 `.ce` programs already wire `>`/`>>` through the per-task
+ * `out_file` field consumed in SYS_WRITE (task.c).  The ring0 builtins
+ * (help/ls/echo/...) write straight through vga_write() and had no capture
+ * path, so `help > file` dropped the output on the floor.  This small tee
+ * mirrors every character the builtin prints into a per-command static
+ * buffer, and on command completion flushes it to the redirect target with
+ * the session's own write permission check (same gate as #167).  Pipes
+ * and `&` backgrounding stay on the existing task ring/pipe path; only a
+ * plain file redirect is mirrored here.  Buffer is capped so a runaway
+ * builtin cannot grow it without bound; overflow truncates the tail. */
+#define SH_REDIR_BUF 8192
+static char  g_redir_buf[SH_REDIR_BUF];
+static uint32_t g_redir_len;
+static int   g_redir_active;
+static char  g_redir_path[FS_PATH_MAX];
+static int   g_redir_append;
+
+static void redir_tee_char(char c) {
+    if (!g_redir_active) return;
+    if (g_redir_len < SH_REDIR_BUF - 1) g_redir_buf[g_redir_len++] = c;
+}
+
+/* Install the builtin redirect for this command line.  Returns 1 when a
+ * plain file redirect was armed (the tee then captures builtin output),
+ * 0 otherwise (pipe / background / none). */
+static int redir_arm(char *out_redir, int append, char *pipe_to) {
+    g_redir_active = 0;
+    g_redir_len = 0; g_redir_buf[0] = 0;
+    g_redir_path[0] = 0; g_redir_append = append;
+    if (!out_redir || !*out_redir || pipe_to) return 0;
+
+    char ab[FS_PATH_MAX];
+    if (redir_abspath(out_redir, ab, sizeof(ab)) != 0) {
+        vga_write("run: bad redirect path\n");
+        return 0;
+    }
+    /* #167 parity: ring0 pre-write must check the target with the session
+     * identity up front, instead of letting a non-root session truncate or
+     * create a protected file. */
+    if (fs_perm_check(ab, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("run: permission denied: '"); vga_write(ab); vga_write("'\n");
+        return 0;
+    }
+    int i;
+    for (i = 0; ab[i] && i < (int)sizeof(g_redir_path) - 1; i++)
+        g_redir_path[i] = ab[i];
+    g_redir_path[i] = 0;
+    g_redir_active = 1;
+    vga_set_tee(redir_tee_char);
+    return 1;
+}
+
+/* Flush the captured builtin output to the redirect target.  `>` truncates
+ * once up front, then every later chunk appends (v2.5.1 multi-line rule). */
+static void redir_flush(void) {
+    if (!g_redir_active) return;
+    g_redir_buf[g_redir_len] = 0;
+    if (g_redir_len > 0) {
+        if (!g_redir_append)
+            fs_write_raw_mode(g_redir_path, "", 0, 0);      /* truncate/create */
+        fs_write_raw_mode(g_redir_path, g_redir_buf, g_redir_len, 1);
+    }
+    g_redir_active = 0;
+    g_redir_len = 0; g_redir_buf[0] = 0;
+    g_redir_path[0] = 0;
+    vga_set_tee(0);
+}
 
 static void itoa(int v, char *out, int width) {
     char tmp[12]; int i = 0, neg = 0;
@@ -93,25 +190,39 @@ static multiboot_info_t *mbi;
 /* ---------- commands ---------- */
 /* v2.37 P0-4: fixed two-column help.  Command field is 24 chars wide,
  * description starts in column 26.  Section headers / notes print raw. */
+/* v2.59: paged help rows.  Each helper feeds the one line through the
+ * shared pager; once the user quits ('q') the rest is dropped and the
+ * helpers become no-ops until cmd_help() calls pager_end(). */
 static void help_row(const char *cmd, const char *desc) {
-    vga_write("  ");
+    if (pager_quit()) return;
+    char line[160];
+    line[0] = 0;
+    /* command field is 24 chars wide, description starts in column 26 */
     int n = 0;
-    for (const char *p = cmd; *p; p++) { vga_putc(*p); n++; }
-    while (n < 24) { vga_putc(' '); n++; }
-    vga_write("  ");
-    vga_write(desc);
-    vga_write("\n");
+    for (const char *p = cmd; *p; p++) { if (n < (int)sizeof(line)-1) line[n++] = *p; }
+    while (n < 24) line[n++] = ' ';
+    line[n++] = ' '; line[n++] = ' ';
+    for (const char *p = desc; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+    line[n] = 0;
+    pager_line(line);
 }
 static void help_head(const char *s) {
+    if (pager_quit()) return;
     vga_set_fg(VGA_LIGHT_CYAN);
-    vga_write("  -- "); vga_write(s); vga_write(" --\n");
+    char line[128];
+    int n = 0; line[n++] = ' '; line[n++] = '-'; line[n++] = ' ';
+    for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+    line[n++] = ' '; line[n++] = '-'; line[n] = 0;
+    pager_line(line);
     vga_set_fg(VGA_WHITE);
 }
-static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write("\n"); }
+static void help_note(const char *s)  { if (pager_quit()) return; char line[128]; line[0] = ' '; int n = 1; for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p; line[n] = 0; pager_line(line); }
 
 static void cmd_help(void) {
-    vga_write("CatOS v0.3 (five-pillar kernel) - commands:\n");
+    pager_begin(1);
+    pager_line("CatOS v0.3 (five-pillar kernel) - commands:");
     help_row("help",        "show this message");
+    help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
@@ -150,6 +261,8 @@ static void cmd_help(void) {
     help_row("F2",          "toggle pinyin IME (works in shell and edit)");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
+    help_row("bsod|blue",   "render the full-screen crash report (--no-reboot for test)");
+    help_row("panicmode",   "show/set post-crash action: reboot|halt (/etc/panicmode)");
 
     help_head("processes (ring3 tasks, preemptive)");
     help_row("run FILE.ce [args..] [&]", "execute a CE app (in background with &)");
@@ -215,14 +328,50 @@ static void cmd_help(void) {
     help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
     help_row("tree [DIR]",  "directory tree listing");
     help_row("format",      "erase the FAT32 volume (y/n confirm)");
-    help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
+    help_row("fsck",        "check FAT mirror + scan dir tree; --purge wipes bad entries");
     help_row("mount",       "list the mount table");
     help_row("mount <1..4|hd0pN> DIR", "bind a FAT32 partition to an empty dir");
     help_row("umount DIR",  "detach the partition bound to DIR");
     help_row("df",          "per-mountpoint volume usage");
     help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
+    help_row("crashlog",    "show the saved panic record (crashlog --full for raw)");
     help_row("edit FILE",   "nano-style full-screen editor");
     help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
+    pager_end();
+}
+
+/* v2.58: grouped key-binding legend.  The rows come straight from the
+ * centralized keys_desc table (keys_table.c) -- the same codes the
+ * keyboard decoder and dispatch branches act on, so adding a binding
+ * there shows up here automatically (no second hand-written list). */
+static void cmd_keys(void) {
+    for (int g = 0; g < KG__COUNT; g++) {
+        vga_set_fg(VGA_LIGHT_CYAN);
+        vga_write("  -- ");
+        vga_write(keys_group_name((enum keys_group)g));
+        vga_write(" --\n");
+        vga_set_fg(VGA_WHITE);
+        for (int i = 0; i < keys_desc_count; i++) {
+            const keys_desc_t *r = &keys_desc[i];
+            if (r->group != g) continue;
+            vga_write("  ");
+            char lab[24];
+            int n = 0;
+            for (const char *p = r->labels; *p && n < 22; ) lab[n++] = *p++;
+            lab[n] = 0;
+            vga_write(lab);
+            while (n < 22) { vga_putc(' '); n++; }
+            vga_write("  ");
+            vga_write(r->desc);
+            vga_write("  (");
+            vga_write(r->scene);
+            if (strcmp_(r->limit, "-") != 0) {
+                vga_write("; ");
+                vga_write(r->limit);
+            }
+            vga_write(")\n");
+        }
+    }
 }
 
 /* ---------- SB16 audio (v2.11) -----------------------------------------
@@ -673,6 +822,19 @@ static int disp_width(const char *s) {
     return w;
 }
 
+/* display width of the first n bytes (UTF-8 aware), for cursor placement. */
+static int disp_width_n(const char *s, int n) {
+    int w = 0, i = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (i < n && *p) {
+        if ((*p & 0xE0) == 0xC0) { w += 1; p += 2; i += 2; }
+        else if ((*p & 0xF0) == 0xE0) { w += 2; p += 3; i += 3; }
+        else if ((*p & 0xF8) == 0xF0) { w += 2; p += 4; i += 4; }
+        else { w += 1; p += 1; i += 1; }
+    }
+    return w;
+}
+
 static void cmd_cowsay(const char *arg) {
     const char *role = "cow";
     const char *msg = arg;
@@ -994,7 +1156,8 @@ static const char *BUILTIN_NAMES[] = {
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
     "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
-    "faultinfo", "fsck", "color",
+    "faultinfo", "crashlog", "fsck", "color",
+    "bsod", "blue", "panicmode",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
     0
@@ -1070,8 +1233,6 @@ static void cmd_cd(const char *arg) {
 }
 
 /* v2.24 forward declarations (helpers live across shell.c) */
-static int g_uid;         /* session uid/gid (defined with the session code) */
-static int g_gid;         /* tentative decls: the real defs sit below */
 static int fs_copy_file(const char *src, const char *dst);
 
 /* v2.24: write-permission check on the PARENT of a would-be entry -- the
@@ -1182,6 +1343,7 @@ static int split_words(char *s, char **out, int max) {
 
 /* bounded concatenation: never writes past d+size; returns 0 if it fit */
 static int strcat_b(char *d, int size, const char *s) {
+    if (!d || size <= 0) return -1;
     while (*d && size > 0) { d++; size--; }
     if (size <= 1) return -1;
     while (*s && size > 1) { *d++ = *s++; size--; }
@@ -2218,7 +2380,16 @@ static void ed_redraw(void) {
     int scr_y = 1 + (ed_cy - ed_top);
     if (scr_y < 1) scr_y = 1;
     if (scr_y > last - 1) scr_y = last - 1;
-    vga_set_cursor((uint8_t)ed_cx, (uint8_t)scr_y);
+    /* v2.58: active IME composition follows the editor cursor inline. */
+    const char *comp = ime_composition();
+    int comp_w = 0;
+    if (comp && *comp) {
+        int px = disp_width_n(ed_lines[ed_cy], ed_cx);
+        vga_write_at_utf8((uint8_t)px, (uint8_t)scr_y, comp);
+        comp_w = disp_width(comp);
+    }
+    int cur_col = ed_cx + comp_w;
+    vga_set_cursor((uint8_t)cur_col, (uint8_t)scr_y);
 }
 
 static void ed_insert(char c) {
@@ -2350,7 +2521,7 @@ static void cmd_edit(const char *arg) {
 
         /* v2.9: F2 pinyin IME also works inside the editor */
         {
-            char han[5];
+            char han[IME_OUT_MAX];
             int ir = ime_feed(k, han);
             if (ir == IME_CONSUME) { ed_redraw(); ime_refresh(); continue; }
             if (ir == IME_COMMIT) {
@@ -2505,6 +2676,134 @@ static int session_is_admin(void) {
 }
 static int session_is_fsadmin(void) {
     return g_uid == UID_ROOT || (g_caps & CAP_FSADMIN);
+}
+
+/* v2.59: render the full-screen crash report on demand.
+ *   bsod [--no-reboot]   --no-reboot: return to the shell after a keypress
+ *                           (test hook); otherwise reboot/halt per the
+ *                           cached /etc/panicmode setting. */
+static void cmd_bsod(char *arg) {
+    int soft = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(arg, "--no-reboot") || !strcmp_(arg, "--soft")) soft = 1;
+    if (!soft && g_uid != UID_ROOT && !(g_caps & (CAP_SYS | CAP_REBOOT))) {
+        vga_write("bsod: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        return;
+    }
+    bsod_enter("manual BSOD triggered by `bsod` command", 0, soft);
+}
+
+/* v2.59: read / set the post-crash action, persisted to /etc/panicmode.
+ *   panicmode            -> show current setting
+ *   panicmode reboot|halt */
+/* v2.59-crashscreen: read the fixed bss panic record saved on the last
+ * crash.  No FS read: the record lives in kernel bss from the crash path.
+ *   crashlog          -> symbolized summary (EIP/frames resolved by the
+ *                         same built-in symbol table the BSOD uses)
+ *   crashlog --full   -> raw fields, with a sensitive-data policy note */
+static void cmd_crashlog(char *arg) {
+    while (*arg == ' ') arg++;
+    const panic_record_t *r = panic_record_get();
+    if (!r || r->magic != PANIC_RECORD_MAGIC) {
+        vga_write("crashlog: no crash record\n");
+        return;
+    }
+    int full = !strcmp_(arg, "--full") || !strcmp_(arg, "-f");
+
+    vga_write("crashlog: saved panic record\n");
+    vga_write("version: "); vga_write(r->version); vga_write("\n");
+    vga_write("tick=");
+    { static const char *h = "0123456789abcdef";
+      vga_write("0x");
+      for (int i = 7; i >= 0; i--) vga_putc(h[(r->ticks >> (i * 4)) & 0xF]); }
+    vga_write(" vector=");
+    { static const char *h = "0123456789abcdef";
+      vga_write("0x");
+      for (int i = 7; i >= 0; i--) vga_putc(h[(r->intno >> (i * 4)) & 0xF]); }
+    vga_write("\n");
+
+    if (full) {
+        vga_write("[sensitive-data note: raw fields may contain pointers / "
+                  "stack residue; share with care]\n");
+        vga_write("EIP=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->eip >> (i * 4)) & 0xF]); }
+        vga_write(" CR2=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->cr2 >> (i * 4)) & 0xF]); }
+        vga_write(" ERR=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->err >> (i * 4)) & 0xF]); }
+        vga_write("\nEFLAGS=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->eflags >> (i * 4)) & 0xF]); }
+        vga_write(" ESP=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->esp_k >> (i * 4)) & 0xF]); }
+        vga_write("\n");
+        for (int i = 0; i < r->nframes; i++) {
+            vga_write("frame#");
+            { char b[4]; b[0] = (char)('0' + i); b[1] = 0; vga_write(b); }
+            vga_write("=");
+            { static const char *h = "0123456789abcdef";
+              vga_write("0x");
+              for (int d = 7; d >= 0; d--) vga_putc(h[(r->frames[i] >> (d * 4)) & 0xF]); }
+            vga_write("\n");
+        }
+    } else {
+        /* summary: EIP resolved to nearest symbol+offset via the same
+         * static .rodata symbol table the BSOD uses. */
+        char sym[44];
+        bsod_sym_fmt(sym, sizeof(sym), r->eip);
+        vga_write("EIP="); vga_write(sym);
+        vga_write(" CR2=");
+        { static const char *h = "0123456789abcdef";
+          vga_write("0x");
+          for (int i = 7; i >= 0; i--) vga_putc(h[(r->cr2 >> (i * 4)) & 0xF]); }
+        vga_write("\nreason: "); vga_write(r->msg); vga_write("\n");
+        for (int i = 0; i < r->nframes && i < 3; i++) {
+            char fsym[44];
+            bsod_sym_fmt(fsym, sizeof(fsym), r->frames[i]);
+            vga_write("  #"); vga_write(fsym); vga_write("\n");
+        }
+    }
+}
+
+static void cmd_panicmode(char *arg) {
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        int m = bsod_mode();
+        vga_write("panicmode: ");
+        vga_write(m == BSOD_MODE_HALT ? "halt" :
+                  m == BSOD_MODE_WAIT ? "wait" : "reboot");
+        vga_write("\n");
+        return;
+    }
+    if (g_uid != UID_ROOT && !(g_caps & (CAP_SYS | CAP_REBOOT))) {
+        vga_write("panicmode: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        return;
+    }
+    if (!strcmp_(arg, "halt")) {
+        bsod_set_mode(BSOD_MODE_HALT);
+        fs_write_text("/etc/panicmode", "halt\n", 5);
+    } else if (!strcmp_(arg, "wait")) {
+        bsod_set_wait();
+        fs_write_text("/etc/panicmode", "wait\n", 5);
+    } else if (!strcmp_(arg, "reboot")) {
+        bsod_set_mode(BSOD_MODE_REBOOT);
+        fs_write_text("/etc/panicmode", "reboot\n", 7);
+    } else {
+        vga_write("panicmode: usage: panicmode [reboot|halt|wait] [reboot:Ns]\n");
+        return;
+    }
+    vga_write("panicmode: ");
+    vga_write(arg);
+    vga_write(" (persisted to /etc/panicmode)\n");
 }
 
 static void cmd_whoami(void) {
@@ -2895,6 +3194,29 @@ static void cmd_chown(char *arg) {
 
 #define CAT_MAX_PRINT 65536u      /* cat: stop printing after 64 KiB */
 
+/* v2.59: shared pager interface for line-oriented file dumps.  Splits the
+ * buffered read on newlines and feeds each line through pager_line(); the
+ * pager itself streams straight through in non-interactive (redirect / pipe
+ * / bg / script) contexts, so no extra decision lives here. */
+static int pager_dump_text(const char *text, uint32_t len) {
+    uint32_t i = 0;
+    static char line[FS_PATH_MAX + 32];
+    int ln = 0;
+    while (i < len) {
+        char ch = text[i++];
+        if (ch == '\n') {
+            line[ln] = 0;
+            if (!pager_line(line)) return 0;
+            ln = 0;
+            continue;
+        }
+        if (ch == '\r') continue;
+        if (ln < (int)sizeof(line) - 1) line[ln++] = ch;
+    }
+    if (ln > 0) { line[ln] = 0; if (!pager_line(line)) return 0; }
+    return 1;
+}
+
 static void cmd_cat(const char *arg) {
     if (!*arg) { vga_write("usage: cat FILE\n"); return; }
     uint32_t c, s;
@@ -2902,22 +3224,25 @@ static void cmd_cat(const char *arg) {
     if (fs_perm_check(arg, g_uid, g_gid, PERM_READ) != 0) {
         vga_write("cat: permission denied\n"); return;
     }
+    pager_begin(1);
     static char buf[512];         /* ring0 single shell: no reentry */
     uint32_t off = 0;
+    int done = 1;
     while (off < s) {
         uint32_t want = s - off;
         if (want > sizeof(buf) - 1) want = sizeof(buf) - 1;
         int r = fs_read_at(arg, buf, (int)off, (int)want);
-        if (r <= 0) { vga_write("cat: read error\n"); return; }
+        if (r <= 0) { vga_write("cat: read error\n"); pager_end(); return; }
         buf[r] = 0;
-        vga_write(buf);
+        if (!pager_dump_text(buf, (uint32_t)r)) { done = 0; break; }
         off += (uint32_t)r;
         if (off >= CAT_MAX_PRINT && off < s) {
             vga_write("\n[cat: output truncated at 64 KiB]\n");
-            return;
+            break;
         }
     }
-    if (off) vga_write("\n");
+    (void)done;
+    pager_end();
 }
 
 /* v2.24 recursive helpers (rm -r / cp -r).  Depth-capped: every frame
@@ -3523,10 +3848,34 @@ static void cmd_wc(char *arg) {
     vga_write(arg); vga_write("\n");
 }
 
+/* v2.59: tree line buffer, accumulated per entry so one whole entry line
+ * feeds the shared pager as a single unit (indent + marker + leaf + size). */
+static char  g_tree_line[FS_NAME_MAX + 40];
+static int   g_tree_ln;
+
+static void tree_line_reset(void) { g_tree_line[0] = 0; g_tree_ln = 0; }
+static void tree_line_app(const char *s) {
+    while (*s && g_tree_ln < (int)sizeof(g_tree_line) - 1)
+        g_tree_line[g_tree_ln++] = *s++;
+    g_tree_line[g_tree_ln] = 0;
+}
+static void tree_line_raw(const uint8_t *raw, char *line, int cap, int *ln) {
+    const char *hd = "0123456789ABCDEF";
+    for (int k = 0; k < 11; k++) {
+        char byte[3];
+        byte[0] = hd[(raw[k] >> 4) & 0xF];
+        byte[1] = hd[raw[k] & 0xF];
+        byte[2] = 0;
+        (void)line; (void)cap;
+        if (*ln < cap - 2) { line[(*ln)++] = byte[0]; line[(*ln)++] = byte[1]; line[(*ln)] = 0; }
+    }
+}
+
 /* tree: explicit-path recursion via fs_enum_entries, depth-capped at 6. */
-static void tree_walk(const char *dir, int depth) {
+static void tree_walk(const char *dir, int depth, int *hidden) {
     char names[24][FS_NAME_MAX];
     int n = fs_enum_entries(dir, names, 24);
+    if (hidden) *hidden += fat_dir_hidden();
     for (int i = 0; i < n; i++) {
         const char *nm = names[i];
         int is_dir = nm[slen_(nm) - 1] == '/';
@@ -3538,32 +3887,77 @@ static void tree_walk(const char *dir, int depth) {
         }
         leaf[li] = 0;
         if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
-        for (int d = 0; d < depth; d++) vga_write("  ");
-        vga_write(is_dir ? "+- " : "- ");
-        if (is_dir) {
-            vga_set_fg(VGA_LIGHT_CYAN);
-            vga_write(leaf);
-            vga_putc('/');
-            vga_set_fg(VGA_WHITE);
-        } else {
-            vga_set_fg(VGA_LIGHT_GREY);
-            vga_write(leaf);
-            vga_set_fg(VGA_WHITE);
-        }
-        vga_write("\n");
+        tree_line_reset();
+        for (int d = 0; d < depth; d++) tree_line_app("  ");
+        tree_line_app(is_dir ? "+- " : "- ");
+        tree_line_app(leaf);
+        if (is_dir) tree_line_app("/");
+        if (!pager_line(g_tree_line)) return;
         if (is_dir && depth < 6) {
             char child[FS_PATH_MAX];
             child[0] = 0;
             strcat_b(child, sizeof(child), dir);
             if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
             strcat_b(child, sizeof(child), leaf);
-            tree_walk(child, depth + 1);
+            tree_walk(child, depth + 1, hidden);
+            if (pager_quit()) return;
+        }
+    }
+}
+
+/* tree --raw: enumerate every live entry, insane ones flagged with their
+ * cluster / slot offset / first byte / raw 8.3 bytes. */
+static void tree_walk_raw(const char *dir, int depth, int *hidden) {
+    struct fs_raw_ent names[24];
+    int h = 0;
+    int n = fs_enum_entries_raw(dir, names, 24, &h);
+    if (hidden) *hidden += h;
+    for (int i = 0; i < n; i++) {
+        const char *nm = names[i].name;
+        int is_dir = names[i].attr & FAT_ATTR_DIR;
+        char leaf[FS_NAME_MAX];
+        int li = 0;
+        for (int q = 0; nm[q] && li < (int)sizeof(leaf) - 1; q++) {
+            if (nm[q] == '/') continue;
+            leaf[li++] = nm[q];
+        }
+        leaf[li] = 0;
+        if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
+        tree_line_reset();
+        for (int d = 0; d < depth; d++) tree_line_app("  ");
+        tree_line_app(is_dir ? "+- " : "- ");
+        tree_line_app(leaf);
+        if (names[i].insane) {
+            tree_line_app("  c=");
+            { char ib[12]; itoa((int)names[i].cluster, ib, 0); tree_line_app(ib); }
+            tree_line_app(" o=");
+            { char ob[12]; itoa(names[i].slot * 32, ob, 0); tree_line_app(ob); }
+            tree_line_app(" raw="); tree_line_raw(names[i].raw, g_tree_line,
+                                                   sizeof(g_tree_line), &g_tree_ln);
+        } else if (is_dir) {
+            tree_line_app("/");
+        }
+        if (!pager_line(g_tree_line)) return;
+        if (is_dir && depth < 6) {
+            char child[FS_PATH_MAX];
+            child[0] = 0;
+            strcat_b(child, sizeof(child), dir);
+            if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
+            strcat_b(child, sizeof(child), leaf);
+            tree_walk_raw(child, depth + 1, hidden);
+            if (pager_quit()) return;
         }
     }
 }
 
 static void cmd_tree(char *arg) {
+    int raw = 0;
     while (*arg == ' ') arg++;
+    if (arg[0] == '-' && arg[1] == '-' && arg[2] == 'r') {
+        raw = 1;
+        arg += 5;
+        while (*arg == ' ') arg++;
+    }
     char dir[FS_PATH_MAX];
     if (!*arg) { fs_pwd(dir, sizeof(dir)); }
     else {
@@ -3576,8 +3970,78 @@ static void cmd_tree(char *arg) {
             strcat_b(dir, sizeof(dir), arg);
         }
     }
-    vga_write(dir); vga_write("\n");
-    tree_walk(dir, 0);
+    pager_begin(1);
+    { char root[FS_PATH_MAX + 2]; int rn = 0;
+      for (const char *p = dir; *p && rn < (int)sizeof(root) - 2; p++) root[rn++] = *p;
+      root[rn] = 0;
+      if (!pager_line(root)) { pager_end(); return; }
+    }
+    int hidden = 0;
+    if (raw) tree_walk_raw(dir, 0, &hidden);
+    else     tree_walk(dir, 0, &hidden);
+    if (!pager_quit() && !raw && hidden > 0) {
+        char hb[12]; itoa(hidden, hb, 0);
+        pager_line(hb);
+    }
+    pager_end();
+}
+
+/* ---------- v2.55: fsck directory integrity scan ---------------------- */
+struct fsck_ud { int bad; int repairable; int purge; };
+
+static void fsck_hexbyte(uint8_t b) {
+    const char *hd = "0123456789ABCDEF";
+    vga_putc(hd[(b >> 4) & 0xF]);
+    vga_putc(hd[b & 0xF]);
+}
+
+static const char *fsck_kind_name(int k) {
+    switch (k) {
+    case FSCK_BADNAME:    return "bad-name";
+    case FSCK_ORPHAN_LFN: return "orphan-lfn";
+    case FSCK_BADCLUST:   return "bad-cluster";
+    }
+    return "?";
+}
+
+static void fsck_report_cb(const fat_fsck_t *e, void *ud) {
+    struct fsck_ud *u = (struct fsck_ud *)ud;
+    u->bad++;
+    if (e->repairable) u->repairable++;
+    vga_write("fsck: ");
+    vga_write(e->path);
+    vga_write(" slot="); print_int(e->slot);
+    vga_write(" first=0x"); fsck_hexbyte(e->first);
+    vga_write(" attr=0x"); fsck_hexbyte(e->attr);
+    vga_write(" kind="); vga_write(fsck_kind_name(e->kind));
+    vga_write(" raw=");
+    for (int k = 0; k < 11; k++) { fsck_hexbyte(e->raw[k]); vga_putc(' '); }
+    vga_write(u->purge ? " [purged]\n" : "\n");
+}
+
+static void cmd_fsck(char *arg) {
+    int purge = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(arg, "--purge") || !strcmp_(arg, "-p")) purge = 1;
+
+    int r = fat_verify_mirror();
+    if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
+    else if (r == 0) vga_write("fsck: FAT mirror OK\n");
+    else {
+        vga_write("fsck: repaired "); print_int(r);
+        vga_write(" FAT sector(s) from mirror #1\n");
+    }
+
+    struct fsck_ud u = { 0, 0, purge };
+    int n = fat_fsck_scan(fat_root(), fsck_report_cb, &u, purge);
+    if (n == 0) {
+        vga_write("fsck: directory tree OK\n");
+    } else {
+        vga_write("fsck: "); print_int(u.bad);
+        vga_write(" bad entries, "); print_int(u.repairable);
+        vga_write(" repairable, "); print_int(u.bad - u.repairable);
+        vga_write(" need rebuild (suggest directory rebuild)\n");
+    }
 }
 
 /* ---------- v2.23 environment variables (session table + /etc/env) -------
@@ -3785,6 +4249,84 @@ static void size_restore(void) {
     if (n < 1) return;
     b[n] = 0;
     if (b[0] >= '0' && b[0] <= '2') con_set_cell_size(b[0] - '0');
+}
+
+/* ---------- v2.56 boot display mode (/etc/videomode) -----------------------
+ * One token per line: text | gfx | vbe | gfx24 (vbe24 accepted as an alias).
+ * Default is gfx24 (800x600x24).  The parser is deliberately fault-tolerant:
+ * a missing/empty file, an unknown value, an over-long line or binary bytes
+ * all fall back to the default instead of panicking.  Field lengths are
+ * bounded so a hostile file can never overflow the stack buffers. */
+#define VIDEOMODE_PATH "/etc/videomode"
+
+/* Re-printed after the autostart banner: a boot-time graphics fallback must
+ * stay visible on the text console, not scroll away under the banner. */
+static char g_fallback_note[128];
+
+static int videomode_parse(void) {
+    char buf[32];
+    int n = fs_read_text(VIDEOMODE_PATH, buf, (int)sizeof(buf) - 1);
+    if (n <= 0) return CON_MODE_VBE24;      /* absent / unreadable -> default */
+    buf[n] = 0;
+
+    int i = 0;
+    while (buf[i] && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' ||
+                      buf[i] == '\n' || (unsigned char)buf[i] < 0x20))
+        i++;
+
+    char tok[16];
+    int k = 0;
+    while (buf[i] && buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\r' &&
+           buf[i] != '\n' && (unsigned char)buf[i] >= 0x20) {
+        if (k < (int)sizeof(tok) - 1) tok[k++] = buf[i];
+        i++;                                /* overflow: keep skipping, cap */
+    }
+    tok[k] = 0;
+
+    if (!strcmp_(tok, "text")) return CON_MODE_TEXT;
+    if (!strcmp_(tok, "gfx"))  return CON_MODE_GFX;
+    if (!strcmp_(tok, "vbe"))  return CON_MODE_VBE;
+    if (!strcmp_(tok, "gfx24") || !strcmp_(tok, "vbe24")) return CON_MODE_VBE24;
+    return CON_MODE_VBE24;                  /* unknown/garbage -> default     */
+}
+
+/* Apply the persisted boot mode before the shell banner prints.  A graphics
+ * back-end that fails to probe (no VBE/SVGA: e.g. -vga cirrus or a VMware
+ * guest whose SVGA init fails) MUST land back in text with a reason on
+ * screen -- never a black, silent boot. */
+static void boot_apply_videomode(void) {
+    int want = videomode_parse();
+    if (want == CON_MODE_TEXT) return;      /* GRUB already set text mode 03 */
+
+    int r = con_request_mode(want, CON_ORIGIN_KERNEL);
+    if (r == 0) {
+        if (want == CON_MODE_VBE24) size_restore();
+        vga_write("[display] boot mode: ");
+        vga_write(con_mode_name(want));
+        vga_write("\n");
+        return;
+    }
+
+    /* switch_backend() already restored the previous (text) back-end when the
+     * new one's enter() failed; con_force_text() is the safety net for any
+     * other failure path so the console can never stay in a dead mode. */
+    con_force_text();
+    const char *why;
+    if (r == CON_ENODEV)      why = "no VBE/SVGA graphics device detected";
+    else if (r == CON_EINVAL) why = "invalid boot mode requested";
+    else                      why = "graphics back-end initialisation failed";
+    g_fallback_note[0] = 0;
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             "[display] WARNING: ");
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             con_mode_name(want));
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             " unavailable (");
+    strcat_b(g_fallback_note, sizeof(g_fallback_note), why);
+    strcat_b(g_fallback_note, sizeof(g_fallback_note),
+             "); safe fallback to 80x25 text mode.");
+    vga_write(g_fallback_note);
+    vga_write("\n");
 }
 
 static void cmd_size(const char *arg) {
@@ -4185,7 +4727,8 @@ static void bar_put_str(char *b, int *n, const char *s) {
 static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
-    "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
     "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
@@ -4369,6 +4912,8 @@ void shell_run(void) {
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
+    boot_apply_videomode();   /* v2.56: /etc/videomode boot display mode, default gfx24 */
+    bsod_init();              /* v2.59: cache panic action config */
     ce_init();
     btime_mark("S4 ce_init");
     /* v2.13: load the persistent user database + ACL (seeds root/user and
@@ -4390,6 +4935,13 @@ void shell_run(void) {
          * seeded default script on a fresh volume. */
         boot_autostart();
         btime_mark("S8 autostart done");
+        /* Re-show the boot fallback warning below the banner so it does not
+         * scroll off the console before the user reads it. */
+        if (g_fallback_note[0]) {
+            vga_write("\n");
+            vga_write(g_fallback_note);
+            vga_write("\n");
+        }
     }
 
     kb_set_completer(sh_complete);        /* v2.28: TAB completion */
@@ -4469,7 +5021,24 @@ void shell_run(void) {
  * program and /bin PATH lookup.  Shared by the interactive loop and the
  * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
+    /* v2.59: parse the redirect/pipe/background marker ONCE, up front, before
+     * the line is truncated.  The same out_redir/append/pipe_to feed both the
+     * non-interactive pager latch and the builtin stdout tee below. */
+    char *out_redir = 0, *pipe_to = 0; int append = 0; int bg = 0;
+    int ni = shell_line_noninteractive(arg, &out_redir, &append, &pipe_to, &bg);
+    /* The pager latch follows THIS line's state exactly: a redirect, pipe,
+     * background job, or script/non-tty run streams straight through without
+     * ever parking on a More prompt.  Re-derive the boolean from the parsed
+     * pointers + bg + script state (not the helper's cached return) so a
+     * stale latch cannot leak across commands. */
+    ni = (out_redir || pipe_to || bg || g_script_mode) ? 1 : 0;
+    pager_set_noninteractive(ni);
+    /* v2.59: arm the ring0 builtin stdout tee for a plain file redirect.
+     * Pipes and `&` keep their existing task ring/pipe wiring below. */
+    redir_arm(out_redir, append, pipe_to);
         if (!strcmp_(cmd, "help"))            cmd_help();
+        else if (!strcmp_(cmd, "keys") ||
+                 !strcmp_(cmd, "shortcuts")) cmd_keys();
         else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
         else if (!strcmp_(cmd, "export") ||
                  !strcmp_(cmd, "setenv"))    cmd_export(arg);
@@ -4528,6 +5097,9 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n");
         }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
+        else if (!strcmp_(cmd, "bsod") ||
+                 !strcmp_(cmd, "blue"))      cmd_bsod(arg);
+        else if (!strcmp_(cmd, "panicmode")) cmd_panicmode(arg);
         else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
         else if (!strcmp_(cmd, "mkdir")) {
@@ -4649,17 +5221,12 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "udp"))         cmd_udp(arg);
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
+        else if (!strcmp_(cmd, "crashlog"))    cmd_crashlog(arg);
         else if (!strcmp_(cmd, "fsck")) {
             if (!(session_is_fsadmin() || (g_caps & CAP_FSCK))) {
                 vga_write("fsck: permission denied (need CAP_FSADMIN or CAP_FSCK)\n");
             } else {
-            int r = fat_verify_mirror();
-            if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
-            else if (r == 0) vga_write("fsck: FAT mirror OK\n");
-            else {
-                vga_write("fsck: repaired "); print_int(r);
-                vga_write(" FAT sector(s) from mirror #1\n");
-            }
+                cmd_fsck(arg);
             }
         }
         else if (!strcmp_(cmd, "color")) {
@@ -4753,6 +5320,8 @@ static void shell_exec(char *cmd, char *arg) {
                 }
             }
         }
+    /* v2.59: flush the builtin stdout tee to the redirect target, if armed. */
+    redir_flush();
 }
 
 /* ---------- v2.17 boot autostart (/etc/autoexec) ---------- */

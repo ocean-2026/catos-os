@@ -298,7 +298,14 @@ void fat_name83(const char *name, uint8_t out[11]) {
 
 void fat_name_show(const uint8_t *n83, char *out) {
     int o = 0;
-    for (int i = 0; i < 8 && n83[i] != ' '; i++) out[o++] = lower_(n83[i]);
+    for (int i = 0; i < 8 && n83[i] != ' '; i++) {
+        uint8_t ch = n83[i];
+        /* FAT spec: a 0x05 first byte stores a real 0xE5 character (the
+         * 0xE5 marker is reserved for deleted entries, so a genuine 0xE5
+         * on disk is escaped as 0x05 and must be mapped back for display). */
+        if (i == 0 && ch == 0x05) ch = 0xE5;
+        out[o++] = lower_(ch);
+    }
     int ext = 0;
     for (int i = 8; i < 11 && n83[i] != ' '; i++) {
         if (!ext) { out[o++] = '.'; ext = 1; }
@@ -323,6 +330,47 @@ int fat_name_illegal(const char *name) {
     }
     if (name[n - 1] == ' ' || name[n - 1] == '.') return 1;
     return 0;
+}
+
+/* ---------- v2.55: name sanity ------------------------------------ */
+static int fat_reserved83(uint8_t c) {
+    return c == '"' || c == '*' || c == '/' || c == ':' || c == '<'
+        || c == '>' || c == '?' || c == '\\' || c == '|';
+}
+
+int fat_83_sane(const uint8_t n83[11]) {
+    int used = 0;
+    for (int i = 0; i < 11; i++) {
+        uint8_t b = n83[i];
+        if (b == ' ') continue;                 /* space padding */
+        if (i == 0 && b == 0x05) continue;      /* legal 0xE5 escape */
+        if (b == 0x00) return 0;               /* NUL inside the name */
+        if (b < 0x20) return 0;                 /* control code */
+        if (b > 0x7E) return 0;                 /* 8.3 is ASCII only */
+        if (fat_reserved83(b)) return 0;
+        used++;
+    }
+    return used > 0;
+}
+
+static int fat_lfn_str_sane(const char *s) {
+    if (!s || !*s) return 1;                    /* no LFN attached: fine */
+    for (const char *p = s; *p; p++) {
+        uint8_t c = (uint8_t)*p;
+        if (c < 0x20 || c == 0x7F) return 0;
+        if (fat_reserved83(c)) return 0;
+        /* >=0x80 UTF-8 continuation/lead bytes are allowed in LFNs. */
+    }
+    return 1;
+}
+
+int fat_name_sane(const char *short83, const char *lfn) {
+    if (!short83 || !*short83) return 0;
+    for (const char *p = short83; *p; p++) {
+        uint8_t c = (uint8_t)*p;
+        if (c < 0x20 || c > 0x7E || fat_reserved83(c)) return 0;
+    }
+    return fat_lfn_str_sane(lfn);
 }
 
 /* v2.48: NT reserved (lcase) byte for a lossless 8.3 entry.  0x10 marks a
@@ -951,42 +999,81 @@ int fat_delete_name(uint32_t dirclus, const char *name) {
     return -1;
 }
 
-/* enumerate a directory calling cb for every entry with its display
- * name (long name when present, else 8.3 lower-case) */
-void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
-                  uint8_t attr, uint32_t clus, uint32_t size, void *ud),
-                  void *ud) {
+/* v2.55: raw enumerator behind fat_list_dir / ls --raw / tree --raw /
+ * fs_enum_*.  Insane entries are skipped unless raw!=0. */
+void fat_list_dir_view(uint32_t dirclus, fat_view_cb cb, void *ud,
+                       int raw, int *hidden) {
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     struct lfn_acc L;
     lfn_acc_reset(&L);
     int per = (int)(spc * 512 / DENT_SIZE);
+    int slot = 0, h = 0;
     for (uint32_t c = dirclus; c >= 2 && c < clus_hi(); ) {
-        if (fat_read_cluster(c, buf) != 0) return;
+        if (fat_read_cluster(c, buf) != 0) goto out;
         for (int i = 0; i < per; i++) {
             uint8_t *b = buf + i * DENT_SIZE;
-            if (b[0] == 0x00) return;
+            if (b[0] == 0x00) goto out;
             if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
             if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
             if (b[11] & 0x08) continue;
             char lfn[FS_LFN_MAX];
             const char *shown = 0;
-            if (lfn_of_short(&L, b, lfn, sizeof(lfn))) shown = lfn;
+            int has_lfn = lfn_of_short(&L, b, lfn, sizeof(lfn));
+            if (has_lfn) shown = lfn;
             lfn_acc_reset(&L);
             char s83[16];
             if (!shown) {
                 fat_name_show(b, s83);
                 shown = s83;
             }
+            int sane = fat_83_sane(b) && (!has_lfn || fat_lfn_str_sane(lfn));
+            /* Skip the "." and ".." pseudo-entries; they are not real children.
+             * They carry the 0x10 dir bit and a leading '.', and are legal 8.3
+             * names, so the sanity check alone does not hide them. */
+            int is_dot = (b[0] == '.');
+            if (!is_dot && !sane) h++;
+            if (is_dot || (!sane && !raw)) { slot++; continue; }
             uint32_t cl = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
                         | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
             uint32_t sz = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
                         | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
-            cb(shown, b[11], cl, sz, ud);
+            fat_view_t v;
+            v.name = shown; v.attr = b[11]; v.cluster = cl; v.size = sz;
+            memcpy_(v.raw, b, 11);
+            v.first = b[0]; v.insane = !sane; v.slot = slot;
+            slot++;
+            cb(&v, ud);
         }
         uint32_t n = fat_get(c);
-        if (n == FAT_EOC) return;
+        if (n == FAT_EOC) break;
         c = n;
     }
+out:
+    if (hidden) *hidden = h;
+}
+
+static int g_dir_hidden = 0;
+int fat_dir_hidden(void) { return g_dir_hidden; }
+
+struct list_adapt {
+    void (*cb)(const char *, uint8_t, uint32_t, uint32_t, void *);
+    void *ud;
+};
+static void list_adapt_cb(const fat_view_t *v, void *ud) {
+    struct list_adapt *a = (struct list_adapt *)ud;
+    a->cb(v->name, v->attr, v->cluster, v->size, a->ud);
+}
+
+/* enumerate a directory calling cb for every entry with its display
+ * name (long name when present, else 8.3 lower-case).  Insane entries
+ * are hidden; count via fat_dir_hidden(). */
+void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
+                  uint8_t attr, uint32_t clus, uint32_t size, void *ud),
+                  void *ud) {
+    struct list_adapt a = { cb, ud };
+    int hidden = 0;
+    fat_list_dir_view(dirclus, list_adapt_cb, &a, 0, &hidden);
+    g_dir_hidden = hidden;
 }
 
 static int fat_mkdir_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres) {
@@ -1598,4 +1685,126 @@ int fat_delete_entry(uint32_t dirclus, const uint8_t *name83) {
         c = n;
     }
     return -1;
+}
+
+/* ---- v2.55: directory integrity scan (fsck) -------------------------- */
+
+struct fsck_walk {
+    fat_fsck_cb cb;
+    void       *ud;
+    int         purge;
+    int         problems;
+};
+
+static void fsck_strcpy(char *dst, const char *src, int maxn) {
+    int i = 0;
+    while (src[i] && i < maxn - 1) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+static void fsck_report(struct fsck_walk *W, const char *dirpath,
+                        const uint8_t *b, int slot, int kind,
+                        uint32_t cl, int repairable) {
+    fat_fsck_t e;
+    memz(&e, sizeof(e));
+    fsck_strcpy(e.path, dirpath, sizeof(e.path));
+    e.cluster = cl;
+    e.slot = slot;
+    e.first = b[0];
+    e.attr = b[11];
+    memcpy_(e.raw, b, 11);
+    e.kind = kind;
+    e.repairable = repairable;
+    W->problems++;
+    W->cb(&e, W->ud);
+}
+
+static void fsck_walk_dir(struct fsck_walk *W, uint32_t dirclus,
+                          const char *dirpath, int depth) {
+    /* one buffer per recursion level: the shared static buffer the plain
+     * directory walker uses would be clobbered by the recursive call. */
+    static uint8_t bufs[7][FAT_CLUSTER_SZ_MAX];
+    uint8_t *buf = bufs[depth];
+    if (depth > 6) return;
+    struct lfn_acc L;
+    lfn_acc_reset(&L);
+    int per = (int)(spc * 512 / DENT_SIZE);
+    int orphan_slot = -1;
+    for (uint32_t c = dirclus; c >= 2 && c < clus_hi(); ) {
+        if (fat_read_cluster(c, buf) != 0) return;
+        for (int i = 0; i < per; i++) {
+            uint8_t *b = buf + i * DENT_SIZE;
+            if (b[0] == 0x00) return;
+            if (b[0] == 0xE5) { lfn_acc_reset(&L); orphan_slot = -1; continue; }
+            if (b[11] == 0x0F) {
+                lfn_acc_feed(&L, b);
+                orphan_slot = i;
+                continue;
+            }
+            if (b[11] & 0x08) continue;
+            uint32_t cl = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
+                        | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
+            char lfn[FS_LFN_MAX];
+            int has_lfn = lfn_of_short(&L, b, lfn, sizeof(lfn));
+            int orphan = ((L.expect != 0 || L.len != 0) && !has_lfn);
+            lfn_acc_reset(&L);
+            orphan_slot = -1;
+
+            int badname = !fat_83_sane(b) ||
+                          (has_lfn && !fat_lfn_str_sane(lfn));
+            int badclust = (cl < 2 || cl >= clus_hi());
+
+            int kind = 0, repairable = 1;
+            if (badclust)      { kind = FSCK_BADCLUST;    repairable = 0; }
+            else if (badname)  { kind = FSCK_BADNAME;      repairable = 1; }
+            else if (orphan)   { kind = FSCK_ORPHAN_LFN;  repairable = 1; }
+
+            if (kind) {
+                fsck_report(W, dirpath, b, i, kind, cl, repairable);
+                if (W->purge && repairable) {
+                    /* explicit purge only: the shell cb printed the entry
+                     * first.  Tombstone the short slot and any preceding
+                     * consecutive LFN slots (orphan runs carry a bad or
+                     * missing checksum, so match on attr alone here). */
+                    for (int k = i - 1; k >= 0; k--) {
+                        uint8_t *p = buf + k * DENT_SIZE;
+                        if (p[11] != 0x0F) break;
+                        p[0] = 0xE5;
+                    }
+                    b[0] = 0xE5;
+                    fat_write_cluster(c, buf);
+                    fat_flush();
+                }
+            }
+
+            /* recurse into sane subdirectories */
+            if ((b[11] & FAT_ATTR_DIR) && b[0] != '.') {
+                char leaf[FS_LFN_MAX];
+                if (has_lfn) fsck_strcpy(leaf, lfn, sizeof(leaf));
+                else         fat_name_show(b, leaf);
+                char child[160];
+                fsck_strcpy(child, dirpath, sizeof(child));
+                int n = slen_(child);
+                if (n > 1 && child[n - 1] != '/') { child[n++] = '/'; child[n] = 0; }
+                fsck_strcpy(child + n, leaf, sizeof(child) - n);
+                fsck_walk_dir(W, cl, child, depth + 1);
+            }
+        }
+        uint32_t n = fat_get(c);
+        if (n == FAT_EOC) break;
+        c = n;
+    }
+    /* leftover LFN run with no short entry at the directory tail */
+    if (L.expect != 0 || L.len != 0) {
+        uint8_t zero[11];
+        memz(zero, 11);
+        fsck_report(W, dirpath, zero, orphan_slot, FSCK_ORPHAN_LFN, 0, 1);
+    }
+}
+
+int fat_fsck_scan(uint32_t root_cluster, fat_fsck_cb cb, void *ud, int purge) {
+    struct fsck_walk W;
+    W.cb = cb; W.ud = ud; W.purge = purge; W.problems = 0;
+    fsck_walk_dir(&W, root_cluster, "/", 0);
+    return W.problems;
 }

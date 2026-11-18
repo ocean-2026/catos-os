@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot, cmd, find_qemu, kill_qemu,  # noqa: E402
                          screen_text, sendkey, type_text,
-                         wait_for_prompt)
+                         wait_for_prompt, force_text)
 
 REPO = os.path.dirname(HERE)
 MONITOR_PORT = 4467                 # own port: 4444/4460..4466/4476 taken
@@ -165,6 +165,7 @@ def main(argv):
     proc, s = boot(qemu, iso, MONITOR_PORT, disk=win_path(DISK),
                    extra_args=["-vga", "vmware"])
     try:
+        force_text(s)          # v2.56: boot defaults to gfx24; text suite
         if not wait_for_prompt(s):
             print("  FAIL shell prompt never appeared")
             return 1

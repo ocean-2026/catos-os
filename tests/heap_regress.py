@@ -37,7 +37,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qemu_driver import (clear_screen, cmd, find_qemu, kill_qemu,  # noqa: E402
                           read_screen, screen_text, sendkey, type_text,
-                          wait_for_prompt)
+                          wait_for_prompt, force_text)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MONITOR = ("127.0.0.1", 4444)
@@ -128,6 +128,7 @@ def main():
 
     proc, s = boot(iso, qemu, disk, port=port)
     print("monitor connected")
+    force_text(s)          # v2.56: boot defaults to gfx24; text suite
     # Wait for the shell instead of sleeping a fixed 25 s: a command
     # typed before the shell is listening is dropped, and a dropped
     # `format` leaves the disk image blank with no visible error.

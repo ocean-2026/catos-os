@@ -10,6 +10,7 @@
 #include "vga.h"
 #include "intr.h"     /* timer_ticks */
 #include "task.h"     /* task_current, task_t */
+#include "bsod.h"     /* full-screen crash report */
 
 fault_record_t g_fault_last;
 
@@ -81,9 +82,11 @@ void faultinfo_print(void) {
 }
 
 void panic(const char *msg) {
-    vga_write("\n*** KERNEL PANIC: ");
-    vga_write(msg ? msg : "(no message)");
-    vga_write(" ***\n");
-    __asm__ volatile ("cli");
+    /* v2.59: full-screen BSOD.  The original message is carried onto the
+     * crash report line; the screen then waits for a key / the idle
+     * timeout and reboots (or halts) per /etc/panicmode.
+     * P0-2: bsod_enter() itself checks g_in_panic and hard-halts on a
+     * nested entry, so a second panic() cannot recurse here either. */
+    bsod_enter(msg ? msg : "(no message)", 0, 0);
     for (;;) __asm__ volatile ("hlt");
 }
