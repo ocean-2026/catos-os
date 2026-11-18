@@ -22,6 +22,7 @@ run qemu    tests/qemu_regress.py    "$ISO" --qemu "$Q" --port 4707
 run guess   tests/shell_guess_regress.py "$ISO" --qemu "$Q" --port 4450
 run fsrec   tests/fsrec_regress.py   "$ISO" --qemu "$Q" --port 4711
 run lfn     tests/lfn_regress.py     "$ISO" --qemu "$Q" --port 4712
+run badname tests/fs_badname_regress.py "$ISO" --qemu "$Q" --port 4719
 run recur   tests/recur_regress.py   "$ISO" --qemu "$Q" --port 4713
 run jobctl  tests/jobctl_regress.py   "$ISO" --qemu "$Q" --port 4468
 run group   tests/group_regress.py    "$ISO" --qemu "$Q" --port 4469

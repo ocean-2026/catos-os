@@ -341,6 +341,38 @@ int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
     return u.count;
 }
 
+struct raw_collect { struct fs_raw_ent *out; int maxn; int count; };
+static void raw_collect_cb(const fat_view_t *v, void *ud) {
+    struct raw_collect *u = (struct raw_collect *)ud;
+    if (u->count < u->maxn) {
+        struct fs_raw_ent *e = &u->out[u->count];
+        scpy(e->name, v->name);
+        e->attr = v->attr;
+        e->cluster = v->cluster;
+        e->size = v->size;
+        e->first = v->first;
+        memcpy_(e->raw, v->raw, 11);
+        e->insane = v->insane;
+        e->slot = v->slot;
+    }
+    u->count++;
+}
+
+int fs_enum_entries_raw(const char *path, struct fs_raw_ent *out,
+                         int maxn, int *hidden) {
+    if (!fs_ready || !path || maxn < 1) return -1;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return -1;
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
+    struct raw_collect u = { out, maxn, 0 };
+    int h = 0;
+    fat_list_dir_view(clus, raw_collect_cb, &u, 1, &h);
+    if (hidden) *hidden = h;
+    return u.count;
+}
+
 int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
@@ -375,7 +407,16 @@ static int mount_suffix(const char *parent_abs, const char *name, char *suf) {
  * case-insensitive name, then print -- matches the ordered column look
  * of modern ls/eza instead of raw FAT directory order. */
 #define LS_MAX 96
-struct ls_ent { char name[FS_NAME_MAX]; uint8_t attr; uint32_t size; };
+struct ls_ent {
+    char     name[FS_NAME_MAX];
+    uint8_t  attr;
+    uint32_t size;
+    uint32_t cluster;
+    int      slot;
+    uint8_t  first;
+    uint8_t  raw[11];
+    int      insane;
+};
 static struct ls_ent ls_buf[LS_MAX];
 static int ls_n;
 
@@ -388,14 +429,24 @@ static int ls_icmp(const char *a, const char *b) {
     }
     return ls_lc(*a) - ls_lc(*b);
 }
-static void ls_collect(const char *name, uint8_t attr,
-                        uint32_t clus, uint32_t size, void *ud) {
-    (void)clus; (void)ud;
+static void ls_view_cb(const fat_view_t *v, void *ud) {
+    (void)ud;
     if (ls_n >= LS_MAX) return;
-    scpy(ls_buf[ls_n].name, name);
-    ls_buf[ls_n].attr = attr;
-    ls_buf[ls_n].size = size;
+    scpy(ls_buf[ls_n].name, v->name);
+    ls_buf[ls_n].attr = v->attr;
+    ls_buf[ls_n].size = v->size;
+    ls_buf[ls_n].cluster = v->cluster;
+    ls_buf[ls_n].slot = v->slot;
+    ls_buf[ls_n].first = v->first;
+    memcpy_(ls_buf[ls_n].raw, v->raw, 11);
+    ls_buf[ls_n].insane = v->insane;
     ls_n++;
+}
+
+static void ls_hexbyte(uint8_t b) {
+    const char *h = "0123456789ABCDEF";
+    vga_putc(h[(b >> 4) & 0xF]);
+    vga_putc(h[b & 0xF]);
 }
 static void ls_sort(void) {
     for (int i = 1; i < ls_n; i++) {
@@ -422,8 +473,18 @@ static int ls_fmt_size(uint32_t size, char *out) {
     out[i] = 0;
     return i;
 }
+static void ls_print_raw_detail(const struct ls_ent *e) {
+    vga_set_fg(VGA_LIGHT_RED);
+    vga_write("  c="); print_int((int)e->cluster);
+    vga_write(" o="); print_int(e->slot * 32);
+    vga_write(" first=0x"); ls_hexbyte(e->first);
+    vga_write(" raw=");
+    for (int k = 0; k < 11; k++) { ls_hexbyte(e->raw[k]); vga_putc(' '); }
+    vga_set_fg(VGA_WHITE);
+}
+
 static void ls_print_one(const struct ls_ent *e, const char *parent,
-                         int longfmt) {
+                         int longfmt, int raw) {
     char suf[8];
     int isdir = (e->attr & FAT_ATTR_DIR) != 0;
     int ismount = isdir && mount_suffix(parent, e->name, suf);
@@ -449,6 +510,7 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
         if (ismount) vga_write(suf);
         else vga_write("/");
         vga_set_fg(VGA_WHITE);
+        if (raw && e->insane) ls_print_raw_detail(e);
         vga_write("\n");
     } else {
         vga_set_fg(VGA_DARK_GREY);
@@ -459,7 +521,9 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
         vga_write("  (");
         for (int p = sn; p < 8; p++) vga_putc(' ');
         vga_write(sz);
-        vga_write(" bytes)\n");
+        vga_write(" bytes)");
+        if (raw && e->insane) ls_print_raw_detail(e);
+        vga_write("\n");
         vga_set_fg(VGA_WHITE);
     }
 }
@@ -469,13 +533,19 @@ void fs_list(const char *path) {
         vga_write("catos: no FAT32 volume. Run 'format' first.\n");
         return;
     }
-    int longfmt = 0;
-    if (path && path[0] == '-' && path[1] == 'l') {   /* v2.34: ls -l */
-        longfmt = 1;
-        path += 2;
-        while (*path == ' ') path++;
-        if (!*path) path = 0;
+    int longfmt = 0, raw = 0;
+    const char *p = path;
+    if (p) {
+        while (*p == ' ') p++;
+        while (p[0] == '-' && p[1]) {
+            if (p[1] == 'l') { longfmt = 1; p += 2; }
+            else if (p[1] == '-' && p[2] == 'r') { raw = 1; p += 5; }
+            else break;
+            while (*p == ' ') p++;
+        }
+        if (!*p) p = 0;
     }
+    path = p;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) {
         vga_write("catos: path too long\n"); return;
@@ -491,18 +561,24 @@ void fs_list(const char *path) {
         for (const char *p = abs; *p; p++) if (*p == '/') nm = p + 1;
         struct ls_ent one;
         scpy(one.name, nm); one.attr = e.attr; one.size = e.size;
+        one.cluster = 0; one.slot = 0; one.first = 0; one.insane = 0;
         vga_write("perms      size     name\n");
-        ls_print_one(&one, abs, 1);
+        ls_print_one(&one, abs, 1, 0);
         return;
     }
     ls_n = 0;
-    fat_list_dir(clus, ls_collect, 0);
+    int hidden = 0;
+    fat_list_dir_view(clus, ls_view_cb, 0, raw, &hidden);
     ls_sort();
-    for (int i = 0; i < ls_n; i++) ls_print_one(&ls_buf[i], abs, longfmt);
+    for (int i = 0; i < ls_n; i++) ls_print_one(&ls_buf[i], abs, longfmt, raw);
     vga_set_fg(VGA_WHITE);
     vga_write("--- ");
     print_int(ls_n);
     vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
+    if (!raw && hidden > 0) {
+        print_int(hidden);
+        vga_write(" hidden invalid entries (use ls --raw to show)\n");
+    }
 }
 
 void fs_pwd(char *out, int outlen) {

@@ -575,3 +575,11 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - gfx 兜底：若当前在 gfx24/VBE/Mode13h，进屏前先 `con_force_text()` 应急切回 80x25 文本；切换失败则退化到当前后端的最小可用绘制。
 - 自测修复两则（问题清单 #194/#195）：TSC 超时倍率千倍错（30 s 误算 30 ms，进屏即超时退场）；直写 0xB8000 与前端 `redraw_all()` 冲突（直写行被旧 grid 全量重绘盖掉），崩溃屏改为纯前端路径。
 - 回归：新增 `tests/panic_regress.py` 11/11（文本渲染/STOP/EIP/回 shell、gfx24 强制切回文本渲染/回 shell、ring3 崩溃隔离系统存活 + faultinfo 记录、halt 模式按键后停蓝屏不复位），已接入 `run_full_regress.sh`（端口 4546）。全套 sweep 复跑保绿：qemu 12/12、guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、jobctl 12/12、group 10/10、daemon 5/5、panic 11/11、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7；`ce_regress` 11 FAIL 为 ce_sim 未建模既有基线，不计回归失败。sweep 首轮 group/size 各有一次并发端口争用导致的连接重置，隔离单跑后均全绿。
+## 三十六、v2.59 坏 FAT 目录项净化 + 目录自检（fat.c / fs.c / shell.c / fat.h / fs.h）
+
+- 显示层净化：新增统一判定 `fat_name_sane(short83, lfn)`、`fat_83_sane()`、`fat_lfn_str_sane()`；8.3 拒绝 NUL/控制字符(<0x20)/非 ASCII(>0x7E)/FAT 保留字符 `" * / : < > ? \ |`，LFN 允许 ≥0x80 UTF-8 字节。`ls`/`tree`/TAB 补全/`fs_enum_*` 统一走 `fat_list_dir_view()` 遍历器；非法名默认隐藏不打印，命令末尾汇总 `N hidden invalid entries (use ls --raw to show)`。
+- `--raw` 显式诊断：`ls --raw`/`tree --raw` 列出所有存活条目，坏项红色追加 `c=<cluster> o=<offset> first=0x<hex> raw=<11 字节>`；新增 `fs_enum_entries_raw()` 原始枚举器。合法项行为完全不变。
+- 内建 `fsck` 目录自检：`fat_fsck_scan()` 递归扫描整棵目录树（深度 6），分类 `bad-name` / `orphan-lfn`（checksum 不匹配的孤儿 LFN）/ `bad-cluster`（越界首簇），逐项报告路径/槽偏移/首字节/属性/8.3 原始字节；汇总坏项数、可修复数、需重建数。默认只报告，**不删除任何用户数据**；仅显式 `fsck --purge`（`-p`）逐项打印后墓碑化短条目及其前导连续 0x0F LFN 槽。
+- 0x05 特例（问题清单 #201）：FAT 规范首字节 0x05 是真实 0xE5 字符的转义；`fat_name_show()` 映射回 0xE5 再渲染，`fat_83_sane()` 判其合法。
+- 调试修复（问题清单 #200）：递归扫描器初版复用单一静态簇缓冲，被子目录读覆盖导致外层遍历中断；改为按递归深度分缓冲 `bufs[7][FAT_CLUSTER_SZ_MAX]`。
+- 回归：新增 tests/fs_badname_regress.py 23/23（离线注入四类坏项：0x05 合法转义/0x01 控制字符 8.3/stale checksum LFN/保留字符 `?`；覆盖默认隐藏计数、--raw c/o/first、fsck 分类计数、正常目录项不受影响、--purge 后二次 fsck clean、无 fatal）。保护复绿：lfn 14/14、fsrec 12/12、qemu 12/12、user 20/20、size 7/7。

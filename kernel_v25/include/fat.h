@@ -84,6 +84,56 @@ int  fat_name_illegal(const char *name);
 /* render an 8.3 name back to a human string (lower-case) */
 void fat_name_show(const uint8_t *n83, char *out);
 
+/* v2.55: name sanity verdict.  Returns 1 when the entry may be displayed,
+ * 0 when the name bytes are illegal: control code (<0x20 / 0x7F), a
+ * non-ASCII byte in the 8.3 slot, or a FAT reserved character
+ * (" * / : < > ? \ |).  `lfn` may be NULL/empty when the entry has no
+ * long name; a non-ASCII UTF-8 byte in an LFN is allowed. */
+int  fat_name_sane(const char *short83, const char *lfn);
+/* raw 11-byte 8.3 sanity check used by the fsck scanner and the walker. */
+int  fat_83_sane(const uint8_t n83[11]);
+
+/* v2.55: directory entry view handed to the raw enumerator. */
+typedef struct {
+    const char *name;      /* display name: LFN when present, else 8.3 */
+    uint8_t  attr;
+    uint32_t cluster;
+    uint32_t size;
+    uint8_t  raw[11];      /* raw 8.3 bytes on disk (space padded) */
+    uint8_t  first;        /* raw name[0] */
+    int      insane;       /* 1 = fails fat_name_sane() */
+    int      slot;         /* slot index inside the directory */
+} fat_view_t;
+typedef void (*fat_view_cb)(const fat_view_t *v, void *ud);
+
+/* enumerate a directory.  When raw==0 insane entries are skipped and the
+ * count is stored in *hidden (hidden may be NULL); raw==1 hands every live
+ * entry to the callback, insane ones flagged in v->insane. */
+void fat_list_dir_view(uint32_t dirclus, fat_view_cb cb, void *ud,
+                       int raw, int *hidden);
+/* number of insane entries skipped by the last fat_list_dir() call. */
+int  fat_dir_hidden(void);
+
+/* v2.55: directory integrity scan (fsck).  Problem kinds: */
+#define FSCK_BADNAME     1   /* illegal 8.3 / LFN name bytes */
+#define FSCK_ORPHAN_LFN  2   /* LFN run with a mismatched checksum / orphan */
+#define FSCK_BADCLUST    3   /* first cluster out of range */
+typedef struct {
+    char     path[160];           /* directory holding the entry */
+    uint32_t cluster;             /* entry first cluster */
+    int      slot;                /* slot index inside the directory */
+    uint8_t  first;               /* raw name[0] */
+    uint8_t  attr;
+    uint8_t  raw[11];             /* raw 8.3 bytes */
+    int      kind;
+    int      repairable;          /* 1 = purge can wipe the slot safely */
+} fat_fsck_t;
+typedef void (*fat_fsck_cb)(const fat_fsck_t *e, void *ud);
+/* walk the whole tree from root_clus; report problems through cb.
+ * purge==0 reports only; purge==1 marks reported repairable slots deleted.
+ * Returns the number of problem entries seen. */
+int  fat_fsck_scan(uint32_t root_clus, fat_fsck_cb cb, void *ud, int purge);
+
 /* ---- v2.18 long-name API ---- */
 #ifndef FS_LFN_MAX
 #define FS_LFN_MAX     96      /* max long-name bytes (UTF-8, incl NUL) */
