@@ -555,3 +555,23 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 示范守护：`extapp/memlog.c`（周期 `brk(0)` 查询堆水位写入捕获 ring，`log TID` 可读回，`kill TID` 停止）；spinner 上限 8/60→200（jobctl_regress 驱动 `spinner 180` 观测 stop/fg/bg 状态机所需）。
 - 回归：新增 tests/daemon_regress.py 5/5（公告 tid/jobs 带 D 标记/log 读回水位样本/kill 回收/无 fatal），已接入 run_full_regress.sh（端口 4467）。
 - 探针修复三则（均为断言侧，非内核语义）：开机后 PS/2 幽灵按键 settle（丢弃性 clear + 2.5s）；jobs/kill 断言前 clear 防全屏旧行污染（dm-3 的 log 输出、jc-2/3/4 的历史 jobs 行都含目标词）；短寿命后台任务在断言前自退——`daemon memlog 60 500`（30s）替代 `6 500`（3s），`fg` 目标 `spinner 20`（10s）替代 `spinner 4`（2s）。
+
+## 三十五、v2.59 完整蓝屏崩溃屏（bsod.c / diag.c / intr.c / shell.c）
+
+- 自包含崩溃模块：新增 `kernel_v25/include/bsod.h` + `src/bsod.c`。进屏后只走 `vga_*` 前端 facade（`vga_set_color`/`vga_clear`/`vga_write_at`/`vga_write_at_utf8`）绘制，不触堆、FS、shell、IME、字体加载；键盘绕过 shell/IME/`keyboard.c` 解析栈，直轮询 8042 端口 0x64/0x60（忽略 break code 0x80）；超时 30 s（`BSOD_TIMEOUT_SEC`，TSC 计时，`mhz*1e6*30`）。
+- 视觉：整屏蓝底白字（CON_WHITE/CON_BLUE），顶部 ASCII `:(`，标题「CatOS 遇到严重问题，需要重新启动。」，列出 STOP 代码、失败任务名/tid/ring、EIP/CR2/ERR/EFLAGS、tick、panic 消息；末尾提示「按任意键重新启动；按 F1 显示已保存崩溃信息。」F1 第二页转储 `faultinfo` 已保存记录。
+- STOP 代码固定映射表（向量 → Windows 风格标签）：
+
+  | 异常向量 | 标签 |
+  |---|---|
+  | 0 (`#DE` 除零) | `DIVIDE_BY_ZERO` |
+  | 6 (`#UD` 非法指令) | `INVALID_OPCODE` |
+  | 13 (`#GP` 一般保护) | `IRQL_NOT_LESS_OR_EQUAL` |
+  | 14 (`#PF` 页故障) | `PAGE_FAULT_IN_NONPAGED_AREA` |
+  | 其余 | `UNEXPECTED_KERNEL_MODE_TRAP` |
+
+- 模式与接入：`/etc/panicmode`（取值 `reboot`/`halt`，默认 `reboot`）启动时 `bsod_init()` 缓存到 BSS，崩溃路径不再打开文件。`panic()` 全面改写：原 msg 带到崩溃报告行，随后进蓝屏；`intr.c` ring0 致命异常记录 fault + serial breadcrumb 后调 `bsod_enter()`；**ring3 任务异常行为不变**（仍只记录 + `task_die_fault` 杀任务，不蓝屏）。
+- shell 内建：`bsod`（别名 `blue`）真机渲染一次崩溃屏；`bsod --no-reboot`（`--soft`）测试钩子，按键后清屏回 shell 而不重启；非 soft 与 `panicmode` 写操作需 root 或 `CAP_SYS`/`CAP_REBOOT`。`panicmode [reboot|halt]` 读/写当前模式并持久化 `/etc/panicmode`。
+- gfx 兜底：若当前在 gfx24/VBE/Mode13h，进屏前先 `con_force_text()` 应急切回 80x25 文本；切换失败则退化到当前后端的最小可用绘制。
+- 自测修复两则（问题清单 #194/#195）：TSC 超时倍率千倍错（30 s 误算 30 ms，进屏即超时退场）；直写 0xB8000 与前端 `redraw_all()` 冲突（直写行被旧 grid 全量重绘盖掉），崩溃屏改为纯前端路径。
+- 回归：新增 `tests/panic_regress.py` 11/11（文本渲染/STOP/EIP/回 shell、gfx24 强制切回文本渲染/回 shell、ring3 崩溃隔离系统存活 + faultinfo 记录、halt 模式按键后停蓝屏不复位），已接入 `run_full_regress.sh`（端口 4546）。全套 sweep 复跑保绿：qemu 12/12、guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、jobctl 12/12、group 10/10、daemon 5/5、panic 11/11、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7；`ce_regress` 11 FAIL 为 ce_sim 未建模既有基线，不计回归失败。sweep 首轮 group/size 各有一次并发端口争用导致的连接重置，隔离单跑后均全绿。

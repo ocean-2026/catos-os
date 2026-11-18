@@ -20,6 +20,7 @@
 #include "task.h"
 #include "usb.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
+#include "bsod.h"       /* v2.59 full-screen crash report on ring0 fault */
 
 /* ---- GDT -------------------------------------------------------------- */
 
@@ -204,24 +205,12 @@ void isr_exception(int_frame_t *f) {
                      f->cs, f->eflags);
         task_die_fault(f);
     }
-    /* ring0 kernel fault: record it, dump the frame, halt (no scheduler
-     * games in a broken kernel).  The record stays queryable in case a
-     * serial console or a second core ever inspects it. */
+    /* ring0 kernel fault: record it, then hand off to the full-screen
+     * BSOD (v2.59).  The record stays queryable via `faultinfo`; the
+     * serial breadcrumb above survives even a triple fault. */
     fault_record(f->intno, f->err, f->eip, cpu_cr2_read(), f->cs, f->eflags);
-    __asm__ volatile ("cli");
-    exc_dump(f);
-    if (f->intno == 14) {
-        vga_write("pf: ");
-        vga_write((f->err & 1) ? "present " : "not-present ");
-        vga_write((f->err & 2) ? "write " : "read ");
-        vga_write((f->err & 4) ? "user " : "supervisor ");
-        if (f->err & 8) vga_write("rsvd ");
-        if (f->err & 16) vga_write("instr-fetch ");
-        vga_write("\n");
-    }
-    vga_write("ring0 kernel fault - system halted\n");
-    ser_write("[intr] ring0 halt\n");
-    for (;;) __asm__ volatile ("hlt");
+    ser_write("[intr] ring0 -> bsod\n");
+    bsod_enter(exc_name[f->intno < 32 ? f->intno : 31], f, 0);
 }
 
 /* ---- IRQ dispatch ------------------------------------------------------ */
