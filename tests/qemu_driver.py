@@ -114,6 +114,9 @@ def _stage_image(path):
     dst = os.path.join(stage, os.path.basename(path))
     shutil.copy2(path, dst)
     atexit.register(lambda: os.path.exists(dst) and os.remove(dst))
+    # v2.59: also drop the (now empty) per-process staging dir at exit.  The
+    # 64 MiB image copies used to pile up in /tmp across hundreds of runs.
+    atexit.register(lambda: shutil.rmtree(stage, ignore_errors=True))
     return dst
 
 

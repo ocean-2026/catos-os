@@ -81,3 +81,7 @@ tests/guess_artifacts/
 tests/qemu_shots_guess/
 tests/regress_logs/
 tests/smoke_artifacts/
+tests/qemu_shots/
+tests/qemu_disk_pager.img
+tests/*.ppm
+*.ppm
