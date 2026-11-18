@@ -20,6 +20,7 @@
 #include "e1000.h"       /* v2.21 #55 e1000 NIC state for netdiag */
 #include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
 #include "lang.h"       /* v2.21 T50: en/zh user-visible messages      */
+#include "bsod.h"       /* v2.59 crash screen: bsod/blue + panicmode      */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -148,6 +149,8 @@ static void cmd_help(void) {
     help_row("F2",          "toggle pinyin IME (works in shell and edit)");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
+    help_row("bsod|blue",   "render the full-screen crash report (--no-reboot for test)");
+    help_row("panicmode",   "show/set post-crash action: reboot|halt (/etc/panicmode)");
 
     help_head("processes (ring3 tasks, preemptive)");
     help_row("run FILE.ce [args..] [&]", "execute a CE app (in background with &)");
@@ -961,6 +964,7 @@ static const char *BUILTIN_NAMES[] = {
     "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
     "faultinfo", "fsck", "color",
+    "bsod", "blue", "panicmode",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
     0
@@ -2471,6 +2475,51 @@ static int session_is_admin(void) {
 }
 static int session_is_fsadmin(void) {
     return g_uid == UID_ROOT || (g_caps & CAP_FSADMIN);
+}
+
+/* v2.59: render the full-screen crash report on demand.
+ *   bsod [--no-reboot]   --no-reboot: return to the shell after a keypress
+ *                           (test hook); otherwise reboot/halt per the
+ *                           cached /etc/panicmode setting. */
+static void cmd_bsod(char *arg) {
+    int soft = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(arg, "--no-reboot") || !strcmp_(arg, "--soft")) soft = 1;
+    if (!soft && g_uid != UID_ROOT && !(g_caps & (CAP_SYS | CAP_REBOOT))) {
+        vga_write("bsod: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        return;
+    }
+    bsod_enter("manual BSOD triggered by `bsod` command", 0, soft);
+}
+
+/* v2.59: read / set the post-crash action, persisted to /etc/panicmode.
+ *   panicmode            -> show current setting
+ *   panicmode reboot|halt */
+static void cmd_panicmode(char *arg) {
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        vga_write("panicmode: ");
+        vga_write(bsod_mode() == BSOD_MODE_HALT ? "halt" : "reboot");
+        vga_write("\n");
+        return;
+    }
+    if (g_uid != UID_ROOT && !(g_caps & (CAP_SYS | CAP_REBOOT))) {
+        vga_write("panicmode: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        return;
+    }
+    if (!strcmp_(arg, "halt")) {
+        bsod_set_mode(BSOD_MODE_HALT);
+        fs_write_text("/etc/panicmode", "halt\n", 5);
+    } else if (!strcmp_(arg, "reboot")) {
+        bsod_set_mode(BSOD_MODE_REBOOT);
+        fs_write_text("/etc/panicmode", "reboot\n", 7);
+    } else {
+        vga_write("panicmode: usage: panicmode [reboot|halt]\n");
+        return;
+    }
+    vga_write("panicmode: ");
+    vga_write(arg);
+    vga_write(" (persisted to /etc/panicmode)\n");
 }
 
 static void cmd_whoami(void) {
@@ -4152,6 +4201,7 @@ static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
     "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
     "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
@@ -4335,6 +4385,7 @@ void shell_run(void) {
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
+    bsod_init();              /* v2.59: cache /etc/panicmode (reboot|halt) */
     ce_init();
     btime_mark("S4 ce_init");
     /* v2.13: load the persistent user database + ACL (seeds root/user and
@@ -4492,6 +4543,9 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n");
         }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
+        else if (!strcmp_(cmd, "bsod") ||
+                 !strcmp_(cmd, "blue"))      cmd_bsod(arg);
+        else if (!strcmp_(cmd, "panicmode")) cmd_panicmode(arg);
         else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
         else if (!strcmp_(cmd, "mkdir")) {
