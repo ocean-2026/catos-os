@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from qemu_driver import (boot as _qemu_boot, find_qemu, kill_qemu,  # noqa: E402
                          screen_text, sendkey, type_text,
-                         wait_for_prompt, read_screen)
+                         wait_for_prompt, read_screen, force_text)
 
 REPO = os.path.dirname(HERE)
 DEFAULT_PORT = 4546
@@ -72,7 +72,17 @@ def main():
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    proc, s = _qemu_boot(qemu, iso, port, disk=disk)
+    # serial capture: the crash path must dual-output the same core summary
+    # to COM1 before painting the VGA buffer.  Read it back after the crash.
+    serial_log = os.path.join(HERE, "regress_logs", "panic_serial.log")
+    os.makedirs(os.path.dirname(serial_log), exist_ok=True)
+    try:
+        os.remove(serial_log)
+    except OSError:
+        pass
+
+    proc, s = _qemu_boot(qemu, iso, port, disk=disk,
+                         extra_args=["-serial", "file:%s" % serial_log])
     results = []
 
     def step(name, ok, note):
@@ -87,6 +97,10 @@ def main():
         do("clear", 0.6)
 
     try:
+        # v2.56: boot defaults to gfx24; force the console back to text so the
+        # 0xB8000 text buffer is readable through the monitor (see qemu_driver
+        # .force_text).  The consent gate is blind by nature.
+        force_text(s)
         if not wait_for_prompt(s, timeout=120.0):
             print("FATAL: shell prompt never appeared")
             return 3
@@ -100,30 +114,73 @@ def main():
             return 3
         step("format", True, "FAT32 volume ready")
 
-        # a) text-mode crash report, soft return to shell
+        # a) text-mode crash report, soft return to shell.
+        #    Summary fields: vector tag, CPU#, FATAL, RECOVER: NO, reason,
+        #    ERR, EIP, CR2(#PF only; manual panic -> 0), RSP, EFLAGS, stack.
         clear()
         do("bsod --no-reboot", 1.5)
         txt = screen_text(s)
-        markers = [":(", "STOP:", "EIP=", "CR2=", "EFLAGS=", "tick", "F1"]
+        markers = [":(", "EIP=", "EFLAGS=", "RECOVER: NO", "FATAL",
+                   "CPU ", "ERR=", "RSP=", "tick"]
         missing = [m for m in markers if m not in txt]
-        step("text-bsod-render", not missing,
-             "missing=%s" % missing if missing else "art/STOP/regs/hint present")
-        step("text-bsod-stopcode", "UNEXPECTED_KERNEL_MODE_TRAP" in txt,
+        step("summary-fields", not missing,
+             "missing=%s" % missing if missing else
+             "vector/FATAL/RECOVER/CPU/ERR/EIP/CR2/RSP/EFLAGS present")
+        step("summary-stopcode", "UNEXPECTED_KERNEL_MODE_TRAP" in txt,
              "manual panic -> default trap code")
-        sendkey(s, "a", 1.5)
-        step("text-bsod-return", prompt_up(s), "keypress back at shell")
 
-        # b) gfx24 -> forced back to text -> report, soft return
+        # single-key pages: D regs, S stack, M map, P dump queued, A cpus.
+        sendkey(s, "d", 1.2)
+        td = screen_text(s)
+        step("page-regs-D", "full register dump" in td,
+             "D -> full register dump page")
+        sendkey(s, "s", 1.2)
+        ts = screen_text(s)
+        step("page-stack-S", "stack trace" in ts, "S -> stack trace page")
+        sendkey(s, "m", 1.2)
+        tm = screen_text(s)
+        step("page-map-M", "memory mapping" in tm and "CR3=" in tm,
+             "M -> mapping / CR3 summary page")
+        sendkey(s, "p", 1.2)
+        tp = screen_text(s)
+        step("page-dump-P", "dump queued" in tp,
+             "P shows only 'dump queued', no FS write")
+        sendkey(s, "a", 1.2)
+        ta = screen_text(s)
+        step("page-cpus-A", "per-CPU state" in ta and "SMP deferred" in ta,
+             "A -> per-CPU page, SMP deferred placeholder")
+        # C refuses: RECOVER: NO
+        sendkey(s, "c", 1.2)
+        tc = screen_text(s)
+        step("continue-refused", "continue not available" in tc,
+             "C refused: RECOVER: NO")
+
+        # serial dual-output: the same core summary landed on COM1.
+        serial = ""
+        try:
+            with open(serial_log, "r", errors="replace") as fh:
+                serial = fh.read()
+        except OSError:
+            pass
+        step("serial-dual-output",
+             "[bsod] === PANIC:" in serial and "eip=" in serial,
+             "COM1 breadcrumb carries vector + EIP")
+
+        # R returns to the shell on the soft path.
+        sendkey(s, "r", 1.5)
+        step("text-bsod-return", prompt_up(s), "R keypress back at shell")
+
+        # b) gfx24 -> forced back to text -> report, soft return.
         clear()
         do("gfx24", 3.0)
         do("bsod --no-reboot", 1.5)
         txt = screen_text(s)
-        missing_b = [m for m in [":(", "STOP:", "EIP="] if m not in txt]
+        missing_b = [m for m in [":(", "EIP="] if m not in txt]
         step("gfx24-bsod-text", not missing_b,
              "forced back to text, missing=%s" % missing_b if missing_b
              else "report visible in text buffer")
-        sendkey(s, "b", 1.5)
-        step("gfx24-bsod-return", prompt_up(s), "keypress back at shell")
+        sendkey(s, "r", 1.5)
+        step("gfx24-bsod-return", prompt_up(s), "R keypress back at shell")
 
         # c) ring3 fault: task killed, no blue screen, system usable
         clear()
@@ -140,17 +197,26 @@ def main():
         step("ring3-recorded", "last fault" in txt and "page-fault" in txt,
              "faultinfo records the ring3 page fault")
 
+        # crashlog: the earlier soft BSOD was a test return, not a real fatal
+        # crash; its record is cleared on soft exit, and the ring3 kill does
+        # not write the kernel panic record, so the builtin reports none.
+        clear()
+        do("crashlog", 1.5)
+        tcl = screen_text(s)
+        step("crashlog-no-record", "no crash record" in tcl,
+             "soft return + ring3 kill leave no saved record")
+
         # d) panicmode=halt: key press leaves the guest halted on the report
         clear()
         do("panicmode halt", 1.0)
         step("panicmode-set", "halt" in screen_text(s),
              "cached + persisted to /etc/panicmode")
         do("bsod", 1.5)
-        sendkey(s, "c", 1.0)
+        sendkey(s, "r", 1.0)
         time.sleep(4.0)
         txt = screen_text(s)
-        halted_bsod = (":(" in txt and "STOP:" in txt) and not prompt_up(s)
-        step("halt-mode-no-reboot", halted_bsod,
+        halted_bsod = (":(" in txt and "MANUAL PANIC" in txt) and not prompt_up(s)
+        step("halt-mode-stays-on-report", halted_bsod,
              "still on BSOD frame, no prompt after key")
     finally:
         kill_qemu(proc)

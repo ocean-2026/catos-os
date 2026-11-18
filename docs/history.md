@@ -160,3 +160,6 @@ CatOS[易错点] 多 clone 并发跑回归时，部分套件的 monitor 端口�
 CatOS[易错点] dispi/LFB 图形模式下 0xB8000 文本平面不是可读镜像：be_text 独占的 VGA 文本窗口在 gfx/vbe/vbe24 后端下，CPU 写 0xB8000 的内容 monitor `xp /4000 0xb8000` 读回仍是空白（QEMU 文本平面在图形模式下与帧缓冲不在同一可观测窗口）。前端给图形后端加一层 0xB8000 文本镜像的方案验证不可行（写入落地但读不回），旧文本读屏测试不能靠内核镜像补救，只能：运行时盲发 `text`+Y consent 切回文本后端，或在磁盘上预置 /etc/videomode=text。
 CatOS[易错点] 启动早期打印的回退警告会被后面的 boot_autostart banner 滚出 25 行缓冲：先把警告文案存进全局备注，banner 跑完后再补打一行，否则回退原因在屏幕上不可见，验收时读 0xB8000 抓不到 WARNING。
 CatOS[易错点] 开机默认改 gfx24 后，面向文本屏的旧回归套件会在 wait_for_prompt/clean_run 处读空缓冲：驱动侧 force_text() 在 shell 就绪后盲发 `text`、回车、`y`、回车，并轮询提示符（最长 20s），首次 `text` 落在 shell 就绪前被吞掉时自动重发一次；不要把固定 sleep 当就绪判据。
+CatOS[易错点] 崩溃屏二次异常护栏的「已在 panic」标志只在硬崩溃路径保持；软测试钩子（`bsod --no-reboot` 按键回 shell）退出蓝屏时必须复位 `g_in_panic`/深度计数/记录，否则本次启动内第二次主动蓝屏会被护栏误判为「蓝屏屏内嵌套致命异常」而直接 cli;hlt，后续隔离/诊断步骤全部落空。护栏标志的生命周期要区分「本次崩溃会话」与「整个启动周期」。
+CatOS[易错点] 回归磁盘镜像若是全零（MBR 无 55aa 签名），format 阶段 FAT 探测不出卷，shell 看似就绪但内置应用/CE 装不上，后续 ring3 用例全部 "killed=False"。跑套件前先 `xxd -l 512` 或 python 读 MBR 签名核对镜像是否已格式化；坏镜像用同套件已格式化的有效盘 `cp -a` 做种子。
+CatOS[易错点] 崩溃路径上的串口断言要在 boot() 传 extra_args `["-serial","file:/tmp/xxx.log"]`；driver 默认不带 -serial，串口面包屑写进了 QEMU 后端但不落盘，事后无法 grep 向量/EIP。断言文件需在 guest 退出后再读（file: 后端缓冲在进程结束时 flush）。

@@ -583,3 +583,33 @@ CJK = 2×ASCII 的**逐像素**断言（下划线连续段 = 精确格子标尺�
 - 0x05 特例（问题清单 #201）：FAT 规范首字节 0x05 是真实 0xE5 字符的转义；`fat_name_show()` 映射回 0xE5 再渲染，`fat_83_sane()` 判其合法。
 - 调试修复（问题清单 #200）：递归扫描器初版复用单一静态簇缓冲，被子目录读覆盖导致外层遍历中断；改为按递归深度分缓冲 `bufs[7][FAT_CLUSTER_SZ_MAX]`。
 - 回归：新增 tests/fs_badname_regress.py 23/23（离线注入四类坏项：0x05 合法转义/0x01 控制字符 8.3/stale checksum LFN/保留字符 `?`；覆盖默认隐藏计数、--raw c/o/first、fsck 分类计数、正常目录项不受影响、--purge 后二次 fsck clean、无 fatal）。保护复绿：lfn 14/14、fsrec 12/12、qemu 12/12、user 20/20、size 7/7。
+
+## 三十七、v2.59-crashscreen 增量强化（bsod.c / serial_log.c / shell.c / intr.c / diag.c / gen_symtab.py）
+
+> 基线 cbf77c3（含 bsod.c 284 行、diag.c panic 改写、intr.c ring0 接入）之上做增量，不推翻重写；独立工作仓本地 commit，不 push。可靠性优先、美观其次。
+
+### P0 正确性
+- **双输出（P0-1）**：抽出共享轮询串口模块 `serial_log.c/.h`（COM1 0x3F8，等 LSR.THRE 置位，4000 次守卫超时丢弃不阻塞）；关键信息先同步写 COM1，再写 VGA 文本缓冲；任一路失败不影响另一路。`intr.c` 异常面包屑复用同一模块。
+- **二次异常护栏（P0-2）**：全局 `g_in_panic` + `g_panic_depth` 深度计数（上限 `BSOD_PANIC_DEPTH_MAX=2`）。`bsod_enter` 入口先 `cli`，见 `g_in_panic` 即深度+1，超限或 triple fault 直接 `cli;hlt` 死循环，禁止递归进蓝屏；`intr.c` `isr_exception` 入口判 `g_in_panic` 直接硬停。软测试路径退出蓝屏时复位标志/深度/记录（#203）。
+- **分级核对成表（P0-3）**：`docs/panic-tiers.md` 整理三级——L0 ring3 异常只杀任务 + 一行消息 + 退出码 -1，不进全屏；L1 受控返回码终止相关任务（非异常路径）；L2 ring0 致命异常（#PF/#GP/#UD/双重故障/看门狗）进全屏。看门狗尚未实现（deferred）。代码与文档一致。
+- **去依赖确认（P0-4）**：审计蓝屏路径无 `kmalloc`/无阻塞锁/无 sleep/无 FS/无 IME/无 UTF-8 框线；FS 调用仅在启动期 `bsod_init` 缓存模式。内建 GB2312 子集字模表缺标题多个汉字（#202），标题与提示行降级 ASCII；字模为内核内建常量表，证据链见 `docs/panic-tiers.md` §4 与问题清单 #202。
+
+### P1 摘要 / 交互 / 事后诊断
+- **摘要页字段（P1-5）**：异常类型 + 十六进制向量（`=== PANIC: CPU EXCEPTION 0x0E (#PF) ===`）、CPU 号、FATAL、RECOVER: NO、简短原因、ERR、EIP、CR2（仅 #PF）、RSP、EFLAGS、tick、EIP 最近符号+偏移、栈顶 3 帧；默认不显示全量寄存器/日志/用户输入/剪贴板。
+- **内建符号表（#204）**：`tools/gen_symtab.py` 构建期从 `nm` 读 T/t 符号、去前导下划线、按地址排序，生成 `src/symtab.inc`（`.rodata`，约 785 符号）；`bsod_sym_fmt()` 二分查最近符号+偏移，蓝屏与 `crashlog` 摘要共用；build.sh 编译前先临时链接 PE 取符号（干净树首构兜底）。
+- **单键交互（P1-6）**：8042 扫描码直解（只认 ASCII，忽略 break code）：R 触发崩溃动作、D 完整寄存器、S 栈回溯全文、M 内存映射/CR3 摘要、P 排队转储（仅显示 `dump queued`）、A 全核状态（SMP deferred 占位）、C 继续（RECOVER: NO 时拒绝并提示不可继续）；F1 保留 faultinfo 页。输入法强制关、无句子级命令、无子提示符；页面切换整屏重绘，不做增量滚动。
+- **转储与事后诊断（P1-7 / #205）**：panic 路径不写 FS；预留 bss 固定区 `panic_record_t`（magic `CPN1`：tick/向量/EIP/CR2/ERR/EFLAGS/ESP/栈顶 5 帧/版本/原因）。下次正常启动内建 `crashlog` 读取并符号化显示摘要；`crashlog --full` 才出原始片段并附敏感数据策略提示；无记录提示 `no crash record`。固定扇区转储 deferred。
+
+### P2 增强（尽力项）
+- 标题反显（`!!! PANIC !!!` 白/蓝反显行），无颜色也可读；配色仅增强；蓝屏路径禁光标闪烁/进度条/动画；IME 候选区不进入。
+- 窄屏（<60 列）/串口只显示核心摘要（向量/EIP/原因/提示），不做双列布局与栈转储。
+- SMP 接口占位（#207）：per-CPU 快照槽位、NMI/IPI 停核标记数组、`[CPU n]` 串口前缀；UP 构建只采样 CPU 0，cpus 页标注 deferred。
+- `/etc/panicmode` 扩展支持 `reboot|halt|wait` 与 `reboot:<Ns>` 倒计时秒数形式；启动期缓存，崩溃路径不开文件；开发版默认 `wait`。
+
+### 回归
+- `tests/panic_regress.py` 扩充至 19 步：摘要字段完整、D/S/M/P/A 各键翻页可见断言、C 拒绝、串口双输出抓取断言、ring3 隔离 + faultinfo、crashlog 无记录提示、P 仅 `dump queued`、halt 模式留屏。`tests/diag_regress.py` 补 `force_text` 盲切文本。
+
+#### 同 ISO 实机复核（2026-11-18，本工作仓 CatOs-f）
+- 全绿：panic_regress **19/19**、qemu_regress **12/12**、caps_regress **12/12**、user_regress **20/20**、fsrec_regress **12/12**、shell_guess_regress **16/16**；diag 4/4、lfn 14/14、badname 23/23、daemon 5/5、disk 5/5、env 13/13、heap 4/4、recur 10/10、jobctl 12/12、group 10/10。
+- `ce_regress` 11 FAIL 为既有基线（ce_sim 未建模），不计本轮回归失败。
+- **size_regress 未在本仓拿到 7/7**：卡在 `size large` 步 QEMU screendump 捕获（large.ppm 未刷新），本仓未改 `be_vbe24.c`/`render.c`/size 链路（diff 仅触及 bsod/serial_log/shell/intr/diag/gen_symtab 与测试）；主仓基线在同一步同样卡住，判定为既有 screendump 时序/争用问题，非本轮增量引入。端口写死 4492，复跑需避开外部 sweep 占用。
