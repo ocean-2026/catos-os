@@ -515,10 +515,12 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
         if (ismount) for (const char *p = suf; *p; p++) line[n++] = *p;
         else line[n++] = '/';
         line[n] = 0;
-        vga_set_fg(VGA_DARK_GREY);
-        vga_write("[DIR] ");
+        /* v2.59 fix: the prefix used to be written with vga_write() and the
+         * rest fed to pager_line() -- two geometry paths that desynchronise
+         * once the pager owns the output (and it skipped row accounting for
+         * the prefix).  Emit the whole line through the pager instead. */
         vga_set_fg(VGA_LIGHT_CYAN);
-        pager_line(line + 6);
+        pager_line(line);
         vga_set_fg(VGA_WHITE);
         if (raw && e->insane) ls_print_raw_detail(e);
     } else {
@@ -530,12 +532,12 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
         for (const char *p = sz; *p; p++) line[n++] = *p;
         line[n++] = ' '; line[n++] = 'b'; line[n++] = 'y'; line[n++] = 't'; line[n++] = 'e'; line[n++] = 's'; line[n++] = ')';
         line[n] = 0;
-        vga_set_fg(VGA_DARK_GREY);
-        vga_write("[FILE] ");
+        /* v2.59 fix: same as the [DIR] branch -- one line, one path.  The
+         * previous split printed the file name twice ("[FILE] a.ce a.ce
+         * ( 100 bytes)") because the tail handed to pager_line() still
+         * contained the name. */
         vga_set_fg(VGA_LIGHT_GREY);
-        vga_write(e->name);
-        vga_set_fg(VGA_DARK_GREY);
-        pager_line(line + 7);
+        pager_line(line);
         vga_set_fg(VGA_WHITE);
         if (raw && e->insane) ls_print_raw_detail(e);
     }
