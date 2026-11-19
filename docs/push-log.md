@@ -18,4 +18,6 @@ git push https://x-access-token:${TOKEN}@github.com/ocean-2026/CatOS.git main
 | 2026-11-19 ~04:5x | 77e62ea | `074933b..77e62ea  main -> main` | `ls-remote` = 77e62ea4…（与本地 HEAD 一致） |
 | 2026-11-19 ~05:2x | 834f5bf | `77e62ea..834f5bf  main -> main` | `ls-remote` = 834f5bf16d13…（与本地 HEAD 一致） |
 | 2026-11-19 ~05:5x | 99af21e | `834f5bf..99af21e  main -> main`（含 merge 02c77e3 滚动返工） | `ls-remote` = 99af21ecd76d…（与本地 HEAD 一致） |
-| 2026-11-19 ~06:0x | e8167f6 | `99af21e..e8167f6  main -> main`（ls 单行统一走 pager_line，修文件名重复） | 待 `ls-remote` 复核（下一步统一校） |
+| 2026-11-19 ~06:0x | e8167f6 | `99af21e..e8167f6  main -> main`（ls 单行统一走 pager_line，修文件名重复） | `ls-remote` = e8167f6（复核通过） |
+| 2026-11-19 ~07:0x | 8c123df | `e8167f6..8c123df  main -> main`（IME 补字母缓冲断言 19/19） | `ls-remote` = 8c123df3c3c7…（复核通过） |
+| 2026-11-19 ~09:1x | e48f8f2 | `8c123df..e48f8f2  main -> main`（含 249e0a1 报告 §7、f437138 清误建目录、IME 光标格防御） | `ls-remote` = e48f8f2b55fa…（复核通过） |
