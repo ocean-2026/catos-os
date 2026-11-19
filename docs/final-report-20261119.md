@@ -159,3 +159,32 @@ cbf77c3..614b396  main -> main
 - `docs/panic-tiers.md`：L0/L1/L2 分级表与代码分支逐一对应。
 - `docs/快捷键.md`：与 `keys` 命令同源的键位说明。
 - `docs/ime-plan.md`：输入法三阶段设计（本轮落阶段一）。
+
+---
+
+## 7. 验收证据索引
+
+### 7.1 回归台账（终验数字，`tests/regress_logs/`）
+
+见 §3：22 套件、270 项断言、269 PASS；唯一 FAIL 为 `ce_regress` 基线豁免（`ce_sim` 未建模 opcode）。分项数字：qemu 12/12、guess 16/16、fsrec 12/12、lfn 14/14、recur 10/10、jobctl 12/12、group 10/10、daemon 5/5、caps 12/12、user 20/20、disk 5/5、env 13/13、heap 4/4、size 7/7、videomode 9/9、badname 23/23、mouse 18/18、panic 19/19、pager 27/27、ime 19/19、diag 4/4。
+
+### 7.2 截图清单（`shots-delivery-20261119/`，逐张目检非黑非花屏）
+
+| 文件 | 分辨率 | 证明的验收点 |
+|---|---|---|
+| `v256_boot_gfx24.png` | 800×600 | 开机默认 gfx24：`[display] boot mode: vbe24` + banner + 提示符 |
+| `v257_scroll_step0/1/2.png` | 640×400 | 连按 Ctrl+↑ 三帧：顶行 hl24→hl23→hl23…，整屏逐行下移、顶行从归档补入、无提示条无空行 |
+| `v257_scroll_row_down.png` | 640×400 | 同 step1（一次滚动的定帧） |
+| `v257_mouse_select.png` | 640×400 | 拖选整行反色高亮（含行末空格块）+ `mouse: x=… y=… btn=…` 诊断行 |
+| `v257_mouse_paste.png` | 640×400 | 中键粘贴：提示符出现剪贴板文本，反色行保留 |
+| `v258_ime_candidates.png` | 640×400 | 内联拼音 `zhong` + 倒数第二行整行 `-` 分隔线 + 末行 `1/2 1.中 2.种 …` |
+| `v258_ime_commit.png` | 640×400 | 数字键选字上屏、候选区恢复 |
+| `v259_pager_help_more.png` | 640×400 | `help` 超屏 + 纯 ASCII `-- More (Enter=1 line, Space=1 page, q=quit) --` |
+| `v259_pager_ls_bin.png` | 800×600 | `ls /bin` 分页 + More 条（gfx24 后端，避开 text 后端末行 framebuffer 刷新缺口） |
+| `v259_panic_summary.png` | 640×400 | `!!! PANIC !!!` 摘要页：EIP/ERR/CR2/RSP/EFLAGS + 单键提示行 |
+| `v259_panic_regs.png` | 640×400 | 按 `D` 的完整寄存器页 |
+| `v259_pager_exact_screen.png` | 640×400 | `help` 翻到末页：不再出 More、提示符干净回来 |
+
+### 7.3 交付包
+
+`CatOS-v2.59-overnight-20261119.zip`（7.2 MB）：含 `CatOs/` 全量源码 + 文档 + 测试 + `catos-v2.59.iso`（11,649,024 字节，可直接 `qemu-system-i386 -cdrom catos-v2.59.iso` 启动）；排除 `.git*`、构建产物（`extapp/bin`、`extapp/pkg`、`node.ce`、`builtin_apps.inc`、`symtab.inc`、`build/`）、截图与回归日志、`*.img`/`*.bak-*`/`*.ppm`/`*.bin`、`night/`、`vmware.log`。
