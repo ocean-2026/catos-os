@@ -955,7 +955,12 @@ int con_scrollback(int delta) {
 
 int  con_scrollback_view(void) { return sb_view; }
 void con_scrollback_reset(void) {
-    if (sb_view) con_scrollback(-sb_view);
+    if (!sb_view) return;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) cells[y][x] = sb_live[y][x];
+    sb_view = 0;
+    con_reset_cursor();         /* v2.61: cursor stays at bottom after quit */
+    sb_repaint();
 }
 
 /* ---- v2.25: input-line anchoring + adjustable glyph scale ---------------- */

@@ -256,13 +256,11 @@ static void cmd_help(void) {
     help_row("yes [TEXT]",  "repeat TEXT until Ctrl+C");
 
     help_head("display (front-end / back-ends)");
-    help_row("gfx [MODE]",  "switch display mode: gfx | vbe | gfx24 (falls back to next); use 'text' to leave");
-    help_row("svgainfo",    "VMware SVGA II PCI/FIFO register dump");
-    help_row("text",        "switch back - needs a physical Y confirmation");
+    help_row("gfx [MODE|CMD]", "display mode switcher + diagnostics:"
+             "\n     MODE = gfx | vbe | gfx24\n     CMD  = svgainfo | size"
+             "\n          | rgb FG [BG] | palette IDX RRGGBB | display");
+    help_row("text",        "switch back to text mode (needs physical Y confirmation)");
     help_row("style SPEC",  "bold+italic+underline+inverse+strike+dim / off");
-    help_row("rgb FG [BG]", "literal 0xRRGGBB colors (VBE: 16.7M colors)");
-    help_row("palette I C", "redefine CLUT[I] as RRGGBB");
-    help_row("display",     "backend, grid, depth, CJK, glyph count");
     help_row("vdiag",       "raw VGA/VBE register diagnostic");
 
     help_head("Chinese (GB2312 display + pinyin input)");
@@ -270,6 +268,7 @@ static void cmd_help(void) {
     help_row("F2",          "toggle pinyin IME (works in shell and edit)");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
+    help_row("shutdown",    "power off via APM BIOS (root/CAP_SYS only; falls back to reboot)");
     help_row("bsod|blue",   "render the full-screen crash report (--no-reboot for test)");
     help_row("panicmode",   "show/set post-crash action: reboot|halt (/etc/panicmode)");
 
@@ -298,7 +297,7 @@ static void cmd_help(void) {
     help_row("log -f TID",  "follow that job until it exits");
     help_row("fg [%]TID",   "resume a stopped/background job in foreground");
     help_row("bg [%]TID",   "resume a stopped job in background");
-    help_row("stop [%]TID",  "suspend a running job (SIGTSTP; omit TID for fg task)");
+    help_row("stop [%]TID",  "suspend a running job (SIGTSTP; same as Ctrl+Z)");
 
     help_head("environment (v2.23, persisted in /etc/env)");
     help_row("export K=V",  "set variable (empty V deletes); env lists all");
@@ -596,77 +595,97 @@ static void cmd_rgb(const char *arg) {
     vga_write(" bg="); print_hex(bg); vga_write("\n");
 }
 
-/* v2.60: unified display-mode switcher.  Optional arg selects a specific
- * backend (\"gfx\", \"vbe\", or \"gfx24\").  Without args, cycles to the
- * first available backend in priority order gfx→vbe→gfx24.
- * Falls back to the next backend when the requested one is unavailable. */
+/* v2.60: unified display-mode switcher + graphics diagnostics.
+ * Without args, cycles to the first available backend in priority order
+ * gfx→vbe→gfx24.  Subcommands `gfx svgainfo|size|rgb|palette|display`
+ * forward to the matching handler so the legacy standalone commands
+ * remain aliases without duplicating logic. */
 static void cmd_gfx(char *arg) {
-    int modes[] = { CON_MODE_GFX, CON_MODE_VBE, CON_MODE_VBE24 };
-    int n_modes = sizeof(modes) / sizeof(modes[0]);
-    int wanted = -1;
-    if (arg && *arg) {
-        if (!strcmp_(arg, "gfx"))   wanted = CON_MODE_GFX;
-        else if (!strcmp_(arg, "vbe"))   wanted = CON_MODE_VBE;
-        else if (!strcmp_(arg, "gfx24") || !strcmp_(arg, "vbe24"))
-            wanted = CON_MODE_VBE24;
-        else {
-            vga_write("gfx: unknown mode '"); vga_write(arg); vga_write("'\n");
+    if (!arg || !*arg) {
+        /* no arg: cycle first usable backend */
+        int modes[] = { CON_MODE_GFX, CON_MODE_VBE, CON_MODE_VBE24 };
+        for (int i = 0; i < (int)(sizeof(modes)/sizeof(modes[0])); i++) {
+            int r = con_request_mode(modes[i], CON_ORIGIN_CONSOLE);
+            if (r == CON_ENODEV) continue;
+            if (r != 0) { vga_write("gfx: switch failed\n"); return; }
+            con_clear();                           /* fresh canvas, no demo pixels */
+            if (modes[i] == CON_MODE_GFX) {
+                con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
+                vga_write("  CatOS gfx - 40x12 styled text, 256 colours\n");
+                con_set_style_rgb(0xFFD700, 0x000000, CON_ATTR_BOLD);
+                vga_write("  中文显示测试：你好，世界！\n");
+                con_set_style(CON_YELLOW, CON_BLACK, CON_ATTR_UNDERLINE);
+                vga_write("  underline   ");
+                con_set_style(CON_LIGHT_CYAN, CON_BLACK, CON_ATTR_ITALIC);
+                vga_write("italic   ");
+                con_set_style(CON_LIGHT_GREEN, CON_BLACK, CON_ATTR_BOLD);
+                vga_write("bold\n");
+                con_set_style(CON_WHITE, CON_RED, CON_ATTR_INVERSE);
+                vga_write("  inverse  ");
+                con_set_style(CON_WHITE, CON_BLACK, CON_ATTR_STRIKE);
+                vga_write("strike  ");
+                con_set_style(200, CON_BLACK, 0);
+                vga_write("grey-200\n");
+                con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+                vga_write("  'text' to leave; 'gfx rgb/palette/display' for more\n\n");
+            } else if (modes[i] == CON_MODE_VBE) {
+                con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
+                vga_write("  CatOS VBE 800x600x32 — truecolour terminal\n");
+                con_set_style_rgb(0xFFD700, 0x000000, 0);
+                vga_write("  中文显示测试：你好，世界！\n");
+                con_set_style_rgb(0x7CFC00, 0x000000, CON_ATTR_UNDERLINE);
+                vga_write("  16.7M 色，每个字符的颜色都是真正的 RGB\n");
+                con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+                vga_write("  type 'text' + confirm Y to leave\n\n");
+            } else {
+                con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
+                vga_write("  CatOS gfx24 800x600x24 — draw-ready canvas\n");
+                con_set_style_rgb(0xFFD700, 0x000000, 0);
+                vga_write("  中文显示测试：你好，世界！\n");
+                con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
+                vga_write("  type 'text' + confirm Y to leave\n\n");
+            }
             return;
         }
-    }
-    for (int i = 0; i < n_modes; i++) {
-        int m = modes[i];
-        if (wanted >= 0 && m != wanted) continue;
-        int r = con_request_mode(m, CON_ORIGIN_CONSOLE);
-        if (r == CON_ENODEV) {
-            if (wanted < 0) continue;          /* try next fallback */
-            vga_write("gfx: "); vga_write(tr(L_GFX_NONE));
-            vga_write("\n");
-            return;
-        }
-        if (r != 0) { vga_write("gfx: switch failed\n"); return; }
-        con_clear();                           /* fresh canvas, no demo pixels */
-        if (m == CON_MODE_GFX) {
-            con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
-            vga_write("  CatOS gfx - 40x12 styled text, 256 colours\n");
-            con_set_style_rgb(0xFFD700, 0x000000, CON_ATTR_BOLD);
-            vga_write("  中文显示测试：你好，世界！\n");
-            con_set_style(CON_YELLOW, CON_BLACK, CON_ATTR_UNDERLINE);
-            vga_write("  underline   ");
-            con_set_style(CON_LIGHT_CYAN, CON_BLACK, CON_ATTR_ITALIC);
-            vga_write("italic   ");
-            con_set_style(CON_LIGHT_GREEN, CON_BLACK, CON_ATTR_BOLD);
-            vga_write("bold\n");
-            con_set_style(CON_WHITE, CON_RED, CON_ATTR_INVERSE);
-            vga_write("  inverse  ");
-            con_set_style(CON_WHITE, CON_BLACK, CON_ATTR_STRIKE);
-            vga_write("strike  ");
-            con_set_style(200, CON_BLACK, 0);
-            vga_write("grey-200\n");
-            con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
-            vga_write("  'text'+Y to leave; 'style', 'rgb', 'palette' to decorate\n\n");
-        } else if (m == CON_MODE_VBE) {
-            con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
-            vga_write("  CatOS VBE 800x600x32 — truecolour terminal\n");
-            con_set_style_rgb(0xFFD700, 0x000000, 0);
-            vga_write("  中文显示测试：你好，世界！\n");
-            con_set_style_rgb(0x7CFC00, 0x000000, CON_ATTR_UNDERLINE);
-            vga_write("  16.7M 色，每个字符的颜色都是真正的 RGB\n");
-            con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
-            vga_write("  type 'text' + confirm Y to leave\n\n");
-        } else {
-            /* VBE24 - clean default, no demo pixels */
-            con_set_style_rgb(0xFFFFFF, 0x103050, CON_ATTR_BOLD);
-            vga_write("  CatOS gfx24 800x600x24 — draw-ready canvas\n");
-            con_set_style_rgb(0xFFD700, 0x000000, 0);
-            vga_write("  中文显示测试：你好，世界！\n");
-            con_set_style(CON_LIGHT_GREY, CON_BLACK, 0);
-            vga_write("  type 'text' + confirm Y to leave\n\n");
-        }
+        vga_write("gfx: no suitable backend found\n");
         return;
     }
-    if (wanted < 0)
-        vga_write("gfx: no suitable backend found\n");
+    /* subcommand dispatch: fall through to legacy handlers with "gfx" prefix */
+    {
+        const char *p = arg; skip_sp(&p);
+        if (!strncmp(p, "svgainfo", 8) && (p[8] == 0 || p[8] == ' '))
+            cmd_svgainfo();
+        else if (!strncmp(p, "size", 4) && (p[4] == 0 || p[4] == ' '))
+            cmd_size(p + 4);
+        else if (!strncmp(p, "rgb", 3) && (p[3] == 0 || p[3] == ' '))
+            cmd_rgb(p + 3);
+        else if (!strncmp(p, "palette", 7) && (p[7] == 0 || p[7] == ' '))
+            cmd_palette(p + 7);
+        else if (!strncmp(p, "display", 7) && (p[7] == 0 || p[7] == ' '))
+            cmd_display();
+        else if (!strcmp_(arg, "gfx")   ||
+                 !strcmp_(arg, "vbe")   ||
+                 !strcmp_(arg, "gfx24") ||
+                 !strcmp_(arg, "vbe24")) {
+        int wanted = CON_MODE_QUERY;
+        if (!strcmp_(arg, "gfx"))         wanted = CON_MODE_GFX;
+        else if (!strcmp_(arg, "vbe"))    wanted = CON_MODE_VBE;
+        else                              wanted = CON_MODE_VBE24;
+        int r = con_request_mode(wanted, CON_ORIGIN_CONSOLE);
+        if (r == CON_ENODEV) {
+            vga_write("gfx: "); vga_write(tr(L_GFX_NONE));
+            vga_write("\n");
+        } else if (r != 0) {
+            vga_write("gfx: switch failed\n");
+        } else {
+            con_clear();
+            vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
+        }
+    } else {
+        vga_write("gfx: unknown subcommand '"); vga_write(arg);
+        vga_write("'\nusage: gfx [svgainfo|size|rgb|palette|display|"
+                  "gfx|vbe|gfx24]\n");
+    }
 }
 
 static void cmd_text(void) {
@@ -1171,7 +1190,7 @@ static const char *BUILTIN_NAMES[] = {
     "unalias", "clear", "cls", "gfx",
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
-    "date", "mem", "reboot", "hang", "dir", "ls", "cd", "mkdir",
+    "date", "mem", "reboot", "hang", "shutdown", "dir", "ls", "cd", "mkdir",
     "touch", "cat", "rm", "rmdir", "cp", "mv", "format", "edit", "run", "sudo",
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
@@ -1243,6 +1262,27 @@ static void cmd_reboot(void) {
 static void cmd_hang(void) {
     vga_write("Halting. Press Ctrl-Alt-Del or close the VM.\n");
     __asm__ volatile ("cli");
+    while (1) __asm__ volatile ("hlt");
+}
+
+/* v2.61: power-off via APM BIOS protected-mode call (INT 15h AX=5001h).
+ * Falls back to a warm reboot if the APM call is unavailable or fails.
+ * Needs CAP_SYS or root. */
+static void cmd_shutdown(void) {
+    __asm__ volatile (
+        "pushfl\n\t"
+        "cli\n\t"
+        "movw $0x0000, %%bx\n\t"      /* APM func 0x5001 = power-off */
+        "movw $0x5001, %%ax\n\t"
+        "int $0x15\n\t"
+        "popfl\n\t"
+        : : : "ax", "bx", "memory"
+    );
+    /* If we reach here the machine did not shut down (APM absent/failed).
+     * Last resort: warm reboot. The user gets power-off semantics on most
+     * modern BIOS / UEFI firmware; on bare metal without APM this reboots. */
+    vga_write("shutdown: APM unavailable — issuing warm reboot\n");
+    outb(0x64, 0xFE);
     while (1) __asm__ volatile ("hlt");
 }
 
@@ -4753,14 +4793,14 @@ static void bar_put_str(char *b, int *n, const char *s) {
  * the input line), exactly one replacement goes back into the line. */
 static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
-    "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
+    "color","cowsay","cp","curl","date","df","dir","dns","echo","edit","env",
     "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo",
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
-    "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
-    "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
+    "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run",
+    "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes",
+    "users","vdiag","whoami","yes","shutdown",
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -5133,6 +5173,12 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n");
         }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
+        else if (!strcmp_(cmd, "shutdown")) {
+            if (g_uid == UID_ROOT || (g_caps & CAP_SYS))
+                cmd_shutdown();
+            else
+                vga_write("shutdown: permission denied (need root or CAP_SYS)\n");
+        }
         else if (!strcmp_(cmd, "bsod") ||
                  !strcmp_(cmd, "blue"))      cmd_bsod(arg);
         else if (!strcmp_(cmd, "panicmode")) cmd_panicmode(arg);

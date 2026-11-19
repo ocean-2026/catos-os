@@ -57,7 +57,9 @@ const keys_desc_t keys_desc[] = {
 
     /* ---- console line control ----------------------------------------- */
     { (int[]){ 0x03 }, "Ctrl+C", KG_CONSOLE,
-      "cancel the current input line", "command line", "-" },
+      "cancel input line / send SIGINT to fg task", "command line", "-" },
+    { (int[]){ KB_CTRL_Z }, "Ctrl+Z", KG_CONSOLE,
+      "suspend fg task to background (SIGTSTP)", "command line", "-" },
     { (int[]){ KB_TAB }, "Tab", KG_CONSOLE,
       "complete command / path", "command line", "-" },
 
