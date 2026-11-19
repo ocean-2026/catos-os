@@ -418,6 +418,11 @@ static void rl_redraw(int x0, int y0, uint8_t base) {
         int cw = rl_width(comp, rl_strlen(comp));
         int cur_col = cc + cw;
         if (cur_col >= cols) cur_col = cols - 1;
+        /* v2.59 fix: the cell the cursor lands on can still carry a glyph
+         * from an earlier frame (the cursor is drawn over it), which shows
+         * up as a stray character right after the pinyin string.  Blank it
+         * explicitly before parking the cursor there. */
+        con_write_at_utf8((uint8_t)cur_col, (uint8_t)y0, " ");
         con_set_cursor((uint8_t)cur_col, (uint8_t)y0);
         return;
     }
