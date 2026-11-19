@@ -232,6 +232,11 @@ def run_text(qemu, iso):
         r.check("candidate row lists `1.` entry", "1." in row1, row1)
         shoot(s, "ime_text_on")
 
+        # 2b. a digit while composing must NEVER be appended to the pinyin
+        # buffer: it is the candidate pick.  Regression guard for the
+        # "zhong9" screenshot artefact (py must hold letters only).
+        r.check("pinyin buffer holds letters only", "zhong9" not in t, t[-120:])
+
         # 3. digit 1 commits the first candidate; composition clears.
         sendkey(s, "1", 0.6)
         time.sleep(0.6)
