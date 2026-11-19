@@ -3,6 +3,7 @@
 #include "render.h"      /* display front-end: mode policy + text styles */
 #include "keyboard.h"
 #include "ime.h"
+#include "usb.h"
 #include "rtc.h"
 #include "io.h"
 #include "fs.h"
@@ -22,6 +23,10 @@
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
+/* v2.52: tid of the newest '&' background job -- fg/bg/stop fall back to
+ * it when called without an argument. */
+static int g_last_bg_tid;
+
 /* ---------- tiny libc ---------- */
 static int strcmp_(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -34,6 +39,11 @@ static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
  * runner (/etc/autostart scripts, v2.17) */
 static void shell_exec(char *cmd, char *arg);
 static void boot_autostart(void);
+
+/* P1: set while /etc/autostart scripts run their commands.  Interactive
+ * prompts (e.g. the PE->CE conversion offer in `run`) must default to
+ * refusal in this mode -- a script cannot answer a keyboard question. */
+static int      g_script_mode = 0;
 
 static void itoa(int v, char *out, int width) {
     char tmp[12]; int i = 0, neg = 0;
@@ -79,85 +89,138 @@ typedef struct {
 static multiboot_info_t *mbi;
 
 /* ---------- commands ---------- */
+/* v2.37 P0-4: fixed two-column help.  Command field is 24 chars wide,
+ * description starts in column 26.  Section headers / notes print raw. */
+static void help_row(const char *cmd, const char *desc) {
+    vga_write("  ");
+    int n = 0;
+    for (const char *p = cmd; *p; p++) { vga_putc(*p); n++; }
+    while (n < 24) { vga_putc(' '); n++; }
+    vga_write("  ");
+    vga_write(desc);
+    vga_write("\n");
+}
+static void help_head(const char *s) {
+    vga_set_fg(VGA_LIGHT_CYAN);
+    vga_write("  -- "); vga_write(s); vga_write(" --\n");
+    vga_set_fg(VGA_WHITE);
+}
+static void help_note(const char *s)  { vga_write("  "); vga_write(s); vga_write("\n"); }
+
 static void cmd_help(void) {
-    vga_write(
-        "CatOS v0.3 (five-pillar kernel) - commands:\n"
-        "  help         show this message\n"
-        "  clear        clear the screen\n"
-        "  lang [en|zh] show/set UI language (default en, /etc/lang)\n"
-        "  Up/Down history | Left/Right/Home/End edit the line\n"
-        "  Ctrl+Up/Down   scroll back console output (any key returns)\n"
-        "  echo TEXT    print text back\n"
-        "  about        system info banner\n"
-        "  autostart    show the boot banner + list /etc/autoexec scripts\n"
-        "  uname        print OS name\n"
-        "  date         show RTC date/time\n"
-        "  mem          show RAM size (multiboot)\n"
-        "  color NUM    set foreground color (0..255; text mode maps to 16)\n"
-        "  -- display (front-end / back-ends) --\n"
-        "  gfx          graphics mode (256-color styled text)\n"
-        "  vbe          800x600x32 truecolour text (Bochs VBE / VMware SVGA)\n"
-        "  gfx24|vbe24 800x600 24-bit-colour drawing surface + pixel demo\n"
-        "  svgainfo     VMware SVGA II PCI/FIFO register dump\n"
-        "  text         switch back - needs a physical Y confirmation\n"
-        "  style SPEC   bold+italic+underline+inverse+strike+dim / off\n"
-        "  rgb FG [BG] literal 0xRRGGBB colors (VBE: 16.7M colors)\n"
-        "  palette I C  redefine CLUT[I] as RRGGBB\n"
-        "  display      backend, grid, depth, CJK, glyph count\n"
-        "  vdiag        raw VGA/VBE register diagnostic\n"
-        "  -- Chinese (GB2312 display + pinyin input) --\n"
-        "  zhdemo       built-in UTF-8 Chinese + truecolour demo\n"
-        "  F2           toggle pinyin IME (works in shell and edit)\n"
-        "  color NUM    set foreground palette index (0..255)\n"
-        "  reboot       warm reboot the machine\n"
-        "  hang         halt the CPU (QEMU: close window)\n"
-        "  -- processes (ring3 tasks, preemptive) --\n"
-        "  run FILE.ce [args..] [&]  execute a CE app (in background with &)\n"
-        "  ps           list tasks (tid, uid, ring, state)\n"
-        "  kill TID     terminate a task\n"
-        "  sudo CMD     run a program as root (uid 0)\n"
-        "  -- users & permissions (v2.13, initial user: root) --\n"
-        "  whoami       current session user\n"
-        "  id [USER]    uid/gid/capabilities of a user\n"
-        "  lsuser       list accounts (/etc/passwd)\n"
-        "  caps         capability bit legend + session caps\n"
-        "  login U [PW] switch session user ('su' = alias)\n"
-        "  useradd N [UID [GID [CAPS]]]  add user (CAP_USERADM)\n"
-        "  userdel N | passwd N PW | chcaps HEX N\n"
-        "  chmod OCT PATH | chown UID[:GID] PATH  (persistent /etc/acl)\n"
-        "  uptime       seconds since boot + task count\n"
-        "  top          live task monitor (CPU% per task, any key quits)\n"
-        "  jobs         list background jobs ('run X &') with pending log\n"
-        "  log TID      show a background job's captured output\n"
-        "  log -f TID   follow that job until it exits\n"
-        "  hwinfo       full hardware dump (CPU/mem/disk/NIC/PCI)\n"
-        "  -- audio (Sound Blaster 16, ISA) --\n"
-        "  sndinfo      SB16 probe, DSP version, IRQ/DMA diagnostics\n"
-        "  sndtest [HZ MS]  play a tone (default 440 Hz / 800 ms)\n"
-        "  -- network (e1000/PCnet) --\n"
-        "  curl URL     HTTP GET (http://IP[:port]/path)\n"
-        "  ping IP      ICMP echo (3 tries)\n"
-        "  dns NAME     resolve a hostname\n"
-        "  udp IP PORT TEXT  send one UDP datagram and wait for a reply\n"
-        "  netdiag      dump NIC/driver state\n"
-        "  Bare NAME is looked up in cwd then /bin (PATH); 'run FILE' uses\n"
-        "  the path verbatim with NO lookup (a bare NAME there is cwd-only).\n"
-        "  -- filesystem (FAT32 on IDE, persistent) --\n"
-        "  dir [PATH]   list a directory\n"
-        "  cd [PATH]    change directory (use .. or /)\n"
-        "  mkdir PATH   create a directory\n"
-        "  touch FILE   create an empty file\n"
-        "  cat FILE     print a file (text, up to 64 KiB)\n"
-        "  fsize FILE   print the size of one file in bytes\n"
-        "  rm FILE      delete a file\n"
-        "  cp SRC DST   copy a file\n"
-        "  mv SRC DST   move a file (copy + delete)\n"
-        "  format       erase the FAT32 volume (y/n confirm)\n"
-        "  fsck         verify/repair FAT #2 against FAT #1 (crash check)\n"
-        "  faultinfo    show the last fatal fault (vector, CR2, PF bits)\n"
-        "  edit FILE    nano-style full-screen editor\n"
-        "               (arrows move, ^O save, ^X exit, ^K del line, ^U clear)\n"
-    );
+    vga_write("CatOS v0.3 (five-pillar kernel) - commands:\n");
+    help_row("help",        "show this message");
+    help_row("clear",       "clear the screen");
+    help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
+    help_note("Up/Down history | Left/Right/Home/End edit the line");
+    help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
+    help_note("after 'did you mean:', press y once to run that suggestion");
+    help_row("echo TEXT",   "print text back (-n no newline, -c COLOR)");
+    help_row("cls",         "clear the screen (alias of clear)");
+    help_row("about",       "system info banner");
+    help_row("autostart",   "re-run /etc/autostart scripts");
+    help_row("uname",       "print OS name");
+    help_row("date",        "show RTC date/time");
+    help_row("mem",         "show RAM size (multiboot)");
+    help_row("color NUM",   "set foreground color (0..255; text mode maps to 16)");
+
+    help_head("fun (NIGHT-P3 Linux-style easter eggs)");
+    help_row("cowsay [-f tux] MSG", "ASCII cow (or Tux) says MSG");
+    help_row("sl",          "steam train drives by (CHOO CHOO)");
+    help_row("fortune",     "print a random fortune");
+    help_row("cal [YEAR]",  "month calendar, or full year with YEAR");
+    help_row("yes [TEXT]",  "repeat TEXT until Ctrl+C");
+
+    help_head("display (front-end / back-ends)");
+    help_row("gfx",         "graphics mode (256-color styled text)");
+    help_row("vbe",         "800x600x32 truecolour text (Bochs VBE / VMware SVGA)");
+    help_row("gfx24|vbe24", "800x600 24-bit-colour drawing surface + pixel demo");
+    help_row("svgainfo",    "VMware SVGA II PCI/FIFO register dump");
+    help_row("text",        "switch back - needs a physical Y confirmation");
+    help_row("style SPEC",  "bold+italic+underline+inverse+strike+dim / off");
+    help_row("rgb FG [BG]", "literal 0xRRGGBB colors (VBE: 16.7M colors)");
+    help_row("palette I C", "redefine CLUT[I] as RRGGBB");
+    help_row("display",     "backend, grid, depth, CJK, glyph count");
+    help_row("vdiag",       "raw VGA/VBE register diagnostic");
+
+    help_head("Chinese (GB2312 display + pinyin input)");
+    help_row("zhdemo",      "built-in UTF-8 Chinese + truecolour demo");
+    help_row("F2",          "toggle pinyin IME (works in shell and edit)");
+    help_row("reboot",      "warm reboot the machine");
+    help_row("hang",        "halt the CPU (QEMU: close window)");
+
+    help_head("processes (ring3 tasks, preemptive)");
+    help_row("run FILE.ce [args..] [&]", "execute a CE app (in background with &)");
+    help_row("ps",          "list tasks (tid, uid, ring, state)");
+    help_row("kill TID",    "terminate a task");
+    help_row("sudo CMD",    "run a program as root (uid 0)");
+
+    help_head("users & permissions (v2.13, initial user: root)");
+    help_row("whoami",      "current session user");
+    help_row("id [USER]",   "uid/gid/capabilities of a user");
+    help_row("lsuser",      "list accounts (/etc/passwd)");
+    help_row("caps",        "capability bit legend + session caps");
+    help_row("login U [PW]","switch session user ('su' = alias)");
+    help_row("useradd N [UID [GID [CAPS]]]", "add user (CAP_USERADM)");
+    help_row("groupadd G [MEMBER]", "create group / append member (CAP_USERADM)");
+    help_row("daemon CMD [args]", "detach a service as a background daemon");
+    help_row("groups", "list groups and members (v2.53 /etc/group)");
+    help_row("userdel N | passwd N PW | chcaps HEX N", "manage accounts / caps");
+    help_row("chmod OCT PATH | chown UID[:GID] PATH", "persistent /etc/acl");
+    help_row("uptime",      "seconds since boot + task count");
+    help_row("top",         "live task monitor (CPU% per task, any key quits)");
+    help_row("jobs",        "list background jobs ('run X &') with pending log");
+    help_row("log TID",     "show a background job's captured output");
+    help_row("log -f TID",  "follow that job until it exits");
+    help_row("fg [%]TID",   "resume a stopped/background job in foreground");
+    help_row("bg [%]TID",   "resume a stopped job in background");
+    help_row("stop [%]TID", "suspend a running job (SIGTSTP)");
+
+    help_head("environment (v2.23, persisted in /etc/env)");
+    help_row("export K=V",  "set variable (empty V deletes); env lists all");
+    help_row("unset K",     "delete variable; $K / ${K} expand in typed lines");
+    help_row("PATH",        "drives bare-NAME lookup (default /bin)");
+    help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
+
+    help_head("audio (Sound Blaster 16, ISA)");
+    help_row("sndinfo",     "SB16 probe, DSP version, IRQ/DMA diagnostics");
+    help_row("sndtest [HZ MS]", "play a tone (default 440 Hz / 800 ms)");
+
+    help_head("network (PCnet)");
+    help_row("curl URL",    "HTTP GET (http://IP[:port]/path)");
+    help_row("ping IP",     "ICMP echo (3 tries)");
+    help_row("dns NAME",    "resolve a hostname");
+    help_row("udp IP PORT TEXT", "send one UDP datagram and wait for a reply");
+    help_row("netdiag",     "dump NIC/driver state");
+
+    help_note("Bare NAME is looked up in cwd then /bin (PATH); 'run FILE' uses");
+    help_note("the path verbatim with NO lookup (a bare NAME there is cwd-only).");
+
+    help_head("filesystem (FAT32 on IDE, persistent)");
+    help_row("dir [PATH]",  "list a directory");
+    help_row("cd [PATH]",   "change directory (use .. or /)");
+    help_row("mkdir PATH",  "create a directory");
+    help_row("touch FILE",  "create an empty file");
+    help_row("cat FILE",    "print a file (text, up to 64 KiB)");
+    help_row("rm FILE",     "delete a file");
+    help_row("rmdir DIR",   "remove an empty directory");
+    help_row("cp SRC DST",  "copy a file");
+    help_row("mv SRC DST",  "move a file (copy + delete)");
+    /* NIGHT-P4: package manager + migrated tools */
+    help_row("pkg list|info|install|remove NAME", "local package manager (/pkg)");
+    help_row("head [-n N] FILE", "print first N lines (default 10)");
+    help_row("tail [-n N] FILE", "print last N lines (default 10)");
+    help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
+    help_row("tree [DIR]",  "directory tree listing");
+    help_row("format",      "erase the FAT32 volume (y/n confirm)");
+    help_row("fsck",        "verify/repair FAT #2 against FAT #1 (crash check)");
+    help_row("mount",       "list the mount table");
+    help_row("mount <1..4|hd0pN> DIR", "bind a FAT32 partition to an empty dir");
+    help_row("umount DIR",  "detach the partition bound to DIR");
+    help_row("df",          "per-mountpoint volume usage");
+    help_row("faultinfo",   "show the last fatal fault (vector, CR2, PF bits)");
+    help_row("edit FILE",   "nano-style full-screen editor");
+    help_note("(arrows move, ^O save, ^X exit, ^K del line, ^U clear)");
 }
 
 /* ---------- SB16 audio (v2.11) -----------------------------------------
@@ -395,6 +458,8 @@ static void cmd_vbe(void) {
  * grid, and vga_clear() repaints it again, so the demo MUST come last.
  * Only the shell's top-row prompt is allowed to overlay it afterwards --
  * every pixel sampled by tests/gfx24_regress.py sits at y >= 120. */
+static void size_restore(void);
+
 static void cmd_gfx24(void) {
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r == CON_ENODEV) {
@@ -404,6 +469,7 @@ static void cmd_gfx24(void) {
     }
     if (r != 0) { vga_write("gfx24: switch failed\n"); return; }
     vga_clear();                 /* clears cells + resets cursor to (0,0) */
+    size_restore();              /* v2.25: re-apply /etc/size if present */
     gfx24_demo();
 }
 
@@ -489,7 +555,15 @@ static void cmd_display(void) {
     vga_write(gfx24_info(GFX_INFO_BACKEND) == 1 ? "SVGA-II" : "Bochs");
     vga_write(" hw_bpp="); print_int(gfx24_info(GFX_INFO_HW_BPP));
     vga_write(" stride="); print_int(gfx24_info(GFX_INFO_STRIDE));
-    vga_write("\nswitch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
+    vga_write("\ndirty-cell tracker: ");
+    print_int(con_info(CON_INFO_CELLS_DRAWN));
+    vga_write(" drawn, ");
+    print_int(con_info(CON_INFO_CELLS_SKIPPED));
+    vga_write(" skipped (identical repaints cost 0 VRAM writes)\n");
+    vga_write("glyph scale       : ");
+    print_int(con_info(CON_INFO_CELL_SCALE));
+    vga_write(" (0 compact 8x8 / 1 normal 8x16 / 2 large 16x32)\n");
+    vga_write("switch policy    : ->gfx/vbe/vbe24 free; ->text needs physical Y\n");
 }
 
 /* v2.20: raw SVGA II register dump.  Useful when a VMware guest shows a
@@ -518,6 +592,7 @@ static void cmd_svgainfo(void) {
 }
 
 static void cmd_about(void) {
+    vga_clear();
     vga_set_fg(VGA_LIGHT_CYAN);
     vga_write(
         "###          ##    ####   #####\n"
@@ -556,6 +631,372 @@ static void cmd_date(void) {
     vga_write("\n");
 }
 
+/* =====================================================================
+ * NIGHT-P3: Linux-style easter eggs + UX enhancements.
+ * All additions in this block are marked "// NIGHT-P3" so the main
+ * agent can spot merge conflicts in the shell command table.
+ * ===================================================================== */
+
+/* ---------- NIGHT-P3: cowsay ----------------------------------------- */
+static const char *COW_ART[] = {
+    "        ^__^",
+    "        (oo)\\_______",
+    "        (__)\\       )\\/\\",
+    "            ||----w |",
+    "            ||     ||",
+    0
+};
+static const char *TUX_ART[] = {
+    "        .--.",
+    "       |o_o |",
+    "       |:_/ |",
+    "      //   \\ \\",
+    "     (|     | )",
+    "     /'\\_   _/`\\",
+    "     \\___)=(___/",
+    0
+};
+
+/* display width: ASCII 1, UTF-8 2-byte 1, 3-byte CJK 2, 4-byte 4.
+ * Used to size speech/quote boxes so CJK borders line up. */
+static int disp_width(const char *s) {
+    int w = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if ((*p & 0xE0) == 0xC0) { w += 1; p += 2; }
+        else if ((*p & 0xF0) == 0xE0) { w += 2; p += 3; }
+        else if ((*p & 0xF8) == 0xF0) { w += 2; p += 4; }
+        else { w += 1; p += 1; }
+    }
+    return w;
+}
+
+static void cmd_cowsay(const char *arg) {
+    const char *role = "cow";
+    const char *msg = arg;
+    /* optional "-f tux" role selector */
+    if (msg[0] == '-' && msg[1] == 'f') {
+        const char *p = msg + 2;
+        while (*p == ' ') p++;
+        const char *r = p;
+        while (*p && *p != ' ') p++;
+        int rlen = (int)(p - r);
+        if (*p == ' ') { p++; while (*p == ' ') p++; }
+        if (rlen == 3 && r[0] == 't' && r[1] == 'u' && r[2] == 'x')
+            role = "tux";
+        msg = p;
+    }
+    char mbuf[44]; int k = 0;
+    while (*msg && k < 42) { mbuf[k++] = *msg++; }
+    mbuf[k] = 0;
+    if (!mbuf[0]) {
+        const char *def = !strcmp_(role, "tux") ? "Hello, I am Tux!" : "Moo!";
+        k = 0; while (def[k] && k < 42) { mbuf[k] = def[k]; k++; }
+        mbuf[k] = 0;
+    }
+    int w = disp_width(mbuf);
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
+    vga_write("  < "); vga_write(mbuf); vga_write(" >\n");
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
+    const char **art = !strcmp_(role, "tux") ? TUX_ART : COW_ART;
+    for (int i = 0; art[i]; i++) { vga_write(art[i]); vga_write("\n"); }
+}
+
+/* ---------- NIGHT-P3: sl (steam train animation) -------------------- */
+static const char *SL_LOCO[] = {
+    "       [_]         ",
+    "    ___________    ",
+    "   |  O     O  |   ",
+    "   |___________|   ",
+    "  /|           |\\  ",
+    " (O)           (O) ",
+    0
+};
+static const char *SL_SMOKE[] = {
+    "  o          ",
+    "   o    o    ",
+    " o      o    ",
+    0
+};
+
+static void cmd_sl(void) {
+    for (int f = 0; f < 16; f++) {
+        vga_clear();
+        int col = 64 - f * 4;
+        if (col < 0) col = 0;
+        vga_write("\n\n\n");
+        vga_write("  ");
+        for (int i = 0; i < col; i++) vga_putc(' ');
+        vga_write(SL_SMOKE[f % 3]); vga_write("\n");
+        for (int r = 0; SL_LOCO[r]; r++) {
+            vga_write("  ");
+            for (int i = 0; i < col; i++) vga_putc(' ');
+            vga_write(SL_LOCO[r]); vga_write("\n");
+        }
+        if (f < 5) vga_write("\n  * CHOO CHOO! *\n");
+        task_sleep_ticks(6);   /* ~60 ms per frame, tick = 10 ms */
+    }
+}
+
+/* ---------- NIGHT-P3: fortune (random quotes) ------------------------ */
+static const char *FORTUNES[] = {
+    "The early bird catches the worm, but the second mouse gets the cheese.",
+    "Talk is cheap. Show me the code. -- Linus Torvalds",
+    "Simplicity is the soul of efficiency. -- Austin Freeman",
+    "Premature optimization is the root of all evil. -- Donald Knuth",
+    "Code should be written for humans first, computers second. -- M. Fowler",
+    "First, solve the problem. Then, write the code. -- John Johnson",
+    "Experience is the name everyone gives to their mistakes. -- Oscar Wilde",
+    "Life is what happens when you are busy planning. -- John Lennon",
+    "Stay hungry, stay foolish. -- Steve Jobs",
+    "The only way to do great work is to love what you do. -- Steve Jobs",
+    "In the middle of difficulty lies opportunity. -- Albert Einstein",
+    "However slow you go, do not stop. -- Confucius",
+    "The journey of a thousand miles begins with a single step. -- Lao Tzu",
+    "Knowledge is power. -- Francis Bacon",
+    "Well begun is half done. -- Aristotle",
+    "Where there is a will there is a way.",
+    "Practice makes perfect.",
+    "A bug in the hand is worth two in the backlog.",
+    "Hard things: cache invalidation, naming, off-by-one errors.",
+    "Hello, world.",
+    "千里之行，始于足下。—— 老子",
+    "学而不思则罔，思而不学则殆。—— 孔子",
+    "天行健，君子以自强不息。—— 《周易》",
+    "不积跬步，无以至千里。—— 荀子",
+    "路漫漫其修远兮，吾将上下而求索。—— 屈原",
+    "宝剑锋从磨砺出，梅花香自苦寒来。",
+    "读书破万卷，下笔如有神。—— 杜甫",
+    "业精于勤，荒于嬉。—— 韩愈",
+    "山重水复疑无路，柳暗花明又一村。—— 陆游",
+    "海内存知己，天涯若比邻。—— 王勃",
+    "只要功夫深，铁杵磨成针。",
+    "代码写完不是结束，测试通过才算开始。",
+    0
+};
+#define NFORT ((int)(sizeof(FORTUNES) / sizeof(FORTUNES[0])) - 1)
+
+static uint32_t g_fortune_seq = 0;   /* NIGHT-P3: breaks same-second repeats */
+static void cmd_fortune(void) {
+    rtc_time_t t; rtc_read(&t);
+    extern volatile uint32_t timer_ticks;
+    g_fortune_seq++;
+    uint32_t r = (uint32_t)t.second * 131u + (uint32_t)t.minute * 17u
+               + timer_ticks + g_fortune_seq * 2654435761u;
+    const char *q = FORTUNES[r % (uint32_t)NFORT];
+    /* v2.45: border sized by display width (CJK counts 2) so the box
+     * lines up for non-ASCII quotes; kept single-line to stay within 80. */
+    int w = disp_width(q);
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
+    vga_write("  | "); vga_write(q); vga_write(" |\n");
+    vga_write("  ");
+    for (int i = 0; i < w + 2; i++) vga_putc('-');
+    vga_write("\n");
+}
+
+/* ---------- NIGHT-P3: cal (month / year calendar) ------------------- */
+static const char *CAL_MON[12] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+static int cal_leap(int y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+static int cal_days(int y, int m) {
+    static int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (m == 2) return cal_leap(y) ? 29 : 28;
+    return dm[m - 1];
+}
+/* Sakamoto: returns 0 = Sunday .. 6 = Saturday */
+static int cal_wday(int y, int m, int d) {
+    static int t[12] = {0,3,2,5,0,3,5,1,4,6,2,4};
+    if (m < 3) y--;
+    int r = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+    return r < 0 ? r + 7 : r;
+}
+static void cal_build_month(int y, int m, char rows[7][22]) {
+    for (int i = 0; i < 7; i++)
+        for (int k = 0; k < 22; k++) rows[i][k] = 0;   /* #143: clear stale cells */
+    int o = 0;
+    /* center the "Mon YYYY" title over the 21-column weekday grid */
+    for (int sp = 0; sp < 6; sp++) rows[0][o++] = ' ';
+    const char *mn = CAL_MON[m - 1];
+    rows[0][o++] = mn[0]; rows[0][o++] = mn[1]; rows[0][o++] = mn[2];
+    rows[0][o++] = ' ';
+    char yb[6]; itoa(y, yb, 4);
+    for (int k = 0; yb[k]; k++) rows[0][o++] = yb[k];
+    rows[0][o] = 0;
+    const char *wd = "Su Mo Tu We Th Fr Sa";
+    for (int k = 0; wd[k]; k++) rows[1][k] = wd[k];
+    rows[1][20] = 0;
+    int col = cal_wday(y, m, 1);
+    int dim = cal_days(y, m);
+    int row = 2;
+    for (int d = 1; d <= dim; d++) {
+        int off = col * 3;
+        char db[4]; itoa(d, db, 0);
+        if (d < 10) { rows[row][off] = ' '; rows[row][off + 1] = db[0]; }
+        else        { rows[row][off] = db[0]; rows[row][off + 1] = db[1]; }
+        rows[row][off + 2] = ' ';
+        col++;
+        if (col == 7) { col = 0; row++; }
+    }
+    for (int r = 2; r < 7; r++) rows[r][20] = 0;
+}
+static void cal_print_one(int y, int m) {
+    char rows[7][22];
+    cal_build_month(y, m, rows);
+    for (int r = 0; r < 7; r++) {
+        vga_write("  "); vga_write(rows[r]); vga_write("\n");
+    }
+}
+static void cal_print_year(int y) {
+    for (int g = 0; g < 4; g++) {
+        char blocks[3][7][22];
+        for (int k = 0; k < 3; k++)
+            cal_build_month(y, g * 3 + k + 1, blocks[k]);
+        for (int r = 0; r < 7; r++) {
+            vga_write("  ");
+            for (int k = 0; k < 3; k++) {
+                vga_write(blocks[k][r]);
+                int len = slen_(blocks[k][r]);
+                while (len < 21) { vga_putc(' '); len++; }
+                if (k < 2) vga_write("  ");
+            }
+            vga_write("\n");
+        }
+        vga_write("\n");
+    }
+}
+static void cmd_cal(const char *arg) {
+    rtc_time_t t; rtc_read(&t);
+    const char *p = arg;
+    while (*p == ' ') p++;
+    if (*p) {
+        int y = 0;
+        while (*p >= '0' && *p <= '9') { y = y * 10 + (*p - '0'); p++; }
+        if (y < 1970 || y > 2099) {
+            vga_write("cal: year out of range (1970..2099)\n");
+            return;
+        }
+        cal_print_year(y);
+    } else {
+        cal_print_one(t.year, t.month);
+    }
+}
+
+/* ---------- NIGHT-P3: yes (repeat, Ctrl+C aware) -------------------- */
+static void cmd_yes(const char *arg) {
+    const char *word = *arg ? arg : "y";
+    for (int i = 0; i < 600; i++) {
+        vga_write(word); vga_write("\n");
+        int k = kb_getkey_timed(1);   /* 1 tick = 10 ms poll */
+        if (k == 0x03) {              /* Ctrl+C */
+            vga_write("^C\n");
+            break;
+        }
+    }
+}
+
+/* ---------- NIGHT-P3 UX: echo with -n / -c COLOR --------------------- */
+static const struct { const char *name; uint8_t idx; } ECHO_COLORS[] = {
+    {"red",      VGA_LIGHT_RED},
+    {"green",    VGA_LIGHT_GREEN},
+    {"blue",     VGA_LIGHT_BLUE},
+    {"yellow",   VGA_YELLOW},
+    {"cyan",     VGA_LIGHT_CYAN},
+    {"magenta",  VGA_LIGHT_MAGENTA},
+    {"white",    VGA_WHITE},
+    {"grey",     VGA_LIGHT_GREY},
+    {"gray",     VGA_LIGHT_GREY},
+    {"darkgrey", VGA_DARK_GREY},
+    {"brown",    VGA_BROWN},
+    {0, 0}
+};
+static int echo_color_lookup(const char *s) {
+    for (int i = 0; ECHO_COLORS[i].name; i++)
+        if (!strcmp_(s, ECHO_COLORS[i].name)) return ECHO_COLORS[i].idx;
+    return -1;
+}
+static void cmd_echo(char *arg) {
+    int nl = 1, color = -1;
+    char *p = arg;
+    while (*p == '-') {
+        if (p[1] == 'n' && (p[2] == ' ' || p[2] == 0)) {
+            nl = 0; p += 2; while (*p == ' ') p++;
+        } else if (p[1] == 'c' && p[2] == ' ') {
+            char *q = p + 3;
+            while (*q == ' ') q++;
+            char *cn = q;
+            while (*q && *q != ' ') q++;
+            char save = *q; *q = 0;
+            color = echo_color_lookup(cn);
+            *q = save; p = q; while (*p == ' ') p++;
+        } else break;
+    }
+    uint8_t old = con_get_fg();
+    if (color >= 0) vga_set_fg((uint8_t)color);
+    vga_write(p);
+    if (nl) vga_write("\n");
+    vga_set_fg(old);
+}
+
+/* ---------- NIGHT-P3 UX: unknown-command suggestion ------------------ */
+static const char *BUILTIN_NAMES[] = {
+    "help", "lang", "export", "setenv", "env", "unset", "alias", "df",
+    "mount", "umount",
+    "unalias", "clear", "cls", "gfx", "vbe", "gfx24", "vbe24",
+    "svgainfo", "text", "style", "rgb", "palette", "display", "size",
+    "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
+    "date", "mem", "reboot", "hang", "dir", "ls", "cd", "mkdir",
+    "touch", "cat", "rm", "rmdir", "cp", "mv", "format", "edit", "run", "sudo",
+    "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
+    "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
+    "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
+    "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
+    "faultinfo", "fsck", "color",
+    "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
+    "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
+    0
+};
+/* tiny Levenshtein for short command words */
+static int cmd_lev(const char *a, const char *b) {
+    int la = slen_(a), lb = slen_(b);
+    int d[16][16];
+    for (int i = 0; i <= la; i++) d[i][0] = i;
+    for (int j = 0; j <= lb; j++) d[0][j] = j;
+    for (int i = 1; i <= la; i++)
+        for (int j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            d[i][j] = d[i - 1][j - 1] + cost;
+            if (d[i - 1][j] + 1 < d[i][j]) d[i][j] = d[i - 1][j] + 1;
+            if (d[i][j - 1] + 1 < d[i][j]) d[i][j] = d[i][j - 1] + 1;
+        }
+    return d[la][lb];
+}
+static const char *suggest_cmd(const char *cmd) {
+    const char *best = 0; int bestd = 99;
+    for (int i = 0; BUILTIN_NAMES[i]; i++) {
+        const char *name = BUILTIN_NAMES[i];
+        int d = cmd_lev(cmd, name);
+        /* typed a prefix of the real command -> strong match */
+        if (slen_(cmd) >= 2 && slen_(name) > slen_(cmd)) {
+            int ok = 1;
+            for (int k = 0; cmd[k]; k++)
+                if (cmd[k] != name[k]) { ok = 0; break; }
+            if (ok && d > 1) d = 1;
+        }
+        if (d < bestd) { bestd = d; best = name; }
+    }
+    return bestd <= 2 ? best : 0;
+}
+
 static void cmd_mem(void) {
     if (mbi && (mbi->flags & 1)) {
         vga_write("Lower memory (0-640K): "); print_int(mbi->mem_lower); vga_write(" KB\n");
@@ -563,6 +1004,13 @@ static void cmd_mem(void) {
         vga_write("Total approx         : ");
         print_int((mbi->mem_lower + mbi->mem_upper) / 1024);
         vga_write(" MB\n");
+        /* PMM view: frames the allocator actually manages (after the kernel
+         * image and reserved DMA areas), not the raw bootloader report. */
+        vga_write("PMM allocator        : used ");
+        print_int(hw_num(HW_MEM_USED_KB) / 4);
+        vga_write(" / free ");
+        print_int(hw_num(HW_MEM_FREE_KB) / 4);
+        vga_write(" frames (4K pages)\n");
     } else {
         vga_write("Memory info not provided by GRUB.\n");
     }
@@ -587,19 +1035,96 @@ static void cmd_cd(const char *arg) {
     else if (r == FS_ERR_NOTDIR) vga_write("cd: not a directory\n");
 }
 
-static void cmd_mkdir(const char *arg) {
-    if (!*arg) { vga_write("usage: mkdir PATH\n"); return; }
-    int r = fs_mkdir(arg);
-    if (r == FS_OK)            return;
-    if (r == FS_ERR_NOENT)      vga_write("mkdir: parent directory not found\n");
-    else if (r == FS_ERR_NOTDIR) vga_write("mkdir: parent is not a directory\n");
-    else if (r == FS_ERR_EXIST) vga_write("mkdir: file or directory already exists\n");
-    else if (r == FS_ERR_INVAL) vga_write("mkdir: invalid name\n");
-    else if (r == FS_ERR_FULL)  vga_write("mkdir: disk full (FAT32)\n");
+/* v2.24 forward declarations (helpers live across shell.c) */
+static int g_uid;         /* session uid/gid (defined with the session code) */
+static int g_gid;         /* tentative decls: the real defs sit below */
+static int fs_copy_file(const char *src, const char *dst);
+
+/* v2.24: write-permission check on the PARENT of a would-be entry -- the
+ * shell is ring0, so nobody else does it.  Without this any user could
+ * mkdir/cp straight into /etc or /bin (the ACL default only guards files
+ * written through the redirect path). */
+static int perm_write_on_parent(const char *path, char *parent, int pcap) {
+    char abs[FS_PATH_MAX];
+    fs_canon_path(path, abs, sizeof(abs));
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return -1;
+    int plen = (int)(leaf - abs);
+    if (plen == 1) { if (pcap > 0) parent[0] = '/'; parent[1] = 0; }
+    else {
+        if (plen >= pcap) return -1;
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+    return fs_perm_check(parent, g_uid, g_gid, PERM_WRITE) != 0 ? -13 : 0;
+}
+
+/* v2.24: mkdir [-p] PATH.  Without -p the parent must already exist;
+ * with -p every missing level is created (FS_ERR_EXIST tolerated). */
+static void cmd_mkdir_p(const char *arg, int parents) {
+    if (!*arg) { vga_write("usage: mkdir [-p] PATH\n"); return; }
+    char parent[FS_PATH_MAX];
+    if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+        vga_write("mkdir: permission denied\n");
+        return;
+    }
+    if (!parents) {
+        int r = fs_mkdir(arg);
+        if (r == FS_OK)            return;
+        if (r == FS_ERR_NOENT)      vga_write("mkdir: parent directory not found\n");
+        else if (r == FS_ERR_NOTDIR) vga_write("mkdir: parent is not a directory\n");
+        else if (r == FS_ERR_EXIST) vga_write("mkdir: file or directory already exists\n");
+        else if (r == FS_ERR_INVAL) vga_write("mkdir: invalid name\n");
+        else if (r == FS_ERR_FULL)  vga_write("mkdir: disk full (FAT32)\n");
+        return;
+    }
+    /* -p: create every missing level, tolerate existing ones */
+    char cur[FS_PATH_MAX];
+    int ci = 0;
+    const char *p2 = arg;
+    if (*p2 == '/') { cur[ci++] = '/'; p2++; }
+    cur[ci] = 0;
+    while (*p2) {
+        const char *seg = p2;
+        while (*p2 && *p2 != '/') p2++;
+        int sl = (int)(p2 - seg);
+        if (sl && ci + sl + 1 < (int)sizeof(cur)) {
+            for (int k = 0; k < sl; k++) cur[ci++] = seg[k];
+            cur[ci] = 0;
+            if (fs_is_dir(cur)) { /* already there */ }
+            else {
+                int r = fs_mkdir(cur);
+                if (r != FS_OK && r != FS_ERR_EXIST) {
+                    vga_write("mkdir: cannot create '");
+                    vga_write(cur);
+                    vga_write("' (");
+                    print_int(r);
+                    vga_write(")\n");
+                    return;
+                }
+            }
+        }
+        if (*p2 == '/') {
+            if (ci + 1 < (int)sizeof(cur)) cur[ci++] = '/';
+            cur[ci] = 0;
+            p2++;
+        }
+    }
 }
 
 static void cmd_touch(const char *arg) {
     if (!*arg) { vga_write("usage: touch FILE\n"); return; }
+    /* #121: creating a NEW entry needs write perm on its parent, the same
+     * guard mkdir/cp -r already apply; a touch of an existing file does not
+     * modify the directory entry so it keeps the old behaviour. */
+    uint32_t tc, ts;
+    if (fs_resolve_file(arg, &tc, &ts) != 0) {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+            vga_write("touch: permission denied\n"); return;
+        }
+    }
     int r = fs_touch(arg);
     if (r == FS_OK)            return;
     if (r == FS_ERR_NOENT)      vga_write("touch: parent directory not found\n");
@@ -629,6 +1154,34 @@ static int strcat_b(char *d, int size, const char *s) {
     *d = 0;
     return *s ? -1 : 0;
 }
+
+/* v2.47: pending-guess one-shot confirm.  Holds the last command the shell
+ * itself suggested after an unknown-command error on the MAIN prompt.  A
+ * bare y/Y at the next main-prompt line replays it; any other line consumes
+ * the offer.  In-command y/n prompts (PE->CE offer, format gate, gfx
+ * consent, useradd wizard) read through their own kb_readline/kb_getkey and
+ * never consult this state, so their answers follow the original path. */
+static char pend_cmd[FS_NAME_MAX];
+static char pend_arg[128];
+static int  pend_valid;
+
+static void pend_clear(void) {
+    pend_valid = 0;
+    pend_cmd[0] = 0;
+    pend_arg[0] = 0;
+}
+
+static void pend_arm(const char *cmd, const char *arg) {
+    if (g_script_mode) return;      /* no one to answer in scripts */
+    pend_valid = 1;
+    pend_cmd[0] = 0;
+    strcat_b(pend_cmd, sizeof(pend_cmd), cmd);
+    pend_arg[0] = 0;
+    strcat_b(pend_arg, sizeof(pend_arg), arg ? arg : "");
+}
+
+/* v2.23 environment variables (defined near the shell loop below) */
+static const char *env_get_(const char *key);
 
 /* run "cmd" as a CE program: current directory first, then /bin (PATH).
  * Returns 0 when a program was found (spawn attempted), -1 if not found.
@@ -669,14 +1222,27 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
         spawn_and_maybe_wait(p, argc, argv, bg, uid);
         return 0;
     }
-    /* 2) PATH: /bin */
-    p[0] = 0;
-    if (strcat_b(p, sizeof(p), "/bin/") != 0) return -1;
-    if (strcat_b(p, sizeof(p), cmd) != 0) return -1;
-    if (strcat_b(p, sizeof(p), ext) != 0) return -1;
-    if (fs_resolve_file(p, &c, &s) == 0) {
-        spawn_and_maybe_wait(p, argc, argv, bg, uid);
-        return 0;
+    /* 2) $PATH lookup (v2.23; default "/bin", colon-separated, in order) */
+    const char *pathv = env_get_("PATH");
+    if (!pathv || !*pathv) pathv = "/bin";
+    const char *seg = pathv;
+    while (*seg) {
+        char dir[64];
+        int di = 0;
+        while (*seg && *seg != ':' && di < (int)sizeof(dir) - 1)
+            dir[di++] = *seg++;
+        dir[di] = 0;
+        if (*seg == ':') seg++;
+        if (!di) continue;
+        p[0] = 0;
+        if (strcat_b(p, sizeof(p), dir) != 0) continue;
+        if (dir[di - 1] != '/' && strcat_b(p, sizeof(p), "/") != 0) continue;
+        if (strcat_b(p, sizeof(p), cmd) != 0) continue;
+        if (strcat_b(p, sizeof(p), ext) != 0) continue;
+        if (fs_resolve_file(p, &c, &s) == 0) {
+            spawn_and_maybe_wait(p, argc, argv, bg, uid);
+            return 0;
+        }
     }
     return -1;
 }
@@ -696,6 +1262,7 @@ void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int u
     if (bg) {
         task_t *bt = task_by_tid(tid);
         if (bt) bt->bg_mode = 1;      /* #59: capture stdout into the ring */
+        g_last_bg_tid = tid;          /* v2.52: fg/bg/stop no-arg default */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -762,6 +1329,18 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
             task_kill(tid, UID_ROOT);
             return;
         }
+        /* #167: the pre-create/truncate below runs in ring0 and used to
+         * skip fs_perm_check entirely; a non-root session could truncate or
+         * create a protected file before the child's own SYS_WRITE checks
+         * ran.  Re-check the target with the session identity up front, and
+         * refuse without touching the file at all. */
+        if (fs_perm_check(ab, g_uid, g_gid, PERM_WRITE) != 0) {
+            vga_write("run: permission denied: '");
+            vga_write(ab);
+            vga_write("'\n");
+            task_kill(tid, UID_ROOT);
+            return;
+        }
         int i;
         for (i = 0; ab[i] && i < (int)sizeof(tt->out_file) - 1; i++)
             tt->out_file[i] = ab[i];
@@ -776,6 +1355,7 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
     if (in_pipe  >= 0) kpipe_assign_in(tid, in_pipe);
     if (!fg) {
         tt->bg_mode = 1;              /* #59: capture stdout into the ring */
+        g_last_bg_tid = tid;          /* v2.52: fg/bg/stop no-arg default */
         vga_write("[bg tid "); print_int(tid); vga_write("] ");
         vga_write(path); vga_write("\n");
         return;
@@ -807,6 +1387,64 @@ static void cmd_run(char *arg, int uid) {
     if (argc > 1 && argv[argc - 1][0] == '&' && argv[argc - 1][1] == 0) {
         bg = 1;
         argc--;
+    }
+
+    /* P1: PE32/MZ detection.  Offer a one-shot conversion to CE01 and save
+     * it on disk.  In non-interactive contexts (pipe, redirect, background,
+     * autostart script) the offer is skipped: there is no one to answer. */
+    {
+        uint32_t pclus = 0, psize = 0;
+        if (fs_resolve_file(file, &pclus, &psize) == 0 && psize >= 2) {
+            char mz[2];
+            if (fs_read_at(file, mz, 0, 2) == 2 &&
+                mz[0] == 'M' && mz[1] == 'Z') {
+                int noninter = pipe_to || out_redir || bg || g_script_mode;
+                if (noninter) {
+                    vga_write("run: '"); vga_write(file);
+                    vga_write("' is a PE32/MZ binary; skipping the conversion "
+                              "offer in a non-interactive session.\n");
+                } else {
+                vga_write("'"); vga_write(file);
+                vga_write("' starts with MZ (PE32 binary). Convert to CE01 "
+                          "and save? (y/n) ");
+                char ans[16];
+                kb_readline(ans, sizeof(ans));
+                if (ans[0] != 'y' && ans[0] != 'Y') {
+                    vga_write("PE conversion skipped; trying direct load.\n");
+                } else {
+                    /* default output: same directory, base name + .ce */
+                    char def[FS_PATH_MAX];
+                    int fi = 0; while (file[fi]) fi++;
+                    int dot = fi, slash = -1;
+                    for (int k = 0; k < fi; k++) {
+                        if (file[k] == '/') slash = k;
+                        if (file[k] == '.') dot = k;
+                    }
+                    int base = slash + 1, di = 0;
+                    if (slash >= 0) {
+                        for (int k = 0; k <= slash; k++) def[di++] = file[k];
+                    }
+                    for (int k = base; k < dot; k++) def[di++] = file[k];
+                    def[di++] = '.'; def[di++] = 'c'; def[di++] = 'e';
+                    def[di] = 0;
+
+                    vga_write("Save CE as ["); vga_write(def); vga_write("]: ");
+                    char name[FS_PATH_MAX];
+                    kb_readline(name, sizeof(name));
+                    const char *dst = name[0] ? name : def;
+                    char cerr[64];
+                    int cr = pe_to_ce_file(file, dst, g_uid, g_gid,
+                                           cerr, sizeof(cerr));
+                    if (cr == 0) {
+                        vga_write("converted to "); vga_write(dst); vga_write("\n");
+                    } else {
+                        vga_write("convert failed: "); vga_write(cerr); vga_write("\n");
+                    }
+                    return;
+                }
+                }
+            }
+        }
     }
 
     if (pipe_to && *pipe_to) {
@@ -1010,8 +1648,110 @@ static const char *job_state_name(int st) {
     case T_WAIT_KB:    return "waitkey";
     case T_WAIT_CHILD: return "wait";
     case T_ZOMBIE:     return "done";
+    case T_STOPPED:    return "stopped";
     default:           return "?";
     }
+}
+
+/* v2.52: parse an optional leading '%' then a TID.  Returns tid >= 0 when
+ * the user named one, -1 when the argument is empty (caller falls back to
+ * the most recent background job), -2 on garbage. */
+static int parse_job_tid(const char *arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '%') arg++;
+    if (*arg == 0) return -1;
+    if (*arg < '0' || *arg > '9') return -2;
+    int tid = 0;
+    while (*arg >= '0' && *arg <= '9') tid = tid * 10 + (*arg++ - '0');
+    return tid;
+}
+
+/* resolve the fg/bg/stop target: explicit TID, else the most recent '&'
+ * job.  Rejects the shell itself (0) -- signaling the shell from its own
+ * prompt would stop the shell. */
+static task_t *job_lookup(char *arg, const char *who) {
+    int tid = parse_job_tid(arg);
+    if (tid == -1) tid = g_last_bg_tid;
+    if (tid < 0) {
+        vga_write(who); vga_write(": no current job\n");
+        return 0;
+    }
+    task_t *t = task_by_tid(tid);
+    if (!t || t->state == T_UNUSED || t == task_current()) {
+        vga_write(who); vga_write(": no such job\n");
+        return 0;
+    }
+    if (t->parent != task_current()) {
+        vga_write(who); vga_write(": not your job\n");
+        return 0;
+    }
+    if (t->state == T_ZOMBIE) {
+        vga_write(who); vga_write(": job already exited\n");
+        return 0;
+    }
+    return t;
+}
+
+/* fg [%]TID : resume a stopped/background job in the foreground and wait
+ *             for it to exit or stop again.
+ * bg [%]TID : resume a stopped job in the background.
+ * stop [%]TID: suspend a running job (shell-side SIGTSTP). */
+static void cmd_fg(char *arg) {
+    task_t *t = job_lookup(arg, "fg");
+    if (!t) return;
+    task_signal(t->tid, SIGCONT);
+    t->bg_mode = 0;                 /* foreground: output goes to the console */
+    int stopped = task_wait_child_or_stop(t);
+    vga_write(stopped ? "\n[stopped] " : "\n[done] ");
+    print_int(t->tid); vga_write(" "); vga_write(t->name); vga_write("\n");
+}
+
+static void cmd_bg(char *arg) {
+    task_t *t = job_lookup(arg, "bg");
+    if (!t) return;
+    if (t->state != T_STOPPED) {
+        vga_write("bg: job is not stopped\n");
+        return;
+    }
+    task_signal(t->tid, SIGCONT);
+    t->bg_mode = 1;                 /* background: capture stdout to the ring */
+    vga_write("[bg tid "); print_int(t->tid); vga_write("] ");
+    vga_write(t->name); vga_write("\n");
+}
+
+static void cmd_stop(char *arg) {
+    task_t *t = job_lookup(arg, "stop");
+    if (!t) return;
+    if (!t->bg_mode && t->state != T_STOPPED) {
+        vga_write("stop: not a background job\n");
+        return;
+    }
+    int r = task_signal(t->tid, SIGTSTP);
+    if (r == -3) vga_write("stop: job is blocked on I/O; try again later\n");
+    else if (r != 0) vga_write("stop: signal failed\n");
+}
+
+/* daemon CMD [args...] : spawn a detached service (v2.54).  Like a
+ * background job it returns to the shell at once and captures stdout to its
+ * log ring, but it is flagged as a daemon: it has no controlling interactive
+ * session and is listed with a `D` marker in `jobs`.  The event loop of a
+ * daemon sleeps on the existing timer/child/key wake sources; no POSIX
+ * session model or signal table is introduced here. */
+static void cmd_daemon(char *arg) {
+    char *argv[16];
+    int argc = split_words(arg, argv, 16);
+    if (argc < 1) {
+        vga_write("usage: daemon CMD [args...]\n");
+        return;
+    }
+    if (run_from_path(argv[0], argv, argc, 1, g_uid) != 0) {
+        vga_write("daemon: unknown command: "); vga_write(argv[0]); vga_write("\n");
+        return;
+    }
+    task_t *t = task_by_tid(g_last_bg_tid);
+    if (t) t->daemon = 1;
+    vga_write("[daemon tid "); print_int(g_last_bg_tid);
+    vga_write("] "); vga_write(argv[0]); vga_write("\n");
 }
 
 static void cmd_jobs(void) {
@@ -1023,11 +1763,13 @@ static void cmd_jobs(void) {
         if (!task_stat(slot, &tid, &cpu, &pages, &state, &uid, &ring,
                        nm, sizeof(nm))) continue;
         task_t *t = task_by_tid(tid);
-        if (!t || !t->bg_mode) continue;     /* background jobs only */
+        /* background jobs, plus stopped foreground jobs held by job control */
+        if (!t || (!t->bg_mode && t->state != T_STOPPED)) continue;
         found = 1;
         vga_write("  "); print_int(tid);
         vga_write("   "); vga_write(job_state_name(state));
-        vga_write("    "); vga_write(nm);
+        vga_write(t->daemon ? " D  " : "    ");
+        vga_write(nm);
         vga_write("  "); print_int(task_log_pending(t));
         vga_write("B\n");
     }
@@ -1317,11 +2059,15 @@ static void cmd_format(void) {    vga_write(tr(L_FORMAT_CONFIRM));
     char ans[16];
     kb_readline(ans, sizeof(ans));
     if (ans[0] == 'y' || ans[0] == 'Y') {
-        fs_format();
+        if (fs_format() != 0) {
+            vga_write("format: no IDE disk attached\n");
+            return;
+        }
         vga_write(tr(L_FORMAT_DONE));
         vga_write("Top-level dirs: /dev /etc /bin /sbin /lib /usr /home\n");
         vga_write("                /root /tmp /var /proc /sys /mnt /boot\n");
         ce_install_builtins();      /* put /bin apps + /appdevelop docs on disk */
+        ce_install_pkg_repo();      /* NIGHT-P4: seed /pkg/ local repo after format */
     } else {
         vga_write(tr(L_FORMAT_CANCEL));
     }
@@ -1384,6 +2130,9 @@ static void ed_load(fs_entry_t *f) {
 }
 
 static int ed_save(fs_entry_t *f) {
+    /* #182: re-check write permission at save time -- fs_save is a ring0
+     * write and must not hand a protected path back to the session. */
+    if (fs_perm_check(ed_fname, g_uid, g_gid, PERM_WRITE) != 0) return -1;
     int total = 0;
     for (int i = 0; i < ed_nlines; i++) total += ed_strlen(ed_lines[i]) + 1;
     if (total > FS_DATA_MAX) return -1;
@@ -1527,26 +2276,33 @@ static void cmd_edit(const char *arg) {
     if (!*arg) { vga_write("usage: edit FILE\n"); return; }
     /* refuse files exceeding the editor buffer: loading used
      * to silently truncate them and ^O then overwrote the file */
-    {
-        uint32_t cl = 0, sz = 0;
-        if (fs_resolve_file(arg, &cl, &sz) == 0 && sz >= FS_DATA_MAX) {
-            vga_write("edit: file too large for the editor;");
-            vga_write(" refusing (a save would truncate it)\n");
-            return;
-        }
-    }
-    /* The built-in apps are installed read-only (H8).  Refuse to open
-     * them here instead of letting the user type into a buffer that can
-     * never be written back -- the editor's save path goes straight to
-     * fat_write_file(). */
-    if (fs_is_readonly(arg)) {
-        vga_write("edit: ");
-        vga_write(arg);
-        vga_write(" is read-only\n");
+    uint32_t cl = 0, sz = 0;
+    int existed = fs_resolve_file(arg, &cl, &sz) == 0;
+    if (existed && sz >= FS_DATA_MAX) {
+        vga_write("edit: file too large for the editor;");
+        vga_write(" refusing (a save would truncate it)\n");
         return;
     }
+    /* #182: gate open/create on write permission.  An existing file needs
+     * PERM_WRITE on the entry itself; a new one needs write on its parent
+     * directory (the same rule touch/mkdir/cp apply). */
+    if (existed) {
+        if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
+            vga_write("edit: permission denied\n"); return;
+        }
+    } else {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(arg, parent, sizeof(parent)) == -13) {
+            vga_write("edit: permission denied\n"); return;
+        }
+    }
     fs_entry_t *f = fs_create_file(arg);
-    if (!f) { vga_write("edit: cannot create/open file\n"); return; }
+    if (!f) {
+        vga_set_fg(VGA_LIGHT_RED);
+        vga_write("edit: cannot create/open file\n");
+        vga_set_fg(VGA_LIGHT_GREY);
+        return;
+    }
 
     int fi = 0;
     while (arg[fi] && fi < FS_NAME_MAX - 1) { ed_fname[fi] = arg[fi]; fi++; }
@@ -1696,6 +2452,9 @@ static void print_caps(uint32_t caps) {
         { CAP_FSADMIN, "fsadmin" }, { CAP_AUDIO, "audio" },
         { CAP_USERADM, "useradm" }, { CAP_DEVICE, "device" },
         { CAP_SYS, "sys" },
+        { CAP_FORMAT, "format" }, { CAP_FSCK, "fsck" },
+        { CAP_RAWIO, "rawio" },   { CAP_HWINFO, "hwinfo" },
+        { CAP_REBOOT, "reboot" }, { CAP_DIAG, "diag" },
     };
     int first = 1;
     for (unsigned i = 0; i < sizeof(T) / sizeof(T[0]); i++)
@@ -1729,7 +2488,7 @@ static void cmd_id(const char *name) {
     vga_write(" home=");  vga_write(u->home);
     vga_write("\ncaps=0x"); print_hex(u->caps);
     vga_write(" ("); print_caps(u->caps); vga_write(")\n");
-    vga_write("pw="); vga_write(u->passhash ? "set" : "none");
+    vga_write("pw="); vga_write(user_pw_is_set(u) ? "set" : "none");
     vga_write(" shell="); vga_write(u->shell); vga_write("\n");
 }
 
@@ -1747,7 +2506,7 @@ static void cmd_lsuser(void) {
         if (!u || !u->used) continue;
         print_pad(u->uid, 4); vga_write(" ");
         print_pad(u->gid, 4); vga_write(" ");
-        vga_write(u->passhash ? "yes  " : "no   ");
+        vga_write(user_pw_is_set(u) ? "yes  " : "no   ");
         print_hex8(u->caps);
         vga_write("  ");
         vga_write(u->name);
@@ -1764,6 +2523,9 @@ static void cmd_caps_legend(void) {
     vga_write("  0x0010 useradm  useradd/userdel/passwd/chcaps/su\n");
     vga_write("  0x0020 device   raw device + low-level hw info\n");
     vga_write("  0x0040 sys      reserved\n");
+    vga_write("  fine-grained (v2.25c splits of fsadmin/device):\n");
+    vga_write("  0x0080 format   0x0100 fsck    0x0200 rawio\n");
+    vga_write("  0x0400 hwinfo   0x0800 reboot  0x1000 diag\n");
     vga_write("session: uid="); print_int(g_uid);
     vga_write(" caps=0x"); print_hex(g_caps);
     vga_write(" ("); print_caps(g_caps); vga_write(")\n");
@@ -1778,7 +2540,7 @@ static void cmd_login(char *arg, int as_su) {
     user_rec_t *u = user_by_name(name);
     if (!u) { vga_write("login: no such user\n"); return; }
     if (u->uid == g_uid) { vga_write("already session user\n"); return; }
-    int need_pw = u->passhash != 0;
+    int need_pw = user_pw_is_set(u);
     if (as_su && g_uid == UID_ROOT) need_pw = 0;      /* root may su freely */
     /* T52: when no password was given on the command line, ask for it
      * interactively and echo '*' per keystroke instead of the characters. */
@@ -1803,6 +2565,94 @@ static void cmd_login(char *arg, int as_su) {
  * With no CAPS_HEX argument the capability set is built interactively: one
  * yes/no prompt per capability bit (T52).  `useradd NAME UID GID CAPS` keeps
  * working for scripts and for the regression suite. */
+/* v2.53: groupadd G [MEMBER...] -- create /etc/group entry, append members */
+static void cmd_groupadd(char *arg) {
+    if (!session_is_admin()) { vga_write("groupadd: permission denied\n"); return; }
+    /* #186: count tokens before split_words mutates the line; words beyond
+     * the argv capacity used to be silently dropped. */
+    int words = 0;
+    for (const char *q = arg; *q; ) {
+        while (*q == ' ') q++;
+        if (!*q) break;
+        words++;
+        while (*q && *q != ' ') q++;
+    }
+    char *argv[12];
+    int argc = split_words(arg, argv, 12);
+    if (argc < 1) {
+        vga_write("usage: groupadd GROUP [MEMBER USER...]\n");
+        return;
+    }
+    if (words > argc)
+        vga_write("groupadd: too many arguments; trailing members ignored\n");
+    int nmem = argc - 1;
+    if (nmem > GROUP_MEMBERS) {
+        vga_write("groupadd: only "); print_int(GROUP_MEMBERS);
+        vga_write(" members supported; extra members ignored\n");
+        nmem = GROUP_MEMBERS;
+    }
+    /* #186: validate members BEFORE touching the group table, so an unknown
+     * user cannot leave an empty group slot that group_save would persist. */
+    for (int i = 1; i < argc; i++) {
+        if (!user_by_name(argv[i])) {
+            vga_write("groupadd: unknown user '"); vga_write(argv[i]);
+            vga_write("'\n");
+            return;
+        }
+    }
+    /* remember whether the group already existed, so a rollback below does
+     * not wipe an existing entry's members. */
+    int existed = 0;
+    char gnm[16];
+    for (int j = 0; group_info(j, gnm, 16, 0) >= 0; j++)
+        if (!strcmp_(gnm, argv[0])) { existed = 1; break; }
+    int gid = group_add(argv[0], 0);
+    if (gid == -2) { vga_write("groupadd: group table full\n"); return; }
+    if (gid < 0)   { vga_write("groupadd: failed\n"); return; }
+    int failed = 0;
+    for (int i = 1; i <= nmem; i++) {
+        int r = group_add(argv[0], argv[i]);
+        if (r == -4) { vga_write("groupadd: member list full\n"); failed = 1; break; }
+        if (r < 0)   { vga_write("groupadd: failed to add member\n"); failed = 1; break; }
+    }
+    if (failed) {
+        if (!existed) group_remove(argv[0]);   /* roll back the fresh slot */
+        return;
+    }
+    if (group_save() != 0) { vga_write("groupadd: WARNING: could not persist\n"); return; }
+    vga_write("group '"); vga_write(argv[0]); vga_write("' gid ");
+    print_int(gid); vga_write("\n");
+}
+
+/* v2.53: groups -- list groups with member names */
+static void cmd_groups(void) {
+    char nm[16];
+    int i = 0, found = 0;
+    for (;;) {
+        int nmem = group_info(i, nm, sizeof(nm), 0);
+        if (nmem < 0) break;
+        found = 1;
+        vga_write(nm);
+        int gid = 0;
+        group_info(i, nm, sizeof(nm), &gid);
+        vga_write(" (gid "); print_int(gid); vga_write("): ");
+        /* members: re-read names from the db through user records */
+        int printed = 0;
+        for (int ui = 0; ui < MAX_USERS; ui++) {
+            user_rec_t *u = user_at(ui);
+            if (!u || !u->used) continue;
+            if (user_in_group(u->uid, gid)) {
+                if (printed) vga_write(" ");
+                vga_write(u->name);
+                printed++;
+            }
+        }
+        vga_write("\n");
+        i++;
+    }
+    if (!found) vga_write("no groups\n");
+}
+
 static void cmd_useradd(char *arg) {
     if (!session_is_admin()) { vga_write("useradd: permission denied\n"); return; }
     char *argv[5];
@@ -1820,18 +2670,33 @@ static void cmd_useradd(char *arg) {
     if (argc >= 4) {
         caps = hex32_(argv[3]);
     } else {
-        /* T52: interactive capability wizard, one question per bit */
+        /* T52 wizard, extended v2.25: presets first, then per-bit
+         * questions including the fine-grained successors. */
         static const struct { uint32_t bit; const char *q; } W[] = {
             { CAP_NET,     "network (http/dns/udp/ping)" },
             { CAP_KILL,    "kill other users' tasks" },
-            { CAP_FSADMIN, "filesystem admin (format/fsck)" },
+            { CAP_FSADMIN, "filesystem admin (format+fsck, broad)" },
+            { CAP_FORMAT,  "format disks (fine)" },
+            { CAP_FSCK,    "fsck mirror repair (fine)" },
             { CAP_AUDIO,   "audio playback (SB16/ES1371)" },
             { CAP_USERADM, "user admin (useradd/passwd/su)" },
-            { CAP_DEVICE,  "raw device + hw info access" },
-            { CAP_SYS,     "system (reboot/kernel introspection)" },
+            { CAP_DEVICE,  "raw device access (broad)" },
+            { CAP_RAWIO,   "raw device I/O (fine)" },
+            { CAP_HWINFO,  "hardware info read (fine)" },
+            { CAP_SYS,     "system (broad: reboot+introspection)" },
+            { CAP_REBOOT,  "reboot (fine)" },
+            { CAP_DIAG,    "kernel introspection/faultinfo (fine)" },
         };
         caps = 0;
-        vga_write("Capabilities for '"); vga_write(name); vga_write("' (y/N per item)\n");
+        vga_write("Capabilities for '"); vga_write(name);
+        vga_write("'\n  preset? admin/operator/developer/viewer/guest or ENTER for wizard: ");
+        char pans[16];
+        kb_readline(pans, sizeof(pans));
+        if (pans[0] && user_preset_caps(pans, &caps) == 0) {
+            vga_write("     preset '"); vga_write(pans);
+            vga_write("' -> caps=0x"); print_hex(caps); vga_write("\n");
+        } else {
+        vga_write("(y/N per item)\n");
         char ans[8];
         for (int i = 0; i < (int)(sizeof(W) / sizeof(W[0])); i++) {
             char num[4]; num[0] = (char)('1' + i); num[1] = 0;
@@ -1846,6 +2711,13 @@ static void cmd_useradd(char *arg) {
             }
         }
         vga_write("       caps=0x"); print_hex(caps); vga_write("\n");
+        }
+    }
+    /* #181: newly created accounts are subject to the same subset rule:
+     * a non-root issuer cannot mint an account stronger than themselves. */
+    if (g_uid != UID_ROOT && (caps & ~g_caps) != 0) {
+        vga_write("useradd: cannot grant capabilities you do not hold\n");
+        return;
     }
     char home[48];
     int o = 0;
@@ -1907,7 +2779,15 @@ static void cmd_chcaps(char *arg) {
     if (!session_is_admin()) { vga_write("chcaps: permission denied\n"); return; }
     char *argv[3];
     if (split_words(arg, argv, 3) < 2) { vga_write("usage: chcaps CAPS_HEX NAME\n"); return; }
-    if (user_set_caps(argv[1], hex32_(argv[0])) != 0) {
+    uint32_t want = hex32_(argv[0]);
+    /* #181: a non-root issuer may only confer bits they already hold, so
+     * a CAP_USERADM account cannot self/other-grant CAP_ALL (CAP_KILL/
+     * DEVICE/SYS/REBOOT ...).  Root is exempt. */
+    if (g_uid != UID_ROOT && (want & ~g_caps) != 0) {
+        vga_write("chcaps: cannot grant capabilities you do not hold\n");
+        return;
+    }
+    if (user_set_caps(argv[1], want) != 0) {
         vga_write("chcaps: no such user\n");
         return;
     }
@@ -2006,32 +2886,158 @@ static void cmd_cat(const char *arg) {
     if (off) vga_write("\n");
 }
 
-/* fsize FILE: print the size of ONE file in bytes.  A directory listing
- * is useless as an existence probe once it holds more entries than the
- * 25-row screen has lines -- the interesting names scroll out of view
- * -- so the size of a single file is the short, unambiguous answer. */
-static void cmd_fsize(const char *arg) {
-    if (!*arg) { vga_write("usage: fsize FILE\n"); return; }
-    uint32_t c, s;
-    if (fs_resolve_file(arg, &c, &s) != 0) { vga_write("fsize: no such file\n"); return; }
-    vga_write("fsize: ");
-    print_int((int)s);
-    vga_write(" bytes\n");
+/* v2.24 recursive helpers (rm -r / cp -r).  Depth-capped: every frame
+ * keeps two FS_PATH_MAX buffers, so the cap also bounds shell stack use.
+ * FAT32 has no symlinks, so no loop risk beyond pathological nesting. */
+#define FSREC_DEPTH_MAX 6
+
+static void rec_join(char *out, int cap, const char *dir, const char *leaf) {
+    int o = 0;
+    for (; *dir && o < cap - 1; dir++) out[o++] = *dir;
+    if (o > 0 && out[o - 1] != '/' && o < cap - 1) out[o++] = '/';
+    for (; *leaf && o < cap - 1; leaf++) out[o++] = *leaf;
+    out[o] = 0;
+}
+
+struct cp_ud { const char *dst; int depth; };
+
+/* v2.50: POSIX cp target normalization.  If DST is an existing directory,
+ * the source entry lands inside it under its own basename
+ * (`cp -r src existing_dir` -> `existing_dir/src`, merge semantics);
+ * otherwise DST is used verbatim as the rename/overwrite target. */
+static void cp_target(char *out, int cap, const char *dst, const char *src) {
+    if (!fs_is_dir(dst)) { rec_join(out, cap, "", dst); return; }
+    const char *bs = src;
+    for (const char *q = src; *q; q++) if (*q == '/') bs = q + 1;
+    rec_join(out, cap, dst, bs);
+}
+
+/* v2.50: ACL mode carried over by a copy.  Plain cp keeps the creator as
+ * owner (owner preservation, cp -p, is not implemented); only the mode
+ * bits transfer, so an executable .ce stays runnable and a restricted
+ * file keeps its bits.  No ACL entry falls back to the 0755 no-entry
+ * default used since v2.24. */
+static int cp_src_mode(const char *src) {
+    int fuid, fgid, fmode;
+    if (acl_lookup(src, &fuid, &fgid, &fmode) != 0) return 0755;
+    return fmode;
+}
+
+static int copy_rec(const char *src, const char *dst, int depth);
+
+/* src prefix for the current fs_foreach walk -- the shell is the only
+ * ring0 thread, so a module-static here is race-free (same pattern the
+ * job/log code uses). */
+static const char *cp_src_prefix;
+
+static void cp_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    (void)size;
+    struct cp_ud *u = (struct cp_ud *)ud;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    char full_d[FS_PATH_MAX];
+    rec_join(full_d, sizeof(full_d), u->dst, name);
+    char full_s[FS_PATH_MAX];
+    rec_join(full_s, sizeof(full_s), cp_src_prefix, name);
+    if (is_dir) copy_rec(full_s, full_d, u->depth + 1);
+    else        fs_copy_file(full_s, full_d);
+}
+
+static int copy_rec(const char *src, const char *dst, int depth) {
+    if (depth > FSREC_DEPTH_MAX) return -5;
+    if (fs_is_dir(src)) {
+        char parent[FS_PATH_MAX];
+        if (perm_write_on_parent(dst, parent, sizeof(parent)) == -13)
+            return -13;
+        int r = fs_mkdir(dst);
+        if (r != FS_OK && r != FS_ERR_EXIST) return -2;
+        acl_set(dst, g_uid, g_gid, cp_src_mode(src));
+        const char *saved = cp_src_prefix;
+        cp_src_prefix = src;
+        struct cp_ud u = { dst, depth };
+        fs_foreach(src, cp_cb, &u);
+        cp_src_prefix = saved;
+        return 0;
+    }
+    return fs_copy_file(src, dst);
+}
+
+static int rm_rec(const char *path, int depth);
+
+struct rm_ud { const char *base; int depth; };
+static void rm_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    (void)size;
+    struct rm_ud *u = (struct rm_ud *)ud;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    char full[FS_PATH_MAX];
+    rec_join(full, sizeof(full), u->base, name);
+    if (is_dir) rm_rec(full, u->depth + 1);
+    else {
+        if (fs_perm_check(full, g_uid, g_gid, PERM_WRITE) == 0) {
+            if (fs_delete(full) == 0) acl_unset(full);
+        }
+    }
+}
+
+static int rm_rec(const char *path, int depth) {
+    if (depth > FSREC_DEPTH_MAX) return -5;
+    if (!fs_is_dir(path)) return fs_delete(path) == 0 ? 0 : -1;
+    if (fs_perm_check(path, g_uid, g_gid, PERM_WRITE) != 0) return -13;
+    struct rm_ud u = { path, depth };
+    fs_foreach(path, rm_cb, &u);
+    int r = fs_rmdir_force(path);
+    if (r == 0) acl_unset(path);
+    return r;
 }
 
 static void cmd_rm(const char *arg) {
-    if (!*arg) { vga_write("usage: rm FILE\n"); return; }
+    int rec = 0;
+    while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'r' || arg[1] == 'R')) {
+        rec = 1;
+        arg += 2;
+        if (*arg == 'f') arg++;
+        while (*arg == ' ') arg++;
+    }
+    if (!*arg) { vga_write("usage: rm [-r] FILE|DIR\n"); return; }
+    if (fs_is_dir(arg)) {
+        if (!rec) { vga_write("rm: is a directory (use rm -r)\n"); return; }
+        char abs[FS_PATH_MAX];
+        fs_canon_path(arg, abs, sizeof(abs));
+        if (!strcmp_(abs, "/")) { vga_write("rm: refusing to remove /\n"); return; }
+        int r = rm_rec(arg, 0);
+        if (r == 0) return;
+        if (r == -13) vga_write("rm: permission denied\n");
+        else if (r == -5) vga_write("rm: nesting too deep\n");
+        else vga_write("rm: directory remove failed (entries left behind?)\n");
+        return;
+    }
     if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
         vga_write("rm: permission denied\n"); return;
     }
     int r = fs_delete(arg);
-    if (r == 0) return;
-    if (r == -13) {
-        /* the built-in apps are read-only: replacing them would be a
-         * way to swap the code that runs on this machine (H8) */
-        vga_write("rm: permission denied (read-only file)\n"); return;
+    if (r == 0) { acl_unset(arg); return; }
+    vga_write("rm: no such file\n");
+}
+
+/* v2.50: rmdir DIR -- remove an EMPTY directory only (no -r; non-empty
+ * directories are refused, matching POSIX rmdir(2)). */
+static void cmd_rmdir(const char *arg) {
+    if (!*arg) { vga_write("usage: rmdir DIR\n"); return; }
+    char abs[FS_PATH_MAX];
+    fs_canon_path(arg, abs, sizeof(abs));
+    if (!strcmp_(abs, "/")) { vga_write("rmdir: refusing to remove /\n"); return; }
+    if (!fs_is_dir(arg)) { vga_write("rmdir: not a directory\n"); return; }
+    /* #168: rmdir had no permission check at all (unlike cmd_rm).  Gate
+     * removal on PERM_WRITE for the session identity, the same check the
+     * file delete path applies. */
+    if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("rmdir: permission denied\n"); return;
     }
-    vga_write("rm: no such file (directories cannot be rm'd)\n");
+    int r = fs_rmdir(arg);
+    if (r == 0) { acl_unset(arg); return; }
+    if (r == -3)      vga_write("rmdir: directory not empty\n");
+    else if (r == -2) vga_write("rmdir: not a directory or root\n");
+    else              vga_write("rmdir: no such directory\n");
 }
 
 /* shared copy core for cp / mv: read src in <=16 KiB chunks, append to a
@@ -2042,12 +3048,9 @@ static int fs_copy_file(const char *src, const char *dst) {
     if (fs_perm_check(src, g_uid, g_gid, PERM_READ) != 0) return -13;
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     static char chunk[16384];     /* ring0 single shell: no reentry */
-    /* -13 (EACCES) means the target exists but is read-only (a built-in
-     * app); pass it through so the shell can say "permission denied"
-     * instead of the misleading "cannot create target" (H8). */
-    int cr = fs_write_raw_mode(dst, "", 0, 0);
-    if (cr != 0) return (cr == -13) ? -13 : -2;
-    acl_set(dst, g_uid, g_gid, 0644);                       /* creator owns it */
+    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
+    /* v2.50: carry the source mode bits over; creator stays owner. */
+    acl_set(dst, g_uid, g_gid, cp_src_mode(src));
     uint32_t off = 0;
     while (off < s) {
         uint32_t want = s - off;
@@ -2061,7 +3064,13 @@ static int fs_copy_file(const char *src, const char *dst) {
 }
 
 static void cmd_cp(char *arg) {
+    int rec = 0;
     while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'r' || arg[1] == 'R')) {
+        rec = 1;
+        arg += 2;
+        while (*arg == ' ') arg++;
+    }
     char *src = arg;
     while (*arg && *arg != ' ') arg++;
     if (!*arg) { vga_write("usage: cp SRC DST\n"); return; }
@@ -2070,8 +3079,23 @@ static void cmd_cp(char *arg) {
     char *dst = arg;
     while (*arg && *arg != ' ') arg++;
     *arg = 0;
-    if (!*src || !*dst) { vga_write("usage: cp SRC DST\n"); return; }
-    int r = fs_copy_file(src, dst);
+    if (!*src || !*dst) { vga_write("usage: cp [-r] SRC DST\n"); return; }
+    /* v2.50: if DST is an existing directory, merge SRC into DST/<basename> */
+    char dstn[FS_PATH_MAX];
+    cp_target(dstn, sizeof(dstn), dst, src);
+    if (rec && fs_is_dir(src)) {
+        char abs[FS_PATH_MAX];
+        fs_canon_path(src, abs, sizeof(abs));
+        if (!strcmp_(abs, "/")) { vga_write("cp: refusing to copy /\n"); return; }
+        int r = copy_rec(src, dstn, 0);
+        if (r == 0) return;
+        if (r == -13) vga_write("cp: permission denied\n");
+        else if (r == -2) vga_write("cp: cannot create target directory\n");
+        else if (r == -5) vga_write("cp: nesting too deep\n");
+        else              vga_write("cp: copy failed mid-way\n");
+        return;
+    }
+    int r = fs_copy_file(src, dstn);
     if (r == 0) return;
     if (r == -13) vga_write("cp: permission denied\n");
     else if (r == -1) vga_write("cp: no such file\n");
@@ -2101,6 +3125,7 @@ static void cmd_mv(char *arg) {
             vga_write("mv: copied but could not delete source\n");
             return;
         }
+        acl_unset(src);
         return;
     }
     if (r == -13) vga_write("mv: permission denied\n");
@@ -2109,20 +3134,1153 @@ static void cmd_mv(char *arg) {
     else              vga_write("mv: move failed mid-way\n");
 }
 
+/* ==================== NIGHT-P4: package manager ============================
+ * Local package repository on the FAT volume under /pkg/:
+ *   /pkg/PKGS.TXT  line index: name|version|desc|file
+ *   pkg/*.catpkg  packaged CE apps (container format, see tools/mkpkg.py)
+ *
+ * `pkg install` validates the container and drops its payload into
+ * /bin/<name>.ce; `pkg remove` deletes that copy.  No network involved
+ * (the guest boots with -net none); the repo is seeded from blobs embedded
+ * in the kernel image by gen_builtin.py.
+ *
+ * .catpkg layout (mirrors kernel_v25/tools/mkpkg.py, keep in sync):
+ *   0    magic[8]   "CPKG01\0"
+ *   8    name[16]
+ *   24   version[16]
+ *   40   cmd[16]    installed command -> /bin/<cmd>.ce
+ *   56   desc[80]
+ *   136  payload_len u32 LE
+ *   140  payload (raw CE01 image)
+ * ------------------------------------------------------------------------- */
+#define PKG_DIR        "/pkg"
+#define PKG_INDEX      "/pkg/PKGS.TXT"
+#define PKG_HDR_SIZE   140
+#define PKG_BUF_MAX    16384
+
+typedef struct {
+    char name[16];
+    char version[16];
+    char desc[80];
+    char file[16];
+} pkg_rec_t;
+
+static char pkg_idx_buf[2048];
+static char pkg_payload[PKG_BUF_MAX];
+
+static void pk_pad_copy(char *dst, int cap, const char *src, int width) {
+    int i = 0;
+    while (i < width && i < cap - 1 && src[i]) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+/* Parse /pkg/PKGS.TXT into recs; returns count (0 = no repo yet). */
+static int pkg_load_index(pkg_rec_t *recs, int max) {
+    int len = fs_read_text(PKG_INDEX, pkg_idx_buf, (int)sizeof(pkg_idx_buf) - 1);
+    if (len <= 0) return 0;
+    pkg_idx_buf[len] = 0;
+    int n = 0;
+    char *p = pkg_idx_buf;
+    while (*p && n < max) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p) *p++ = 0;
+        char *e = line + slen_(line);
+        if (e > line && e[-1] == '\r') e[-1] = 0;
+        if (!*line || line[0] == '#') continue;
+
+        char *fields[4] = { line, 0, 0, 0 };
+        int fi = 0;
+        for (char *q = line; *q && fi < 3; q++) {
+            if (*q == '|') { *q = 0; fields[++fi] = q + 1; }
+        }
+        if (!fields[0] || !*fields[0] || !fields[3] || !*fields[3]) continue;
+        pk_pad_copy(recs[n].name,    sizeof(recs[n].name),    fields[0], 15);
+        pk_pad_copy(recs[n].version,sizeof(recs[n].version),fields[1], 15);
+        pk_pad_copy(recs[n].desc,    sizeof(recs[n].desc),    fields[2], 79);
+        pk_pad_copy(recs[n].file,   sizeof(recs[n].file),     fields[3], 15);
+        n++;
+    }
+    return n;
+}
+
+static int pkg_find(const char *name, pkg_rec_t *recs, int n) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp_(recs[i].name, name)) return i;
+    return -1;
+}
+
+static int pkg_installed(const pkg_rec_t *r) {
+    char p[FS_PATH_MAX];
+    p[0] = 0;
+    strcat_b(p, sizeof(p), "/bin/");
+    strcat_b(p, sizeof(p), r->name);
+    strcat_b(p, sizeof(p), ".ce");
+    uint32_t c = 0, s = 0;
+    return fs_resolve_file(p, &c, &s) == 0;
+}
+
+static void pkg_dst_path(const pkg_rec_t *r, char *out, int cap) {
+    out[0] = 0;
+    strcat_b(out, cap, "/bin/");
+    strcat_b(out, cap, r->name);
+    strcat_b(out, cap, ".ce");
+}
+
+static void pkg_pad(const char *s, int width) {
+    int l = slen_(s);
+    vga_write(s);
+    for (int p = l; p < width; p++) vga_putc(' ');
+}
+static void cmd_pkg_list(void) {
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    if (n == 0) { vga_write("pkg: no package repository (/pkg/PKGS.TXT missing)\n"); return; }
+    vga_write("Package repository (/pkg/):\n");
+    for (int i = 0; i < n; i++) {
+        int installed = pkg_installed(&recs[i]);
+        vga_write("  ");
+        vga_set_fg(VGA_LIGHT_BLUE);
+        pkg_pad(recs[i].name, 10);
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("[");
+        pkg_pad(recs[i].version, 8);
+        vga_write("]  ");
+        vga_set_fg(installed ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
+        pkg_pad(installed ? "installed" : "available", 11);
+        vga_set_fg(VGA_LIGHT_GREY);
+        vga_write("- ");
+        vga_write(recs[i].desc);
+        vga_set_fg(VGA_WHITE);
+        vga_write("\n");
+    }
+}
+
+static void cmd_pkg_info(const char *name) {
+    if (!*name) { vga_write("usage: pkg info NAME\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("name:    ");
+    vga_set_fg(VGA_LIGHT_BLUE); vga_write(recs[i].name); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("version: ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].version); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("desc:    ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].desc); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("file:    ");
+    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].file); vga_write("\n");
+    vga_set_fg(VGA_DARK_GREY);
+    vga_write("status:  ");
+    vga_set_fg(pkg_installed(&recs[i]) ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
+    vga_write(pkg_installed(&recs[i]) ? "installed" : "available");
+    vga_set_fg(VGA_WHITE);
+    vga_write("\n");
+}
+
+static void cmd_pkg_install(const char *name) {
+    if (!*name) { vga_write("usage: pkg install NAME\n"); return; }
+    if (!fs_fs_ready()) { vga_write("pkg: no FAT32 volume\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+
+    char cpath[FS_PATH_MAX];
+    cpath[0] = 0;
+    strcat_b(cpath, sizeof(cpath), PKG_DIR);
+    strcat_b(cpath, sizeof(cpath), "/");
+    strcat_b(cpath, sizeof(cpath), recs[i].file);
+
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(cpath, &clus, &sz) != 0) {
+        vga_write("pkg: payload missing: "); vga_write(cpath); vga_write("\n"); return;
+    }
+    if (sz > PKG_BUF_MAX) { vga_write("pkg: package too large\n"); return; }
+    int rd = fs_read_at(cpath, pkg_payload, 0, (int)sz);
+    if (rd <= 0) { vga_write("pkg: read error\n"); return; }
+
+    /* validate magic: "CPKG01\0" */
+    if (rd < PKG_HDR_SIZE ||
+        pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
+        pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
+        pkg_payload[4] != '0' || pkg_payload[5] != '1') {
+        vga_write("pkg: bad package magic (not a .catpkg)\n"); return;
+    }
+
+    char cmd[16];
+    pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
+    uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
+                    ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
+                    ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
+                    ((uint32_t)(unsigned char)pkg_payload[139] << 24);
+    if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
+        vga_write("pkg: corrupt package (length mismatch)\n"); return;
+    }
+
+    char dst[FS_PATH_MAX];
+    dst[0] = 0;
+    strcat_b(dst, sizeof(dst), "/bin/");
+    strcat_b(dst, sizeof(dst), cmd);
+    strcat_b(dst, sizeof(dst), ".ce");
+
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("pkg: permission denied writing to /bin\n"); return;
+    }
+    /* truncate-replace, matching fs_copy_file's installed-app semantics */
+    if (fs_write_raw_mode(dst, pkg_payload + PKG_HDR_SIZE, plen, 0) != 0) {
+        vga_write("pkg: install failed (disk full?)\n"); return;
+    }
+    acl_set(dst, g_uid, g_gid, 0755);
+    vga_write("pkg: installed "); vga_write(recs[i].name);
+    vga_write(" -> "); vga_write(dst); vga_write("\n");
+}
+
+static void cmd_pkg_remove(const char *name) {
+    if (!*name) { vga_write("usage: pkg remove NAME\n"); return; }
+    pkg_rec_t recs[16];
+    int n = pkg_load_index(recs, 16);
+    int i = pkg_find(name, recs, n);
+    if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
+
+    char dst[FS_PATH_MAX];
+    pkg_dst_path(&recs[i], dst, sizeof(dst));
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(dst, &clus, &sz) != 0) {
+        vga_write("pkg: "); vga_write(recs[i].name);
+        vga_write(" is not installed\n"); return;
+    }
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write("pkg: permission denied\n"); return;
+    }
+    if (fs_delete(dst) != 0) { vga_write("pkg: remove failed\n"); return; }
+    acl_unset(dst);
+    vga_write("pkg: removed "); vga_write(recs[i].name); vga_write("\n");
+}
+
+static void cmd_pkg(char *arg) {
+    char sub[16];
+    int k = 0;
+    while (*arg == ' ') arg++;
+    while (*arg && *arg != ' ' && k < (int)sizeof(sub) - 1) sub[k++] = *arg++;
+    sub[k] = 0;
+    while (*arg == ' ') arg++;
+    if (!strcmp_(sub, "list"))       cmd_pkg_list();
+    else if (!strcmp_(sub, "info"))  cmd_pkg_info(arg);
+    else if (!strcmp_(sub, "install")) cmd_pkg_install(arg);
+    else if (!strcmp_(sub, "remove") || !strcmp_(sub, "rm")) cmd_pkg_remove(arg);
+    else {
+        vga_write("usage: pkg list | info NAME | install NAME | remove NAME\n");
+    }
+}
+
+/* ==================== NIGHT-P4: migrated common tools =====================
+ * head / tail / wc / tree: shell builtins over the FAT32 raw read API.
+ * Files are small (editor limit 4 KiB, CE payloads a few KiB), so a
+ * 16 KiB static ring0 buffer per command is enough, matching cmd_cat.
+ * ------------------------------------------------------------------------- */
+#define TOOL_BUF_MAX 49152
+static char tool_buf[TOOL_BUF_MAX + 1];   /* +1 for the trailing NUL */
+
+/* Parse a leading [-n N] option; returns the file argument, sets *def_n. */
+static const char *tool_parse_headtail(char *arg, int *def_n) {
+    *def_n = 10;
+    while (*arg == ' ') arg++;
+    if (arg[0] == '-' && (arg[1] == 'n' || arg[1] == 'N')) {
+        arg += 2;
+        while (*arg == ' ') arg++;
+        int v = 0;
+        while (*arg >= '0' && *arg <= '9') { v = v * 10 + (*arg - '0'); arg++; }
+        if (v > 0) *def_n = v;
+        while (*arg == ' ') arg++;
+    }
+    return arg;
+}
+
+static int tool_read_whole(const char *path) {
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(path, &clus, &sz) != 0) return -1;
+    if (sz > TOOL_BUF_MAX) return -2;
+    if (sz == 0) { tool_buf[0] = 0; return 0; }   /* empty file: resolve OK, no bytes */
+    int rd = fs_read_at(path, tool_buf, 0, (int)sz);
+    if (rd < 0) return -1;
+    tool_buf[rd] = 0;
+    return rd;
+}
+
+static void cmd_head(char *arg) {
+    int def_n;
+    const char *path = tool_parse_headtail(arg, &def_n);
+    if (!*path) { vga_write("usage: head [-n N] FILE\n"); return; }
+    int rd = tool_read_whole(path);
+    if (rd == -1) { vga_write("head: no such file\n"); return; }
+    if (rd == -2) { vga_write("head: file too large\n"); return; }
+
+    int lines = 0, cut = 0;
+    for (int i = 0; i < rd; i++) {
+        if (tool_buf[i] == '\n') {
+            lines++;
+            if (lines >= def_n) { cut = i + 1; break; }
+        }
+        cut = i + 1;
+    }
+    tool_buf[cut] = 0;
+    vga_write(tool_buf);
+    if (cut && tool_buf[cut - 1] != '\n') vga_write("\n");
+}
+
+static void cmd_tail(char *arg) {
+    int def_n;
+    const char *path = tool_parse_headtail(arg, &def_n);
+    if (!*path) { vga_write("usage: tail [-n N] FILE\n"); return; }
+    int rd = tool_read_whole(path);
+    if (rd == -1) { vga_write("tail: no such file\n"); return; }
+    if (rd == -2) { vga_write("tail: file too large\n"); return; }
+
+    int lines = 0, start = rd;
+    for (int i = rd - 1; i >= 0; i--) {
+        if (tool_buf[i] == '\n') {
+            lines++;
+            if (lines >= def_n) { start = i + 1; break; }
+        }
+        start = i;
+    }
+    vga_write(tool_buf + start);
+    if (start < rd && tool_buf[rd - 1] != '\n') vga_write("\n");
+}
+
+static void cmd_wc(char *arg) {
+    int f_lines = 0, f_words = 0, f_bytes = 0;
+    int any_flag = 0;
+    while (*arg == ' ') arg++;
+    while (arg[0] == '-' && arg[1]) {      /* collect flags: -l -w -c */
+        any_flag = 1;
+        for (int q = 1; arg[q] && arg[q] != ' '; q++) {
+            if (arg[q] == 'l') f_lines = 1;
+            else if (arg[q] == 'w') f_words = 1;
+            else if (arg[q] == 'c') f_bytes = 1;
+        }
+        while (*arg && *arg != ' ') arg++;
+        while (*arg == ' ') arg++;
+    }
+    if (!any_flag) f_lines = f_words = f_bytes = 1;   /* default: all */
+    if (!*arg) { vga_write("usage: wc [-l] [-w] [-c] FILE\n"); return; }
+
+    int rd = tool_read_whole(arg);
+    if (rd == -1) { vga_write("wc: no such file\n"); return; }
+    if (rd == -2) { vga_write("wc: file too large\n"); return; }
+
+    int lines = 0, words = 0, in_word = 0;
+    for (int i = 0; i < rd; i++) {
+        char c = tool_buf[i];
+        if (c == '\n') lines++;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') in_word = 0;
+        else if (!in_word) { in_word = 1; words++; }
+    }
+    if (rd > 0 && tool_buf[rd - 1] != '\n') lines++;
+
+    if (f_lines) { print_int(lines); vga_write("  "); }
+    if (f_words) { print_int(words); vga_write("  "); }
+    if (f_bytes) { print_int(rd); vga_write("  "); }
+    vga_write(arg); vga_write("\n");
+}
+
+/* tree: explicit-path recursion via fs_enum_entries, depth-capped at 6. */
+static void tree_walk(const char *dir, int depth) {
+    char names[24][FS_NAME_MAX];
+    int n = fs_enum_entries(dir, names, 24);
+    for (int i = 0; i < n; i++) {
+        const char *nm = names[i];
+        int is_dir = nm[slen_(nm) - 1] == '/';
+        char leaf[FS_NAME_MAX];
+        int li = 0;
+        for (int q = 0; nm[q] && li < (int)sizeof(leaf) - 1; q++) {
+            if (nm[q] == '/') continue;
+            leaf[li++] = nm[q];
+        }
+        leaf[li] = 0;
+        if (!strcmp_(leaf, ".") || !strcmp_(leaf, "..")) continue;
+        for (int d = 0; d < depth; d++) vga_write("  ");
+        vga_write(is_dir ? "+- " : "- ");
+        if (is_dir) {
+            vga_set_fg(VGA_LIGHT_CYAN);
+            vga_write(leaf);
+            vga_putc('/');
+            vga_set_fg(VGA_WHITE);
+        } else {
+            vga_set_fg(VGA_LIGHT_GREY);
+            vga_write(leaf);
+            vga_set_fg(VGA_WHITE);
+        }
+        vga_write("\n");
+        if (is_dir && depth < 6) {
+            char child[FS_PATH_MAX];
+            child[0] = 0;
+            strcat_b(child, sizeof(child), dir);
+            if (dir[slen_(dir) - 1] != '/') strcat_b(child, sizeof(child), "/");
+            strcat_b(child, sizeof(child), leaf);
+            tree_walk(child, depth + 1);
+        }
+    }
+}
+
+static void cmd_tree(char *arg) {
+    while (*arg == ' ') arg++;
+    char dir[FS_PATH_MAX];
+    if (!*arg) { fs_pwd(dir, sizeof(dir)); }
+    else {
+        if (arg[0] == '/') strcat_b(dir, sizeof(dir), arg);
+        else {
+            char pwd[FS_PATH_MAX];
+            fs_pwd(pwd, sizeof(pwd));
+            strcat_b(dir, sizeof(dir), pwd);
+            if (pwd[slen_(pwd) - 1] != '/') strcat_b(dir, sizeof(dir), "/");
+            strcat_b(dir, sizeof(dir), arg);
+        }
+    }
+    vga_write(dir); vga_write("\n");
+    tree_walk(dir, 0);
+}
+
+/* ---------- v2.23 environment variables (session table + /etc/env) -------
+ * Windows/Linux both expose process/session environment variables; CatOS's
+ * shell is ring0 and single-session, so a flat table is honest here.
+ *   export KEY=value   set (empty value deletes, like POSIX unset semantics)
+ *   export KEY=        delete
+ *   export / env       list
+ *   unset KEY          delete
+ *   $KEY / ${KEY}      expanded in typed lines and autostart scripts
+ *   PATH               drives bare-NAME program lookup (default /bin)
+ * Persistence: /etc/env, one KEY=VALUE per line, saved on every change
+ * (same on-demand style as /etc/lang).  CE apps do NOT inherit env yet --
+ * passing an environment block needs an append-only ABI slot, tracked in
+ * PROGRESS as the next step. */
+#define ENV_MAX     16
+#define ENV_KEY_MAX 16
+#define ENV_VAL_MAX 64
+typedef struct { char key[ENV_KEY_MAX]; char val[ENV_VAL_MAX]; } env_rec_t;
+static env_rec_t g_env[ENV_MAX];
+static int g_env_used[ENV_MAX];
+
+static int env_key_ok(const char *k) {
+    if (!k || !*k) return 0;
+    for (int i = 0; k[i]; i++) {
+        char c = k[i];
+        int ok = (c == '_') ||
+                 (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (i > 0 && c >= '0' && c <= '9');
+        if (!ok) return 0;
+    }
+    return slen_(k) < ENV_KEY_MAX;
+}
+
+static const char *env_get_(const char *key) {
+    if (!env_key_ok(key)) return 0;
+    for (int i = 0; i < ENV_MAX; i++)
+        if (g_env_used[i] && !strcmp_(g_env[i].key, key)) return g_env[i].val;
+    return 0;
+}
+
+/* returns 0 set, 1 deleted, -1 table full / bad key */
+static int env_set_(const char *key, const char *val) {
+    if (!env_key_ok(key)) return -1;
+    int slot = -1;
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (g_env_used[i] && !strcmp_(g_env[i].key, key)) { slot = i; break; }
+        if (slot < 0 && !g_env_used[i]) slot = i;
+    }
+    if (slot < 0) return -1;
+    if (val && *val) {
+        if (slen_(val) >= ENV_VAL_MAX || slen_(key) >= ENV_KEY_MAX) return -1;
+        int i = 0;
+        for (; key[i]; i++) g_env[slot].key[i] = key[i];
+        g_env[slot].key[i] = 0;
+        for (i = 0; val[i]; i++) g_env[slot].val[i] = val[i];
+        g_env[slot].val[i] = 0;
+        g_env_used[slot] = 1;
+        return 0;
+    }
+    g_env_used[slot] = 0;               /* empty value deletes */
+    return 1;
+}
+
+static void env_list(void) {
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (!g_env_used[i]) continue;
+        vga_write(g_env[i].key);
+        vga_write("=");
+        vga_write(g_env[i].val);
+        vga_write("\n");
+    }
+}
+
+int env_save(void) {
+    static char buf[2048];
+    int o = 0;
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (!g_env_used[i]) continue;
+        for (int j = 0; g_env[i].key[j]; j++) buf[o++] = g_env[i].key[j];
+        buf[o++] = '=';
+        for (int j = 0; g_env[i].val[j]; j++) buf[o++] = g_env[i].val[j];
+        buf[o++] = '\n';
+    }
+    if (o == 0) return 0;               /* empty table: nothing to persist */
+    return fs_write_text("/etc/env", buf, (uint32_t)o) == 0 ? 0 : -1;
+}
+
+void env_init(void) {
+    for (int i = 0; i < ENV_MAX; i++) g_env_used[i] = 0;
+    if (!fs_fs_ready()) return;
+    static char buf[2048];
+    int n = fs_read_text("/etc/env", buf, (int)sizeof(buf) - 1);
+    int fresh = (n <= 0);
+    if (n > 0) {
+        buf[n] = 0;
+        char *p = buf;
+        while (*p) {
+            char *line = p;
+            while (*p && *p != '\n') p++;
+            if (*p) *p++ = 0;
+            char *eq = line;
+            while (*eq && *eq != '=') eq++;
+            if (!*eq) continue;
+            *eq = 0;
+            env_set_(line, eq + 1);     /* bad keys silently skipped */
+        }
+    }
+    if (!env_get_("PATH")) env_set_("PATH", "/bin");
+    if (fresh) env_save();              /* seed /etc/env with PATH=/bin */
+}
+
+/* expand $KEY / ${KEY} in place.  Unknown names expand to empty (sh
+ * semantics).  "$$" is a literal '$'. */
+static void env_expand(char *line, int cap) {
+    char out[256];
+    int o = 0;
+    for (int i = 0; line[i] && o < (int)sizeof(out) - 1; ) {
+        if (line[i] != '$') { out[o++] = line[i++]; continue; }
+        if (line[i + 1] == '$') { out[o++] = '$'; i += 2; continue; }
+        int brace = 0;
+        int j = i + 1;                      /* skip the '$' itself */
+        if (line[j] == '{') { brace = 1; j++; }
+        char key[ENV_KEY_MAX];
+        int k = 0;
+        for (; line[j] && k < ENV_KEY_MAX - 1; j++) {
+            char c = line[j];
+            int ok = (c == '_') ||
+                     (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     (k > 0 && c >= '0' && c <= '9');
+            if (!ok) break;
+            key[k++] = c;
+        }
+        key[k] = 0;
+        if (brace && line[j] == '}') j++;
+        i = j;
+        if (!k) { if (o < (int)sizeof(out) - 1) out[o++] = '$'; continue; }
+        const char *v = env_get_(key);
+        if (v) for (; *v && o < (int)sizeof(out) - 1; v++) out[o++] = *v;
+    }
+    out[o] = 0;
+    int j = 0;
+    for (; out[j] && j < cap - 1; j++) line[j] = out[j];
+    line[j] = 0;
+}
+
+static void cmd_export(char *arg) {
+    if (!arg || !*arg) { env_list(); return; }
+    /* #122: the env table is global and persisted to /etc/env; mutating it
+     * is a system-config write, so it goes through the same admin gate as
+     * useradd/chcaps.  (There is no per-session env store yet.) */
+    if (!session_is_admin()) { vga_write("export: permission denied\n"); return; }
+    char *eq = arg;
+    while (*eq && *eq != '=') eq++;
+    if (!*eq) { vga_write("usage: export KEY=VALUE | export KEY= | export | env\n"); return; }
+    *eq = 0;
+    int r = env_set_(arg, eq + 1);
+    if (r == -1) { vga_write("export: bad key or table full or value too long\n"); return; }
+    if (r == 0) vga_write("export: "); else vga_write("unset: ");
+    vga_write(arg);
+    if (r == 0) { vga_write("="); vga_write(eq + 1); }
+    vga_write("\n");
+    if (env_save() != 0)
+        vga_write(tr(L_ENV_NOSAVE));
+}
+
+static void cmd_unset(char *arg) {
+    /* #122: global persisted env -- admin gate, same rationale as export. */
+    if (!session_is_admin()) { vga_write("unset: permission denied\n"); return; }
+    if (!arg || !*arg) { vga_write("usage: unset KEY\n"); return; }
+    char key[ENV_KEY_MAX];
+    int i = 0;
+    for (; arg[i] && i < ENV_KEY_MAX - 1; i++) key[i] = arg[i];
+    key[i] = 0;
+    if (env_set_(key, "") != 1) { vga_write("unset: no such variable\n"); return; }
+    vga_write("unset: ");
+    vga_write(key);
+    vga_write("\n");
+    if (env_save() != 0)
+        vga_write(tr(L_ENV_NOSAVE));
+}
+
+/* ---------- v2.25 glyph scale (`size`, persisted in /etc/size) ---------- */
+static const char *size_name(int s) {
+    if (s == 0) return "compact  (8x8 cell, 100x75)";
+    if (s == 2) return "large    (16x32 cell, 50x18)";
+    return "normal   (8x16 cell, 100x37)";
+}
+
+static void size_apply(int s) {
+    if (con_set_cell_size(s) != 0) return;
+    /* #122: the cell-size default is a global persisted preference
+     * (/etc/size); only admins may write it.  The current session still
+     * switches scale for non-root, it just is not saved across reboots. */
+    if (session_is_admin()) {
+        char b[2] = { (char)('0' + s), 0 };
+        fs_write_text("/etc/size", b, 1);
+    }
+}
+
+/* Re-apply the persisted scale when entering vbe24 (boot default 1). */
+static void size_restore(void) {
+    char b[8];
+    int n = fs_read_text("/etc/size", b, (int)sizeof(b) - 1);
+    if (n < 1) return;
+    b[n] = 0;
+    if (b[0] >= '0' && b[0] <= '2') con_set_cell_size(b[0] - '0');
+}
+
+static void cmd_size(const char *arg) {
+    if (con_get_mode() != CON_MODE_VBE24) {
+        vga_write("size: only supported in vbe24 mode (run `gfx24` first)\n");
+        return;
+    }
+    int s = con_info(CON_INFO_CELL_SCALE);
+    if (!*arg) {
+        vga_write("size: current "); vga_write(size_name(s));
+        vga_write("\nusage: size compact|normal|large  (rows x cols change with\n");
+        vga_write("       the cell size; layout is re-flowed, choice persists)\n");
+        return;
+    }
+    if (!strcmp_(arg, "compact") || !strcmp_(arg, "small") ||
+        arg[0] == '0')      size_apply(0);
+    else if (!strcmp_(arg, "normal") || arg[0] == '1') size_apply(1);
+    else if (!strcmp_(arg, "large") || !strcmp_(arg, "big") ||
+        arg[0] == '2')      size_apply(2);
+    else { vga_write("size: compact|normal|large\n"); return; }
+    vga_write("size: now "); vga_write(size_name(con_info(CON_INFO_CELL_SCALE)));
+    vga_write(" -- grid "); print_int(con_cols());
+    vga_write(" x "); print_int(con_rows()); vga_write("\n");
+}
+
+
+/* ---------- v2.25 full-screen user administration UI (`useredit`) -------
+ * Full-screen takeover: con_screen_push() saves the live grid, the TUI
+ * owns every row until Q/Esc, con_screen_pop() restores the shell view
+ * verbatim.  Requires CAP_USERADM (or root). */
+static void ue_line(int y, int x, const char *txt, uint8_t fg, uint8_t bg) {
+    if (y < 0 || y >= con_rows()) return;
+    con_set_style(fg, bg, 0);
+    con_write_at((uint8_t)x, (uint8_t)y, txt);
+}
+
+static void ue_pad(int y, uint8_t bg) {
+    char blanks[128];
+    int w = con_cols();
+    if (w > 120) w = 120;
+    for (int i = 0; i < w; i++) blanks[i] = ' ';
+    blanks[w] = 0;
+    con_set_style(CON_LIGHT_GREY, bg, 0);
+    con_write_at(0, (uint8_t)y, blanks);
+}
+
+static void ue_frame(const char *title) {
+    for (int y = 0; y < con_rows(); y++) ue_pad(y, CON_BLUE);
+    ue_line(0, 2, "+-------------------------------------------------------------+",
+            CON_YELLOW, CON_BLUE);
+    ue_line(1, 2, "|                                                             |",
+            CON_YELLOW, CON_BLUE);
+    char hdr[80];
+    int o = 0;
+    for (const char *q = "| "; *q && o < 78; q++) hdr[o++] = *q;
+    for (const char *q = title; *q && o < 77; q++) hdr[o++] = *q;
+    while (o < 63) hdr[o++] = ' ';
+    for (const char *q = "|"; *q && o < 78; q++) hdr[o++] = *q;
+    hdr[o] = 0;
+    ue_line(1, 2, hdr, CON_YELLOW, CON_BLUE);
+}
+
+static const char *ue_pwmark(const user_rec_t *u) {
+    return user_pw_is_set(u) ? "yes" : "no ";
+}
+
+static void ue_draw_list(int sel) {
+    ue_frame("CatOS user administration (v2.25 fine-grained caps)");
+    ue_line(2, 4, "  # name        uid gid caps      password",
+            CON_WHITE, CON_BLUE);
+    char ln[80];
+    int row = 3;
+    for (int i = 0; i < 10 && row < con_rows() - 3; i++) {
+        user_rec_t *u = user_at(i);
+        if (!u || !u->used) continue;
+        int o = 0;
+        ln[o++] = u->uid == (int)sel ? '>' : ' ';
+        ln[o++] = ' ';
+        char num[12];
+        int n = 0;
+        int v = i;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        if (n < 2) ln[o++] = '0';
+        while (n > 0) ln[o++] = num[--n];
+        ln[o++] = ' ';
+        for (const char *q = u->name; *q && o < 14; q++) ln[o++] = *q;
+        while (o < 16) ln[o++] = ' ';
+        n = 0; v = u->uid;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        while (n > 0) ln[o++] = num[--n];
+        ln[o++] = ' ';
+        n = 0; v = u->gid;
+        do { num[n++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+        while (n > 0) ln[o++] = num[--n];
+        while (o < 24) ln[o++] = ' ';
+        for (int k = 0; k < 8; k++) {
+            uint32_t c = user_caps_of(u->uid);
+            ln[o++] = "0123456789ABCDEF"[(c >> (28 - k * 4)) & 0xF];
+        }
+        ln[o++] = ' ';
+        for (const char *q = ue_pwmark(u); *q && o < 76; q++) ln[o++] = *q;
+        ln[o] = 0;
+        ue_line(row, 2, ln,
+                u->uid == (int)sel ? CON_BLACK : CON_LIGHT_GREY,
+                u->uid == (int)sel ? CON_YELLOW : CON_BLUE);
+        row++;
+    }
+    ue_line(con_rows() - 2, 2,
+            " arrows=select  N=new  E=edit caps  P=password  D=delete  Q=quit ",
+            CON_BLACK, CON_LIGHT_GREY);
+}
+
+static void ue_draw_caps(const char *name, uint32_t caps) {
+    ue_frame("editing capabilities (space toggles, R=preset, Esc=done)");
+    static const struct { uint32_t bit; const char *q; } W[] = {
+        { CAP_NET,     "network (http/dns/udp/ping)" },
+        { CAP_KILL,    "kill other users' tasks" },
+        { CAP_FSADMIN, "fs admin broad (format+fsck)" },
+        { CAP_FORMAT,  "format disks (fine)" },
+        { CAP_FSCK,    "fsck repair (fine)" },
+        { CAP_AUDIO,   "audio playback" },
+        { CAP_USERADM, "user admin" },
+        { CAP_DEVICE,  "raw device broad" },
+        { CAP_RAWIO,   "raw I/O (fine)" },
+        { CAP_HWINFO,  "hw info read (fine)" },
+        { CAP_SYS,     "system broad (reboot+diag)" },
+        { CAP_REBOOT,  "reboot (fine)" },
+        { CAP_DIAG,    "kernel introspection (fine)" },
+    };
+    char ln[80];
+    int row = 3;
+    for (int i = 0; i < (int)(sizeof(W) / sizeof(W[0])) && row < con_rows() - 3; i++) {
+        int o = 0;
+        ln[o++] = '[';
+        ln[o++] = (caps & W[i].bit) ? 'x' : ' ';
+        ln[o++] = ']';
+        ln[o++] = ' ';
+        for (const char *q = W[i].q; *q && o < 60; q++) ln[o++] = *q;
+        ln[o] = 0;
+        ue_line(row, 4, ln, (caps & W[i].bit) ? CON_LIGHT_GREEN : CON_LIGHT_GREY,
+                CON_BLUE);
+        row++;
+    }
+    char st[80];
+    int o = 0;
+    for (const char *q = name; *q && o < 30; q++) st[o++] = *q;
+    for (const char *q = "  caps=0x"; *q && o < 62; q++) st[o++] = *q;
+    for (int k = 0; k < 8 && o < 70; k++)
+        st[o++] = "0123456789ABCDEF"[(caps >> (28 - k * 4)) & 0xF];
+    st[o] = 0;
+    ue_line(con_rows() - 2, 2, st, CON_BLACK, CON_LIGHT_GREY);
+}
+
+static void ue_edit_caps(const char *name) {
+    user_rec_t *u = user_by_name(name);
+    if (!u) return;
+    uint32_t caps = user_caps_of(u->uid);
+    static const uint32_t bits[] = {
+        CAP_NET, CAP_KILL, CAP_FSADMIN, CAP_FORMAT, CAP_FSCK, CAP_AUDIO,
+        CAP_USERADM, CAP_DEVICE, CAP_RAWIO, CAP_HWINFO, CAP_SYS,
+        CAP_REBOOT, CAP_DIAG
+    };
+    int nb = (int)(sizeof(bits) / sizeof(bits[0]));
+    int cur = 0;
+    for (;;) {
+        ue_draw_caps(name, caps);
+        int k = kb_getkey();
+        if (k == KB_UP)   { if (--cur < 0) cur = nb - 1; }
+        else if (k == KB_DOWN) { if (++cur >= nb) cur = 0; }
+        else if (k == ' ') caps ^= bits[cur];
+        else if (k == 27 || k == '\n') {
+            /* #181: strip any bit the non-root issuer does not hold before
+             * persisting; the interactive toggle cannot mint new powers. */
+            if (g_uid != UID_ROOT) caps &= g_caps;
+            user_set_caps(name, caps);
+            if (user_save() != 0) vga_write("useredit: persist failed\n");
+            return;
+        }
+        else if (k == 'r' || k == 'R') {
+            ue_line(con_rows() - 1, 2,
+                    " preset: admin/operator/developer/viewer/guest: ",
+                    CON_WHITE, CON_BLUE);
+            char p[16];
+            kb_readline(p, sizeof(p));
+            uint32_t pc;
+            if (p[0] && user_preset_caps(p, &pc) == 0) caps = pc;
+        }
+    }
+}
+
+static void ue_password(const char *name) {
+    char p1[64], p2[64];
+    ue_line(con_rows() - 1, 2, " new password (masked): ", CON_WHITE, CON_BLUE);
+    kb_readline_masked(p1, sizeof(p1));
+    ue_line(con_rows() - 1, 2, " retype:                 ", CON_WHITE, CON_BLUE);
+    kb_readline_masked(p2, sizeof(p2));
+    if (!p1[0] || strcmp_(p1, p2) != 0) {
+        ue_line(con_rows() - 1, 2, " password NOT set (empty or mismatch) ",
+                CON_LIGHT_RED, CON_BLUE);
+        return;
+    }
+    user_set_pw(name, p1);
+    if (user_save() != 0)
+        ue_line(con_rows() - 1, 2, " persist FAILED ", CON_LIGHT_RED, CON_BLUE);
+    else
+        ue_line(con_rows() - 1, 2, " password set + persisted ", CON_LIGHT_GREEN, CON_BLUE);
+}
+
+static void cmd_useredit(void) {
+    if (!session_is_admin()) {
+        vga_write("useredit: permission denied (need CAP_USERADM)\n");
+        return;
+    }
+    if (con_screen_push() != 0) { vga_write("useredit: push failed\n"); return; }
+    int sel = UID_USER;
+    for (;;) {
+        ue_draw_list(sel);
+        int k = kb_getkey();
+        if (k == KB_UP) {
+            int best = -1;
+            for (int i = 0; i < 10; i++) {
+                user_rec_t *u = user_at(i);
+                if (u && u->used && u->uid < sel && u->uid > best) best = u->uid;
+            }
+            if (best >= 0) sel = best;
+        } else if (k == KB_DOWN) {
+            int best = -1;
+            for (int i = 0; i < 10; i++) {
+                user_rec_t *u = user_at(i);
+                if (u && u->used && u->uid > sel &&
+                    (best < 0 || u->uid < best)) best = u->uid;
+            }
+            if (best >= 0) sel = best;
+        } else if (k == 'q' || k == 'Q' || k == 27) break;
+        else if (k == 'e' || k == 'E') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u && u->uid != UID_ROOT) ue_edit_caps(u->name);
+        } else if (k == 'p' || k == 'P') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u) ue_password(u->name);
+        } else if (k == 'd' || k == 'D') {
+            user_rec_t *u = user_by_uid(sel);
+            if (u && u->uid != UID_ROOT) {
+                user_del(u->name);
+                user_save();
+                sel = UID_ROOT;
+            }
+        } else if (k == 'n' || k == 'N') {
+            ue_line(con_rows() - 1, 2, " new user name: ", CON_WHITE, CON_BLUE);
+            char nm[24], uid[8];
+            kb_readline(nm, sizeof(nm));
+            if (nm[0] && !user_by_name(nm)) {
+                ue_line(con_rows() - 1, 2, " uid (>=100):   ", CON_WHITE, CON_BLUE);
+                kb_readline(uid, sizeof(uid));
+                int uidv = uid[0] ? atoi_(uid) : 101;
+                if (uidv < 100) uidv = 101;
+                char home[48];
+                int o = 0;
+                for (const char *q = "/home/"; *q && o < 47; q++) home[o++] = *q;
+                for (const char *q = nm; *q && o < 47; q++) home[o++] = *q;
+                home[o] = 0;
+                user_add(nm, uidv, uidv, home, "/bin/shell.ce", 0);
+                user_save();
+                sel = uidv;
+            }
+        }
+    }
+    con_screen_pop();
+}
+
 /* ---------- shell loop ---------- */
+/* v2.33: shell aliases (bash-style, single-level expansion) */
+#define ALIAS_MAX 8
+static char al_name[ALIAS_MAX][16];
+static char al_value[ALIAS_MAX][64];
+static int  al_count;
+
+static int alias_lookup(const char *n) {
+    for (int i = 0; i < al_count; i++)
+        if (!strcmp_(al_name[i], n)) return i;
+    return -1;
+}
+
+static void cmd_alias(char *arg) {
+    char *eq = 0;
+    for (char *p = arg; *p; p++) if (*p == '=') { eq = p; break; }
+    if (!eq) {                          /* list all (or one) */
+        if (*arg) {
+            int i = alias_lookup(arg);
+            if (i < 0) { vga_write("alias: not found: "); vga_write(arg); vga_write("\n"); }
+            else { vga_write("alias "); vga_write(al_name[i]); vga_write("='");
+                   vga_write(al_value[i]); vga_write("'\n"); }
+            return;
+        }
+        for (int i = 0; i < al_count; i++) {
+            vga_write("alias "); vga_write(al_name[i]); vga_write("='");
+            vga_write(al_value[i]); vga_write("'\n");
+        }
+        if (!al_count) vga_write("(no aliases)\n");
+        return;
+    }
+    *eq = 0;
+    char *name = arg, *value = eq + 1;
+    if (!*name || !*value) { vga_write("usage: alias name=value\n"); return; }
+    int l = 0; while (name[l]) l++;
+    if (l >= 16) { vga_write("alias: name too long\n"); return; }
+    int i = alias_lookup(name);
+    if (i < 0) {
+        if (al_count >= ALIAS_MAX) { vga_write("alias: table full\n"); return; }
+        i = al_count++;
+        for (int j = 0; j < l; j++) al_name[i][j] = name[j];
+        al_name[i][l] = 0;
+    }
+    al_value[i][0] = 0;   /* #120: an existing alias must be REPLACED, not appended to */
+    if (strcat_b(al_value[i], 64, value) != 0) {
+        int v = 0; while (value[v] && v < 63) { al_value[i][v] = value[v]; v++; }
+        al_value[i][v] = 0;
+    }
+}
+
+static void cmd_unalias(char *arg) {
+    if (!*arg) { vga_write("usage: unalias name\n"); return; }
+    int i = alias_lookup(arg);
+    if (i < 0) { vga_write("unalias: not found: "); vga_write(arg); vga_write("\n"); return; }
+    for (int j = i; j < al_count - 1; j++) {
+        for (int k = 0; k < 16; k++) al_name[j][k] = al_name[j + 1][k];
+        for (int k = 0; k < 64; k++) al_value[j][k] = al_value[j + 1][k];
+    }
+    al_count--;
+}
+
+/* v2.34: df -- volume usage, one row per mount point (P2) */
+static void cmd_df(void) {
+    fs_df();
+}
+
+/* P2: mount <partition|device> <empty-dir>; bare `mount` lists the table.
+ * spec: partition number 1..4 on drive 0, or "hd<d>p<e>" (e.g. hd0p2). */
+static void cmd_mount(char *arg) {
+    if (!*arg) { fs_mount_list(); return; }
+    char *argv[4];
+    int argc = split_words(arg, argv, 3);
+    if (argc < 2) { vga_write("usage: mount <1..4|hd0pN> <empty-dir>\n"); return; }
+    int rc = fs_mount(argv[0], argv[1]);
+    switch (rc) {
+    case FS_OK:
+        vga_write("mount: "); vga_write(argv[1]); vga_write(" mounted\n");
+        break;
+    case FS_ERR_NOENT:  vga_write("mount: target directory not found\n"); break;
+    case FS_ERR_NOTDIR: vga_write("mount: target is not a directory\n"); break;
+    case FS_ERR_INVAL:  vga_write("mount: bad spec (partition 1..4 or hd0pN)\n"); break;
+    case FS_ERR_EXIST:  vga_write("mount: directory is already a mount point\n"); break;
+    case -10: vga_write("mount: unsupported partition (extended or non-FAT32)\n"); break;
+    case -11: vga_write("mount: no free mount slot\n"); break;
+    case -12: vga_write("mount: failed to probe a FAT32 volume there\n"); break;
+    case -13: vga_write("mount: target directory is not empty\n"); break;
+    case -15: vga_write("mount: partition already mounted elsewhere\n"); break;
+    default:  vga_write("mount: failed\n"); break;
+    }
+}
+
+/* P2: umount <directory> -- detach the partition bound there. */
+static void cmd_umount(char *arg) {
+    if (!*arg) { vga_write("usage: umount <directory>\n"); return; }
+    char *argv[4];
+    int argc = split_words(arg, argv, 1);
+    if (argc < 1) { vga_write("usage: umount <directory>\n"); return; }
+    int rc = fs_umount(argv[0]);
+    switch (rc) {
+    case FS_OK:         vga_write("umount: detached\n"); break;
+    case FS_ERR_NOENT:  vga_write("umount: not a mount point\n"); break;
+    case FS_ERR_INVAL:  vga_write("umount: bad argument\n"); break;
+    case -14:           vga_write("umount: busy (current directory is inside)\n"); break;
+    default:            vga_write("umount: failed\n"); break;
+    }
+}
+
 static char input[256];
 
+
+/* ---- v2.28: TAB completion --------------------------------------------
+ * helpers: bounded strncmp and bounded string append */
+static int sh_strneq_(const char *s, const char *p, int n) {
+    for (int i = 0; i < n; i++) {
+        if (s[i] != p[i]) return 0;
+        if (!s[i]) return 1;              /* prefix already shorter */
+    }
+    return 1;
+}
+static void bar_put_str(char *b, int *n, const char *s) {
+    while (*s && *n < 158) b[(*n)++] = *s++;
+}
+/* ---- v2.28: TAB completion ----
+ * token 0 completes against the command table; later tokens complete
+ * against the current directory's file names (prefix only, no path
+ * parsing).  Multiple matches go into the candidate bar (the row under
+ * the input line), exactly one replacement goes back into the line. */
+static const char *sh_cmds[] = {
+    "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
+    "color","cowsay","cp","curl","date","df","dir","display","dns","echo","edit","env",
+    "export","faultinfo","fg","fortune","format","fsck","gfx","gfx24","hang","help","hwinfo",
+    "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
+    "netcfg","netdiag","pkg","palette","passwd","ping","ps","reboot","rgb","rm","rmdir","run",
+    "setenv","size","sl","sndinfo","sndtest","stop","style","su","sudo","svgainfo","text","top",
+    "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
+    "users","vbe","vbe24","vdiag","whoami","yes",
+};
+#define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
+
+static void sh_best_prefix(const char *const *tab, int n,
+                           const char *pfx, int plen,
+                           char *out, char *bar) {
+    out[0] = 0; bar[0] = 0;
+    const char *hit = 0; int hits = 0;
+    for (int i = 0; i < n; i++)
+        if (plen == 0 || (sh_strneq_(tab[i], pfx, plen))) { hit = tab[i]; hits++; }
+    if (hits == 1) {
+        int j = 0;
+        while (hit[j] && j < 120) out[j] = hit[j], j++;
+        out[j++] = ' '; out[j] = 0;
+        return;
+    }
+    if (hits > 1) {                       /* candidate bar, first N names */
+        int n2 = 0;
+        bar_put_str(bar, &n2, "[tab] ");
+        for (int i = 0; i < n && n2 < 140; i++)
+            if (plen == 0 || sh_strneq_(tab[i], pfx, plen)) {
+                bar_put_str(bar, &n2, tab[i]);
+                bar_put_str(bar, &n2, " ");
+            }
+        bar[n2] = 0;
+    }
+}
+
+static int sh_complete(const char *line, int cur, char out[KB_BUF], char bar[160]) {
+    /* command token = the region from the first non-blank char up to the
+     * first blank; if `cur` is inside it (or nothing typed yet) complete
+     * against the command table, otherwise against file names. */
+    int s0 = 0;
+    while (s0 < cur && line[s0] == ' ') s0++;
+    int blank = (s0 >= cur);
+    int cmd_end = s0;
+    while (cmd_end < cur && line[cmd_end] != ' ') cmd_end++;
+    if (blank || cmd_end >= cur) {        /* inside the command token */
+        int plen = cur - s0;
+        if (plen == 0) { out[0] = 0; bar[0] = 0; return 0; }  /* no hint on bare TAB */
+        sh_best_prefix(sh_cmds, SH_NCMDS, line + s0, plen, out, bar);
+        return (out[0] != 0);
+    }
+    int ts = s0;
+    int i = cmd_end;
+    while (i < cur) {
+        while (i < cur && line[i] == ' ') i++;
+        if (i >= cur) break;
+        ts = i;
+        while (i < cur && line[i] != ' ') i++;
+        if (i >= cur) break;
+    }
+    int te = (i > cur) ? cur : i;
+    if (ts >= te) { out[0] = 0; bar[0] = 0; return 0; }
+    /* path completion only for a plain name (no '/' yet) */
+    for (int j = ts; j < te; j++)
+        if (line[j] == '"') { out[0] = 0; bar[0] = 0; return 0; }
+    static char names[64][FS_NAME_MAX];
+    char cwdp[FS_PATH_MAX];
+    fs_pwd(cwdp, sizeof(cwdp));
+    int n = fs_enum_entries(cwdp, names, 64);
+    if (n <= 0) { out[0] = 0; bar[0] = 0; return 0; }
+    /* shell order: files enum returns dir names first?  just prefix-match */
+    int plen = te - ts;
+    int kept = 0;
+    static const char *ptrs[64];
+    static char flat[64][FS_NAME_MAX];
+    for (int j = 0; j < n; j++)
+        if (plen == 0 || sh_strneq_(names[j], line + ts, plen)) {
+            for (int k2 = 0; k2 < FS_NAME_MAX; k2++) flat[kept][k2] = names[j][k2];
+            ptrs[kept] = flat[kept];
+            kept++;
+        }
+    if (kept == 0) { out[0] = 0; bar[0] = 0; return 0; }
+    char fo[KB_BUF], fbar[160];
+    sh_best_prefix(ptrs, kept, line + ts, plen, fo, fbar);
+    if (fo[0]) {                          /* splice the completed token */
+        int j = 0, o = 0;
+        for (; j < ts && o < KB_BUF - 1; j++) out[o++] = line[j];
+        for (j = 0; fo[j] && o < KB_BUF - 1; j++) out[o++] = fo[j];
+        for (j = te; line[j] && o < KB_BUF - 1; j++) out[o++] = line[j];
+        out[o] = 0;
+        if (fbar[0]) { int b = 0; while (fbar[b] && b < 159) { bar[b] = fbar[b]; b++; } bar[b] = 0; }
+        return 1;
+    }
+    if (fbar[0]) { int b = 0; while (fbar[b] && b < 159) { bar[b] = fbar[b]; b++; } bar[b] = 0; }
+    return 0;
+}
+
 static void prompt(void) {
+    /* v2.25: keep the input line on the middle row of the screen. */
+    con_scroll_anchor();
     char pwd[160];
     fs_pwd(pwd, sizeof(pwd));
     user_rec_t *u = user_by_uid(g_uid);
+
+    /* v2.35: PS1 custom prompt (\u = user, \h = host, \w = cwd,
+     * \$ = $; anything else passes through).  Unset PS1 -> default. */
+    const char *ps1 = env_get_("PS1");
+    if (ps1 && *ps1) {
+        vga_set_fg(VGA_LIGHT_GREEN);
+        for (const char *p = ps1; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                if (*p == 'u' && u) vga_write(u->name);
+                else if (*p == 'h') vga_write("catos");
+                else if (*p == 'w') { vga_set_fg(VGA_LIGHT_BLUE); vga_write(pwd); vga_set_fg(VGA_LIGHT_GREEN); }
+                else if (*p == '$') vga_write(g_uid == UID_ROOT ? "#" : "$");
+                else { vga_write("\\"); vga_putc(*p); }
+            } else vga_putc(*p);
+        }
+        vga_write(" ");
+        vga_set_fg(VGA_WHITE);
+        return;
+    }
+
     vga_set_fg(VGA_LIGHT_GREEN);
     if (u) { vga_write(u->name); vga_write("@"); }
     vga_write("catos");
     vga_set_fg(VGA_LIGHT_BLUE);
     vga_write(":");
     vga_write(pwd);
-    vga_write("$ ");
+    vga_set_fg(VGA_LIGHT_GREEN);
+    vga_write(g_uid == UID_ROOT ? "# " : "$ ");
     vga_set_fg(VGA_WHITE);
 }
 
@@ -2137,14 +4295,14 @@ static void net_boot_status(void) {
     extern uint8_t net_mac[6];
     extern int net_env_vmware(void);
     if (net_ready) {
-        vga_write("net: "); vga_write(net_backend_name()); vga_write(" up  mac=");
+        vga_write("net: AMD PCnet-PCI up  mac=");
         print_hex((net_mac[0]<<8)|net_mac[1]); vga_write(":");
         print_hex((net_mac[2]<<8)|net_mac[3]); vga_write(":");
         print_hex((net_mac[4]<<8)|net_mac[5]); vga_write("\n");
         return;
     }
     vga_write("net: no usable NIC");
-    if (net_fail_code == 1) vga_write(" (no e1000 8086:100e or PCnet 1022:2000)");
+    if (net_fail_code == 1) vga_write(" (no 1022:2000)");
     else if (net_fail_code == 2) vga_write(" (open bus)");
     else if (net_fail_code == 3) vga_write(" (MAC unreadable)");
     else if (net_fail_code == 4) vga_write(" (INIT/START failed)");
@@ -2163,36 +4321,55 @@ static void net_boot_status(void) {
         vga_write("net: VMware guest -> set the VM NIC to Intel E1000\n"
                   "     (PCnet path works only when the adapter is 'AMD PCnet')\n");
     else
-        vga_write("net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=n0\n");
+        vga_write("net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0\n");
 }
 
 void shell_run(void) {
     mbi = (multiboot_info_t *)multiboot_info_ptr;
+    btime_mark("S0 shell_run enter");
 
     vga_clear();
     fs_init();
+    btime_mark("S1 fs_init done");
     lang_init();              /* v2.21 T50: load /etc/lang, default en */
+    btime_mark("S2 lang_init");
+    env_init();               /* v2.23: load /etc/env, default PATH=/bin */
+    btime_mark("S3 env_init");
     ce_init();
+    btime_mark("S4 ce_init");
     /* v2.13: load the persistent user database + ACL (seeds root/user and
      * the default owner/group/other table when the files are absent) */
     user_db_init();
     acl_init();
+    group_db_init();        /* v2.53 supplementary groups (/etc/group) */
     session_apply();                /* boot session = root (initial user) */
+    btime_mark("S5 user/acl/session");
     if (!fs_fs_ready())
         vga_write(tr(L_NO_FAT32));
     else {
         ce_install_builtins();      /* fallback: install built-in apps at boot */
-        /* v2.17: the boot banner is printed from a kernel string and
-         * /etc/autoexec is only LISTED.  Nothing found on the volume is
-         * executed at boot any more -- that directory is user-writable,
-         * so running what it contains was root code execution on every
-         * reboot (H9). */
+        btime_mark("S6 builtins installed");
+        ce_install_pkg_repo();      /* NIGHT-P4: seed /pkg/ local repo + index */
+        btime_mark("S7 pkg repo seeded");
+        /* v2.17: boot output now comes from /etc/autostart scripts
+         * (echo lines) instead of a hardcoded banner.  Falls back to a
+         * seeded default script on a fresh volume. */
         boot_autostart();
+        btime_mark("S8 autostart done");
     }
+
+    kb_set_completer(sh_complete);        /* v2.28: TAB completion */
+    btime_mark("S9 shell prompt ready");
 
     while (1) {
         prompt();
-        kb_readline(input, sizeof(input));
+        if (kb_readline(input, sizeof(input)) == 2) {   /* ^C cancels */
+            vga_set_fg(VGA_LIGHT_GREEN);
+            vga_write("^C\n");
+            vga_set_fg(VGA_WHITE);
+            continue;
+        }
+        env_expand(input, (int)sizeof(input));   /* v2.23: $KEY / ${KEY} */
 
         /* Split first token */
         char *cmd = input;
@@ -2202,17 +4379,75 @@ void shell_run(void) {
         if (*arg) { *arg = 0; arg++; while (*arg == ' ') arg++; }
 
         if (!*cmd) continue;
+
+        /* v2.47: pending-guess one-shot confirm.  A bare y/Y (no trailing
+         * args) replays the suggested command line; anything else consumes
+         * the offer.  This check lives ONLY in the main prompt loop --
+         * in-command confirmations read their own input and never reach
+         * here, so their y/n answers follow the original path. */
+        if (pend_valid && !*arg &&
+            (!strcmp_(cmd, "y") || !strcmp_(cmd, "Y"))) {
+            char replay[256];
+            replay[0] = 0;
+            strcat_b(replay, sizeof(replay), pend_cmd);
+            if (*pend_arg) {
+                strcat_b(replay, sizeof(replay), " ");
+                strcat_b(replay, sizeof(replay), pend_arg);
+            }
+            pend_clear();               /* one-shot: consumed on replay */
+            /* echo the actual line being run so the replay is obvious */
+            vga_set_fg(VGA_YELLOW);
+            vga_write("-> ");
+            vga_set_fg(VGA_LIGHT_BLUE);
+            vga_write(replay);
+            vga_set_fg(VGA_YELLOW);
+            vga_write("\n");
+            vga_set_fg(VGA_WHITE);
+            char *rc = replay;
+            while (*rc == ' ') rc++;
+            char *ra = rc;
+            while (*ra && *ra != ' ') ra++;
+            if (*ra) { *ra = 0; ra++; while (*ra == ' ') ra++; }
+            shell_exec(rc, ra);
+            continue;
+        }
+        pend_clear();                   /* any other line covers the offer */
+
+        /* v2.33: single-level alias expansion of the command word */
+        int ai = alias_lookup(cmd);
+        if (ai >= 0) {
+            char expanded[256];
+            expanded[0] = 0;
+            strcat_b(expanded, (int)sizeof(expanded), al_value[ai]);
+            if (*arg && strcat_b(expanded, (int)sizeof(expanded), " ") == 0)
+                strcat_b(expanded, (int)sizeof(expanded), arg);
+            char *earg = expanded;
+            while (*earg && *earg != ' ') earg++;
+            if (*earg) { *earg = 0; earg++; while (*earg == ' ') earg++; }
+            shell_exec(expanded, earg);
+            continue;
+        }
         shell_exec(cmd, arg);
     }
 }
 
 /* Execute one parsed command line: builtins first, then current-dir
- * program and /bin PATH lookup.  Only the interactive loop calls this
- * now: /etc/autoexec scripts are no longer executed at boot (H9). */
+ * program and /bin PATH lookup.  Shared by the interactive loop and the
+ * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "lang"))      cmd_lang(arg);
-        else if (!strcmp_(cmd, "clear"))      vga_clear();
+        else if (!strcmp_(cmd, "export") ||
+                 !strcmp_(cmd, "setenv"))    cmd_export(arg);
+        else if (!strcmp_(cmd, "env"))       env_list();
+        else if (!strcmp_(cmd, "unset"))     cmd_unset(arg);
+        else if (!strcmp_(cmd, "alias"))     cmd_alias(arg);
+        else if (!strcmp_(cmd, "df"))        cmd_df();
+        else if (!strcmp_(cmd, "mount"))     cmd_mount(arg);
+        else if (!strcmp_(cmd, "umount"))     cmd_umount(arg);
+        else if (!strcmp_(cmd, "unalias"))   cmd_unalias(arg);
+        else if (!strcmp_(cmd, "clear") ||
+                 !strcmp_(cmd, "cls"))      vga_clear();   /* NIGHT-P3: cls alias */
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx();
         else if (!strcmp_(cmd, "vbe"))        cmd_vbe();
         else if (!strcmp_(cmd, "gfx24") ||
@@ -2223,27 +4458,66 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);
         else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
         else if (!strcmp_(cmd, "display"))    cmd_display();
+        else if (!strcmp_(cmd, "size"))       cmd_size(arg);
+        else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
+        else if (!strcmp_(cmd, "usb")) {
+            if (!strcmp_(arg, "scan")) {
+                int n = usb_scan_devices();
+                vga_write(n ? "usb: keyboard attached\n"
+                            : "usb: no device found\n");
+            } else {
+                char b[96];
+                vga_write("usb: "); vga_write(usb_status(b, sizeof(b)));
+                vga_write("\n");
+            }
+        }
         else if (!strcmp_(cmd, "vdiag"))      con_diag();
-        else if (!strcmp_(cmd, "echo"))      { vga_write(arg); vga_write("\n"); }
+        else if (!strcmp_(cmd, "echo"))      cmd_echo(arg);
+        /* NIGHT-P3: Linux-style easter eggs */
+        else if (!strcmp_(cmd, "cowsay"))    cmd_cowsay(arg);
+        else if (!strcmp_(cmd, "sl"))         cmd_sl();
+        else if (!strcmp_(cmd, "fortune"))    cmd_fortune();
+        else if (!strcmp_(cmd, "cal"))        cmd_cal(arg);
+        else if (!strcmp_(cmd, "yes"))        cmd_yes(arg);
         else if (!strcmp_(cmd, "about"))      cmd_about();
         else if (!strcmp_(cmd, "autostart"))  boot_autostart();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
         else if (!strcmp_(cmd, "date"))       cmd_date();
         else if (!strcmp_(cmd, "mem"))        cmd_mem();
-        else if (!strcmp_(cmd, "reboot"))    cmd_reboot();
+        else if (!strcmp_(cmd, "reboot")) {
+            /* v2.25 fine-grained split: CAP_SYS (broad) or CAP_REBOOT. */
+            if (g_uid == UID_ROOT || (g_caps & (CAP_SYS | CAP_REBOOT)))
+                cmd_reboot();
+            else
+                vga_write("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n");
+        }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
         else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
-        else if (!strcmp_(cmd, "mkdir"))      cmd_mkdir(arg);
+        else if (!strcmp_(cmd, "mkdir")) {
+            if (arg[0] == '-' && arg[1] == 'p' && (arg[2] == ' ' || arg[2] == 0)) {
+                const char *pa = arg + 2;
+                while (*pa == ' ') pa++;
+                cmd_mkdir_p(pa, 1);
+            } else               cmd_mkdir_p(arg, 0);
+        }
         else if (!strcmp_(cmd, "touch"))      cmd_touch(arg);
         else if (!strcmp_(cmd, "cat"))        cmd_cat(arg);
-        else if (!strcmp_(cmd, "fsize"))      cmd_fsize(arg);
         else if (!strcmp_(cmd, "rm"))         cmd_rm(arg);
+        else if (!strcmp_(cmd, "rmdir"))      cmd_rmdir(arg);
         else if (!strcmp_(cmd, "cp"))         cmd_cp(arg);
         else if (!strcmp_(cmd, "mv"))         cmd_mv(arg);
+        /* NIGHT-P4: package manager + migrated common tools */
+        else if (!strcmp_(cmd, "pkg"))         cmd_pkg(arg);
+        else if (!strcmp_(cmd, "head"))       cmd_head(arg);
+        else if (!strcmp_(cmd, "tail"))       cmd_tail(arg);
+        else if (!strcmp_(cmd, "wc"))         cmd_wc(arg);
+        else if (!strcmp_(cmd, "tree"))       cmd_tree(arg);
         else if (!strcmp_(cmd, "format")) {
-            if (session_is_fsadmin()) cmd_format();
-            else vga_write("format: permission denied (need CAP_FSADMIN)\n");
+            /* v2.25: fine-grained split -- CAP_FSADMIN (broad) or the
+             * new CAP_FORMAT successor both grant mkfs. */
+            if (session_is_fsadmin() || (g_caps & CAP_FORMAT)) cmd_format();
+            else vga_write("format: permission denied (need CAP_FSADMIN or CAP_FORMAT)\n");
         }
         else if (!strcmp_(cmd, "edit"))      cmd_edit(arg);
         else if (!strcmp_(cmd, "run"))        cmd_run(arg, g_uid);
@@ -2265,8 +4539,10 @@ static void shell_exec(char *cmd, char *arg) {
                 argv[0] = scmd;
                 argc += split_words(sarg, argv + 1, 15);
                 if (run_from_path(scmd, argv, argc, 0, UID_ROOT) != 0) {
+                    vga_set_fg(VGA_LIGHT_RED);
                     vga_write("catos: unknown command: ");
                     vga_write(scmd); vga_write("\n");
+                    vga_set_fg(VGA_LIGHT_GREY);
                 }
             }
             }
@@ -2279,15 +4555,31 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "login"))       cmd_login(arg, 0);
         else if (!strcmp_(cmd, "su"))          cmd_login(arg, 1);
         else if (!strcmp_(cmd, "useradd"))     cmd_useradd(arg);
+        else if (!strcmp_(cmd, "groupadd"))    cmd_groupadd(arg);
+        else if (!strcmp_(cmd, "groups"))      cmd_groups();
+        else if (!strcmp_(cmd, "daemon"))      cmd_daemon(arg);
         else if (!strcmp_(cmd, "userdel"))     cmd_userdel(arg);
         else if (!strcmp_(cmd, "passwd"))      cmd_passwd(arg);
         else if (!strcmp_(cmd, "chcaps"))      cmd_chcaps(arg);
         else if (!strcmp_(cmd, "chmod"))       cmd_chmod(arg);
         else if (!strcmp_(cmd, "chown"))       cmd_chown(arg);
+        else if (!strcmp_(cmd, "history")) {
+            int n = kb_hist_count();
+            for (int i = 0; i < n; i++) {
+                vga_write("  ");
+                print_int(i + 1);
+                vga_write("  ");
+                vga_write(kb_hist_get(i));
+                vga_write("\n");
+            }
+        }
         else if (!strcmp_(cmd, "ps"))          task_ps_print();
         else if (!strcmp_(cmd, "top"))         cmd_top();
         else if (!strcmp_(cmd, "jobs"))        cmd_jobs();
         else if (!strcmp_(cmd, "log"))         cmd_log(arg);
+        else if (!strcmp_(cmd, "fg"))          cmd_fg(arg);
+        else if (!strcmp_(cmd, "bg"))         cmd_bg(arg);
+        else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo();
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
@@ -2305,8 +4597,15 @@ static void shell_exec(char *cmd, char *arg) {
             while (*arg >= '0' && *arg <= '9') { tid = tid * 10 + (*arg - '0'); arg++; }
             if (neg) tid = -tid;
             if (tid == 0) { vga_write("usage: kill TID\n"); }
-            else if (task_kill(tid, UID_ROOT) != 0)
-                vga_write("kill: no such task\n");
+            else {
+                /* #184: hand the session identity to task_kill so its owner /
+                 * CAP_KILL check actually runs.  The old UID_ROOT argument
+                 * bypassed that check entirely, letting a caps=0 non-root
+                 * session kill root-owned tasks. */
+                int kr = task_kill(tid, g_uid);
+                if (kr == -2) vga_write("kill: permission denied\n");
+                else if (kr != 0) vga_write("kill: no such task\n");
+            }
         }
         else if (!strcmp_(cmd, "curl"))        cmd_curl(arg);
         else if (!strcmp_(cmd, "ping"))        cmd_ping(arg);
@@ -2315,8 +4614,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "netdiag"))     cmd_netdiag(arg);
         else if (!strcmp_(cmd, "faultinfo"))   faultinfo_print();
         else if (!strcmp_(cmd, "fsck")) {
-            if (!session_is_fsadmin()) {
-                vga_write("fsck: permission denied (need CAP_FSADMIN)\n");
+            if (!(session_is_fsadmin() || (g_caps & CAP_FSCK))) {
+                vga_write("fsck: permission denied (need CAP_FSADMIN or CAP_FSCK)\n");
             } else {
             int r = fat_verify_mirror();
             if (r < 0)      vga_write("fsck: ATA error while comparing FAT mirrors\n");
@@ -2374,7 +4673,9 @@ static void shell_exec(char *cmd, char *arg) {
                         fs_resolve_file(p, &c, &s) != 0) p[0] = 0;
                 }
                 if (!p[0]) {
+                    vga_set_fg(VGA_LIGHT_RED);
                     vga_write("catos: unknown command: "); vga_write(cmd); vga_write("\n");
+                    vga_set_fg(VGA_LIGHT_GREY);
                 } else if (pipe_to && *pipe_to) {
                     char *file2 = pipe_to;
                     char *sp = pipe_to;
@@ -2397,8 +4698,23 @@ static void shell_exec(char *cmd, char *arg) {
                                       out_redir, append, -1, -1);
                 }
             } else if (run_from_path(cmd, argv, argc, bg, g_uid) != 0) {
+                vga_set_fg(VGA_LIGHT_RED);
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
+                vga_set_fg(VGA_LIGHT_GREY);
+                /* NIGHT-P3: friendly nearest-command suggestion (yellow hint) */
+                const char *sug = suggest_cmd(cmd);
+                if (sug) {
+                    vga_set_fg(VGA_YELLOW);
+                    vga_write("catos: did you mean: ");
+                    vga_set_fg(VGA_LIGHT_BLUE);
+                    vga_write(sug);
+                    vga_set_fg(VGA_YELLOW);
+                    vga_write("?\n");
+                    vga_set_fg(VGA_WHITE);
+                    /* v2.47: arm the one-shot y-confirm for this guess. */
+                    pend_arm(sug, arg);
+                }
             }
         }
 }
@@ -2409,9 +4725,8 @@ static void shell_exec(char *cmd, char *arg) {
  * stem) is rejected by path_has_long_names() -- hence "autoexec". */
 #define AUTOSTART_DIR "/etc/autoexec"
 
-/* Seeded on a fresh volume so the user can read what a boot script
- * looks like.  It is documentation only: nothing in this directory is
- * executed any more (see boot_autostart below). */
+/* Seeded on a fresh volume so the boot banner still works out of the
+ * box; the user may edit or delete it and add more scripts. */
 static const char *const AUTOSTART_DEFAULT =
     "# CatOS boot scripts live in /etc/autoexec\n"
     "# (one shell command per line, '#' comments and blank lines skipped,\n"
@@ -2424,22 +4739,6 @@ static const char *const AUTOSTART_DEFAULT =
     "echo Runs on      : QEMU / VMware / Bochs / real PC\n"
     "echo Type 'help' for a list of commands.\n";
 
-/* The boot banner itself is embedded in the kernel image.  It used to be
- * produced by running /etc/autoexec/banner.sh, but that directory lives
- * on a writable volume: one file dropped there was executed as root on
- * every single boot, with no user interaction and no trace beyond the
- * file itself -- a persistence channel that survived a reboot and a
- * reformat of the "attacker-controlled" state (H9).  The banner is now
- * a kernel string, and the scripts are only LISTED. */
-static const char *const AUTOSTART_BANNER =
-    "CatOS 0.3 -- A tiny Unix-like OS on GRUB Multiboot\n"
-    "Architecture : i386 (32-bit x86)\n"
-    "Bootloader   : GRUB 2 (ISO9660 / El Torito)\n"
-    "Filesystem   : FAT32 on IDE (persistent)\n"
-    "Display      : front-end + text/gfx back-ends\n"
-    "Runs on      : QEMU / VMware / Bochs / real PC\n"
-    "Type 'help' for a list of commands.\n";
-
 static void boot_autostart(void) {
     if (!fs_fs_ready()) return;
     /* seed dir + default banner (fs_write_raw skips an existing file) */
@@ -2447,23 +4746,66 @@ static void boot_autostart(void) {
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
 
-    /* the banner comes from the kernel image, never from the volume */
-    vga_write(AUTOSTART_BANNER);
-
-    /* The scripts are listed, never executed.  Running them at boot was
-     * equivalent to giving every user who can write into /etc/autoexec
-     * root command execution at every boot (H9); the manual "run" below
-     * keeps the directory useful without reopening the hole. */
     char names[8][FS_NAME_MAX];
     int n = fs_enum_files(AUTOSTART_DIR, names, 8);
     if (n <= 0) return;
     for (int i = 0; i < n && i < 8; i++) {
+        char path[FS_PATH_MAX];
+        int k = 0;
+        const char *s;
+        for (s = AUTOSTART_DIR; *s && k < (int)sizeof(path) - 1; s++)
+            path[k++] = *s;
+        if (k < (int)sizeof(path) - 1) path[k++] = '/';
+        for (s = names[i]; *s && k < (int)sizeof(path) - 1; s++)
+            path[k++] = *s;
+        path[k] = 0;
+
+        static char buf[2048];
+        int len = fs_read_text(path, buf, (int)sizeof(buf) - 1);
+        if (len <= 0) continue;
+        buf[len] = 0;
+
         vga_write("autostart: ");
         vga_write(names[i]);
-        vga_write(" (not auto-executed; run it manually: run ");
-        vga_write(AUTOSTART_DIR "/");
-        vga_write(names[i]);
-        vga_write(")\n");
+        vga_write("\n");
+        g_script_mode = 1;          /* P1: no interactive prompts in scripts */
+        char *p = buf;
+        while (*p) {
+            char *line = p;
+            while (*p && *p != '\n') p++;
+            if (*p) *p++ = 0;
+            char *e = line + slen_(line);
+            if (e > line && e[-1] == '\r') e[-1] = 0;   /* CRLF safety */
+            env_expand(line, 256);                      /* v2.23 */
+
+            char *lcmd = line;
+            while (*lcmd == ' ' || *lcmd == '\t') lcmd++;
+            if (!*lcmd || *lcmd == '#') continue;
+            /* v2.54: a leading '@' marks an autostart service: launched
+             * detached as a daemon instead of run in the boot script. */
+            int as_daemon = 0;
+            if (*lcmd == '@') { as_daemon = 1; lcmd++;
+                while (*lcmd == ' ' || *lcmd == '\t') lcmd++; }
+            char *larg = lcmd;
+            while (*larg && *larg != ' ' && *larg != '\t') larg++;
+            if (*larg) {
+                *larg = 0; larg++;
+                while (*larg == ' ' || *larg == '\t') larg++;
+            }
+            if (as_daemon) {
+                char *dargv[16];
+                int dargc = 1;
+                dargv[0] = lcmd;
+                dargc += split_words(larg, dargv + 1, 15);
+                if (run_from_path(lcmd, dargv, dargc, 1, UID_ROOT) == 0) {
+                    task_t *dt = task_by_tid(g_last_bg_tid);
+                    if (dt) dt->daemon = 1;
+                }
+            } else {
+                shell_exec(lcmd, larg);
+            }
+        }
+        g_script_mode = 0;
     }
     net_boot_status();              /* keep the one-line NIC status at boot */
     vga_write("\n");

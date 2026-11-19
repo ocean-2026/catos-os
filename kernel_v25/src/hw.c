@@ -17,6 +17,29 @@ extern void frame_stats(uint32_t *total, uint32_t *used);
 extern int  task_count(void);
 extern char _bss_end[];
 
+/* ---- v2.46 boot stage markers ---------------------------------------- */
+extern uint32_t uptime_ms(void);
+extern void ser_dbg(const char *s);
+
+static void btime_append_u32(char *b, int *n, uint32_t v) {
+    char t[10]; int k = 0;
+    if (v == 0) { b[(*n)++] = '0'; return; }
+    while (v) { t[k++] = (char)('0' + v % 10); v /= 10; }
+    while (k) b[(*n)++] = t[--k];
+}
+
+void btime_mark(const char *tag) {
+    char b[80]; int n = 0;
+    const char *p = "[btime] ";
+    while (*p) b[n++] = *p++;
+    btime_append_u32(b, &n, uptime_ms());
+    b[n++] = 'm'; b[n++] = 's'; b[n++] = ' ';
+    p = tag;
+    while (*p && n < (int)sizeof(b) - 2) b[n++] = *p++;
+    b[n++] = '\n'; b[n] = 0;
+    ser_dbg(b);
+}
+
 /* ---- CPUID ---------------------------------------------------------- */
 
 static char cpu_vendor[13];
@@ -98,6 +121,8 @@ void hw_calibrate_cpu(void) {
     cpu_mhz = delta / 100000u;
 }
 
+/* Fallbacks used only when GRUB passes no memory map; real values come
+ * from hw_mem_boot() in kernel_main().  v2.38 P0: no 63 MiB clamp here. */
 static uint32_t mem_lower_kb = 640, mem_upper_kb = 63u << 10;
 void hw_mem_boot(uint32_t lower_kb, uint32_t upper_kb) {
     if (lower_kb) mem_lower_kb = lower_kb;
@@ -218,8 +243,13 @@ int hw_num(int what) {
                                                    | ((cpu_sig >> 12) & 0xF0));
     case HW_CPU_STEPPING: cpu_detect(); return (int)(cpu_sig & 0xF);
     case HW_MEM_TOTAL_KB: {
-        uint32_t hi = mem_upper_kb < (63u << 10) ? mem_upper_kb : (63u << 10);
-        return (int)(1024 + hi + mem_lower_kb / 1024);
+        /* Honest physical total from the bootloader (no 64 MiB clamp).
+         * mem_upper is KB above 1 MiB; total KB = 1024 + upper + lower/1024.
+         * Cap at the 4 GiB ceiling so a near-4 GiB guest cannot wrap the
+         * 32-bit KB figure. */
+        uint32_t kb = 1024u + mem_upper_kb + mem_lower_kb / 1024u;
+        if (kb > 4096u * 1024u) kb = 4096u * 1024u;
+        return (int)kb;
     }
     case HW_MEM_FREE_KB:
     case HW_MEM_USED_KB: {

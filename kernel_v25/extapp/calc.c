@@ -1,4 +1,4 @@
-﻿#include "ce_abi.h"
+#include "ce_abi.h"
 
 catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;
 

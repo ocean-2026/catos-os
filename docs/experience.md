@@ -36,3 +36,46 @@
 - [CatOS/v2.14][经验] **收编老项目的原则是"内核已有的从 ot 去掉，没有但有价值的内核态实现"**：ot 的 30 个与 shell 重复命令直接从命令表删除（而不是留着兼容），独有价值（脚本引擎/文件管理器/十六进制编辑/搜索/版本控制）保留；当年在用户态做 workaround 的根因（无非阻塞按键、无文件四件套）在内核态补齐后，应用侧 hack 一行不留
 - [CatOS/v2.14][经验] **修用户态 hack 要修到 API 层而不是给 hack 发护照**：adofai 屏蔽 IRQ1 + 直读 0x64/0x60 的"解法"本质是 ring3 篡改中断控制器；正确路径是内核补 slot 64 `pollkey()`（`kb_getkey_timed(0)`，nargs=0 沿用单参 thunk），游戏删光 IMR/端口代码——能力进内核，应用只管调用
 - [CatOS/v2.14][经验] **测试 flaky 先怀疑测试节奏再怀疑内核**：ot_regress 三处 FAIL 手动复现全部成功，根因全是测试侧（y 没跟 Enter、format 后等 2.5s 不够、读屏竞态）；诊断方法是手动脚本逐步二分"哪一步之后 faultinfo 有记录"，定位后修测试而非内核
+CatOS[经验] UHCI 轮询式 HID 键盘驱动最小实现：PIIX3 UHCI（BAR4 I/O）+ 4KB 帧表全指向单 QH + 单中断 IN TD，10ms 定时器轮询 TD status，免 EHCI/OHCI 复杂度即得 USB 键盘；控制传输（SETUP/IN/OUT 深度链）仅用于枚举三步，之后设备地址固定，无需 SET_IDLE/SET_PROTOCOL。
+CatOS[经验] 判定"内核某路径是否真的执行"：不要相信源码里有调用就等于运行——先核实调用点是否处于可达路径（CatOS case 0 教训），再用一次性串口 breadcrumb（static flag 打一次日志）做存在性验证，成本远低于反复推断。
+CatOS[经验] 审查 ring0 shell 权限面的高效手法：按 fs_touch/fs_mkdir/fs_write_raw_mode/fs_copy_file/fs_delete/fs_rmdir 全量 grep shell.c，逐个确认该命令在写盘前是否经过 perm_write_on_parent 或 fs_perm_check；未经过的就是 syscall 层守卫罩不住的缺口（本轮由此定位 touch 漏网）。
+CatOS[经验] QEMU UHCI 热插拔时序：monitor device_add usb-kbd 后，内核靠 100 tick 轮询挂起 pending_attach、由键盘等待循环里的 usb_service() 触发扫描+端口复位；枚举/复位需要 1~2s 窗口，探针延迟太短会读到 "no device found" 误判为驱动缺陷。端口状态 bit7(0x0080) 在 QEMU 实连时置位，可作端口有效位判据。
+CatOS[经验] 终端现代主题整改的最低风险路径：以 16 色 CLUT 为唯一语义映射层——bg=#0C0C0C、正文=#DCDCDC、次要=#8B949E、强调绿=#7EE787、路径蓝=#60A5FA、语义红=#F85149/黄=#E3B341/青=#39C5CF/成功绿=#56D364，分别映射到 CON_BLACK/LIGHT_GREY/DARK_GREY/LIGHT_GREEN/LIGHT_BLUE/LIGHT_RED/YELLOW/LIGHT_CYAN/GREEN；shell 侧提示符/错误/成功只引用索引，不改硬编码 RGB，换肤只需改一张表。
+CatOS[经验] 帮助/清单两列对齐：写一个 help_row(cmd,desc) 小助手，先把命令左对齐补齐到固定宽度（24）再写分隔与描述列（第 26 列起），比在超长静态字符串里手工数空格稳健；命令超宽时补齐循环自然跳过、描述退一格不崩溃。
+CatOS[经验] 扩展恒等映射覆盖范围时，把“映射上界”和“分配器上界”分开维护：PSE 尾块可整块映射（沿用旧 16-PSE 行为），但分配器只发 < mem_top 的帧，尾块内不存在的 RAM/hole 永远不会被触达；任务目录镜像要复制全部 1024 个内核 PDE（不能只拷前 16 个），高 LFB PT PDE 随 kdir 一起镜像且保持 supervisor-only（无 US 位），ring3 仍不可触达。
+CatOS[经验] 排查内存类回归先画探测链路再动手：GRUB mbi.mem_lower/mem_upper → kernel.c 透传 → hw_mem_boot/hw_num 显示 → paging_init 的 PMM 上界；逐段确认有无二次截断（本轮截断点在 hw.c 总量钳到 63MiB、paging.c top 钳到 64MiB 两处），其余消费方（shell mem 命令直读 mbi、hwinfo/top 走 hw_num）无需改。
+CatOS[经验] 区分“既有环境问题”与“新引入回归”的最快办法是 A/B：git stash 源码改动 → 重建 iso → 同一条回归脚本跑基线 → 比对失败集合；本轮 size_regress 三档 band 在基线同样 FAIL，根因是检测色值常量滞后于现代主题配色，与内存改动无关。
+CatOS[经验] 为新二进制格式写内核加载器时，先在宿主侧用 Python 按磁盘偏移逐字段解包并跑一遍全部边界校验，再对照内核 C 结构体；字段错位这类问题在宿主模拟器里能立刻暴露，比反复实机重编译截图定位快一个数量级。
+CatOS[经验] 跨 guest 会话持久化 FAT 卷的稳妥模式：fresh 磁盘 → 拷到本地 /tmp 暂存 → guest 格式化 → 退出前把暂存盘拷回原始磁盘 → 宿主注入工具写原始磁盘 → 再拷回暂存盘起第二遍；既绕开工作区 fs 的 flock 限制，又保证两遍之间卷状态连续。
+CatOS[经验] 给内核加第三条二进制轨道（CE01/ELF32 之外的 PE32）时，分派点先按魔数三分支，再把"镜像/bss/api 槽位注入"这类旧轨道专属条件用 !is_elf && !is_pe 排除；新轨道的段映射/VMA 标记在各自 loader 内部完成，避免污染既有 CE/ELF 路径的页表与 API 槽写入。
+CatOS[经验] 多卷 FAT 内核的最小改造路径：几何参数按卷存上下文结构体，FAT 缓存/写日志作为活跃卷共享（避免每卷再占一份 4 MiB 静态缓存撑大 BSS），切卷时从磁盘重载该卷 FAT #1；接口上只加 activate/mount/release 三个动作，旧的 fat_* 操作签名不动，上层 fs 调用方几乎零改。
+CatOS[经验] Linux 挂载语义在 VFS 层的落点：路径解析做最长前缀匹配，命中挂载点即切到对应卷再解析剩余相对路径；盘符后缀只在列目录展示时按“父路径/名字”反查挂载表追加，目录本身不改名，umount 后原名自然恢复，无需额外的改名/还原逻辑。
+CatOS[经验] 无 sfdisk/mtools 时，宿主 Python 可直接构造双分区 FAT32 测试盘：镜像内核 mkdisk 的 DBR/双 FAT/根目录写入器，按分区 LBA 落盘，MBR 填两个 0x0C 表项（起始 LBA + 扇区数）；分区内预置一个标记文件即可在 guest 里验证跨分区读，cp 一个已有文件进去即可验证跨分区写。
+CatOS[经验] ring0 shell 内建是彩蛋类功能的最低成本路径：无需走 CE 编译链（extapp/build_ce.sh + builtin_apps.inc 嵌入），在 shell.c 加分发分支即可；逐帧动画用 task_sleep_ticks(6)（tick=10ms，约 60ms/帧），可中断轮询用 kb_getkey_timed(1)，收到 0x03（Ctrl+C）即退出。
+CatOS[经验] 日历实现：星期几用 Sakamoto 公式（t[12]={0,3,2,5,0,3,5,1,4,6,2,4}，3 月前年份减一），闰年判定 (y%4==0 && y%100!=0) || y%400==0；全年 3 列布局先把每月填进 rows[7][22] 缓冲，再按行拼接三块并补齐到固定宽度，避免边打印边对齐错位。
+CatOS[经验] 命令纠错建议：微型 Levenshtein（命令词 ≤15 字符，16×16 栈表足够）+ 前缀命中降权（输入是命令前缀时距离记 1），阈值距离 ≤2 才给 "did you mean"，避免对无关命令乱提示；内置命令名单独维护一张表，新增命令同步登记。
+CatOS[经验] echo 加开关参数（-n 无换行 / -c 颜色）时，先循环剥离开关再打印；颜色用 con_get_fg() 存旧前景、打印后 vga_set_fg(old) 还原，不要写死恢复色，否则会覆盖用户当前主题色。
+CatOS[经验] 包管理器框架复用既有嵌入机制：gen_builtin.py 除 builtin_files[] 外再发一张 pkg_meta[]/pkg_files[] 表，开机播种 /pkg/ 与 PKGS.TXT；pkg install 解包到 /bin，pkg remove 只删 /bin 副本、保留仓库副本，安装状态由 /bin/<name>.ce 是否存在推导，无需额外状态文件。
+CatOS[经验] 容器包格式定长头 + 原始负载：头字段 NUL 填充、小端长度；安装器先校验 magic 与 头长+负载长==文件长，再按头内 cmd 名落盘 /bin/<cmd>.ce；未来更换负载格式（ELF/压缩）只需扩展头部并在安装器按 magic 分派。
+CatOS[经验] 并行分片 QEMU 端口隔离：本分片独占 4740-4749；回归脚本默认 4444，并发跑多个分片时必须显式 --port，避免撞 monitor socket。
+CatOS[经验] 实机验证前先做镜像内容自检：strings kernel.bin | grep 新命令串，确认代码真的链接进内核；再核对 catos.iso 内嵌副本与 kernel.bin 一致，避免把"舞台镜像陈旧"误判成编译/代码问题。
+CatOS[经验] 合并后全量回归分层跑：qemu 基础帧 → fsrec/caps/user/disk/env/heap/size 逐域 → ce_sim 主机侧；ce_sim 未建模 opcode（0x6a/0x08/ff /6 等）的 FAIL 不代表真机回归，同一应用在 QEMU 实机步骤 PASS 即可判定功能正常。
+CatOS[经验] 测试报 FAIL 先分层定性：让受测应用直接 `run` 一遍，能跑通即目录条目/加载路径正常，问题在前端列举可见性或断言位置；再决定改测试还是改内核，避免把基建假阴性当内核缺陷修。
+CatOS[经验] 多卷挂载去重应按「ATA 驱动号 + 分区 LBA」遍历全部卷槽（含根卷槽 0）判归属，而不是只扫附加挂载表的设备名；否则根分区可被二次绑定，两个 FAT 缓存覆盖同一 LBA 留下分叉风险。
+CatOS[经验] 整文件读缓冲路径：空文件要在解析成功后直接返回 0（区别于读取错误），缓冲在申请长度 +1 处留尾 NUL，避免恰好读满缓冲时 tool_buf[rd]=0 越界写。
+CatOS[经验] 终端审美整改的最小闭环：先截图取证建评分表（对照 Campbell/eza），再按「收集→排序→分列着色→右对齐」改列举类命令；表格类输出统一「标签深灰 / 主键强调色 / 次键灰 / 状态按语义着色」四层，列宽固定后视觉立刻整齐。
+CatOS[经验] 提示行语义色分层：错误整行红，相邻的纠错建议用黄做次级提示、建议命令名用蓝高亮；问号紧贴命令词，不要留 `help ?` 这种空格。
+CatOS[经验] 提示符三段配色惯例：用户@主机强调绿、路径蓝、权限标记（#/$）另用强调绿或白，不要让标记继承路径色；路径与标记之间不留多余空格。
+CatOS[经验] 审美化改动也要过功能回归：本轮 ls 排序、df 对齐、pkg 分列均未改 API；唯一需要同步的是测试断言中隐含的顺序假设，先把断言改成与新排序无关的稳定条目/计数，再跑 qemu/fsrec/caps/user/disk/env/heap/size 套件。
+CatOS[经验] 探测类自旋等待对空设备/开放总线应加「稳定无信号采样」跳出：状态恒定 0x00/0xFF 连续 N 次即判空槽返回，再配迭代兜底；避免无设备端口上跑满百万级空转。本轮 ATA 空槽由 10M 迭代/槽降到 256 采样即退，内核启动省约 1.65s。
+CatOS[经验] 启动耗时诊断先打点拆分 pre-kernel（BIOS/GRUB/ISO 加载）/kernel markers/post-marker 三段，区分固件引导开销与内核开销；GRUB 菜单倒计时属于 pre-kernel，组装期 timeout 替换比内核侧优化收益更大（本轮 5s vs 内核 1.65s）。
+CatOS[经验] did-you-mean 一键确认用三态状态机最稳：arm（主循环给出建议时缓存命令名+原始参数，脚本模式 g_script_mode 下不 arm）/ consume（裸 y/Y 且无尾随参数回放后立即清）/ cover（任意其他主循环行派发前清掉）。回放复用既有 `shell_exec()` 路径，补全表、argv 拆分、重定向语义与用户直接输入完全一致；回放前用 `-> <line>` 黄/蓝回显实际执行行，与原始 `y` 输入区分。问询上下文不持有该状态，故无需在每个确认点额外豁免。
+CatOS[经验] 目录项写侧跨簇失败回滚：写入前记录每个已触碰簇号与槽位区间（起始槽+计数），中途 ATA 失败/链越界时按记录逐簇读回、把已写槽位墓碑为 0xE5 再写盘，避免悬挂半截 LFN run 被读侧误聚合；目录链尾追加新簇失败必须先解链（父簇指回原尾标记）再释放新簇，否则留孤儿链项。短条目 ntres(lcase) 字节按原始名大小写写：词干全小写置 0x10、扩展名全小写置 0x08，混合/全大写清零；LFN 别名恒大写、ntres=0。
+CatOS[经验] CE 用户态 libc 雏形第一步取"头文件 inline 包装 + 单 .c 槽定义 + 构建脚本多链一个 .o"，比 ar 归档/独立 crt0 改动小：字符串/控制台辅助写成 static inline（优先走内核 vsyscall 槽，槽空回落 freestanding 实现），不产生跨 app 重复符号；真正的 libc.a 归档与启动代码分离留作后续小设计。
+CatOS[经验] 递归文件操作语义分层：对外命令（rmdir）走严格内核校验（非空拒绝），对内递归清空器（rm -r）走 force 变体；后序遍历已自行删完所有后代，无需在内核侧重复非空扫描。cp 目标归一化先判 DST 是否已存在目录，是则拼上 src 基名（合并语义），否则原样作为覆盖/改名目标。
+CatOS[经验] 口令摘要加宽保持可演进：旧混合函数保留下来仅用于校验旧记录，新记录走新格式；登录成功后原地重算新格式即透明升级，无需离线迁移工具。多车道摘要用独立 IV 种子 + 逐轮跨车道异或扩散，避免四条独立可并行碰撞的弱拼接。
+CatOS[经验] 调度类死锁用串口时序打点最快定位：`-serial file:/tmp/ser.log` + 内核侧 btime_mark()（自带 ms 时间戳），在 signal 投递/wait 进入/wake-parent/reap 四个点打标，一次运行即可看出「wake-parent 有、reaped 无」这类「被唤醒但永不调度回来/等待条件永不满足」的竞态，比反复抓屏猜测高效得多。
+CatOS[经验] 附加组最小落地不必给每个任务/用户凭据挂 supplementary 数组：内核维护一张常驻组库（内存表 + 持久化 /etc/group，行格式 name:gid:member,...，成员按名存、加载期解析 uid），权限检查在「主 gid 未命中」后用 uid 反查组库即可命中任一附加组。老单 gid 记录与空组库天然向后兼容；每任务附加组凭据缓存留作后续优化。
+CatOS[经验] 守护原语最小落地复用后台作业管线：task_t 加一个 daemon 标志 + spawn 复位 + jobs 加 D 列即可，事件等待复用既有 delay（timer 唤醒）/子退出/键入三唤醒源，不新增调度类、不引入 POSIX 会话/信号表；自启服务用 /etc/autoexec 行首 @ 前缀走同一 daemon 管线（uid=root）。示范守护（memlog 堆水位）周期写捕获 ring，log TID 读回、kill TID 停止，全部交互走 v2.51 既有命令。
+CatOS[经验] 二进制字体格式解析层最稳的落地路径：先用宿主侧脚本（fontTools）把参考字体的轮廓点/advance 生成 C 期望表入仓，再写 C 解析层逐点 diff；内核路径全定点 F2Dot14（raw/16384，四舍五入），每个多字节访问都过边界校验，截断/垃圾/空缓冲用例纳入单测。最易出错三处：cmap 子表偏移相对表起点而非文件绝对偏移；loca 表 short(×2)/long 双格式；简单字形 REPEAT 展开计数与 X/Y_SAME 零 delta 占 0 字节分支。
+CatOS[经验] 对抗测试闭环按红/白/蓝分工最清晰：红队一律磁盘副本隔离跑动态攻击（基础盘不污染），白队只读静态审查出条目并续号，蓝队按"有界写入/权限闸门/属主校验"优先修可落地项；改动面大或需专项设计的编号登记 deferred，不硬塞进本轮。findings 与证据目录归档，问题清单条目与 commit message 双向可查，收官报告按任务/版本链/统计/状态对照分层汇总。

@@ -34,7 +34,17 @@ typedef enum {
     T_WAIT_KB,      /* blocked for a key                     */
     T_WAIT_CHILD,   /* shell waiting for a child to exit     */
     T_ZOMBIE,       /* exited, waiting to be reaped          */
+    T_STOPPED,      /* v2.52: suspended by SIGTSTP, held by job control */
 } tstate_e;
+
+/* v2.52 minimal signal abstraction for job control.  This is NOT the full
+ * POSIX signal set: only the handful a shell needs to stop/continu a job,
+ * plus INT/TERM as terminate mappings and CHLD as a parent-notice hint. */
+#define SIGCONT  1
+#define SIGINT   2
+#define SIGTSTP  3
+#define SIGCHLD  4
+#define SIGTERM  9
 
 #define MAX_TASKS  16
 #define TID_SHELL  0
@@ -57,6 +67,9 @@ typedef struct task {
     uint32_t    wake_tick;      /* T_SLEEPING wakeup                   */
     int         exit_code;
     struct task *parent;
+    int         pgid;          /* v2.52: job/process group id (== tid for a
+                                   standalone job; pipelines share one later) */
+    int         pending_sig;    /* v2.52: last delivered signal, 0 = none   */
     uint32_t    heap_end;       /* user heap break                     */
     vma_t      *vm;             /* VMA list for this task (NULL if ring0)*/
     /* ls syscall snapshot (one listing at a time per task) */
@@ -76,6 +89,8 @@ typedef struct task {
      * scribbling over the shell prompt.  `log TID` drains it, `log -f TID`
      * follows it until the task exits. */
     int         bg_mode;        /* 1 = background job -> capture stdout */
+    int         daemon;         /* v2.54: detached service (survives session,
+                                   logged like a bg job; not an interactive job */
     uint16_t    log_head;       /* write index (bytes)                 */
     uint16_t    log_tail;       /* read index  (bytes)                 */
     uint32_t    log_lost;       /* bytes dropped because the ring was full */
@@ -87,9 +102,19 @@ void     tasks_init(void);
 task_t  *task_current(void);
 int      tasks_ready(void);
 int      task_spawn_ce(const char *path, int argc, char **argv, int uid);
+/* P1: flatten a supported PE32 into a CE01 .ce file (shell convert-on-run).
+ * err/errsz receive a human-readable failure reason; returns 0 / negative.
+ * uid/gid are the session identity used for the target-path write check
+ * (#182); the conversion never writes a path the caller may not write. */
+int      pe_to_ce_file(const char *pe_path, const char *ce_path,
+                       int uid, int gid, char *err, int errsz);
 void     task_exit_current(int code) __attribute__((noreturn));
 int      task_kill(int tid, int by_uid);
 void     task_wait_child(task_t *child);
+/* v2.52: minimal signal delivery.  Returns 0 ok, -1 no such task. */
+int      task_signal(int tid, int sig);
+/* Wait for a child to either exit (reaped, returns 0) or stop (returns 1). */
+int      task_wait_child_or_stop(task_t *child);
 
 /* ---- scheduling ------------------------------------------------------ */
 void     task_yield(void);            /* cooperative: give up the CPU now */

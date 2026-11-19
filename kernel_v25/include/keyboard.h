@@ -39,18 +39,30 @@
 #define KB_CTRL_RIGHT 0x123
 #define KB_CTRL_PGUP  0x124
 #define KB_CTRL_PGDN  0x125
+#define KB_TAB        0x110
+#define KB_CTRL_C     0x03   /* v2.28: ^C -- kb_readline cancels, ret 2 */
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */
-/* v2.26: same ring-buffer enqueue for the USB HID path (usb_poll). */
-void kb_usb_feed(uint8_t sc);
+void kb_usb_feed(uint8_t sc); /* USB HID: set-1 scancode from usb_uhci.c   */
 int  kb_peek(void);           /* non-blocking: a scancode is pending */
 int  kb_getkey_timed(uint32_t ticks);  /* real key within N ticks, else -1 */
 /* Blocking: returns one key as either an ASCII code (0..255, Ctrl+letter
  * comes back as ^A..^Z i.e. 0x01..0x1A) or one of the KB_* special codes. */
 int  kb_getkey(void);
+/* v2.28: TAB completion hook.  The shell registers a completer; the line
+ * editor calls it on TAB with the full draft line and the cursor offset.
+ * Return 1 when `out` holds a replacement line (cursor follows the new
+ * end), 0 for no change; a non-empty `bar` is painted on the row below
+ * the input line (candidate list). */
+typedef int (*rl_complete_fn)(const char *line, int cur,
+                              char out[KB_BUF], char bar[160]);
+void kb_set_completer(rl_complete_fn fn);
+int  kb_hist_count(void);              /* v2.31: history listing */
+const char *kb_hist_get(int i);        /* 0 = oldest */
 /* Line mode used by the shell: echoes input, returns 1 on Enter with the
- * line copied into buf (NUL-terminated, max len-1 chars). */
+ * line copied into buf (NUL-terminated, max len-1 chars); returns 2 on
+ * Ctrl+C (line cancelled, buf cleared). */
 int  kb_readline(char *buf, int len);
 /* T52: same line reader but every printable key echoes '*' instead of the
  * character -- for password entry.  Backspace erases one star. */

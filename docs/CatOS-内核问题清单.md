@@ -689,3 +689,112 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 
 ---
 *本节后继续编号为 #112+。*
+
+## 二十三、v2.22~v2.24 跨夜轮（#112~#113，2026-11-14）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 112 | 高 | ring0 shell 的 `mkdir` 不做父目录写权限检查，非 root 用户可直接在 /etc、/bin 下建目录 | shell 自身在 ring0，ACL 只在 fs_perm_check 调用点生效，mkdir 从未调用 | v2.24 `perm_write_on_parent()` 统一守卫 mkdir/cp -r（fsrec_regress 6 步断言） | ✅ 已修 |
+| 113 | 中 | rm/mv 删除文件后 /etc/acl 留悬空条目，重建同名文件继承旧权限（如旧 chmod 000） | 删除路径不清理 ACL 表 | v2.24 新增 `acl_unset()`，rm/rm -r/mv 删除成功即清除条目 | ✅ 已修 |
+| 114 | 低 | `fs_copy_file` 给副本写死 0644（无执行位），副本 .ce 比"无条目=0755"默认语义更受限，`run` 报 err -13 | 创建者 ACL 用了 0644 | v2.24 改为 0755，与文档化默认一致 | ✅ 已修 |
+
+*本节后继续编号为 #115+。*
+
+| 116 | 高 | 无 IDE 硬盘时 `format` 死循环假死（分钟级无响应） | fat_mkfs 对 IDENTIFY 失败 fallback 到虚构 64MiB 卷继续 mkfs，每个扇区写都烧满 10M 迭代超时 | v2.32：fat_mkfs/fs_format 改 int 签名，无盘立即返回 -1，shell 报 "no IDE disk attached" | ✅ 已修 |
+
+| 117 | 低 | text 模式（VGA 字库）下中文内容无法显示（cat 输出中文静默丢弃） | VGA 9042 字库无中文字形，图形模式才有软件字库渲染 | 记录为已知限制；可选改进：非 ASCII 渲染为 '?' 或提示切图形模式 | ⏳ 已知限制 |
+
+| 118 | 高 | fat_alloc/free 计数用 max_clus 当数据簇上界，小卷上可达数据区 2 倍——可能分配卷尾外簇（数据损坏）且 df 显示 free>total | max_clus 语义混用（FAT 表容量 vs 数据区簇数） | v2.34：clus_hi()=vol_clusters+2 统一替换 17 处 | ✅ 已修 |
+
+## 二十四、v2.36 审查轮（#120~#123，2026-11-15）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 120 | 中 | `alias name=value` 对已存在别名重复赋值时，新值被**追加**到旧值之后（`alias ll=ls` 再 `alias ll=dir` 得到 `ll='lsdir'`），而非替换 | cmd_alias 命中已有条目后直接 `strcat_b(al_value[i], …)`，未先清空旧值；仅在 strcat_b 放不下的 fallback 分支才整段覆盖 | v2.36：覆盖前先 `al_value[i][0]=0` 再拼接，实机复现验证 `alias ll='dir'` 纯替换 | ✅ 已修 |
+| 121 | 高 | ring0 shell 的 `touch` 不做父目录写权限检查，非 root 用户可在 /etc、/bin 下新建空文件（与 #112 mkdir 同类缺口，当时只补了 mkdir/cp -r，漏了 touch） | cmd_touch 直接调 fs_touch，未走 perm_write_on_parent；fs.c 层无 ACL 概念，守卫只在 shell 侧 | v2.36：文件不存在时先 `perm_write_on_parent()` 守卫父目录写权限；已存在文件不改动目录条目，保留原行为。实机：user 建 /etc/* 被拒、/tmp/* 允许 | ✅ 已修 |
+| 122 | 低 | `export`/`unset`/`size` 直接写全局持久化配置 /etc/env、/etc/size，未做管理员（CAP_USERADM/root）守卫；非 root 可改全局环境变量与字号默认值 | 这些命令在 ring0 shell 直接 fs_write_text 系统配置文件，未复用 session_is_admin() 闸门 | 本轮记录为低危观察项，未改：env/size 属会话偏好语义，是否全局可写需产品决策；后续若收紧，应在 cmd_export/cmd_unset/size_apply 落盘前加 admin 检查 | ⏳ 观察项 |
+| 123 | 低 | `ata_read_sectors` 的 DRQ 等待超时/错误分支为空：等待失败后仍继续从数据口读 256 字并返回 0（成功），上层拿到陈旧/垃圾数据却无错误信号 | ata_wait_drq 返回 -1 后未中断读循环、未把失败上抛；与 ata_write_sectors（失败即 return -1）不对称 | 本轮记录为低危观察项；建议读超时/错误时 return -1，由 fs/fat 层按既有 -1 路径处理 | ⏳ 观察项 |
+
+*本节后继续编号为 #124+。*
+
+## 二十五、v2.37 审美整改轮（#124~#127，2026-11-15）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 124 | 低（审美） | `help` 未实现内部分页器：长帮助一次滚出，无空格/回车翻页、Q 退出；分段标题与段间距待细化 | cmd_help 原为单段静态字符串一次性 vga_write | v2.37：命令列固定 24 宽、描述列第 26 列起（help_row 助手）；分页器留待下轮 | ⏳ 部分完成 |
+| 125 | 低（审美） | 编辑器 nano 双底栏未做：标题反白灰底、底栏深藏蓝单条；`[modified]`/line:col 未右对齐，无独立状态消息行 | ed_status_msg 固定白字/LIGHT_BLUE 底，标题栏用反白 | 本轮未改；下轮按标题 `#2D333B`/字 `#E6EDF3`、底栏 `#1F4E79`/白字、按键名反白、说明次要色重排 | ⏳ 待办 |
+| 126 | 低（审美） | IME 候选浮层未做首选高亮：整行反白，首选候选无蓝底白字，编号徽章/候选间距未调 | ime.c 候选条整行同一反白样式 | 本轮未改；下轮浮层底 `#E6E6E6`/字 `#0C0C0C`、首选 `#1F6FEB` 白字、候选间留 1 格 | ⏳ 待办 |
+| 127 | 低（审美） | 部分语义色未分离：`Saved.`/PASS 未走成功绿、`[!]` 未走警告黄；提示符 root `#`/普通 `$` 未分色，家目录 `~` 缩写未做 | 状态消息沿用默认 fg，提示符分隔符沿用路径蓝 | v2.37：unknown command / edit cannot 走错误红；其余语义色与提示符分色留待下轮 | ⏳ 部分完成 |
+
+*本节后继续编号为 #128+。*
+
+## 二十六、跨夜迭代轮（#128+，2026-11-15，v2.38~v2.42）
+
+五分片并行开发合并入主干：P0 4G 内存、P1 PE 支持、P2 分区挂载、P3 彩蛋 UX、P4 包管理器。
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 122 | 低 | `export`/`unset`/`size` 直写 /etc/env、/etc/size 未做管理员守卫（二十四节观察项） | ring0 shell 直写系统配置，未复用 session_is_admin() 闸门 | v2.38（P0）：cmd_export/cmd_unset/size_apply 落盘前加 admin 检查 | ✅ 已修 |
+| 123 | 低 | `ata_read_sectors` DRQ 等待超时/错误分支为空，失败仍回读数据并返回成功（二十四节观察项） | ata_wait_drq 失败后未中断读循环、未上抛错误 | v2.38（P0）：DRQ 失败即 return -1，与写路径对称；P2 多盘重构后并入 ata_read(drv) 封装 | ✅ 已修 |
+| 128 | 中 | PCI hole 之上的第二段 RAM 未枚举：大内存客户机显示总量小于 `-m` 标称（3840MiB 标称→报告 ~3071MiB） | multiboot mem_upper 只统计 1MiB 以上连续低内存；hole 之上 RAM 仅在 mmap 表，内核未解析 | 本轮如实反映，非内存泄漏；后续解析 mmap 表补枚举 | ⏳ deferred |
+| 129 | 中 | 真 4GiB 客户机的 MMIO 避让缺失：恒等映射未按 multiboot mmap 避让 PCI BAR/MMIO 区间，BAR 落入最后 4GiB 块时 PSE 恒等页会覆盖 MMIO | 恒等映射未做 mmap 区间避让 | 本机测试矩阵 RAM 顶 < BAR0(0xfd000000) 无冲突；彻底解决需每帧内核窗口方案（ROADMAP 内存动态化） | ⏳ deferred |
+| 130 | 中 | PE 未实现基址重定位（.reloc）：`spawn_load_pe()` 按首选 ImageBase 映射，镜像必须加载到别的基址时绝对引用不修正 | PE 加载器未处理 .reloc 目录 | 直接加载路径要求 ImageBase 落在用户竞技场 [0x2000000,0x2800000)；重定位留后续 | ⏳ 已知限制 |
+| 131 | 低 | PE→CE 转换器要求入口落在 flat 镜像偏移 0（CE 加载器总从偏移 0 起跳）；入口不在镜像起始的布局被拒绝并返回明确错误 | CE01 单段 flat 镜像无段表 | 明确报错；非入口-0 布局需重排后转换 | ⏳ 已知限制 |
+| 132 | 中 | 扩展分区（EBR 链）不遍历：类型 0x05/0x0F/0x85/0xEE 仅标记不支持并由 mount 报错 | 分区解析只遍历主分区表 | 本轮不解析 EBR 链式主分区 | ⏳ 已知限制 |
+| 133 | 中 | 多物理盘仅代码路径验证：ATA 扫描/分区扫描支持多盘，金属测试只跑了单盘双分区；第二块 IDE 盘挂载未真机验证 | 缺双盘硬件矩阵 | 待后续双盘真机回归 | ⏳ 待金属验证 |
+| 134 | 低 | 挂载表不持久：mount 状态在内存，重启后需重新挂载，无写回磁盘的挂载配置 | VFS 挂载表为内存态 | 本轮仅运行时挂载；持久化配置留后续 | ⏳ 已知限制 |
+| 135 | 低 | help 顶部小节无法回滚留证：help 输出超 25 行，打印结束后顶部行已离开实时网格，CON_SB_ROWS=96 只回得到中部段 | 回滚缓冲深度不足、help 无内部分页暂停 | 新 help 行已在源码逐行核对、渲染链路正常；后续可在 help 内部分段暂停或加深存档 | ⏳ 已知限制 |
+| 136 | 低 | head/tail/wc 整文件读入 48KiB 静态缓冲（bss），超过 48KiB 的文件被拒绝（file too large） | 工具实现为一次性读入 | 现有文档/应用均在此范围内；流式逐行处理留后续 | ⏳ 已知限制 |
+| 137 | 中 | 联网拉包未实现：e1000 与 net_send/net_recv 在位，但 P4 只做本地 /pkg/ 仓库；HTTP/1.0 客户端、索引拉取、签名校验未做 | 包管理器本轮限定本地仓库 | 见 docs/pkg-repo-design.md §2；网络拉包留后续 | ⏳ deferred |
+| 138 | 低（测试基建） | size_regress 绿带检测常量 0x55FF55 滞后于现代主题实际绿 #7EE787，且脚本未挂磁盘导致 /etc/size 持久化步骤无源卷 | 调色板 v2.37 更新后测试脚本常量未同步；早期脚本 boot() 未传 disk | v2.42 集成收尾：GREEN 改为 (0x7E,0xE7,0x87)，boot() 挂 catos_disk.img；ISO 参数改为可选（测试基建，不改内核） | ✅ 已修 |
+| 139 | 低（测试基建） | heap_regress `ls-bin` 假阴性：`/bin` 已播种约 38 个条目，整目录列举超过 25 行文本屏，早期安装的 allocprobe.ce/heaptest.ce 滚出可见帧缓冲，screen_text 抓不到名字；目录条目实际存在，`run /bin/allocprobe.ce`、`run /bin/heaptest.ce` 真机均 PASS | 测试断言依赖整屏可见性，未考虑目录条目数超过单屏；与内核目录列举无关 | v2.43：步骤改为定向查询单条目分支 `ls -l /bin/<file>`（每条目一行，不滚动），复跑 4/4 PASS（测试基建，不改内核） | ✅ 已修 |
+| 140 | 低（测试基建） | size_regress `size-persisted` 假阴性：`cat /etc/size` 回显后尾随重绘的 shell prompt，`text.rstrip().endswith("0")` 匹配到 prompt 而非文件内容；实测文件内容为 compact 档 `0`，落盘正确 | 断言把屏幕末行当作文件值，未剥离尾随 prompt | v2.43：改用正则 `/etc/size\s+0(?!\d)` 匹配命令回显后的数值，复跑 7/7 PASS（测试基建，不改内核） | ✅ 已修 |
+| 141 | 低（内核 UX） | 目录列举/help 等输出超过 25 行文本屏时，顶部条目离开实时网格后无法回看：无内部分页暂停、屏幕回滚缓冲深度不足（与 #135 同源）；条目增多后整屏列举只能看到末尾一段 | 文本前端无 scrollback/分页机制，CON_SB_ROWS 存档深度有限 | 本轮测试侧绕开（定向单条目查询）；后续可在 `ls`/`help` 加分页暂停或加深回滚缓冲 | ⏳ 已知限制 |
+| 142 | 中 | 同一分区可被挂载到第二个挂载点：两个卷槽打开同一 LBA，各自缓存 FAT，写入后两份缓存可能分叉（v2.43 审查实测 hd0p2 同时挂 /docs 与 /docs2） | fs_mount 只查挂载点占用与目录非空，未按设备名去重 | v2.44：初版按 g_mnt[] 同 dev 拒绝；#146 进一步按「驱动+LBA」对全部卷槽去重，返回 -15 `mount: partition already mounted elsewhere`；挂载表只保留单条 hd0p2 | ✅ 已修 |
+| 143 | 低（审美） | `cal` 年视图未用单元格残留：月块行只清首字节，三栏复用的栈行带上一组月的数字；单日个位写 NUL 渲染成 `?`/`?,` 杂符 | cal_build_month 行未整体清零；单日用 width-2 itoa 补零后把 '0' 写进个位格 | v2.44：7 行 ×22 列整体清零；单日左补空格、改用宽度 0 itoa；年视图无 `?`/杂符 | ✅ 已修 |
+| 144 | 中 | head/tail/wc 读 0 字节文件被当成 `no such file`：fs_read_at 在 max=0 时返回 -1，工具把 rd<=0 一律判为读取失败（实测 touch 出的空文件 ls 可见、wc/head/tail 均报不存在） | tool_read_whole 未区分「解析成功的空文件」与「读取错误」 | v2.44：resolve 成功且 sz==0 直接返回 0（空缓冲）；仅 rd<0 报错；tool_buf 加 1 字节尾 NUL 位，消除恰好 48KiB 文件的越界写 | ✅ 已修 |
+| 145 | 低 | TAB 命令补全表 sh_cmds[] 漏收 P3 彩蛋（cowsay/sl/fortune/cal/yes）与 df：help 行与建议表 BUILTIN_NAMES 都有，补全表只并了 P4 工具 | 五片人工语义合并时 P3 彩蛋与 df 未并入补全表 | v2.44：六个命令补入 sh_cmds[]，并补收别名 cls/su；实测 TAB `cows`→cowsay、`df`、`cl`→clear/cls、`su`→su/sudo 均可补全 | ✅ 已修 |
+| 146 | 中 | #142 初版去重只扫附加卷槽（g_mnt[]），根分区（卷槽 0）仍可被二次绑定到另一挂载点：同样是两个 FAT 缓存覆盖同一 LBA 的分叉风险 | 去重判定未覆盖根卷槽；g_vol[] 不对外暴露归属信息 | v2.44：新增 `fat_volume_owns(drive,lba)` 遍历全部卷槽（含槽 0）比对驱动+LBA，fs_mount 据此拒绝；实机 `mount 1 /docs2`（根 P1）被拒，P2 重复挂载仍被拒，挂载表仅一条 hd0p2 | ✅ 已修 |
+| 147 | 低（潜在） | pkg install 按 CPKG 头 `cmd` 字段落盘 `/bin/<cmd>.ce`，而 pkg_installed/pkg_dst_path 按索引 `name` 字段查 `/bin/<name>.ce`；播种包 name==cmd 无差异，若日后发布 name≠cmd 的包，remove 将找不到已安装文件 | 安装/卸载两侧取名字段不一致 | 本轮播种三包 name/cmd 对齐，实机 install/reinstall/remove 闭环 PASS；后续可让卸载侧也读包内 cmd 头字段，或索引直接携带落盘文件名 | ⏳ 建议项 |
+
+| 148 | 低（审美，已修） | 文本后端 DAC 仍是经典 VGA 16 色 ramp（纯黑底、`#AAAAAA` 灰正文、`#5555FF` 蓝），现代主题 CLUT 只在 gfx/VBE 生效，两套观感；`palette`/`rgb` 调整在文本模式不落地 | `text_dac_reset` 写固定 ramp 表；`text_set_palette` 空实现；`render_rgb_to_vga` 只按 3-bit 阈值量化，CLUT 蓝被归入青色槽 | v2.45：DAC 0..15 由 `render_clut(i)` 写 6-bit 值；`set_palette` 实时写单条目；量化前先在 CLUT 0..15 做最近邻匹配（距离阈值 24²·3），未命中再回退阈值 ramp | ✅ 已修 |
+| 149 | 低（审美，已修） | `ls` 条目按 FAT 原始顺序；`[DIR ]`/`[FILE]` 标签与目录名/文件名同色；字节数括号前后参差 | 列举回调逐条直写，无收集排序；标签与名字共用同一前景 | v2.45：`fs_list` 先收集 `ls_buf[96]`，目录优先 + 大小写不敏感插入排序后打印；标签深灰、目录青、文件灰、尺寸右对齐宽 8 | ✅ 已修 |
+| 150 | 低（审美，已修） | df/mount 数值左对齐与表头错位；pkg list 名称/版本/状态列参差且状态无色；unknown 建议行默认灰、`help ?` 问号前多余空格；提示符 `#`/`$` 继承路径蓝 | 数值未右对齐；pkg 行单空格拼接；建议块未设语义色；提示符路径色未在标记前还原 | v2.45：df 数值宽 7 右对齐、use% 宽 3，mount 设备宽 12；pkg 名称宽 10/版本宽 8/状态宽 11 并按安装态着色；建议行黄 + 命令名蓝 + `?` 紧贴；提示符标记改强调绿 | ✅ 已修 |
+| 151 | 低（已回退，deferred） | tree `+-- `/`\-- ` 兄弟连接器 + `│   ` 续行前缀递归实现实机刷屏同串 `?????t?????+--` 乱码；fortune 72 列按词换行实现把引文丢进空框 | shell 栈容量与 `fs_enum_entries` 24 槽枚举下，递归排序/三行换行栈缓冲不可靠；两轮改动均污染后续帧 | v2.45 回退到原始 `+- `/`- ` 缩进与单行框，仅保留目录着色与显示宽度边框修正；连接器/换行待条目收集改堆上或静态大缓冲后再做（遗留 L2/L3） | ⏳ deferred |
+| 152 | 低（已知限制） | `about` 七行 ASCII 横幅顶部少量行仍离开网格：清屏调用已加，残留与行编辑器锚定/回滚缓冲深度同源 | 行编辑器 scrollback 深度有限（#135/#141 同源），非清屏链路问题 | 本轮保留 vga_clear 前置；后续加深存档缓冲或 about 前独立分页（遗留 L1） | ⏳ 已知限制 |
+| 153 | 中（已修） | ATA 空槽 IDENTIFY 后状态端口恒定 `0x00`（无 BSY/ERR/DRQ 跃迁），探测等待两轮各空转满 10,000,000 迭代；槽1/槽3 每槽 820–830ms，四槽合计约 1.65s 内核启动时间（v2.45 实测 S9 uptime 1860–1900ms） | 等待循环只认 BSY/ERR/DRQ 三个状态位，空设备端口无任何状态跃迁；兜底迭代上限过大；开放总线 `0xFF` 同样无信号 | v2.46：探测路径新增稳定无信号采样（状态恒定 `0x00`/`0xFF` 连续 256 次即判空槽返回），等待兜底收紧到 1,000,000 迭代；空闲等待对开放总线 `0xFF` 提前跳出；读写 PIO 等待循环未动 | ✅ 已修 |
+| 154 | 低（已修） | GRUB 模板内嵌 `grub.cfg` `set timeout=5`，菜单倒计时占 pre-kernel 约 5s（v2.45 实测 pre-kernel ≈7.36s，其中 SeaBIOS+multiboot 仅约 2.4s） | 模板菜单默认等待用户选择，未针对光盘直接启动场景收敛 | v2.46：`patch_work_iso.py` 组装期把 `timeout=5` 替换为 `timeout=0`（pattern 唯一性断言，两者都不在则报错退出）；模板二进制不改 | ✅ 已修 |
+
+*本节后继续编号为 #155+。*
+
+| 156 | 中（潜在竞态） | 任务退出路径 task_exit_current/task_die_fault/task_kill 先把 parent 置 READY 再 maybe_autoreap：等待方一旦不是接受 T_UNUSED 的旧 task_wait_child（如 v2.52 新增 task_wait_child_or_stop 只认 ZOMBIE/STOPPED），唤醒后 autoreap 已把僵尸回收成 T_UNUSED，父进程在 T_WAIT_CHILD 死循环、屏幕冻结 | 唤醒与回收顺序颠倒：wake 使 parent 脱离 WAIT_CHILD，autoreap 误判无人等待 | v2.52：三处统一改为「先 maybe_autoreap（parent 仍 WAIT_CHILD 则保留僵尸）、后唤醒 parent」；task_wait_child_or_stop 防御性接受 T_UNUSED；jobctl_regress 12/12 与全量十二套复绿 | ✅ 已修 |
+
+| 155 | 中（latent，deferred） | 嵌套递归删除时 fat 层 delete-name 重入：rm -r 后序删除子目录条目时父目录 `fat_list_dir` 静态缓冲仍在活动，子目录条目墓碑化/簇释放后父目录重新列举仍计数到残留条目，条目属性/簇字段被破坏成不可解析（resolve 返回 -2 非目录） | 目录簇读缓冲（fat_list_dir/fat_delete_name/dir_walk 各自 static buf）在嵌套回调中被复用覆盖；删除条目与活动遍历共用缓冲 | 本批 v2.50 以 `fs_rmdir_force` 保持 rm -r 基线行为绕过；后续需把目录簇读缓冲改为调用方传入或堆上分配，消除嵌套重入；在此之前不要让 rm -r 依赖严格非空校验 | ⏳ deferred |
+
+| 157 | 中（已修） | `fs_perm_check` 把 UNIX mode 三权限位（r=4,w=2,x=1）直接与内核 `PERM_READ=1/PERM_WRITE=2/PERM_EXEC=4` 位掩码做 `&` 比对：4xx 组/主读位 4 与 PERM_READ(1) 相与为 0 被误拒，执行位 1 又被当成 READ 误放；v2.53 附加组判定挂在组位分支上，该错误掩码把组/附加组可读访问全部误判成 permission denied | 两套位编码混用：文件 mode 是经典 12-bit octal triad，syscall need 是独立 1/2/4 位掩码，二者从未做翻译 | v2.53：组/主/other 取出 triad 后先翻译成 PERM_*（4→READ、2→WRITE、1→EXEC）再与 need 比对；group_regress 10/10（成员经附加组可读、非成员 640 被拒、追加成员可读、持久化复登） | ✅ 已修 |
+
+## 对抗测试 R1（蓝队修复轮次，2026-11-18）
+
+| # | 严重度 | 问题 | 根因 | 修复 | 状态 |
+|---|---|---|---|---|---|
+| 163 | 中（WHITE-008） | `group_db_init` 解析两字段行（如 `grp:100`，无第二个冒号）时 `fld[2]` 为未初始化栈指针被解引用 | `split_fields` 未用槽位未置 NULL；成员列空指针解引用 | `split_fields` 对未填字段一律置 NULL（根治）；`group_db_init` 对 `fld[2]==NULL` 跳过成员列。commit `0a49d9d`；离线注入两字段行磁盘副本实机启动无 #PF、组库正常降级 | ✅ 已修 |
+| 164 | 中（WHITE-009） | `group_save` 静态缓冲无界写：分隔符 ':'、十进制数字串、'\n' 均无条件 `buf[o++]` | 保存路径无边界检查，越界写 bss | 新增有界追加内联（`buf_put/buf_str/buf_num`，`o < sizeof(buf)-2` 才写，写满截断停止）；三处 save 统一改走有界写入。commit `3c1fc90` | ✅ 已修 |
+| 178 | 中（WHITE-026） | `acl_save` 同上静态缓冲无界写 | 同 #164 | 同 #164 有界追加。commit `3c1fc90` | ✅ 已修 |
+| 166 | 中（WHITE-011） | `user_save` 同上静态缓冲无界写 | 同 #164 | 同 #164 有界追加。commit `3c1fc90` | ✅ 已修 |
+| 167 | 中（WHITE-013） | `spawn_ce_redirect` 预截断/预建文件走 `fs_write_raw_mode` 绕过权限：非 root 会话可截断/创建受保护文件 | 重定向目标在子任务自身 SYS_WRITE 检查之前由 ring0 预建/截断，未做 `fs_perm_check` | 预截断/预建前用 `g_uid/g_gid` 对目标路径做 `fs_perm_check(PERM_WRITE)`；拒绝时杀掉已 spawn 任务且不触碰文件。commit `d415332` | ✅ 已修 |
+| 168 | 中（WHITE-014） | `cmd_rmdir` 完全缺权限检查，对照 `cmd_rm` 无 `PERM_WRITE` 闸门 | rmdir 路径漏接权限校验 | 补 `fs_perm_check(..., PERM_WRITE)`，与文件删除一致。commit `da89050` | ✅ 已修 |
+| 182 | 中（WHITE-030） | `cmd_edit` 打开/新建与 `ed_save` 保存均无权限检查；`pe_to_ce_file` 落盘同样无校验 | 编辑链路与 PE→CE 转换落盘未接属主/权限闸门 | 目标存在时 `fs_perm_check(PERM_WRITE)`，不存在时检查父目录写位；`ed_save` 保存前复核；`pe_to_ce_file` 增加 uid/gid 参数并在落盘前校验，shell 调用点传会话身份。commit `c2bd2d4` | ✅ 已修 |
+| 165 | 低（WHITE-010） | `group_save` 已删除首成员后留下前导逗号 | 逗号分隔用循环下标 `m` 判断首成员，下标 0 成员缺失时仍前置逗号 | 改用「已输出过成员」标志 `emitted` 决定是否先写逗号。commit `9988828` | ✅ 已修 |
+| 181 | 中（WHITE-029） | `cmd_chcaps`/`useradd` 能力授予无子集约束：USERADM 账户可自授 `CAP_ALL` | 授予方所持位与目标位无超集校验；root 豁免 | 非 root 时 `(want & ~g_caps) != 0` 拒绝；`ue_edit_caps` 持久化时按 `g_caps` 裁剪；root 例外豁免。commit `0b6db38` | ✅ 已修 |
+| 180 | 中（WHITE-028） | spawn 失败回滚路径（`fail_space4`/`fail_space6`）只 `task_space_destroy`，不释放 VMA 链表 | 加载失败分支对照 `task_cleanup` 漏做 `while (t->vm) vma_free` | 新增 `task_free_vma_list(t)`；ELF/PE 加载失败分支与两处回滚在 `task_space_destroy` 后释放 VMA 节点链表。commit `4de63b8` | ✅ 已修 |
+| 170 | 中（WHITE-017） | `fs.c` `abs_path` 无界 `scpy/scat` 拼接，撑爆 320 字节栈缓冲 | cwd + '/' + 相对名先拼进 `tmp[FS_PATH_MAX*2]`，未做长度校验，`path_norm` 有界输出之前栈已溢出 | 改为 int 返回（0 成功 / -1 超长拒绝），合成长度先校验再逐字节有界拷贝；全部内部调用点传播失败（int API 返回 `FS_ERR_INVAL`/-1，`fs_is_dir`→0，`fs_open_file`→NULL，`fs_list` 打印 path too long，`fs_canon_path` 出空 key）。commit `ff99325` | ✅ 已修 |
+| 184 | 高（RED-03） | shell `kill` 分发硬编码 `task_kill(tid, UID_ROOT)`，完全绕过 `task_kill` 属主/`CAP_KILL` 判定；caps=0 非 root 实证杀死 root 守护 | 分发未传入会话 `g_uid`，`task_kill` 的 `-2 not yours` 分支被绕过 | 改为以会话 `g_uid` 调用；`-2` 单独报 `permission denied`，`-1` 报 no such task。commit `b4e11c3`；复刻红队序列（root `useradd guest` → `daemon memlog` → `su guest` → `kill 1`）实机被拒、守护仍存活 | ✅ 已修 |
+| 185 | 中（RED-14） | `user_db_init` 口令归一化把「解析不出数字」与「哈希=0（开放账户）」混同：`xyz` 等非 hex 串被清空口令致账户解锁 | `parse_uint(pw,16)==0` 同时覆盖「值为 0」与「非数字」两种情形 | 仅 `"0"` 或合法 hex 且值为 0 才算 open；无法解析一律保留为已设未知口令，登录拒绝。commit `bc542d3`；`short:...:xyz` 实机 `login short wrongpw` 返回 incorrect password，会话仍为 root | ✅ 已修 |
+| 186 | 中（RED-06） | `groupadd` 成员校验失败回滚不撤空槽（空组经 `group_save` 持久化）；超容量成员 token 被 `split_words(...,5)` 静默丢弃 | 先建槽再循环加成员，失败不撤槽；参数表容量上限无告警 | 成员先对照 `/etc/passwd` 校验再触碰组表；失败时新增 `group_remove` 撤掉新建槽（已存在的组不回滚）；成员超 `GROUP_MEMBERS` 与参数过多均打印告警而非静默丢弃。commit `f6be766`；`groupadd gg1 nosuchuser` 实机报 unknown user，`groups` 无 gg1 槽 | ✅ 已修 |
+| 187 | 中（RED-05） | 磁盘 `/etc/group` 加载不做 gid 唯一性校验：重复 gid 两行经 `user_in_group(uid,gid)` 同时命中，成员串互相显 | `group_db_init` 无已见 gid 扫描；内存 `group_add` 避让 gid 但加载路径不避让 | 加载时遇已见 gid 跳过该行。commit `a7d475b`；离线注入 `dup1:103:root`/`dup2:103:u1`，`groups` 仅保留 dup1:root，无跨组串显 | ✅ 已修 |
+| 188 | 中（RED-02 / WHITE-001，deferred） | TID 槽位即时复用，无代际/已退出标记：旧 tid 引用静默命中新任务，脚本化按固定 tid 记账可能误杀复用后的新任务 | 槽位回收后 TID 立即复用，无代际号或「job already exited」语义 | 改动面大（任务表/作业控制/所有引用 tid 的命令），本轮登记 deferred；后续引入代际计数或退出标记 | ⏳ deferred |
+| 189 | 中（RED-09，deferred） | 守护任务存在绕过 ring 隔离的直写控制台路径：迭代计数/诊断行直刷前台，淹没交互提示符；同任务 heap 行经 SYS_WRITE 进 ring | 至少一条输出路径未走 `bg_mode` ring 分支；需先定位 memlog 计数走的是哪条 syscall/直写路径 | 本轮登记 deferred；定位直写控制台的 syscall 入口后统一并入 per-task 环形缓冲 | ⏳ deferred |
+| 190 | 中（RED-11，deferred） | 组件名超 `FS_NAME_MAX(48)` 未被拒绝，静默截断生成退化 8.3 别名，扩展名损坏/丢失 | `abs_path` 归一化先截断路径，`create_path` 拿到的 leaf 已短于 48，长度校验被绕过；`fat_name83` 截 ext 越界 | 与长名截断及 8.3 别名生成联动改动面较大，本轮登记 deferred；后续在写侧入口做组件名长度校验并拒绝超长 | ⏳ deferred |
+| 191 | 低（RED-15，deferred） | 对猜测回答 `n` 不会拒绝建议：`n` 被当作新未知命令重新最近邻 arm，后续 `y` 回放的是新猜测 | pending-guess 状态机未把「对当前 offer 的否定回答（n/no）」与「新命令行」区分开，`pend_clear` 消费旧 offer 后 `run_from_path` 失败又 `pend_arm` 新建议 | 属行为设计取舍，本轮登记 deferred；后续状态机显式识别 n/no 并清除待确认状态 | ⏳ deferred |
+| 192 | 中（WHITE-027，deferred） | 管道句柄全局命名空间，无属主校验：任意 ring3 任务可读写/关闭他人管道（句柄 `0x100+idx` 全局可见，`pipe_by_handle` 只判 `used`） | 管道模型缺 POSIX 式句柄私有归属；`PIPE_READ/WRITE/CLOSE` 不校验管道是否挂在调用者 `out_pipe/in_pipe` 上 | 本轮登记 deferred；后续为管道句柄加属主任务校验 | ⏳ deferred |
+| 193 | 低（RED-04 / WHITE-031，deferred） | `jobs`/`ps` 跨会话枚举其他属主的后台/守护任务（名称、状态、日志环字节数），为越权 kill 提供目标 tid 枚举 | 列表遍历全表，仅按 `bg_mode`/`T_STOPPED` 过滤，不校验 `t->uid` 与会话关系 | 信息泄露，不破坏内存；本轮登记 deferred；后续列表按属主过滤（root/会话属主/`CAP_KILL` 可见他人） | ⏳ deferred |

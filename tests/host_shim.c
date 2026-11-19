@@ -1,4 +1,4 @@
-﻿/* host_shim.c -- run cc.c's ce_main on the host (x86-64 friendly).
+/* host_shim.c -- run cc.c's ce_main on the host (x86-64 friendly).
  * Provides a fake catos_api_t whose file I/O hits the real filesystem,
  * so cc.ce can be exercised without QEMU or a full i386 emulator. */
 #include <stdio.h>

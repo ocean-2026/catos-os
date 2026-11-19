@@ -1,6 +1,8 @@
 #include "fs.h"
 #include "fat.h"
+#include "part.h"
 #include "vga.h"
+#include "hw.h"
 static void fs_dbg2(const char *tag, uint32_t v) {
     (void)tag; (void)v;  /* v2.5 debug: no-op */
 }
@@ -13,6 +15,19 @@ static int      fs_ready = 0;
 static uint32_t g_cwd;                  /* FAT cluster of current dir */
 static char     cwd_path[FS_PATH_MAX];  /* absolute path, e.g. "/etc" */
 static fs_entry_t g_ent;                /* single open-file buffer */
+
+/* P2: mount table.  Volume slot 0 is the implicit root volume (letter
+ * 'A'); g_mnt[] holds the manually mounted extra partitions. */
+#define VFS_MAX_MOUNTS (FAT_VOL_MAX - 1)
+struct vfs_mount {
+    uint8_t used;
+    char    mnt[FS_PATH_MAX];   /* absolute mount point, e.g. "/docs" */
+    int     vol;                /* fat volume slot */
+    char    letter;             /* drive suffix, e.g. 'B' */
+    char    dev[16];            /* device name, e.g. "hd0p2" */
+};
+static struct vfs_mount g_mnt[VFS_MAX_MOUNTS];
+static const char ROOT_LETTER = 'A';
 
 /* ---------- tiny string helpers ---------- */
 static int slen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
@@ -80,28 +95,85 @@ static void path_norm(const char *in, char *out) {
     out[o] = 0;
 }
 
-/* return the absolute path for a (possibly relative) input path */
-static void abs_path(const char *p, char *out) {
+/* return the absolute path for a (possibly relative) input path.
+ * #170: the old scpy/scat were unbounded, so a deep cwd plus a long
+ * relative name could overflow tmp[FS_PATH_MAX*2] on the stack.  The
+ * composition is now length-checked and bounded; returns 0 on success,
+ * -1 when the composed path would not fit (callers refuse the path). */
+static int abs_path(const char *p, char *out) {
     char tmp[FS_PATH_MAX * 2];
+    const int cap = (int)sizeof(tmp) - 1;
+    const char *base;
+    int o = 0;
     if (!p || !*p) {
-        scpy(tmp, cwd_path);
+        base = cwd_path;
+        int l = slen(base);
+        if (l > cap) return -1;
+        for (int i = 0; i < l; i++) tmp[o++] = base[i];
     } else if (p[0] == '/') {
-        scpy(tmp, p);
+        int l = slen(p);
+        if (l > cap) return -1;
+        for (int i = 0; i < l; i++) tmp[o++] = p[i];
     } else {
-        scpy(tmp, cwd_path);
-        int l = slen(tmp);
-        if (l > 0 && tmp[l - 1] != '/') scat(tmp, "/");
-        scat(tmp, p);
+        int cl = slen(cwd_path);
+        int pl = slen(p);
+        if (cl + 1 + pl > cap) return -1;
+        for (int i = 0; i < cl; i++) tmp[o++] = cwd_path[i];
+        if (o == 0 || tmp[o - 1] != '/') tmp[o++] = '/';
+        for (int i = 0; i < pl; i++) tmp[o++] = p[i];
     }
+    tmp[o] = 0;
     path_norm(tmp, out);
+    return 0;
+}
+
+/* P2: find the mount entry whose mount point owns `abs` (longest prefix
+ * match).  Returns the g_mnt index, or -1 when the path lives on the
+ * root volume. */
+static int mount_for(const char *abs) {
+    int best = -1, bestlen = 0;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        const char *m = g_mnt[i].mnt;
+        int ml = slen(m);
+        int match = 0;
+        if (scmp(abs, m) == 0) match = 1;
+        else if (abs[ml] == '/') {
+            int k = 0;
+            for (; k < ml; k++) if (abs[k] != m[k]) break;
+            if (k == ml) match = 1;
+        }
+        if (match && ml > bestlen) { best = i; bestlen = ml; }
+    }
+    return best;
+}
+
+/* does `abs` sit inside (or equal) mount point `m`? */
+static int path_under(const char *abs, const char *m) {
+    int ml = slen(m);
+    if (scmp(abs, m) == 0) return 1;
+    if (abs[ml] != '/') return 0;
+    for (int k = 0; k < ml; k++) if (abs[k] != m[k]) return 0;
+    return 1;
 }
 
 /* resolve an absolute path (must start with '/'); returns FAT cluster of
- * the final component, or 0 on error. */
+ * the final component, or 0 on error.  Walks through mount points: once a
+ * prefix matches a mount entry, resolution continues inside that volume. */
 static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
+    int mi = mount_for(abs);
+    const char *rel = abs;
+    if (mi >= 0) {
+        fat_activate(g_mnt[mi].vol);
+        int ml = slen(g_mnt[mi].mnt);
+        rel = abs + ml;
+        if (*rel == '/') rel++;
+    } else {
+        fat_activate(0);
+    }
     uint32_t cur = fat_root();
     int filled = 0;
-    const char *p = abs;
+    const char *p = rel;
     if (*p == '/') p++;
     while (*p) {
         while (*p == '/') p++;
@@ -131,7 +203,13 @@ static uint32_t resolve_path(const char *abs, fat_dirent_t *out) {
 
 /* ---------- lifecycle ---------- */
 void fs_init(void) {
+    btime_mark("F0 fs_init enter");
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) g_mnt[i].used = 0;
+    btime_mark("F1 before fat_probe");
     fs_ready = (fat_probe() == 0);
+    btime_mark("F2 fat_probe done");
+    if (fs_ready) part_scan();     /* enumerate MBR partitions for mount */
+    btime_mark("F3 part_scan done");
     g_cwd = fat_root();
     scpy(cwd_path, "/");
     memz(&g_ent, sizeof(g_ent));
@@ -139,9 +217,10 @@ void fs_init(void) {
 
 int fs_fs_ready(void) { return fs_ready; }
 
-void fs_format(void) {
-    fat_mkfs();
+int fs_format(void) {
+    if (fat_mkfs() != 0) return -1;        /* v2.32: no IDE disk */
     fs_init();
+    return 0;
 }
 
 uint16_t fs_cwd_index(void) { return (uint16_t)g_cwd; }
@@ -150,7 +229,7 @@ uint16_t fs_cwd_index(void) { return (uint16_t)g_cwd; }
 int fs_chdir(const char *path) {
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) return FS_ERR_NOENT;
@@ -166,7 +245,7 @@ static int create_path(const char *path, uint8_t type) {
     if (!path || !*path) return FS_ERR_INVAL;
 
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -188,8 +267,8 @@ static int create_path(const char *path, uint8_t type) {
     /* validate leaf name */
     if (!*leaf || !scmp(leaf, ".") || !scmp(leaf, "..")) return FS_ERR_INVAL;
     if (slen(leaf) >= FS_NAME_MAX) return FS_ERR_INVAL;
-    for (const char *q = leaf; *q; q++)
-        if (*q == '/' || *q < 32) return FS_ERR_INVAL;
+    /* v2.48: FAT reserved chars / control codes / trailing dot-space */
+    if (fat_name_illegal(leaf)) return FS_ERR_INVAL;
 
     fat_dirent_t tmp;
     uint8_t rn[11];
@@ -207,7 +286,7 @@ int fs_mkdir(const char *path) {
 int fs_touch(const char *path) {
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (clus) {
@@ -223,6 +302,18 @@ int fs_touch(const char *path) {
  * Returns the number of names found, or -1 if the path is not an
  * existing directory (e.g. the volume is not mounted). */
 struct enumf_ud { char (*out)[FS_NAME_MAX]; int maxn; int count; };
+static void enumf_all_cb(const char *name, uint8_t attr,
+                         uint32_t clus, uint32_t size, void *ud) {
+    struct enumf_ud *u = ud;
+    (void)clus; (void)size;
+    if (u->count < u->maxn) {
+        int k;
+        for (k = 0; name[k] && k < FS_NAME_MAX - 2; k++) u->out[u->count][k] = name[k];
+        if (attr & FAT_ATTR_DIR) { u->out[u->count][k++] = '/'; }
+        u->out[u->count][k] = 0;
+    }
+    u->count++;
+}
 static void enumf_cb(const char *name, uint8_t attr,
                      uint32_t clus, uint32_t size, void *ud) {
     struct enumf_ud *u = (struct enumf_ud *)ud;
@@ -235,10 +326,25 @@ static void enumf_cb(const char *name, uint8_t attr,
     u->count++;
 }
 
+/* v2.28: like fs_enum_files but includes directories; a directory name
+ * comes back with a trailing '/' so completion can offer both kinds. */
+int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
+    if (!fs_ready || !path || maxn < 1) return -1;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return -1;
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
+
+    struct enumf_ud u = { out, maxn, 0 };
+    fat_list_dir(clus, enumf_all_cb, &u);
+    return u.count;
+}
+
 int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
@@ -248,25 +354,114 @@ int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     return u.count;
 }
 
-struct list_ud { int count; };
-static void list_cb(const char *name, uint8_t attr,
-                    uint32_t clus, uint32_t size, void *ud) {
-    struct list_ud *u = (struct list_ud *)ud;
-    if (attr & FAT_ATTR_DIR) {
-        vga_set_fg(VGA_LIGHT_CYAN);
-        vga_write("[DIR ] ");
-        vga_write(name);
-        vga_write("/\n");
-    } else {
-        vga_set_fg(VGA_LIGHT_GREY);
-        vga_write("[FILE] ");
-        vga_write(name);
-        vga_set_fg(VGA_WHITE);
-        vga_write("  (");
-        print_int((int)size);
-        vga_write(" bytes)\n");
+/* P2: if `name` inside `parent_abs` is a mount point, fill `suf` with
+ * "(X:)" (drive letter) and return 1; otherwise leave it empty. */
+static int mount_suffix(const char *parent_abs, const char *name, char *suf) {
+    char full[FS_PATH_MAX];
+    if (!scmp(parent_abs, "/")) { scpy(full, "/"); scat(full, name); }
+    else { scpy(full, parent_abs); scat(full, "/"); scat(full, name); }
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (g_mnt[i].used && !scmp(g_mnt[i].mnt, full)) {
+            suf[0] = '('; suf[1] = g_mnt[i].letter; suf[2] = ':';
+            suf[3] = ')'; suf[4] = 0;
+            return 1;
+        }
     }
-    u->count++;
+    suf[0] = 0;
+    return 0;
+}
+
+/* v2.45 aesthetic: collect entries first, sort dirs-first then
+ * case-insensitive name, then print -- matches the ordered column look
+ * of modern ls/eza instead of raw FAT directory order. */
+#define LS_MAX 96
+struct ls_ent { char name[FS_NAME_MAX]; uint8_t attr; uint32_t size; };
+static struct ls_ent ls_buf[LS_MAX];
+static int ls_n;
+
+static char ls_lc(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c; }
+static int ls_icmp(const char *a, const char *b) {
+    while (*a && *b) {
+        char x = ls_lc(*a), y = ls_lc(*b);
+        if (x != y) return x - y;
+        a++; b++;
+    }
+    return ls_lc(*a) - ls_lc(*b);
+}
+static void ls_collect(const char *name, uint8_t attr,
+                        uint32_t clus, uint32_t size, void *ud) {
+    (void)clus; (void)ud;
+    if (ls_n >= LS_MAX) return;
+    scpy(ls_buf[ls_n].name, name);
+    ls_buf[ls_n].attr = attr;
+    ls_buf[ls_n].size = size;
+    ls_n++;
+}
+static void ls_sort(void) {
+    for (int i = 1; i < ls_n; i++) {
+        struct ls_ent k = ls_buf[i];
+        int j = i - 1;
+        int kdir = (k.attr & FAT_ATTR_DIR) != 0;
+        while (j >= 0) {
+            int jdir = (ls_buf[j].attr & FAT_ATTR_DIR) != 0;
+            int swap = (jdir == kdir) ? ls_icmp(ls_buf[j].name, k.name) > 0
+                                      : (!jdir && kdir);
+            if (!swap) break;
+            ls_buf[j + 1] = ls_buf[j];
+            j--;
+        }
+        ls_buf[j + 1] = k;
+    }
+}
+static int ls_fmt_size(uint32_t size, char *out) {
+    char b[12]; int n = 0;
+    if (size == 0) out[n++] = '0';
+    else while (size > 0) { b[n++] = (char)('0' + size % 10); size /= 10; }
+    int i = 0;
+    while (n > 0) out[i++] = b[--n];
+    out[i] = 0;
+    return i;
+}
+static void ls_print_one(const struct ls_ent *e, const char *parent,
+                         int longfmt) {
+    char suf[8];
+    int isdir = (e->attr & FAT_ATTR_DIR) != 0;
+    int ismount = isdir && mount_suffix(parent, e->name, suf);
+    char sz[12];
+    int sn = ls_fmt_size(e->size, sz);
+    if (longfmt) {
+        vga_write(isdir ? "drwxr-xr-x  " : "-rw-r--r--  ");
+        for (int p = sn; p < 8; p++) vga_putc(' ');
+        vga_write(sz);
+        vga_write("  ");
+        vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
+        vga_write(e->name);
+        if (ismount) vga_write(suf);
+        vga_set_fg(VGA_WHITE);
+        vga_write((isdir && !ismount) ? "/\n" : "\n");
+        return;
+    }
+    if (isdir) {
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("[DIR] ");
+        vga_set_fg(VGA_LIGHT_CYAN);
+        vga_write(e->name);
+        if (ismount) vga_write(suf);
+        else vga_write("/");
+        vga_set_fg(VGA_WHITE);
+        vga_write("\n");
+    } else {
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("[FILE] ");
+        vga_set_fg(VGA_LIGHT_GREY);
+        vga_write(e->name);
+        vga_set_fg(VGA_DARK_GREY);
+        vga_write("  (");
+        for (int p = sn; p < 8; p++) vga_putc(' ');
+        vga_write(sz);
+        vga_write(" bytes)\n");
+        vga_set_fg(VGA_WHITE);
+    }
 }
 
 void fs_list(const char *path) {
@@ -274,19 +469,40 @@ void fs_list(const char *path) {
         vga_write("catos: no FAT32 volume. Run 'format' first.\n");
         return;
     }
+    int longfmt = 0;
+    if (path && path[0] == '-' && path[1] == 'l') {   /* v2.34: ls -l */
+        longfmt = 1;
+        path += 2;
+        while (*path == ' ') path++;
+        if (!*path) path = 0;
+    }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) {
+        vga_write("catos: path too long\n"); return;
+    }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
-    if (!(e.attr & FAT_ATTR_DIR)) { vga_write("catos: dir: not a directory\n"); return; }
+    if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write("catos: dir: not a directory\n"); return; }
 
-    struct list_ud u = { 0 };
-    fat_list_dir(clus, list_cb, &u);
+    if (longfmt && !(e.attr & FAT_ATTR_DIR)) {
+        /* v2.34: ls -l <file> -- show just that entry */
+        const char *nm = abs;
+        for (const char *p = abs; *p; p++) if (*p == '/') nm = p + 1;
+        struct ls_ent one;
+        scpy(one.name, nm); one.attr = e.attr; one.size = e.size;
+        vga_write("perms      size     name\n");
+        ls_print_one(&one, abs, 1);
+        return;
+    }
+    ls_n = 0;
+    fat_list_dir(clus, ls_collect, 0);
+    ls_sort();
+    for (int i = 0; i < ls_n; i++) ls_print_one(&ls_buf[i], abs, longfmt);
     vga_set_fg(VGA_WHITE);
     vga_write("--- ");
-    print_int(u.count);
-    vga_write(u.count == 1 ? " entry ---\n" : " entries ---\n");
+    print_int(ls_n);
+    vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
 }
 
 void fs_pwd(char *out, int outlen) {
@@ -305,7 +521,7 @@ void fs_pwd(char *out, int outlen) {
 void fs_canon_path(const char *in, char *out, int outlen) {
     char abs[FS_PATH_MAX];
     if (!out || outlen < 1) return;
-    abs_path(in, abs);
+    if (abs_path(in, abs) != 0) { out[0] = 0; return; }
     int i = 0;
     for (; abs[i] && i < outlen - 1; i++) {
         char c = abs[i];
@@ -318,7 +534,7 @@ void fs_canon_path(const char *in, char *out, int outlen) {
 fs_entry_t *fs_open_file(const char *path) {
     if (!fs_ready) return 0;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return 0;
 
     /* split parent + leaf so we can remember the directory entry */
     const char *leaf = abs;
@@ -431,14 +647,6 @@ void fs_clear_file(fs_entry_t *f) {
 
 int fs_save(fs_entry_t *f) {
     if (!fs_ready || !f) return -1;
-    /* A read-only file (the built-in apps) must not be written back.
-     * fs_save() writes through fat_write_file() directly and is the
-     * last step of the editor path (edit + ^O), so without this check
-     * the shell's editor could still replace a built-in -- the very
-     * hole the FAT read-only attribute was added to close (H8). */
-    fat_dirent_t e;
-    if (fat_lookup(f->parent_cluster, f->name83, &e) == 0 &&
-        (e.attr & FAT_ATTR_RO)) return -1;
     if (fat_write_file(f->cluster, f->data, f->size) != 0) return -1;
     fat_update_entry(f->parent_cluster, f->name83, f->cluster, f->size);
     return 0;
@@ -449,7 +657,7 @@ int fs_save(fs_entry_t *f) {
 int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -484,7 +692,7 @@ static void fe_cb(const char *name, uint8_t attr,
 int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
     if (!fs_ready || !cb) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path ? path : "/", abs);
+    if (abs_path(path ? path : "/", abs) != 0) return -1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) return -1;
@@ -505,52 +713,9 @@ int fs_read_text(const char *path, char *buf, int max) {
     return (int)n;
 }
 
-/* is the file at `path` marked read-only?  1 = yes, 0 = no (or the file
- * does not exist yet).  The FAT attribute is the ONLY protection that
- * also holds for uid 0: fs_perm_check() returns "allowed" for root
- * straight away, so the ACL cannot stop root from replacing the
- * kernel's own built-in apps (H8). */
-static int fs_path_readonly(const char *path) {
-    if (!path || !*path) return 0;
-    char abs[FS_PATH_MAX];
-    abs_path(path, abs);
-
-    const char *leaf = abs;
-    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
-    if (!*leaf) return 0;
-
-    char parent[FS_PATH_MAX];
-    int plen = (int)(leaf - abs);
-    if (plen <= 0) return 0;
-    if (plen == 1) scpy(parent, "/");
-    else {
-        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
-        parent[plen - 1] = 0;
-    }
-
-    fat_dirent_t pe;
-    uint32_t pclus = resolve_path(parent, &pe);
-    if (!pclus) return 0;
-    uint8_t n83[11];
-    fat_dirent_t e;
-    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return 0;   /* absent */
-    return (e.attr & FAT_ATTR_RO) ? 1 : 0;
-}
-
-/* public wrapper: is the file at `path` read-only (FAT_ATTR_RO)?
- * 1 = yes, 0 = no (or the file does not exist). */
-int fs_is_readonly(const char *path) {
-    return fs_path_readonly(path);
-}
-
 int fs_write_text(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (size >= FS_DATA_MAX) return -1;          /* room for the NUL */
-    /* The `save` syscall lands here, not in fs_write_raw_mode(), so the
-     * read-only guard has to be repeated: without it a CE app could
-     * still replace a built-in through api->save() even though
-     * api->file_write() was refused. */
-    if (fs_path_readonly(path)) return -13;      /* EACCES */
     fs_entry_t *f = fs_create_file(path);
     if (!f) return -1;
     int i;
@@ -563,17 +728,9 @@ int fs_write_text(const char *path, const char *data, uint32_t size) {
 /* raw write of arbitrary-size data (no FS_DATA_MAX limit); skips if the
  * file already exists.  Used to install built-in .ce apps and docs. */
 int fs_write_raw(const char *path, const char *data, uint32_t size) {
-    return fs_write_raw_attr(path, data, size, FAT_ATTR_FILE);
-}
-
-/* same as fs_write_raw(), but the file is created with `attr` -- the
- * built-in apps are installed read-only (FAT_ATTR_FILE | FAT_ATTR_RO) so
- * that no user, root included, can replace them on disk (H8). */
-int fs_write_raw_attr(const char *path, const char *data, uint32_t size,
-                      uint8_t attr) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -596,41 +753,10 @@ int fs_write_raw_attr(const char *path, const char *data, uint32_t size,
     if (!(e.attr & FAT_ATTR_DIR)) { fs_dbg2("[F5]",0); return -1; }
     if (fat_lookup_name(pclus, leaf, &e, n83) == 0) return 0;  /* already installed */
 
-    if (fat_mkfile_name_attr(pclus, leaf, attr) != 0) return -1;
+    if (fat_mkfile_name(pclus, leaf) != 0) return -1;
     if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (fat_write_file(e.cluster, data, size) != 0) return -1;
     return fat_update_entry(pclus, n83, e.cluster, size);
-}
-
-/* set the FAT attribute byte of an existing file; the content is not
- * touched.  Used to seal the built-in apps on volumes that were built
- * before the read-only attribute existed. */
-int fs_set_attr(const char *path, uint8_t attr) {
-    if (!fs_ready || !path || !*path) return -1;
-    char abs[FS_PATH_MAX];
-    abs_path(path, abs);
-
-    const char *leaf = abs;
-    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
-    if (!*leaf) return -1;
-
-    char parent[FS_PATH_MAX];
-    int plen = (int)(leaf - abs);
-    if (plen <= 0) return -1;
-    if (plen == 1) scpy(parent, "/");
-    else {
-        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
-        parent[plen - 1] = 0;
-    }
-
-    uint8_t n83[11];
-    fat_dirent_t e;
-    uint32_t pclus = resolve_path(parent, &e);
-    if (!pclus) return -1;
-    if (!(e.attr & FAT_ATTR_DIR)) return -1;
-    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
-    if (e.attr & FAT_ATTR_DIR) return -1;   /* never strip the DIR bit */
-    return fat_set_attr(pclus, n83, attr);
 }
 
 /* ---- v2.5: offset read / mode write / delete (big files) ---------------- */
@@ -678,7 +804,7 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (mode != 0 && mode != 1) { fs_dbg2("[F1]",0); return -1; }
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -703,23 +829,6 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
         if (fat_lookup_name(pclus, leaf, &e, n83) != 0) { fs_dbg2("[F7]",0); return -1; }
     }
     fs_dbg2("[F8 c=", e.cluster); fs_dbg2("F9 sz=", e.size);
-    /* A13: writing to a DIRECTORY used to succeed.  fat_write_file() then
-     * stamped the caller's bytes over that directory's own dirents (and its
-     * cluster chain), so `file_write("/BIN", ...)` turned /BIN from 36
-     * entries into 2 and there was no way back after a reboot -- persistent
-     * data loss, which is strictly worse than the halts the red team also
-     * found.  A directory is not a byte stream, so refuse it here: this
-     * function is the single choke point for SYS_FILE_WRITE, `save` and the
-     * shell's redirect path, so one check covers all three.  Files and
-     * append mode are untouched (the attribute bit is not set for them). */
-    if (e.attr & FAT_ATTR_DIR) { fs_dbg2("[FD dir]", e.cluster); return -2; }  /* EISDIR */
-    /* A read-only file (the built-in apps) must not be rewritten.  The
-     * check sits next to the directory check, i.e. still BEFORE the
-     * first byte is written, so a refused write leaves the file exactly
-     * as it was.  This is the only barrier that also holds for uid 0:
-     * fs_perm_check() returns "allowed" for root without even looking
-     * at the ACL (H8). */
-    if (e.attr & FAT_ATTR_RO) { fs_dbg2("[FR ro]", e.cluster); return -13; }  /* EACCES */
     if (mode == 1) {
         if (fat_append_file(e.cluster, e.size, data, size) != 0) { fs_dbg2("[F10]",e.cluster); return -1; }
     } else {
@@ -731,12 +840,76 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     return ur;
 }
 
+
+int fs_is_dir(const char *path) {
+    if (!fs_ready || !path || !*path) return 0;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return 0;
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    return (clus && (e.attr & FAT_ATTR_DIR)) ? 1 : 0;
+}
+
+/* v2.24: remove an EMPTY directory.  The recursive emptier lives in the
+ * shell (rm -r); the kernel API stays minimal and refuses anything that
+ * still holds entries (besides the always-present "." / ".."). */
+struct rmdir_ud { int count; };
+static void rmdir_cb(const char *name, uint8_t attr,
+                     uint32_t clus, uint32_t size, void *ud) {
+    (void)attr; (void)clus; (void)size;
+    struct rmdir_ud *u = (struct rmdir_ud *)ud;
+    /* v2.50: count real entries only; skip the "." / ".." dots.  The old
+     * condition required the name to be BOTH "." AND ".." at once, so the
+     * count stayed 0 and non-empty directories passed the emptiness check
+     * as if empty. */
+    if (scmp(name, ".") != 0 && scmp(name, "..") != 0) u->count++;
+}
+
+static int fs_rmdir_impl(const char *path, int strict) {
+    if (!fs_ready || !path || !*path) return -1;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return -1;
+    const char *leaf = abs;
+    for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
+    if (!*leaf) return -2;                    /* root: never deletable */
+    char parent[FS_PATH_MAX];
+    int plen = (int)(leaf - abs);
+    if (plen == 1) scpy(parent, "/");
+    else {
+        for (int i = 0; i < plen - 1; i++) parent[i] = abs[i];
+        parent[plen - 1] = 0;
+    }
+    fat_dirent_t e;
+    uint32_t pclus = resolve_path(parent, &e);
+    if (!pclus || !(e.attr & FAT_ATTR_DIR)) return -1;
+    uint8_t n83[11];
+    if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
+    if (!(e.attr & FAT_ATTR_DIR)) return -2;
+    struct rmdir_ud u = { 0 };
+    fat_list_dir(e.cluster, rmdir_cb, &u);
+    if (strict && u.count) return -3;         /* still has entries */
+    fat_free_chain(e.cluster);
+    return fat_delete_name(pclus, leaf);
+}
+
+/* strict: refuse a non-empty directory (used by the `rmdir` shell command,
+ * POSIX rmdir(2) semantics). */
+int fs_rmdir(const char *path) { return fs_rmdir_impl(path, 1); }
+
+/* v2.50: force variant for the shell's own recursive `rm -r` emptier.  The
+ * caller has already walked and deleted every descendant post-order, so the
+ * directory is expected empty; this skips the re-check.  The latent nested
+ * delete-name reentrancy in the fat layer is tracked separately in the
+ * kernel issue list; keeping this path identical to the pre-v2.50 behavior
+ * avoids changing rm -r semantics in this batch. */
+int fs_rmdir_force(const char *path) { return fs_rmdir_impl(path, 0); }
+
 int fs_delete(const char *path) {
     /* remove a file: free its cluster chain and mark the directory entry
      * deleted.  Directories are not deletable through this API (v2.5). */
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
-    abs_path(path, abs);
+    if (abs_path(path, abs) != 0) return -1;
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -757,11 +930,150 @@ int fs_delete(const char *path) {
     if (!pclus) { fs_dbg2("[F4]",0); return -1; }
     if (fat_lookup_name(pclus, leaf, &e, n83) != 0) return -1;
     if (e.attr & FAT_ATTR_DIR) return -1;
-    /* Deleting a read-only file is refused for the same reason writing
-     * to it is: the built-in apps must stay exactly as the kernel
-     * installed them, otherwise "rm /bin/x.ce" plus a same-named file
-     * is a second way to replace the code that runs (H8). */
-    if (e.attr & FAT_ATTR_RO) return -13;         /* EACCES */
     fat_free_chain(e.cluster);
     return fat_delete_name(pclus, leaf);
+}
+
+/* ---------- P2: mount table (Linux-style bind of a partition) ---------- */
+
+struct empty_ud { int count; };
+static void empty_cb(const char *name, uint8_t attr,
+                     uint32_t clus, uint32_t size, void *ud) {
+    (void)attr; (void)clus; (void)size;
+    struct empty_ud *u = (struct empty_ud *)ud;
+    if (scmp(name, ".") && scmp(name, "..")) u->count++;
+}
+
+int fs_mount(const char *spec, const char *dir) {
+    if (!fs_ready) return FS_ERR_NOENT;
+    if (!spec || !*spec || !dir || !*dir) return FS_ERR_INVAL;
+
+    int pi = part_lookup(spec);
+    if (pi < 0) return FS_ERR_INVAL;
+    const part_t *p = part_get(pi);
+    if (p->extended) return -10;  /* EBR chains unsupported */
+    if (!p->fat32)  return -10;
+
+    char abs[FS_PATH_MAX];
+    if (abs_path(dir, abs) != 0) return FS_ERR_INVAL;
+    if (!scmp(abs, "/")) return FS_ERR_INVAL;    /* root is never a mountpoint */
+
+    fat_dirent_t e;
+    uint32_t clus = resolve_path(abs, &e);
+    if (!clus) return FS_ERR_NOENT;
+    if (!(e.attr & FAT_ATTR_DIR)) return FS_ERR_NOTDIR;
+    if (mount_for(abs) >= 0) return FS_ERR_EXIST;
+
+    struct empty_ud u = { 0 };
+    fat_list_dir(clus, empty_cb, &u);
+    if (u.count) return -13;                      /* target directory not empty */
+
+    int mi = -1;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++)
+        if (!g_mnt[i].used) { mi = i; break; }
+    if (mi < 0) return -11;
+
+    /* #142: refuse mounting the same partition a second time at another
+     * point -- two volume slots over one LBA would keep diverging FAT caches.
+     * The check covers the root volume slot 0 as well: re-binding the boot
+     * partition under a second mount point is the same cache-divergence risk. */
+    char dev[16];
+    part_devname(p, dev, sizeof(dev));
+    if (fat_volume_owns(p->drive, p->start)) return -15;
+
+    int vol = -1;
+    if (fat_mount_partition(p->drive, p->start, p->size, &vol) != 0)
+        return -12;
+
+    int n = 0;
+    for (int j = 0; j < VFS_MAX_MOUNTS; j++) if (g_mnt[j].used) n++;
+    g_mnt[mi].used = 1;
+    g_mnt[mi].vol = vol;
+    g_mnt[mi].letter = (char)(ROOT_LETTER + 1 + n);
+    scpy(g_mnt[mi].mnt, abs);
+    scpy(g_mnt[mi].dev, dev);
+
+    fat_activate(0);                             /* back to the root volume */
+    return FS_OK;
+}
+
+int fs_umount(const char *dir) {
+    if (!fs_ready) return FS_ERR_NOENT;
+    if (!dir || !*dir) return FS_ERR_INVAL;
+    char abs[FS_PATH_MAX];
+    if (abs_path(dir, abs) != 0) return FS_ERR_INVAL;
+
+    int mi = -1;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++)
+        if (g_mnt[i].used && !scmp(g_mnt[i].mnt, abs)) { mi = i; break; }
+    if (mi < 0) return FS_ERR_NOENT;
+
+    if (path_under(cwd_path, abs)) return -14;    /* cwd is inside: busy */
+
+    if (fat_active_slot() == g_mnt[mi].vol) fat_activate(0);
+    fat_release_slot(g_mnt[mi].vol);
+    g_mnt[mi].used = 0;
+    return FS_OK;
+}
+
+static void df_put_k(uint32_t k) {
+    char b[12]; int n = 0;
+    if (k == 0) b[n++] = '0';
+    while (k > 0) { b[n++] = (char)('0' + k % 10); k /= 10; }
+    for (int p = n; p < 7; p++) vga_putc(' ');
+    while (n > 0) vga_putc(b[--n]);
+    vga_write("K");
+}
+
+void fs_mount_list(void) {
+    vga_write("Filesystem  Mounted on\n");
+    vga_write("hd0");
+    for (int p = 3; p < 12; p++) vga_putc(' ');
+    vga_write("/\n");
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        vga_write(g_mnt[i].dev);
+        for (int p = slen(g_mnt[i].dev); p < 12; p++) vga_putc(' ');
+        vga_write(g_mnt[i].mnt);
+        vga_write("  (");
+        vga_putc(g_mnt[i].letter);
+        vga_write(":)\n");
+    }
+}
+
+/* one df row for volume `vol` mounted at `mnt` (device `dev`) */
+static void df_row(const char *dev, const char *mnt, int vol) {
+    fat_activate(vol);
+    uint32_t cs  = fat_cluster_size();
+    uint32_t tot = fat_total_clusters();
+    uint32_t fre = fat_free_clusters();
+    uint32_t used = tot > fre ? tot - fre : 0;
+    uint32_t tot_k = (uint32_t)(((uint64_t)tot * cs) / 1024);
+    uint32_t use_k = (uint32_t)(((uint64_t)used * cs) / 1024);
+    uint32_t fre_k = (uint32_t)(((uint64_t)fre * cs) / 1024);
+    vga_write(dev);
+    for (int p = slen(dev); p < 12; p++) vga_putc(' ');
+    df_put_k(tot_k); vga_write("  ");
+    df_put_k(use_k); vga_write("  ");
+    df_put_k(fre_k); vga_write("  ");
+    int pct = tot ? (int)(used * 100 / tot) : 0;
+    char pc[4]; int pn = 0;
+    if (pct == 0) pc[pn++] = '0';
+    while (pct > 0) { pc[pn++] = (char)('0' + pct % 10); pct /= 10; }
+    for (int p = pn; p < 3; p++) vga_putc(' ');
+    while (pn > 0) vga_putc(pc[--pn]);
+    vga_write("%  ");
+    vga_write(mnt);
+    vga_write("\n");
+}
+
+void fs_df(void) {
+    if (!fs_ready) { vga_write("df: no FAT32 volume\n"); return; }
+    vga_write("Filesystem   total    used    free   use%  Mounted on\n");
+    df_row("hd0", "/", 0);
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!g_mnt[i].used) continue;
+        df_row(g_mnt[i].dev, g_mnt[i].mnt, g_mnt[i].vol);
+    }
+    fat_activate(0);
 }

@@ -1,6 +1,4 @@
-#include "ce_abi.h"
-
-catos_api_t *__ce_api __attribute__((section(".ce_api"))) = (catos_api_t *)0;
+#include "ce_app.h"
 
 /* demo.c - beginner-friendly tour of the CatOS CE API (v2.0, 25 calls).
  * Exercises every new helper and shows its result on screen.
@@ -24,20 +22,20 @@ int ce_main(int argc, char **argv) {
     api->print_hex(0xDEADBEEFu);
     api->write("\n");
 
-    api->strcpy(name, "CatOS");
+    ce_strcpy(name, "CatOS");
     api->write("strcpy -> '");
     api->write(name);
     api->write("'  strlen = ");
-    api->print_int(api->strlen(name));
+    api->print_int(ce_strlen(name));
     api->write("\n");
 
-    if (api->strcmp(name, "CatOS") == 0)
+    if (ce_strcmp(name, "CatOS") == 0)
         api->write("strcmp: equal\n");
     else
         api->write("strcmp: NOT equal\n");
 
     api->write("atoi(\"  42 \") = ");
-    api->print_int(api->atoi("  42 "));
+    api->print_int(ce_atoi("  42 "));
     api->write("\n");
 
     if (api->file_exists("/bin/calc.ce"))

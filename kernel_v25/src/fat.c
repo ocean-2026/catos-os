@@ -3,6 +3,7 @@
 #include "ata.h"
 #include "io.h"
 #include "vga.h"        /* boot-time fsck notice */
+#include "hw.h"
 
 /* ---------- fixed layout constants ---------- */
 #define PART_START    1u        /* partition starts right after the MBR */
@@ -41,13 +42,40 @@ struct __attribute__((packed)) dent {
     uint32_t size;
 };
 
-/* ---------- volume state (geometry is dynamic) ---------- */
+/* ---------- volume state (geometry is dynamic) ----------
+ * P2: geometry lives in a per-volume slot; the FAT cache and the
+ * write journal are shared and belong to the ACTIVE volume.  Switching
+ * volumes (fat_activate) reloads that volume's FAT #1 from disk. */
+typedef struct {
+    uint8_t  d_drive;
+    uint32_t d_start;        /* partition LBA */
+    uint32_t d_fatsz;       /* sectors per FAT */
+    uint32_t d_data;        /* LBA of cluster 2 */
+    uint32_t d_root;        /* root directory cluster */
+    uint32_t d_next;        /* allocation hint */
+    uint32_t d_vcl;         /* usable clusters */
+    uint32_t d_maxc;        /* FAT entries capacity */
+    uint32_t d_vtot;        /* drive sectors (IDENTIFY) */
+    uint32_t d_spc;         /* sectors per cluster */
+    uint8_t  d_present;
+} fat_vol_t;
+
+static fat_vol_t g_vol[FAT_VOL_MAX];
+static int       g_active = 0;
+static fat_vol_t *V(void) { return &g_vol[g_active]; }
+
+#define part_start   (V()->d_start)
+#define fat_sz       (V()->d_fatsz)
+#define data_start   (V()->d_data)
+#define root_clus    (V()->d_root)
+#define next_free    (V()->d_next)
+#define vol_clusters (V()->d_vcl)
+#define max_clus     (V()->d_maxc)
+#define vol_total    (V()->d_vtot)
+#define spc          (V()->d_spc)
+#define cur_drive    (V()->d_drive)
+
 static uint8_t  fat_cache[FAT_CACHE_MAX];   /* whole FAT #1 cached */
-static uint32_t part_start   = PART_START;
-static uint32_t fat_sz       = 0;           /* sectors per FAT */
-static uint32_t data_start   = 0;           /* LBA of cluster 2 */
-static uint32_t root_clus    = ROOT_CLUS;
-static uint32_t next_free    = 3;           /* allocation hint */
 /* #48 deep fix (v2.5.4): per-entry FAT write journal.  fat_flush() used to
  * rewrite whole FAT sectors from the in-memory cache, silently wiping
  * host-side injected FAT entries that share a sector with kernel-modified
@@ -62,14 +90,24 @@ static uint32_t fat_journal[FAT_JOURNAL_MAX];         /* modified entries */
 static uint8_t  fat_jsec[(FAT_CACHE_MAX / 512) / 8];  /* dirty sector map */
 static int      fat_journal_n   = 0;
 static int      fat_journal_ovf = 0;
-static uint32_t vol_clusters = 0;           /* usable clusters */
-static uint32_t max_clus     = 0;           /* FAT entries (fat_sz*512/4) */
-static uint32_t vol_total    = 0;           /* drive sectors (IDENTIFY) */
-static uint32_t spc          = 8;           /* sectors per cluster */
 
 static uint32_t clus_lba(uint32_t c) { return data_start + (c - 2) * spc; }
+/* v2.34 (#118): valid cluster numbers end at vol_clusters+1.  max_clus
+ * is the FAT *table* capacity and on small volumes can be ~2x larger
+ * than the data area -- allocating past the data end corrupts the
+ * volume tail (and made df report free > total). */
+static uint32_t clus_hi(void) { return vol_clusters + 2; }
 
 uint32_t fat_cluster_size(void) { return spc * 512; }
+
+/* v2.34: df support */
+uint32_t fat_total_clusters(void) { return vol_clusters; }
+uint32_t fat_free_clusters(void) {
+    uint32_t n = 0;
+    for (uint32_t c = 3; c < clus_hi(); c++)
+        if (fat_get(c) == 0) n++;
+    return n;
+}
 uint32_t fat_disk_sectors(void) { return vol_total; }
 
 /* ---------- FAT access ---------- */
@@ -108,7 +146,7 @@ static void write_fat_region(uint32_t start) {
     while (done < fat_sz) {
         uint32_t n = fat_sz - done;
         if (n > 128) n = 128;
-        ata_write_sectors(start + done, (uint8_t)n, fat_cache + done * 512);
+        ata_write(cur_drive, start + done, (uint8_t)n, fat_cache + done * 512);
         done += n;
     }
 }
@@ -118,7 +156,7 @@ static int read_fat_region(void) {
     while (done < fat_sz) {
         uint32_t n = fat_sz - done;
         if (n > 128) n = 128;
-        if (ata_read_sectors(part_start + RESERVED + done, (uint8_t)n,
+        if (ata_read(cur_drive, part_start + RESERVED + done, (uint8_t)n,
                              fat_cache + done * 512) != 0) return -1;
         done += n;
     }
@@ -138,26 +176,26 @@ static void fsinfo_update(void) {
     sec[0] = 0x52; sec[1] = 0x52; sec[2] = 0x61; sec[3] = 0x41;   /* RRaA */
     sec[0x1E4] = 0x72; sec[0x1E5] = 0x72; sec[0x1E6] = 0x61; sec[0x1E7] = 0x41;
     uint32_t free = 0;
-    for (uint32_t c = 2; c < max_clus; c++)
+    for (uint32_t c = 2; c < clus_hi(); c++)
         if (fat_get(c) == 0) free++;
     sec[0x1E8] = (uint8_t)(free & 0xFF);
     sec[0x1E9] = (uint8_t)((free >> 8) & 0xFF);
     sec[0x1EA] = (uint8_t)((free >> 16) & 0xFF);
     sec[0x1EB] = (uint8_t)((free >> 24) & 0xFF);
-    uint32_t nf = (next_free >= 3 && next_free < max_clus) ? next_free : 3;
+    uint32_t nf = (next_free >= 3 && next_free < clus_hi()) ? next_free : 3;
     sec[0x1EC] = (uint8_t)(nf & 0xFF);
     sec[0x1ED] = (uint8_t)((nf >> 8) & 0xFF);
     sec[0x1EE] = (uint8_t)((nf >> 16) & 0xFF);
     sec[0x1EF] = (uint8_t)((nf >> 24) & 0xFF);
     sec[0x1FC] = 0x00; sec[0x1FD] = 0x00; sec[0x1FE] = 0x55; sec[0x1FF] = 0xAA;
-    ata_write_sectors(part_start + 1, 1, sec);
+    ata_write(cur_drive, part_start + 1, 1, sec);
 }
 
 /* patch one sector of one FAT with the journaled entries (RMW).  Returns
  * 0 ok / -1 read or write failure (journal is kept for a retry). */
 static int fat_flush_sector(uint32_t fatbase, uint32_t sec) {
     uint8_t disk[512];
-    if (ata_read_sectors(fatbase + sec, 1, disk) != 0) return -1;
+    if (ata_read(cur_drive, fatbase + sec, 1, disk) != 0) return -1;
     for (int j = 0; j < fat_journal_n; j++) {
         uint32_t c = fat_journal[j];
         if ((c >> 7) != sec) continue;
@@ -167,7 +205,7 @@ static int fat_flush_sector(uint32_t fatbase, uint32_t sec) {
         disk[off + 2] = fat_cache[c * 4 + 2];
         disk[off + 3] = fat_cache[c * 4 + 3];
     }
-    return ata_write_sectors(fatbase + sec, 1, disk);
+    return ata_write(cur_drive, fatbase + sec, 1, disk);
 }
 
 static void fat_flush(void) {
@@ -197,13 +235,13 @@ uint32_t fat_alloc(void) {
      * silently overwrite the injected file.  One ATA read of the entry's
      * sector tells the truth; on mismatch the cache is synced to disk and
      * the scan moves on. */
-    uint32_t start = (next_free >= 3 && next_free < max_clus) ? next_free : 3;
+    uint32_t start = (next_free >= 3 && next_free < clus_hi()) ? next_free : 3;
     uint32_t c = start;
     for (int pass = 0; pass < 2; pass++) {
-        for (; c < max_clus; c++) {
+        for (; c < clus_hi(); c++) {
             if (fat_get(c) != 0) continue;
             uint8_t sec[512];
-            if (ata_read_sectors(part_start + RESERVED + (c >> 7), 1, sec) != 0)
+            if (ata_read(cur_drive, part_start + RESERVED + (c >> 7), 1, sec) != 0)
                 break;                                  /* ATA trouble: stop allocating */
             uint32_t off = (c & 127) * 4;
             uint32_t dv = (uint32_t)sec[off]
@@ -223,23 +261,23 @@ uint32_t fat_alloc(void) {
 
 void fat_free_chain(uint32_t clus) {
     uint32_t c = clus;
-    while (c >= 2 && c < max_clus && fat_get(c) != FAT_EOC) {
+    while (c >= 2 && c < clus_hi() && fat_get(c) != FAT_EOC) {
         uint32_t n = fat_get(c);
         fat_set(c, 0);
         c = n;
     }
-    if (c >= 2 && c < max_clus) fat_set(c, 0);
+    if (c >= 2 && c < clus_hi()) fat_set(c, 0);
     fat_flush();
 }
 
 int fat_read_cluster(uint32_t clus, uint8_t *out) {
     if (clus < 2) return -1;
-    return ata_read_sectors(clus_lba(clus), (uint8_t)spc, out);
+    return ata_read(cur_drive, clus_lba(clus), (uint8_t)spc, out);
 }
 
 int fat_write_cluster(uint32_t clus, const uint8_t *buf) {
     if (clus < 2) return -1;
-    return ata_write_sectors(clus_lba(clus), (uint8_t)spc, buf);
+    return ata_write(cur_drive, clus_lba(clus), (uint8_t)spc, buf);
 }
 
 /* ---------- names ---------- */
@@ -269,6 +307,52 @@ void fat_name_show(const uint8_t *n83, char *out) {
     out[o] = 0;
 }
 
+/* v2.48: FAT/VFAT forbidden-character check.  Control codes and the eight
+ * reserved punctuation marks may not appear in a directory entry name;
+ * trailing spaces and dots are stripped by every FAT implementation and
+ * must never reach disk.  Returns 1 = illegal. */
+int fat_name_illegal(const char *name) {
+    if (!name || !*name) return 1;
+    int n = 0;
+    for (const char *p = name; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 32) return 1;
+        if (c == '"' || c == '*' || c == '/' || c == ':' || c == '<'
+            || c == '>' || c == '?' || c == '\\' || c == '|') return 1;
+        n++;
+    }
+    if (name[n - 1] == ' ' || name[n - 1] == '.') return 1;
+    return 0;
+}
+
+/* v2.48: NT reserved (lcase) byte for a lossless 8.3 entry.  0x10 marks a
+ * lower-case base, 0x08 a lower-case extension; mixed-case or all-upper
+ * leaves the bits clear, per the FAT specification.  LFN aliases are
+ * uppercase, so their short entry always gets ntres = 0. */
+static uint8_t ntres_from_name(const char *name) {
+    uint8_t nt = 0;
+    const char *dot = 0;
+    for (const char *p = name; *p; p++) if (*p == '.') dot = p;
+    int bl = 0, bu = 0;
+    for (const char *p = dot ? name : name; *p && p != dot; p++) {
+        if (*p >= 'a' && *p <= 'z') bl = 1;
+        else if (*p >= 'A' && *p <= 'Z') bu = 1;
+    }
+    if (bl && !bu) nt |= 0x10;
+    if (dot) {
+        int el = 0, eu = 0;
+        for (const char *p = dot + 1; *p; p++) {
+            if (*p >= 'a' && *p <= 'z') el = 1;
+            else if (*p >= 'A' && *p <= 'Z') eu = 1;
+        }
+        if (el && !eu) nt |= 0x08;
+    }
+    return nt;
+}
+
+static int fat_mkdir_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres);
+static int fat_mkfile_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres);
+
 static int name83_eq(const uint8_t *a, const uint8_t *b) {
     for (int i = 0; i < 11; i++) if (a[i] != b[i]) return 0;
     return 1;
@@ -289,7 +373,7 @@ static int dir_walk(uint32_t dirclus,
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     uint32_t c = dirclus;
     int per = (int)(spc * 512 / DENT_SIZE);
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         if (fat_read_cluster(c, buf) != 0) return 1;
         for (int i = 0; i < per; i++) {
             struct dent *e = (struct dent *)(buf + i * DENT_SIZE);
@@ -345,7 +429,7 @@ static int dir_write_dent(uint32_t dirclus, const struct dent *nd) {
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     uint32_t c = dirclus, last = 0;
     int per = (int)(spc * 512 / DENT_SIZE);
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         last = c;
         if (fat_read_cluster(c, buf) != 0) return -1;
         for (int i = 0; i < per; i++) {
@@ -381,10 +465,12 @@ static void fat_stamp(uint16_t *dt, uint16_t *tm) {
 }
 
 static void dent_init(struct dent *d, const uint8_t *name83,
-                      uint8_t attr, uint32_t clus, uint32_t size) {
+                      uint8_t attr, uint32_t clus, uint32_t size,
+                      uint8_t ntres) {
     memz(d, sizeof(*d));
     memcpy_(d->name, name83, 11);
     d->attr = attr;
+    d->ntres = ntres;
     d->clus_lo = (uint16_t)(clus & 0xFFFF);
     d->clus_hi = (uint16_t)(clus >> 16);
     d->size = size;
@@ -534,82 +620,46 @@ static int lfn_of_short(const struct lfn_acc *L, const uint8_t *b,
     return o > 0;
 }
 
-/* fill a fat_dirent_t from the raw 32 bytes of a directory entry.
- * Only the fields the callers use are copied (attr, first cluster,
- * size); the 8.3 name is kept separately in the out_n83 buffer. */
-static void dent_fill(fat_dirent_t *e, const uint8_t *b) {
-    e->attr = b[11];
-    /* clus_hi @20..21 (LE u16), clus_lo @26..27 (LE u16) */
-    e->cluster = ((uint32_t)b[20] << 16) | ((uint32_t)b[21] << 24)
-               | (uint32_t)b[26] | ((uint32_t)b[27] << 8);
-    e->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
-            | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
-}
-
-/* Full-name lookup: VFAT semantics -- a long-name match always beats a
- * match on the truncated 8.3 name.
- *
- * The old order was the opposite (exact 8.3 first, long name as the
- * fallback), and that had two consequences:
- *
- *   - the same user-visible name resolved to DIFFERENT files depending
- *     on how the volume was built.  The kernel installer stores
- *     "allocprobe.ce" as the alias "ALLOCPRO~1.CE" plus a long-name
- *     entry, while the host-side disk builder (build/mkdisk.py) stores
- *     it as the plain 8.3 name "ALLOCPRO.CE"; before, "allocprobe.ce"
- *     hit the long-name entry on a kernel-formatted volume but the 8.3
- *     entry on a host-built image.  fat_delete_name() already resolved
- *     per entry (its own 8.3 name first, then its own long name), so
- *     the two resolvers could disagree about which file a name means.
- *   - a user could create a plain 8.3 file whose name is the truncated
- *     form of a built-in (e.g. "/bin/allocpro.ce" next to the built-in
- *     "/bin/allocprobe.ce").  The 8.3 lookup matched THAT file first,
- *     so `run /bin/allocprobe.ce` executed the user's file instead of
- *     the built-in -- the same code-replacement primitive the read-only
- *     attribute (H8) was meant to close.
- *
- * One directory walk collects both candidates: the long name wins, the
- * exact 8.3 name is the fallback (all a volume without long names ever
- * needs).  A single walk also keeps the I/O at one pass per lookup --
- * looking the long name up first and the 8.3 name up afterwards would
- * read every directory cluster twice for the common names that have no
- * long form.
- */
+/* full-name lookup: exact 8.3 first (legacy layout), then LFN match.
+ * On success fills out and the *actual* 11-byte short name of the hit. */
 int fat_lookup_name(uint32_t dirclus, const char *name,
                     fat_dirent_t *out, uint8_t out_n83[11]) {
     uint8_t n83[11];
     fat_name83(name, n83);
     fat_dirent_t e;
-    uint8_t short_hit[11];
-    int have_short = 0;
-
+    if (fat_lookup(dirclus, n83, &e) == 0) {
+        if (out) *out = e;
+        if (out_n83) memcpy_(out_n83, n83, 11);
+        return 0;
+    }
     /* LFN walk: single pass, accumulate attr-0x0F windows */
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     struct lfn_acc L;
     lfn_acc_reset(&L);
     int per = (int)(spc * 512 / DENT_SIZE);
-    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+    for (uint32_t c = dirclus; c >= 2 && c < clus_hi(); ) {
         if (fat_read_cluster(c, buf) != 0) break;
         for (int i = 0; i < per; i++) {
             uint8_t *b = buf + i * DENT_SIZE;
-            if (b[0] == 0x00) goto done;           /* end of directory */
+            if (b[0] == 0x00) goto notfound;
             if (b[0] == 0xE5) { lfn_acc_reset(&L); continue; }
             if (b[11] == 0x0F) { lfn_acc_feed(&L, b); continue; }
             if (b[11] & 0x08) continue;               /* volume label */
-
-            /* the exact 8.3 name: remember it, but keep walking -- a
-             * long name further down the directory takes precedence */
-            if (!have_short && name83_eq(b, n83)) {
-                have_short = 1;
-                memcpy_(short_hit, b, 11);
-                dent_fill(&e, b);
-            }
             /* short entry: does the accumulated LFN match? */
             char lfn[FS_LFN_MAX];
             if (lfn_of_short(&L, b, lfn, sizeof(lfn)) &&
                 name_ieq_u16(name, L.ucs, L.len)) {
                 lfn_acc_reset(&L);
-                if (out) dent_fill(out, b);
+                if (out) {
+                    out->attr = b[11];
+                    /* clus_hi @20..21 (LE u16), clus_lo @26..27 */
+                    out->cluster = ((uint32_t)b[20] << 16)
+                                 | ((uint32_t)b[21] << 24)
+                                 | (uint32_t)b[26]
+                                 | ((uint32_t)b[27] << 8);
+                    out->size = (uint32_t)b[28] | ((uint32_t)b[29] << 8)
+                              | ((uint32_t)b[30] << 16) | ((uint32_t)b[31] << 24);
+                }
                 if (out_n83) memcpy_(out_n83, b, 11);
                 return 0;
             }
@@ -619,33 +669,33 @@ int fat_lookup_name(uint32_t dirclus, const char *name,
         if (n == FAT_EOC) break;
         c = n;
     }
-done:
-    if (!have_short) return -1;
-    if (out) *out = e;
-    if (out_n83) memcpy_(out_n83, short_hit, 11);
-    return 0;
+notfound:
+    return -1;
 }
 
-/* unique BODY~N.EXT alias for a name that needs an LFN */
+/* unique BODY~N.EXT alias for a name that needs an LFN.  The base takes
+ * the first six characters of the uppercased stem with dots and spaces
+ * removed (Windows short-name rule); every collision bumps ~N until free. */
 static int make_alias83(uint32_t parent, const char *name, uint8_t out[11]) {
     for (int i = 0; i < 11; i++) out[i] = ' ';
     const char *dot = 0;
     for (const char *p = name; *p; p++) if (*p == '.') dot = p;
-    int nlen = dot ? (int)(dot - name) : slen_(name);
-    if (nlen > 6) nlen = 6;
+    const char *stem_end = dot ? dot : name + slen_(name);
     int blen = 0;
-    for (int i = 0; i < nlen; i++) {
-        char c = name[i];
+    for (const char *p = name; p != stem_end && blen < 6; p++) {
+        char c = *p;
+        if (c == '.' || c == ' ') continue;       /* dots/spaces dropped */
         if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
         out[blen++] = (uint8_t)upper_(c);
     }
     if (blen == 0) { out[0] = 'N'; out[1] = 'E'; out[2] = 'W'; blen = 3; }
     if (dot) {
         int el = 0;
-        for (const char *p = dot + 1; *p && el < 3; p++, el++) {
+        for (const char *p = dot + 1; *p && el < 3; p++) {
             char c = *p;
+            if (c == '.' || c == ' ') continue;
             if ((unsigned char)c < 32 || (unsigned char)c > 126) c = '_';
-            out[8 + el] = (uint8_t)upper_(c);
+            out[8 + el++] = (uint8_t)upper_(c);
         }
     }
     fat_dirent_t tmp;
@@ -658,6 +708,8 @@ static int make_alias83(uint32_t parent, const char *name, uint8_t out[11]) {
             out[blen + 1] = (uint8_t)('0' + n / 10);
             out[blen + 2] = (uint8_t)('0' + n % 10);
         }
+        /* 8.3 short namespace collision: an existing LFN entry keeps its
+         * alias as the short entry, so fat_lookup() covers both layouts. */
         if (fat_lookup(parent, out, &tmp) != 0) return 0;
     }
     return -1;                                  /* 99 aliases taken */
@@ -676,7 +728,11 @@ static void lfn_fill_part(uint8_t *b, const uint16_t *u, int total, int base) {
 }
 
 /* write the LFN run + short entry at a (start_c, start_i) position that
- * may span directory clusters; every touched cluster is written back */
+ * may span directory clusters; every touched cluster is written back.
+ * v2.48: a mid-write ATA failure or overrun tombstones every slot written
+ * so far, so no dangling partial LFN run / half-written short entry stays
+ * visible to the read side. */
+#define PUTRUN_MAX_CL 32
 static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
                        int n, int nent, const uint8_t *alias, uint8_t attr,
                        uint32_t clus, uint32_t size) {
@@ -684,12 +740,17 @@ static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
     int per = (int)(spc * 512 / DENT_SIZE);
     uint32_t wc = start_c;
     int wi = start_i;
-    int loaded = 0, dirty = 0, rc = 0;
+    int loaded = 0, dirty = 0;
+    uint32_t touch_c[PUTRUN_MAX_CL];
+    int      touch_i[PUTRUN_MAX_CL];
+    int      touch_n[PUTRUN_MAX_CL];
+    int      tnc = 0;
     uint8_t sum = lfn_checksum(alias);
     for (int k = 0; k <= nent; k++) {
         if (!loaded) {
-            if (fat_read_cluster(wc, wbuf) != 0) return -1;
+            if (fat_read_cluster(wc, wbuf) != 0) goto fail;
             loaded = 1; dirty = 0;
+            touch_c[tnc] = wc; touch_i[tnc] = wi; touch_n[tnc] = 0; tnc++;
         }
         uint8_t *b = wbuf + wi * DENT_SIZE;
         if (k < nent) {
@@ -702,20 +763,33 @@ static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
             lfn_fill_part(b, ucs, n, (seq - 1) * 13);
         } else {
             struct dent *se = (struct dent *)b;
-            dent_init(se, alias, attr, clus, size);
+            dent_init(se, alias, attr, clus, size, 0);  /* alias: upper */
         }
+        touch_n[tnc - 1]++;
         dirty = 1;
         wi++;
         if (wi >= per) {
-            if (fat_write_cluster(wc, wbuf) != 0) return -1;
+            if (fat_write_cluster(wc, wbuf) != 0) goto fail;
             loaded = 0; dirty = 0;
             uint32_t nx = fat_get(wc);
-            if (nx < 2 || nx >= 0x0FFFFFF0) return -1;  /* run overran */
+            if (nx < 2 || nx >= 0x0FFFFFF0) goto fail;  /* run overran */
             wc = nx; wi = 0;
         }
     }
-    if (dirty && fat_write_cluster(wc, wbuf) != 0) return -1;
-    return rc;
+    if (dirty && fat_write_cluster(wc, wbuf) != 0) goto fail;
+    return 0;
+
+fail:
+    for (int t = 0; t < tnc; t++) {
+        static uint8_t rb[FAT_CLUSTER_SZ_MAX];
+        if (fat_read_cluster(touch_c[t], rb) != 0) continue;
+        for (int j = 0; j < touch_n[t]; j++) {
+            uint8_t *p = rb + (touch_i[t] + j) * DENT_SIZE;
+            p[0] = 0xE5;
+        }
+        fat_write_cluster(touch_c[t], rb);
+    }
+    return -1;
 }
 
 /* write alias + its LFN run into the first contiguous free window of
@@ -738,7 +812,7 @@ static int dir_write_lfn(uint32_t dirclus, const char *name,
     int run = 0;
     uint32_t c = dirclus;
     int guard = 0;
-    while (c >= 2 && c < max_clus && guard++ < 65536) {
+    while (c >= 2 && c < clus_hi() && guard++ < 65536) {
         if (fat_read_cluster(c, zbuf) != 0) return -1;
         for (int i = 0; i < per; i++) {
             uint8_t *en = zbuf + i * DENT_SIZE;
@@ -752,12 +826,19 @@ static int dir_write_lfn(uint32_t dirclus, const char *name,
         uint32_t nx = fat_get(c);
         if (nx < 2 || nx >= 0x0FFFFFF0) {
             /* chain exhausted: append a zeroed cluster (all slots free)
-             * and keep counting the run into it */
+             * and keep counting the run into it.  v2.48: a failed append
+             * unlinks the new cluster and frees it instead of leaving an
+             * orphan chain entry behind. */
+            uint32_t tail = (nx >= 2 && nx < 0x0FFFFFF0) ? nx : FAT_EOC;
             uint32_t nc = fat_alloc();
             if (!nc) return -1;
             fat_set(c, nc);
             memz(zbuf, sizeof(zbuf));
-            if (fat_write_cluster(nc, zbuf) != 0) return -1;
+            if (fat_write_cluster(nc, zbuf) != 0) {
+                fat_set(c, tail);
+                fat_free_chain(nc);
+                return -1;
+            }
             if (run == 0) { start_c = nc; start_i = 0; }
             c = nc;
             continue;
@@ -773,11 +854,16 @@ static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
     uint8_t rn[11];
     if (fat_lookup_name(parent, name, &tmp, rn) == 0) return -1;  /* exists */
 
+    /* v2.48: reject FAT-forbidden names before any cluster/dir slot is
+     * touched; the 8.3 conversion would otherwise embed reserved bytes. */
+    if (fat_name_illegal(name)) return -1;
+
     if (name_lossless83(name)) {
         uint8_t n83[11];
         fat_name83(name, n83);
-        if (attr & FAT_ATTR_DIR) return fat_mkdir(parent, n83);
-        return fat_mkfile_attr(parent, n83, attr);
+        uint8_t nt = ntres_from_name(name);
+        if (attr == FAT_ATTR_DIR) return fat_mkdir_nt(parent, n83, nt);
+        return fat_mkfile_nt(parent, n83, nt);
     }
 
     uint8_t alias[11];
@@ -793,8 +879,8 @@ static int fat_create_nl(uint32_t parent, const char *name, uint8_t attr) {
         dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
         struct dent *d0 = (struct dent *)zbuf;
         struct dent *d1 = (struct dent *)(zbuf + DENT_SIZE);
-        dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-        dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0);
+        dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+        dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0, 0);
         if (fat_write_cluster(nc, zbuf) != 0) return -1;
     } else {
         memz(zbuf, sizeof(zbuf));
@@ -816,12 +902,6 @@ int fat_mkfile_name(uint32_t parent, const char *name) {
     return fat_create_nl(parent, name, FAT_ATTR_FILE);
 }
 
-/* same as fat_mkfile_name() but the new entry gets `attr` instead of
- * the plain FAT_ATTR_FILE -- used for the read-only built-in apps */
-int fat_mkfile_name_attr(uint32_t parent, const char *name, uint8_t attr) {
-    return fat_create_nl(parent, name, attr);
-}
-
 /* delete by full name: marks the short entry 0xE5 and any immediately
  * preceding LFN run with the same checksum */
 int fat_delete_name(uint32_t dirclus, const char *name) {
@@ -831,7 +911,7 @@ int fat_delete_name(uint32_t dirclus, const char *name) {
     struct lfn_acc L;
     lfn_acc_reset(&L);
     int per = (int)(spc * 512 / DENT_SIZE);
-    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+    for (uint32_t c = dirclus; c >= 2 && c < clus_hi(); ) {
         if (fat_read_cluster(c, buf) != 0) return -1;
         int hit = -1;
         for (int i = 0; i < per; i++) {
@@ -880,7 +960,7 @@ void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
     struct lfn_acc L;
     lfn_acc_reset(&L);
     int per = (int)(spc * 512 / DENT_SIZE);
-    for (uint32_t c = dirclus; c >= 2 && c < max_clus; ) {
+    for (uint32_t c = dirclus; c >= 2 && c < clus_hi(); ) {
         if (fat_read_cluster(c, buf) != 0) return;
         for (int i = 0; i < per; i++) {
             uint8_t *b = buf + i * DENT_SIZE;
@@ -909,7 +989,7 @@ void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
     }
 }
 
-int fat_mkdir(uint32_t parent, const uint8_t *name83) {
+static int fat_mkdir_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;   /* exists */
 
@@ -924,26 +1004,22 @@ int fat_mkdir(uint32_t parent, const uint8_t *name83) {
     dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
     struct dent *d0 = (struct dent *)buf;
     struct dent *d1 = (struct dent *)(buf + DENT_SIZE);
-    dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-    dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0);
+    dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+    dent_init(d1, dotdotname, FAT_ATTR_DIR, parent, 0, 0);
     if (fat_write_cluster(nc, buf) != 0) return -1;
 
     struct dent de;
-    dent_init(&de, name83, FAT_ATTR_DIR, nc, 0);
+    dent_init(&de, name83, FAT_ATTR_DIR, nc, 0, ntres);
     if (dir_write_dent(parent, &de) != 0) return -1;
     fat_flush();
     return 0;
 }
 
-int fat_mkfile(uint32_t parent, const uint8_t *name83) {
-    return fat_mkfile_attr(parent, name83, FAT_ATTR_FILE);
+int fat_mkdir(uint32_t parent, const uint8_t *name83) {
+    return fat_mkdir_nt(parent, name83, 0);
 }
 
-/* create a plain 8.3 file with an explicit attribute byte.  FAT_ATTR_RO
- * is what makes the kernel's built-in apps immutable from user space:
- * the attribute lives in the directory entry, so no amount of uid 0
- * privilege can talk the FAT layer into overwriting the file (H8). */
-int fat_mkfile_attr(uint32_t parent, const uint8_t *name83, uint8_t attr) {
+static int fat_mkfile_nt(uint32_t parent, const uint8_t *name83, uint8_t ntres) {
     fat_dirent_t tmp;
     if (fat_lookup(parent, name83, &tmp) == 0) return -1;
 
@@ -954,39 +1030,14 @@ int fat_mkfile_attr(uint32_t parent, const uint8_t *name83, uint8_t attr) {
     fat_write_cluster(nc, buf);
 
     struct dent de;
-    dent_init(&de, name83, attr, nc, 0);
+    dent_init(&de, name83, FAT_ATTR_FILE, nc, 0, ntres);
     if (dir_write_dent(parent, &de) != 0) { fat_free_chain(nc); return -1; }
     fat_flush();
     return 0;
 }
 
-/* rewrite ONLY the attribute byte of an existing directory entry.  The
- * name, the cluster chain, the size and the timestamps are left alone,
- * so this can be used to seal a file that was installed earlier
- * (e.g. a built-in app from an older volume) without rewriting -- or
- * even looking at -- its content. */
-int fat_set_attr(uint32_t dirclus, const uint8_t *name83, uint8_t attr) {
-    static uint8_t buf[FAT_CLUSTER_SZ_MAX];
-    uint32_t c = dirclus;
-    int per = (int)(spc * 512 / DENT_SIZE);
-    while (c >= 2 && c < max_clus) {
-        if (fat_read_cluster(c, buf) != 0) return -1;
-        for (int i = 0; i < per; i++) {
-            struct dent *e = (struct dent *)(buf + i * DENT_SIZE);
-            if (e->name[0] == 0x00) return -1;
-            if (e->name[0] == 0xE5) continue;
-            if (e->attr == 0x0F || (e->attr & 0x08)) continue;
-            if (name83_eq(e->name, name83)) {
-                if (e->attr == attr) return 0;    /* already sealed */
-                e->attr = attr;
-                return fat_write_cluster(c, buf);
-            }
-        }
-        uint32_t n = fat_get(c);
-        if (n == FAT_EOC) break;
-        c = n;
-    }
-    return -1;
+int fat_mkfile(uint32_t parent, const uint8_t *name83) {
+    return fat_mkfile_nt(parent, name83, 0);
 }
 
 int fat_update_entry(uint32_t dirclus, const uint8_t *name83,
@@ -994,7 +1045,7 @@ int fat_update_entry(uint32_t dirclus, const uint8_t *name83,
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     uint32_t c = dirclus;
     int per = (int)(spc * 512 / DENT_SIZE);
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         if (fat_read_cluster(c, buf) != 0) return -1;
         for (int i = 0; i < per; i++) {
             struct dent *e = (struct dent *)(buf + i * DENT_SIZE);
@@ -1023,7 +1074,7 @@ int fat_read_file(uint32_t clus, uint32_t size, char *out) {
     uint32_t c = clus, got = 0;
     uint32_t csz = spc * 512;
     if (size == 0) { out[0] = 0; return 0; }
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         if (fat_read_cluster(c, buf) != 0) return -1;
         uint32_t take = (size - got) < csz ? (size - got) : csz;
         memcpy_(out + got, buf, take);
@@ -1071,13 +1122,13 @@ int fat_write_file(uint32_t clus, const char *data, uint32_t size) {
     }
 
     /* truncate the rest of the old chain */
-    while (c >= 2 && c < max_clus && fat_get(c) != FAT_EOC) {
+    while (c >= 2 && c < clus_hi() && fat_get(c) != FAT_EOC) {
         uint32_t n = fat_get(c);
         if (undo_n < 512) { undo[undo_n].clus = c; undo[undo_n].old = fat_get(c); undo_n++; }
         fat_set(c, 0);
         c = n;
     }
-    if (c >= 2 && c < max_clus) {
+    if (c >= 2 && c < clus_hi()) {
         if (undo_n < 512) { undo[undo_n].clus = c; undo[undo_n].old = fat_get(c); undo_n++; }
         fat_set(c, 0);
     }
@@ -1118,16 +1169,16 @@ int fat_verify_mirror(void) {
         }
         if (!dirty) continue;
         uint8_t d1[512], d2[512];
-        if (ata_read_sectors(part_start + RESERVED + sec, 1, d1) != 0) {
+        if (ata_read(cur_drive, part_start + RESERVED + sec, 1, d1) != 0) {
             fat_mirror_last = -1; return -1;
         }
-        if (ata_read_sectors(part_start + RESERVED + fat_sz + sec, 1, d2) != 0) {
+        if (ata_read(cur_drive, part_start + RESERVED + fat_sz + sec, 1, d2) != 0) {
             fat_mirror_last = -1; return -1;
         }
         int same = 1;
         for (int k = 0; k < 512; k++) if (d1[k] != d2[k]) { same = 0; break; }
         if (same) continue;
-        if (ata_write_sectors(part_start + RESERVED + fat_sz + sec, 1, d1) != 0) {
+        if (ata_write(cur_drive, part_start + RESERVED + fat_sz + sec, 1, d1) != 0) {
             fat_mirror_last = -1; return -1;
         }
         fixed++;
@@ -1136,28 +1187,15 @@ int fat_verify_mirror(void) {
     return fixed;
 }
 
-int fat_probe(void) {
-    uint8_t mbr[512], dbr[512];
+/* Probe one FAT32 volume at `drive` LBA `part_lba` into volume slot
+ * `slot`, activate it and cache its FAT #1.  0 ok / -1 failure. */
+static int probe_volume(int slot, uint8_t drive, uint32_t part_lba) {
+    uint8_t dbr[512];
+    btime_mark("V0 probe_volume enter");
+    g_active = slot;
+    g_vol[slot].d_drive = drive;
 
-    /* discover the IDE slot and drive size first */
-    uint32_t sec = 0;
-    if (ata_identify(&sec) != 0 || sec == 0) return -1;
-
-    if (ata_read_sectors(0, 1, mbr) != 0) return -1;
-    if (!(mbr[510] == 0x55 && mbr[511] == 0xAA)) return -1;
-
-    int found = -1;
-    for (int i = 0; i < 4; i++) {
-        uint8_t *e = mbr + 446 + i * 16;
-        if (e[4] == 0x0B || e[4] == 0x0C) { found = i; break; }
-    }
-    if (found < 0) return -1;
-
-    uint32_t part = (uint32_t)mbr[446 + found * 16 + 8]
-                  | ((uint32_t)mbr[446 + found * 16 + 9] << 8)
-                  | ((uint32_t)mbr[446 + found * 16 + 10] << 16)
-                  | ((uint32_t)mbr[446 + found * 16 + 11] << 24);
-    if (ata_read_sectors(part, 1, dbr) != 0) return -1;
+    if (ata_read(drive, part_lba, 1, dbr) != 0) return -1;
     if (!(dbr[510] == 0x55 && dbr[511] == 0xAA)) return -1;
 
     uint16_t bps = (uint16_t)(dbr[0x0B] | (dbr[0x0C] << 8));
@@ -1184,20 +1222,21 @@ int fat_probe(void) {
 
     if (root < 2) return -1;
     if (total32 <= rsvd + nfats * fatsz) return -1;  /* underflow guard */
-    part_start = part;
+    part_start = part_lba;
     spc = s;
     fat_sz = fatsz;
-    data_start = part + rsvd + nfats * fatsz;
+    data_start = part_lba + rsvd + nfats * fatsz;
     root_clus = root;
     max_clus = fatsz * 512 / 4;
-    vol_total = total32 + part;
+    vol_total = total32 + part_lba;
     vol_clusters = (total32 - (rsvd + nfats * fatsz)) / spc;
 
     if (read_fat_region() != 0) return -1;
+    btime_mark("V1 FAT cache loaded");
 
     /* find first free cluster as allocation hint */
     next_free = 3;
-    for (uint32_t c = 3; c < max_clus; c++)
+    for (uint32_t c = 3; c < clus_hi(); c++)
         if (fat_get(c) == 0) { next_free = c; break; }
 
     /* mount-time crash check: a previous unclean shutdown may have torn
@@ -1205,18 +1244,89 @@ int fat_probe(void) {
      * can allocate through the stale copy. */
     if (fat_verify_mirror() > 0)
         vga_write("fsck: FAT mirror was inconsistent, repaired from FAT #1\n");
+    btime_mark("V2 mirror verify done");
+    g_vol[slot].d_present = 1;
     return 0;
 }
 
+int fat_probe(void) {
+    uint8_t mbr[512];
+
+    /* discover the IDE slots first */
+    if (ata_scan() == 0) return -1;
+
+    if (ata_read(0, 0, 1, mbr) != 0) return -1;
+    if (!(mbr[510] == 0x55 && mbr[511] == 0xAA)) return -1;
+
+    int found = -1;
+    for (int i = 0; i < 4; i++) {
+        uint8_t *e = mbr + 446 + i * 16;
+        if (e[4] == 0x0B || e[4] == 0x0C) { found = i; break; }
+    }
+    if (found < 0) return -1;
+
+    uint32_t part = (uint32_t)mbr[446 + found * 16 + 8]
+                  | ((uint32_t)mbr[446 + found * 16 + 9] << 8)
+                  | ((uint32_t)mbr[446 + found * 16 + 10] << 16)
+                  | ((uint32_t)mbr[446 + found * 16 + 11] << 24);
+    return probe_volume(0, 0, part);
+}
+
+int fat_mount_partition(uint8_t drive, uint32_t part_lba, uint32_t size,
+                        int *out_slot) {
+    (void)size;
+    int slot = -1;
+    for (int i = 1; i < FAT_VOL_MAX; i++) {
+        if (!g_vol[i].d_present) { slot = i; break; }
+    }
+    if (slot < 0) return -1;
+    if (probe_volume(slot, drive, part_lba) != 0) {
+        g_vol[slot].d_present = 0;
+        if (g_vol[0].d_present) fat_activate(0);
+        return -1;
+    }
+    if (out_slot) *out_slot = slot;
+    return 0;
+}
+
+void fat_activate(int slot) {
+    if (slot < 0 || slot >= FAT_VOL_MAX || !g_vol[slot].d_present) return;
+    if (g_active == slot) return;
+    g_active = slot;
+    /* reload this volume's FAT #1 into the shared cache; reset journal */
+    read_fat_region();
+}
+
+int fat_active_slot(void) { return g_active; }
+
+/* #142+: does any probed volume slot (root slot 0 included) already own
+ * this (drive, LBA) pair?  Mounting the same partition twice -- even the
+ * root volume -- would open a second FAT cache over one LBA that can
+ * diverge from the first. */
+int fat_volume_owns(uint8_t drive, uint32_t part_lba) {
+    for (int i = 0; i < FAT_VOL_MAX; i++)
+        if (g_vol[i].d_present &&
+            g_vol[i].d_drive == drive && g_vol[i].d_start == part_lba)
+            return 1;
+    return 0;
+}
+
+void fat_release_slot(int slot) {
+    if (slot <= 0 || slot >= FAT_VOL_MAX) return;
+    if (g_active == slot) g_active = 0;
+    g_vol[slot].d_present = 0;
+}
+
 /* ---------- mkfs (geometry from ATA IDENTIFY) ---------- */
-void fat_mkfs(void) {
+int fat_mkfs(void) {
     uint8_t mbr[512], sec[512];
     uint32_t i;
 
-    /* 0) drive size */
+    /* 0) drive size -- v2.32: no IDE disk is a hard error (writing a
+     * phantom volume made every sector write burn its 10M-iteration
+     * timeout: "format" looked frozen for minutes). */
     vol_total = 0;
-    if (ata_identify(&vol_total) != 0 || vol_total <= 1)
-        vol_total = 131072u;               /* fallback: 64 MiB */
+    if (ata_identify(&vol_total) != 0 || vol_total <= 1) return -1;
     uint32_t part_sec = vol_total - 1;
 
     /* pick sectors/cluster by volume size (FAT32 convention) */
@@ -1331,8 +1441,8 @@ void fat_mkfs(void) {
         dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
         struct dent *d0 = (struct dent *)rbuf;
         struct dent *d1 = (struct dent *)(rbuf + DENT_SIZE);
-        dent_init(d0, dotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
-        dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
+        dent_init(d0, dotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
+        dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
         ata_write_sectors(data_start, (uint8_t)spc, rbuf);   /* cluster 2 */
     }
 
@@ -1356,11 +1466,11 @@ void fat_mkfs(void) {
             dotname[0] = '.'; dotdotname[0] = '.'; dotdotname[1] = '.';
             struct dent *d0 = (struct dent *)rbuf;
             struct dent *d1 = (struct dent *)(rbuf + DENT_SIZE);
-            dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0);
-            dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0);
+            dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
+            dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
             if (fat_write_cluster(nc, rbuf) != 0) break;
             struct dent de;
-            dent_init(&de, n83, FAT_ATTR_DIR, nc, 0);
+            dent_init(&de, n83, FAT_ATTR_DIR, nc, 0, 0);
             if (dir_write_dent(ROOT_CLUS, &de) != 0) break;
         }
     }
@@ -1390,6 +1500,7 @@ void fat_mkfs(void) {
     }
     sec[0x1FC] = 0x00; sec[0x1FD] = 0x00; sec[0x1FE] = 0x55; sec[0x1FF] = 0xAA;
     ata_write_sectors(PART_START + 1, 1, sec);
+    return 0;
 }
 
 /* ---- v2.5: append to an existing file (cluster-level, no full-file
@@ -1407,7 +1518,7 @@ int fat_append_file(uint32_t clus, uint32_t old_size, const char *data, uint32_t
     uint32_t csz = spc * 512;
     /* walk to the last cluster of the old chain */
     uint32_t c = clus, prev = 0;
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         prev = c;
         uint32_t n = fat_get(c);
         if (n == FAT_EOC || n < 2 || n >= max_clus) break;
@@ -1468,7 +1579,7 @@ a2fail:
 int fat_delete_entry(uint32_t dirclus, const uint8_t *name83) {
     static uint8_t buf[FAT_CLUSTER_SZ_MAX];
     uint32_t c = dirclus;
-    while (c >= 2 && c < max_clus) {
+    while (c >= 2 && c < clus_hi()) {
         if (fat_read_cluster(c, buf) != 0) return -1;
         for (int i = 0; i < (int)(spc * 512 / 32); i++) {
             uint8_t *en = buf + i * 32;

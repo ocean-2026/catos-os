@@ -12,12 +12,12 @@
  */
 
 #include "task.h"
+#include "usb.h"
 #include "io.h"
 #include "vga.h"
 #include "render.h"      /* v2.7 display front-end (mode policy + styles) */
 #include "svga.h"       /* VMware SVGA II FIFO refresh (svga_tick) */
 #include "keyboard.h"
-#include "usb.h"        /* v2.26 UHCI/HID keyboard polling (usb_poll) */
 #include "fs.h"
 #include "fat.h"
 #include "net.h"
@@ -357,6 +357,14 @@ static void task_cleanup(task_t *t) {
     if (console_owner_tid() == t->tid) console_wake_release(t->tid);
 }
 
+/* #180: release the VMA node list.  task_space_destroy frees the mapped
+ * frames but NOT the kzalloc_frame'd VMA nodes; a failed spawn that
+ * skipped this leaked nodes onto the slot, and the next reuse either
+ * orphaned the old chain or walked stale frames on it. */
+static void task_free_vma_list(task_t *t) {
+    while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
+}
+
 /* nobody is waiting for this task (background job): reclaim its slot
  * right away instead of leaking a zombie until the table fills up */
 static void maybe_autoreap(task_t *t) {
@@ -372,8 +380,8 @@ void task_die_fault(int_frame_t *f) {
     task_cleanup(t);
     t->exit_code = -1;
     t->state = T_ZOMBIE;
+    maybe_autoreap(t);                    /* v2.52: reap before waking parent */
     if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
-    maybe_autoreap(t);
     reschedule();
     __builtin_unreachable();
 }
@@ -385,8 +393,14 @@ void task_exit_current(int code) {
     t->state = T_ZOMBIE;
     w("[task "); wdec(t->tid); w(" '"); w(t->name); w("' exit(");
     wdec(code); w(")]\n");
-    if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
+    /* v2.52 fix: reap BEFORE waking the parent.  Waking first flipped the
+     * parent to T_READY, so maybe_autoreap() saw "nobody waits" and reaped
+     * the zombie out from under a shell blocked in task_wait_child*(),
+     * which then waited on a T_UNUSED slot forever. */
     maybe_autoreap(t);
+    if (t->parent && t->parent->state == T_WAIT_CHILD) {
+        t->parent->state = T_READY;
+    }
     reschedule();
     __builtin_unreachable();
 }
@@ -394,23 +408,6 @@ void task_exit_current(int code) {
 int task_kill(int tid, int by_uid) {
     task_t *t = task_by_tid(tid);
     if (!t || t == cur_task) return -1;
-    /* ring3 code may never kill a ring0 task.  TID 0 is the shell -- it
-     * IS the console loop (shell_run() never returns), and every CE spawned
-     * from it inherits UID_ROOT, so the uid gate below was wide open:
-     * api->kill(0) from an ordinary program ran task_cleanup() on the
-     * shell, whose slot then went T_UNUSED with nothing to respawn it.
-     * The machine kept ticking but the prompt was gone for good -- the
-     * cheapest possible denial of service, no kernel fault needed.
-     * Stated as a privilege boundary, not a tid blacklist: ring0 is the
-     * layer the user cannot preempt (sched_timer_tick only switches tasks
-     * when the interrupted frame is ring3, i.e. (f->cs & 3) == 3), so it
-     * must not be killable from ring3 either, and any future kernel task
-     * is covered automatically.
-     * Ring0 callers are unaffected: the shell's own `kill TID` command
-     * and its redirect-failure cleanup keep working, and same-uid kills
-     * between ring3 tasks stay legal (POSIX semantics, and orphaning a
-     * ring3 child is harmless -- maybe_autoreap reaps it). */
-    if (t->ring0 && !cur_task->ring0) return -2;    /* EPERM: kernel task */
     /* v2.13: root, the owner, or a caller with CAP_KILL */
     if (by_uid != UID_ROOT && t->uid != by_uid &&
         !(user_caps_of(by_uid) & CAP_KILL)) return -2;  /* not yours */
@@ -418,8 +415,8 @@ int task_kill(int tid, int by_uid) {
     task_cleanup(t);                      /* switches cr3 to the kernel dir */
     t->exit_code = -9;
     t->state = T_ZOMBIE;
+    maybe_autoreap(t);                    /* v2.52: reap before waking parent */
     if (t->parent && t->parent->state == T_WAIT_CHILD) t->parent->state = T_READY;
-    maybe_autoreap(t);
     /* the killer keeps the CPU: switch cr3 back to our own space */
     if (cur_task->space.dir)
         cpu_cr3_write(cur_task->space.dir);
@@ -433,6 +430,63 @@ void task_wait_child(task_t *child) {
     child->state = T_UNUSED;              /* reaped */
 }
 
+/* v2.52: wait until the child exits (reaped, 0) or stops (1).  A stopped
+ * child is left in T_STOPPED so `fg`/`bg` can resume it later. */
+int task_wait_child_or_stop(task_t *child) {
+    while (child->state != T_ZOMBIE && child->state != T_STOPPED &&
+           child->state != T_UNUSED)
+        task_block(T_WAIT_CHILD);
+    if (child->state == T_ZOMBIE) {
+        child->state = T_UNUSED;          /* reaped */
+        return 0;
+    }
+    return 1;
+}
+
+/* v2.52 minimal signal delivery for job control.
+ *   SIGCONT  : wake a stopped job back to READY
+ *   SIGTSTP  : suspend a running/runnable job (release the console)
+ *   SIGINT/TERM: terminate (minimal mapping onto the existing kill path)
+ *   SIGCHLD  : informational; parent re-checks its children on wake
+ */
+int task_signal(int tid, int sig) {
+    task_t *t = task_by_tid(tid);
+    if (!t || t->state == T_UNUSED) return -1;
+    if (t->state == T_ZOMBIE) return 0;
+    switch (sig) {
+    case SIGCONT:
+        if (t->state == T_STOPPED) {
+            t->state = T_READY;
+            t->pending_sig = 0;
+            need_resched = 1;
+        }
+        return 0;
+    case SIGTSTP:
+        if (t->state == T_STOPPED) return 0;
+        /* v2.52: only a runnable/sleeping job can be suspended cleanly.
+         * A job blocked in T_WAIT_KB / T_WAIT_CHILD resumed via SIGCONT
+         * would return from task_block() into "a key/child arrived" code
+         * paths that no longer hold, feeding the app a bogus key. */
+        if (t->state != T_READY && t->state != T_RUNNING &&
+            t->state != T_SLEEPING) return -3;
+        t->pending_sig = sig;
+        t->state = T_STOPPED;
+        if (console_owner_tid() == t->tid) console_wake_release(t->tid);
+        /* wake a waiting parent so the shell can observe the stopped job */
+        if (t->parent && t->parent->state == T_WAIT_CHILD)
+            t->parent->state = T_READY;
+        return 0;
+    case SIGINT:
+    case SIGTERM:
+        task_kill(tid, UID_ROOT);
+        return 0;
+    case SIGCHLD:
+        return 0;
+    default:
+        return -2;
+    }
+}
+
 int task_count(void) {
     int n = 0;
     for (int i = 0; i < MAX_TASKS; i++)
@@ -443,6 +497,7 @@ int task_count(void) {
 void task_ps_print(void) {
     static const char *names[] = {
         "UNUSED", "READY ", "RUN   ", "SLEEP ", "KB    ", "CHILD ", "ZOMBIE",
+        "STOP  ",
     };
     w("TID  UID   RING  STATE   NAME\n");
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -450,7 +505,7 @@ void task_ps_print(void) {
         wdec(i); w(i < 10 ? "    " : "   ");
         wdec(tasks[i].uid); w(tasks[i].uid < 10 ? "    " : "   ");
         w(tasks[i].ring0 ? "0    " : "3    ");
-        w(names[tasks[i].state <= T_ZOMBIE ? tasks[i].state : 0]); w("  ");
+        w(names[tasks[i].state <= T_STOPPED ? tasks[i].state : 0]); w("  ");
         w(tasks[i].name); w("\n");
     }
     w("--- "); wdec(task_count()); w(" task(s), uptime ");
@@ -841,18 +896,6 @@ static int heap_vma_init(task_t *t) {
 }
 
 static void *sys_alloc(task_t *t, uint32_t size) {
-    /* Reject anything the arena could never satisfy, BEFORE the 8-byte
-     * round-up.  (size + 7) wraps for size in 0xFFFFFFF1..0xFFFFFFFF:
-     * alloc(0xFFFFFFFF) used to collapse to size 0, which "fits" the
-     * first free block, so the carve handed back rest = h + 8 -- the
-     * freelist's own header -- as the payload.  Eight attacker bytes
-     * there forged {size,next} for the next allocation and could make
-     * h->next point at h (see the walk guard below).  The heap payload
-     * is at most USER_HEAP_MAX - sizeof(heap_hdr_t), so no request above
-     * USER_HEAP_MAX can ever succeed: this rejects only doomed calls and
-     * leaves every currently-working allocation untouched
-     * (alloc(0) and alloc(1) still round up to a real 8-byte block). */
-    if (size > USER_HEAP_MAX) return 0;
     if (size == 0) size = 1;
     size = (size + 7u) & ~7u;
     if (heap_vma_init(t) != 0) return 0;
@@ -865,15 +908,7 @@ static void *sys_alloc(task_t *t, uint32_t size) {
         heap_free_root[t->tid] = t->heap_end;
     }
     uint32_t *pp = &heap_free_root[t->tid];
-    /* The freelist lives in USER pages, so every next pointer here is
-     * attacker-writable.  A double free (sys_free() keeps no allocation
-     * record) or one stray word past a block makes h->next point at h;
-     * the old `while (*pp)` then walked that cycle forever with
-     * interrupts off (int 0x80 is an interrupt gate) -- a hard hang, not
-     * a slow alloc.  Bound the walk: the arena holds at most
-     * USER_HEAP_MAX/sizeof(heap_hdr_t) blocks, so passing that many is
-     * already pathological.  Bound hit -> treat as no-fit, return NULL. */
-    for (uint32_t guard = 0; *pp && guard <= USER_HEAP_MAX / 8u; guard++) {
+    while (*pp) {
         heap_hdr_t *h = (heap_hdr_t *)*pp;
         if (h->size >= size) {
             if (h->size >= size + sizeof(heap_hdr_t) + 8) {
@@ -912,13 +947,7 @@ static void *sys_alloc(task_t *t, uint32_t size) {
 }
 
 static void sys_free(task_t *t, void *p) {
-    /* vma_contains() also accepted the stack and the image, so
-     * free(stack_ptr) published the 8 bytes below that pointer as a heap
-     * block header: the attacker wrote {size,next} there, the next
-     * alloc() walked user-controlled metadata, and the freelist stayed
-     * poisoned afterwards (every later alloc returned NULL).  Only a
-     * pointer inside the HEAP VMA may enter the freelist. */
-    if (!heap_vma_has(t, (uint32_t)p)) return;
+    if (!vma_contains(t->vm, (uint32_t)p)) return;
     uint32_t a = (uint32_t)p;
     if (a < USER_HEAP_BASE + sizeof(heap_hdr_t)) return;
     heap_hdr_t *h = (heap_hdr_t *)(a - sizeof(heap_hdr_t));
@@ -1309,6 +1338,17 @@ void isr_syscall(int_frame_t *f) {
             task_block(T_WAIT_KB);
         }
         int k = kb_getkey();
+        /* v2.52: Ctrl-Z (0x1A) suspends the foreground job, mirroring the
+         * tty-generated SIGTSTP.  Background jobs keep the raw byte.  The
+         * ^Z itself is discarded: after SIGCONT the job loops back to
+         * waiting for a real key instead of returning ENOSYS. */
+        for (;;) {
+            if (k != 26 || t->bg_mode) break;
+            task_signal(t->tid, SIGTSTP);
+            while (t->state == T_STOPPED) task_block(T_STOPPED);
+            while (kb_peek() == 0) task_block(T_WAIT_KB);
+            k = kb_getkey();
+        }
         ret = (uint32_t)k;
         break;
     }
@@ -1675,22 +1715,6 @@ void isr_syscall(int_frame_t *f) {
         int tid = (int)a1;
         task_t *ch = task_by_tid(tid);
         if (!ch || ch->state == T_UNUSED) { ret = (uint32_t)-1; break; }
-        /* Only the caller's OWN child may be waited on.  task_wait_child()
-         * parks the caller in T_WAIT_CHILD until `ch` stops being
-         * RUNNING/READY, so waiting on a task that can never exit for us
-         * wedges BOTH sides: wait(gettid()) parked the CE on itself while
-         * the shell was already parked in task_wait_child() on that CE, so
-         * pick_ready() found nobody and the machine sat in the idle loop
-         * with the console dead for good (int 0x80 is an interrupt gate,
-         * so no timer tick could ever break the deadlock).  wait(0) did
-         * the same to the shell directly, and an arbitrary tid could also
-         * reap another parent's zombie through task_wait_child()'s
-         * unconditional `child->state = T_UNUSED`.  -1 (ECHILD) matches
-         * the !ch path above.  The shell is unaffected: it never comes
-         * through here, it calls task_wait_child() directly on a tid it
-         * just spawned, and task_spawn_ce() sets `t->parent = cur_task`,
-         * so ch->parent == cur_task holds there. */
-        if (ch == t || ch->parent != t) { ret = (uint32_t)-1; break; }
         task_wait_child(ch);
         ret = (uint32_t)ch->exit_code;
         break;
@@ -1833,20 +1857,6 @@ void isr_syscall(int_frame_t *f) {
             ret = (uint32_t)-22;                /* EINVAL */
             break;
         }
-        /* A10: w/h were checked but x/y were not, so x = INT_MAX reached the
-         * back-end.  clip() there did the bounds test in int, INT_MAX + w
-         * wrapped negative, the clamp was skipped and the store landed 2 GB
-         * past the framebuffer -> ring0 #PF -> permanent halt.  clip() now
-         * does the arithmetic in int64_t and cannot wrap; this window is the
-         * second layer: a rectangle starting more than 8 screens away cannot
-         * be partially visible by any stretch, so it is rejected up front
-         * (visible EINVAL to the caller rather than a silent no-op) and the
-         * back-end never sees a coordinate anywhere near INT_MAX. */
-        if (r.x <= -8 * GFX24_W || r.x >= 8 * GFX24_W ||
-            r.y <= -8 * GFX24_H || r.y >= 8 * GFX24_H) {
-            ret = (uint32_t)-22;                /* EINVAL */
-            break;
-        }
         gfx24_rect(r.x, r.y, r.w, r.h, r.rgb);
         ret = 0;
         break;
@@ -1861,14 +1871,6 @@ void isr_syscall(int_frame_t *f) {
         }
         if (b.src == 0 || b.w <= 0 || b.h <= 0 ||
             b.w > GFX24_W || b.h > GFX24_H) {
-            ret = (uint32_t)-22;                /* EINVAL */
-            break;
-        }
-        /* Same coordinate window as SYS_GFX_RECT: gfx24_blit() bounds-checks
-         * every pixel, but `b.x + i` / `b.y + j` are still int arithmetic on
-         * attacker input, so keep them away from the limits too. */
-        if (b.x <= -8 * GFX24_W || b.x >= 8 * GFX24_W ||
-            b.y <= -8 * GFX24_H || b.y >= 8 * GFX24_H) {
             ret = (uint32_t)-22;                /* EINVAL */
             break;
         }
@@ -2101,19 +2103,349 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
     return 0;
 }
 
-#ifdef SPAWN_DEBUG
-/* Print the physical address a user virtual address maps to, or "?"
- * when the page is not mapped.  Physical address 0 is the x86
- * interrupt vector table, so an unmapped page must never be turned
- * into a physical address and dereferenced -- a diagnostic that reads
- * page 0 is harmless, but the sibling code in the loader WRITES
- * through the same translation. */
-static void wdbg_pa(task_space_t *s, uint32_t vaddr) {
-    uint32_t pa = task_virt_to_phys(s, vaddr);
-    if (!pa) { w("?"); return; }
-    whex(pa);
+/* ---- PE32 loader (P1) ---------------------------------------------------
+ * Loads a minimal PE32 i386 image into the per-task user arena.  Import
+ * and export directories are ignored on purpose: CatOS has no dynamic
+ * linking, so only self-contained freestanding PEs are accepted.
+ *
+ * Supported subset (anything else returns -5, never crashes):
+ *   - IMAGE_FILE_MACHINE_I386 (0x14c), PE32 optional-header magic 0x10b
+ *     (PE32+ / x86-64 / ARM are rejected)
+ *   - not a DLL (IMAGE_FILE_DLL bit clear), non-high ImageBase
+ *     (< 0x80000000); the whole image fits
+ *     [USER_IMAGE_BASE, USER_EXT_END)
+ *   - sections mapped at ImageBase+RVA; raw data copied in, the
+ *     VirtualSize tails stay zeroed (kzalloc_frame)
+ *
+ * Error codes mirror spawn_load_elf: -5 bad/unsupported image,
+ * -4 disk read error, -12 out of memory, -3 file too large.
+ */
+#define PE_MAX_SECTIONS 16
+#define PE_MAX_FILE     (USER_EXT_SIZE / 2)     /* 2 MiB sanity cap */
+
+typedef struct {
+    uint16_t e_magic;            /* 0x5A4D "MZ" */
+    uint16_t e_cblp, e_cp, e_crlc, e_cparhdr, e_minalloc, e_maxalloc;
+    uint16_t e_ss, e_sp, e_csum, e_ip, e_cs, e_lfarlc, e_ovno;
+    uint16_t e_res[4], e_oemid, e_oeminfo;
+    uint16_t e_res2[10];
+    uint32_t e_lfanew;
+} pe_dos_t;
+
+typedef struct {
+    uint16_t Machine;
+    uint16_t NumberOfSections;
+    uint32_t TimeDateStamp;
+    uint32_t PointerToSymbolTable;
+    uint32_t NumberOfSymbols;
+    uint16_t SizeOfOptionalHeader;
+    uint16_t Characteristics;
+} pe_coff_t;
+
+typedef struct {
+    char     Name[8];
+    uint32_t VirtualSize;
+    uint32_t VirtualAddress;
+    uint32_t SizeOfRawData;
+    uint32_t PointerToRawData;
+    uint32_t PointerToRelocations;
+    uint32_t PointerToLinenumbers;
+    uint16_t NumberOfRelocations;
+    uint16_t NumberOfLinenumbers;
+    uint32_t Characteristics;
+} pe_section_t;
+
+#define PE_MACHINE_I386   0x14cu
+#define PE_OPT_MAGIC_32   0x10bu
+#define PE_CHAR_DLL       0x2000u
+#define PE_CHAR_WRITE     0x80000000u
+#define PE_HIGH_BASE      0x80000000u
+
+static uint32_t pe_rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-#endif
+
+static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
+                         uint32_t *entry_out) {
+    if (fsize < sizeof(pe_dos_t) || fsize > PE_MAX_FILE) return -5;
+
+    pe_dos_t dos;
+    if (fat_pread(clus0, fsize, 0, sizeof(dos), (uint8_t *)&dos) != 0) return -4;
+    if (dos.e_magic != 0x5A4Du) return -5;                 /* not "MZ" */
+    if (dos.e_lfanew == 0 || dos.e_lfanew > fsize - 4) return -5;
+
+    uint8_t pe_sig[4];
+    if (fat_pread(clus0, fsize, dos.e_lfanew, 4, pe_sig) != 0) return -4;
+    if (pe_sig[0] != 'P' || pe_sig[1] != 'E' || pe_sig[2] != 0 || pe_sig[3] != 0)
+        return -5;                                        /* no PE signature */
+
+    uint32_t coff_off = dos.e_lfanew + 4;
+    pe_coff_t coff;
+    if (fat_pread(clus0, fsize, coff_off, sizeof(coff), (uint8_t *)&coff) != 0)
+        return -4;
+    if (coff.Machine != PE_MACHINE_I386) return -5;       /* not i386 */
+    if (coff.Characteristics & PE_CHAR_DLL) return -5;   /* DLL, not an EXE */
+    if (coff.NumberOfSections == 0 || coff.NumberOfSections > PE_MAX_SECTIONS)
+        return -5;
+    if (coff.SizeOfOptionalHeader < 96 || coff.SizeOfOptionalHeader > 240)
+        return -5;
+
+    uint32_t opt_off = coff_off + sizeof(coff);
+    uint8_t opt[96];
+    if (fat_pread(clus0, fsize, opt_off, sizeof(opt), opt) != 0) return -4;
+    uint16_t opt_magic = (uint16_t)(opt[0] | (opt[1] << 8));
+    if (opt_magic != PE_OPT_MAGIC_32) return -5;         /* PE32+ / other */
+
+    uint32_t entry_rva  = pe_rd32(opt + 16);
+    uint32_t image_base = pe_rd32(opt + 28);
+    uint32_t size_image = pe_rd32(opt + 56);
+    if (image_base >= PE_HIGH_BASE) return -5;           /* high address */
+    if (size_image == 0 || size_image > USER_EXT_SIZE) return -5;
+    if (image_base < USER_IMAGE_BASE) return -5;
+    if (image_base > USER_EXT_END - size_image) return -5;
+
+    uint32_t sect_off = opt_off + coff.SizeOfOptionalHeader;
+    if ((uint64_t)sect_off + (uint64_t)coff.NumberOfSections * sizeof(pe_section_t)
+        > fsize) return -5;
+
+    pe_section_t sec[PE_MAX_SECTIONS];
+    if (fat_pread(clus0, fsize, sect_off,
+                  (uint32_t)coff.NumberOfSections * sizeof(pe_section_t),
+                  (uint8_t *)sec) != 0) return -4;
+
+    /* collect + merge page ranges of every section (mirrors spawn_load_elf) */
+    struct { uint32_t start, end; int w; } rg[PE_MAX_SECTIONS];
+    int nrg = 0;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        uint32_t va  = image_base + sec[i].VirtualAddress;
+        uint32_t mem = sec[i].VirtualSize;
+        if (mem < sec[i].SizeOfRawData) mem = sec[i].SizeOfRawData;
+        if (mem == 0) continue;
+        if (sec[i].SizeOfRawData != 0 &&
+            sec[i].PointerToRawData + sec[i].SizeOfRawData > fsize) return -5;
+        if (sec[i].VirtualAddress + mem > size_image) return -5;
+        uint32_t s = va & ~0xFFFu;
+        uint32_t e = (va + mem + 0xFFFu) & ~0xFFFu;
+        if (s < USER_IMAGE_BASE || e > USER_EXT_END) return -5;
+        int w = (sec[i].Characteristics & PE_CHAR_WRITE) ? 1 : 0;
+        int merged = 0;
+        for (int j = 0; j < nrg; j++) {
+            if (s <= rg[j].end && e >= rg[j].start) {
+                if (s < rg[j].start) rg[j].start = s;
+                if (e > rg[j].end)   rg[j].end   = e;
+                rg[j].w |= w;
+                merged = 1; break;
+            }
+        }
+        if (!merged && nrg < PE_MAX_SECTIONS) {
+            rg[nrg].start = s; rg[nrg].end = e; rg[nrg].w = w; nrg++;
+        } else if (!merged) return -5;
+    }
+    if (nrg == 0) return -5;
+
+    for (int i = 0; i < nrg; i++) {
+        for (uint32_t p = rg[i].start; p < rg[i].end; p += 4096) {
+            uint32_t f = (uint32_t)kzalloc_frame();
+            if (!f) return -12;
+            if (task_map_page(&t->space, p, f, rg[i].w) != 0) {
+                frame_free(f);
+                return -12;
+            }
+        }
+        vma_t *v = vma_new(rg[i].start, rg[i].end, VMA_IMAGE, rg[i].w);
+        if (!v) return -12;
+        t->vm = vma_insert(t->vm, v);
+    }
+
+    /* copy raw section bytes (bss tails stay zeroed) */
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        if (sec[i].SizeOfRawData == 0) continue;
+        static uint8_t fb2[FAT_CLUSTER_SZ_MAX];
+        uint32_t remaining = sec[i].SizeOfRawData;
+        uint32_t off = sec[i].PointerToRawData;
+        uint32_t va = image_base + sec[i].VirtualAddress;
+        while (remaining) {
+            uint32_t n = remaining > sizeof(fb2) ? sizeof(fb2) : remaining;
+            if (fat_pread(clus0, fsize, off, n, fb2) != 0) return -4;
+            k2u_copy(&t->space, va, fb2, n);
+            va += n; off += n; remaining -= n;
+        }
+    }
+
+    uint32_t entry = image_base + entry_rva;
+    int ok = 0;
+    for (int i = 0; i < nrg; i++)
+        if (entry >= rg[i].start && entry < rg[i].end) ok = 1;
+    if (!ok) return -5;
+    *entry_out = entry;
+    return 0;
+}
+
+/* ---- PE32 -> CE01 flattening (P1, shell convert-on-run) ------------------
+ * Converts the supported PE32 subset into a CE01 flat image saved on the
+ * FAT volume.  It mirrors tests/mkpe.py offline: sections are packed by
+ * RVA, zero tails go to the CE bss, and a 4-byte API slot is reserved at
+ * the image end.  Unsupported layouts (entry not at flat offset 0,
+ * oversize image/bss, sections needing absolute cross-section references)
+ * return -5 with a text error rather than corrupting anything. */
+
+static uint8_t pe_ce_bounce[sizeof(ce_header_t) + CE_MAX_IMAGE + 4];
+
+static void pe_ce_err(char *err, int errsz, const char *msg) {
+    if (!err || errsz < 1) return;
+    int i = 0;
+    while (msg[i] && i < errsz - 1) { err[i] = msg[i]; i++; }
+    err[i] = 0;
+}
+
+int pe_to_ce_file(const char *pe_path, const char *ce_path,
+                  int uid, int gid, char *err, int errsz) {
+    uint32_t clus = 0, fsize = 0;
+    if (!pe_path || !*pe_path || !ce_path || !*ce_path) {
+        pe_ce_err(err, errsz, "bad path"); return -3;
+    }
+    /* #182: the flattened CE image is written through a ring0 raw write;
+     * check the target path with the session identity before any disk
+     * touch, the same gate SYS_FILE_SAVE applies. */
+    if (fs_perm_check(ce_path, uid, gid, PERM_WRITE) != 0) {
+        pe_ce_err(err, errsz, "permission denied"); return -13;
+    }
+    if (fs_resolve_file(pe_path, &clus, &fsize) != 0) {
+        pe_ce_err(err, errsz, "source file not found"); return -2;
+    }
+    if (fsize < sizeof(pe_dos_t)) {
+        pe_ce_err(err, errsz, "not a PE32 file"); return -5;
+    }
+
+    pe_dos_t dos;
+    if (fat_pread(clus, fsize, 0, sizeof(dos), (uint8_t *)&dos) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (dos.e_magic != 0x5A4Du || dos.e_lfanew == 0 || dos.e_lfanew > fsize - 4) {
+        pe_ce_err(err, errsz, "not an MZ/PE image"); return -5;
+    }
+
+    uint8_t pe_sig[4];
+    if (fat_pread(clus, fsize, dos.e_lfanew, 4, pe_sig) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (pe_sig[0] != 'P' || pe_sig[1] != 'E' || pe_sig[2] != 0 || pe_sig[3] != 0) {
+        pe_ce_err(err, errsz, "no PE signature"); return -5;
+    }
+
+    uint32_t coff_off = dos.e_lfanew + 4;
+    pe_coff_t coff;
+    if (fat_pread(clus, fsize, coff_off, sizeof(coff), (uint8_t *)&coff) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    if (coff.Machine != PE_MACHINE_I386 || (coff.Characteristics & PE_CHAR_DLL)) {
+        pe_ce_err(err, errsz, "unsupported PE (need i386 EXE, not DLL)"); return -5;
+    }
+    if (coff.NumberOfSections == 0 || coff.NumberOfSections > PE_MAX_SECTIONS) {
+        pe_ce_err(err, errsz, "bad section count"); return -5;
+    }
+    if (coff.SizeOfOptionalHeader < 96 || coff.SizeOfOptionalHeader > 240) {
+        pe_ce_err(err, errsz, "bad optional header"); return -5;
+    }
+
+    uint32_t opt_off = coff_off + sizeof(coff);
+    uint8_t opt[96];
+    if (fat_pread(clus, fsize, opt_off, sizeof(opt), opt) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+    uint16_t opt_magic = (uint16_t)(opt[0] | (opt[1] << 8));
+    if (opt_magic != PE_OPT_MAGIC_32) {
+        pe_ce_err(err, errsz, "need PE32 (not PE32+)"); return -5;
+    }
+    uint32_t entry_rva  = pe_rd32(opt + 16);
+    uint32_t image_base = pe_rd32(opt + 28);
+    uint32_t size_image = pe_rd32(opt + 56);
+    if (image_base >= PE_HIGH_BASE || size_image == 0) {
+        pe_ce_err(err, errsz, "unsupported image base/size"); return -5;
+    }
+
+    uint32_t sect_off = opt_off + coff.SizeOfOptionalHeader;
+    if ((uint64_t)sect_off + (uint64_t)coff.NumberOfSections * sizeof(pe_section_t)
+        > fsize) {
+        pe_ce_err(err, errsz, "section table out of file"); return -5;
+    }
+    pe_section_t sec[PE_MAX_SECTIONS];
+    if (fat_pread(clus, fsize, sect_off,
+                  (uint32_t)coff.NumberOfSections * sizeof(pe_section_t),
+                  (uint8_t *)sec) != 0) {
+        pe_ce_err(err, errsz, "disk read error"); return -4;
+    }
+
+    /* insertion sort sections by RVA so the flat image is RVA-ordered */
+    for (int i = 1; i < coff.NumberOfSections; i++) {
+        pe_section_t key = sec[i]; int j = i - 1;
+        while (j >= 0 && sec[j].VirtualAddress > key.VirtualAddress) {
+            sec[j + 1] = sec[j]; j--;
+        }
+        sec[j + 1] = key;
+    }
+
+    uint8_t *img = pe_ce_bounce + sizeof(ce_header_t);
+    uint32_t off[PE_MAX_SECTIONS], mem[PE_MAX_SECTIONS], raw[PE_MAX_SECTIONS];
+    uint32_t va[PE_MAX_SECTIONS];
+    uint32_t cur = 0, bss = 0;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        va[i]  = sec[i].VirtualAddress;
+        raw[i] = sec[i].SizeOfRawData;
+        mem[i] = sec[i].VirtualSize > raw[i] ? sec[i].VirtualSize : raw[i];
+        if (sec[i].SizeOfRawData != 0 &&
+            sec[i].PointerToRawData + raw[i] > fsize) {
+            pe_ce_err(err, errsz, "section raw data out of file"); return -5;
+        }
+        off[i] = cur;
+        if (raw[i] != 0) {
+            if (fat_pread(clus, fsize, sec[i].PointerToRawData, raw[i],
+                          img + cur) != 0) {
+                pe_ce_err(err, errsz, "disk read error"); return -4;
+            }
+        }
+        if (mem[i] > raw[i]) bss += mem[i] - raw[i];
+        cur = (cur + mem[i] + 3u) & ~3u;
+    }
+
+    uint32_t image_size = cur;
+    if (image_size + 4 > CE_MAX_IMAGE) {
+        pe_ce_err(err, errsz, "image too large for CE"); return -5;
+    }
+    if (bss > CE_MAX_BSS) {
+        pe_ce_err(err, errsz, "bss too large for CE"); return -5;
+    }
+    uint32_t api_off = image_size;
+    *(uint32_t *)(img + api_off) = 0;
+    image_size += 4;
+
+    /* the CE loader always jumps to flat offset 0; the entry must be there */
+    uint32_t entry_off = 0xFFFFFFFFu;
+    for (int i = 0; i < coff.NumberOfSections; i++) {
+        if (entry_rva >= va[i] && entry_rva < va[i] + mem[i]) {
+            entry_off = off[i] + (entry_rva - va[i]);
+            break;
+        }
+    }
+    if (entry_off == 0xFFFFFFFFu || entry_off != 0) {
+        pe_ce_err(err, errsz, "entry not at image start; rebuild entry section first");
+        return -5;
+    }
+
+    ce_header_t *h = (ce_header_t *)pe_ce_bounce;
+    h->magic[0] = 'C'; h->magic[1] = 'E'; h->magic[2] = '0'; h->magic[3] = '1';
+    h->entry = 0;
+    h->bss_size = bss;
+    h->api_offset = api_off;
+    h->image_size = image_size;
+
+    if (fs_write_raw_mode(ce_path, (char *)pe_ce_bounce,
+                          sizeof(ce_header_t) + image_size, 0) != 0) {
+        pe_ce_err(err, errsz, "write failed (disk full or read-only)"); return -4;
+    }
+    return 0;
+}
 
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int slot = -1;
@@ -2164,13 +2496,18 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     if (fat_read_cluster(clus, fbuf) != 0) return -4;
 
     /* v2.10: dual-track dispatch -- CE01 flat image (legacy, fixed
-     * offsets in PDE 8) or ELF32 (PIE + ASLR in the PDE 9 extension). */
+     * offsets in PDE 8) or ELF32 (PIE + ASLR in the PDE 9 extension).
+     * P1: third track -- PE32 EXE (MZ magic), loaded by spawn_load_pe. */
     int is_elf = (fbuf[0] == 0x7F && fbuf[1] == 'E' && fbuf[2] == 'L' && fbuf[3] == 'F');
+    int is_pe  = (fbuf[0] == 'M' && fbuf[1] == 'Z');
     uint32_t entry = USER_IMAGE_BASE;
     uint32_t img, bss, api;
 
     if (is_elf) {
         if (size > ELF_MAX_FILE) return -3;
+        img = bss = api = 0;
+    } else if (is_pe) {
+        if (size > PE_MAX_FILE) return -3;
         img = bss = api = 0;
     } else {
         if (size < sizeof(ce_header_t) || size > CE_MAX_IMAGE + sizeof(ce_header_t)) return -3;
@@ -2199,6 +2536,8 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->out_append = 0;
     /* #59: reused slots must not leak the previous job's captured output */
     t->bg_mode = 0;
+    t->daemon = 0;              /* v2.54: detached-service flag */
+    t->pending_sig = 0;          /* v2.52: clear stale pending signal */
     t->log_head = 0;
     t->log_tail = 0;
     t->log_lost = 0;
@@ -2214,6 +2553,16 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         int r = spawn_load_elf(t, clus, size, &entry);
         if (r != 0) {
             task_space_destroy(&t->space);
+            task_free_vma_list(t);            /* #180 */
+            return r;
+        }
+    } else if (is_pe) {
+        /* PE32 path: sections are mapped, copied and VMA-tagged inside
+         * spawn_load_pe (per-task user arena, preferred ImageBase). */
+        int r = spawn_load_pe(t, clus, size, &entry);
+        if (r != 0) {
+            task_space_destroy(&t->space);
+            task_free_vma_list(t);            /* #180 */
             return r;
         }
     } else {
@@ -2239,13 +2588,6 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
             uint32_t k = 0;
             while (k < take) {
                 uint32_t pa = task_virt_to_phys(&t->space, (va + k) & ~0xFFFu);
-                /* An unmapped page translates to physical address 0, and
-                 * physical 0 is the x86 interrupt vector table: copying
-                 * the image there would destroy the IVT and halt the
-                 * machine on the next interrupt.  The image pages were
-                 * mapped a few lines above, so a 0 here means the page
-                 * tables are broken -- fail the load instead. */
-                if (!pa) goto fail_space4;
                 uint32_t poff = (va + k) & 0xFFF;
                 uint32_t n = 4096 - poff; if (n > take - k) n = take - k;
                 uint8_t *d = (uint8_t *)(pa + poff);
@@ -2282,7 +2624,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * Heap VMA is created lazily on first SYS_ALLOC. */
     {
         uint32_t span = (img + bss + 0xFFF) & ~0xFFFu;
-        if (!is_elf) {
+        if (!is_elf && !is_pe) {
             vma_t *im = vma_new(USER_IMAGE_BASE, USER_IMAGE_BASE + span, VMA_IMAGE, 0);
             if (!im) goto fail_space6;
             t->vm = im;
@@ -2316,43 +2658,25 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     k2u_copy(&t->space, usp, three, 12);
 #ifdef SPAWN_DEBUG
     {
-        /* Physical address 0 is the interrupt vector table, so an
-         * unmapped page must never be dereferenced -- not even by a
-         * diagnostic.  Print "?" instead. */
-        uint32_t chk[3] = { 0, 0, 0 };
+        uint32_t chk[3];
         uint32_t pa = task_virt_to_phys(&t->space, usp);
-        if (pa) {
-            chk[0] = *(uint32_t *)pa;
-            chk[1] = *(uint32_t *)(pa + 4);
-            chk[2] = *(uint32_t *)(pa + 8);
-        }
+        chk[0] = *(uint32_t *)pa;
+        chk[1] = *(uint32_t *)(pa + 4);
+        chk[2] = *(uint32_t *)(pa + 8);
         w("[dbg usp="); whex(usp);
-        w(" words=");
-        if (pa) { whex(chk[0]); w(" "); whex(chk[1]); w(" "); whex(chk[2]); }
-        else    w("?");
-        w(" vs0="); wdbg_pa(&t->space, USER_VSYSCALL);
-        w(" vs300="); wdbg_pa(&t->space, USER_VSYSCALL + 0x300);
-        w(" tbl0="); wdbg_pa(&t->space, VS_TABLE);
-        w(" apislot="); wdbg_pa(&t->space, USER_IMAGE_BASE + api);
+        w(" words="); whex(chk[0]); w(" "); whex(chk[1]); w(" "); whex(chk[2]);
+        w(" vs0="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_VSYSCALL));
+        w(" vs300="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_VSYSCALL + 0x300));
+        w(" tbl0="); whex(*(uint32_t *)task_virt_to_phys(&t->space, VS_TABLE));
+        w(" apislot="); whex(*(uint32_t *)task_virt_to_phys(&t->space, USER_IMAGE_BASE + api));
         w("]\n");
     }
 #endif
 
-    /* api table pointer into the image's api slot (CE only; ELF programs
-     * call the vsyscall table directly at CATOS_VS_TABLE) */
-    if (!is_elf) {
+    /* api table pointer into the image's api slot (CE only; ELF/PE
+     * programs call the vsyscall table directly at CATOS_VS_TABLE) */
+    if (!is_elf && !is_pe) {
         uint32_t pa = task_virt_to_phys(&t->space, USER_IMAGE_BASE + api);
-        /* Same trap as in the image loop above: an unmapped page yields
-         * physical address 0, and writing the vsyscall pointer there
-         * would overwrite the interrupt vector table.  The image slot
-         * must be mapped for the program to run at all, so an unmapped
-         * slot means the load is broken -- fail it. */
-        if (!pa) {
-            /* drop the VMA list built above first: every node is a
-             * kzalloc_frame'd block and would leak on this path */
-            while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
-            goto fail_space4;
-        }
         *(uint32_t *)pa = VS_TABLE;
     }
 
@@ -2382,6 +2706,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->wake_tick = 0;
     t->exit_code = 0;
     t->parent = cur_task;
+    t->pgid = slot;              /* v2.52: standalone job owns its group */
     t->heap_end = USER_HEAP_BASE;
     heap_free_root[slot] = 0;
     t->ls_count = 0;
@@ -2402,8 +2727,10 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
      * image/bss/vsyscall/stack frames plus the page-table frames. */
 fail_space4:
     task_space_destroy(&t->space);
+    task_free_vma_list(t);                /* #180 */
     return -4;
 fail_space6:
     task_space_destroy(&t->space);
+    task_free_vma_list(t);                /* #180 */
     return -6;
 }

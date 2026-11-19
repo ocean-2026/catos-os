@@ -71,6 +71,9 @@ CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check \
 # runtime stub (__chkstk_ms etc.) -- see ce_stub.c
 "$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$CEBASE/ce_stub.c" \
     -o "$CEBASE/build/ce_stub.o"
+# v2.49 shared app layer: single __ce_api slot definition -- see ce_app.c
+"$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$CEBASE/ce_app.c" \
+    -o "$CEBASE/build/ce_app.o"
 
 # ce_main must be at offset 0: force it via the linker script.
 # (MinGW mangles C symbols with a leading underscore: _ce_main; GNU ld on
@@ -85,7 +88,7 @@ fi
 # cc.c's static buffers, far over CE_MAX_IMAGE).  The CE loader relocates
 # nothing, so the section is pure weight.
 "$LD" -m i386pe --disable-reloc-section -T "$CEBASE/ce.ld" -e "$ENTRY_SYM" \
-    "$CEBASE/build/$NAME.o" "$CEBASE/build/ce_stub.o" \
+    "$CEBASE/build/$NAME.o" "$CEBASE/build/ce_stub.o" "$CEBASE/build/ce_app.o" \
     -o "$CEBASE/build/$NAME.exe"
 
 MAIN=$("$NM" "$CEBASE/build/$NAME.exe" | awk '/[TD] _*ce_main$/{print $1; exit}')

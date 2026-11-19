@@ -8,6 +8,7 @@
 #include "task.h"
 #include "hw.h"
 #include "snd.h"
+#include "usb.h"
 
 uint32_t multiboot_info_ptr = 0;
 uint32_t multiboot_flags = 0;
@@ -30,9 +31,11 @@ static void print_hex4(uint16_t v) {
 void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     (void)mb_magic;
     multiboot_info_ptr = mb_info;
+    btime_mark("K0 kernel_main enter");
 
     vga_init();
     kb_init();
+    btime_mark("K1 vga+kbd init");
 
     /* five-pillar boot order:
      *   1. paging (identity kernel map + frame allocator)
@@ -48,11 +51,14 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     uint32_t hi = (mi && (mi->flags & 1)) ? mi->mem_upper : (63u << 10);
 
     paging_init(lo, hi);
+    btime_mark("K2 paging");
     intr_init();
     tasks_init();
     intr_enable();
+    btime_mark("K3 intr+tasks+sti");
     hw_mem_boot(lo, hi);
     hw_calibrate_cpu();      /* 100 ms: TSC vs PIT -> hw_num(HW_CPU_MHZ) */
+    btime_mark("K4 mem+cpu calibrate");
 
     /* Sound Blaster 16 (ISA, IRQ5).  Must come after intr_enable() --
      * snd_init() unmasks IRQ5 -- and before shell_run(), which never
@@ -70,6 +76,15 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     } else {
         vga_write("snd: no audio device detected (audio disabled)\n");
     }
+    btime_mark("K5 snd_init");
+
+    /* v2.26 USB (UHCI + HID keyboard).  Missing controller is NOT fatal:
+     * PS/2 remains the primary input path and all regressions must boot
+     * identically without -usb.  Port reset costs ~200ms only when a
+     * device actually attaches. */
+    if (usb_start() && usb_ready())
+        vga_write("usb: UHCI ready, HID keyboard on port\n");
+    btime_mark("K6 usb_start");
 
     if (net_init() < 0) {
         vga_write("net: no usable NIC");
@@ -98,6 +113,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     } else {
         vga_write("net: AMD PCnet-PCI up\n");
     }
+    btime_mark("K7 net_init");
 
     shell_run();
 }

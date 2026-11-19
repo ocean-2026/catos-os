@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """ce_sim.py -- host-side runner for CatOS .ce images (cc.ce test harness).
 
 Emulates exactly what kernel task_spawn_ce does: the flat image is loaded

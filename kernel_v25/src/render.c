@@ -105,9 +105,22 @@ uint8_t render_quantize(uint32_t rgb) {
     return best;
 }
 
-/* VGA's 16-colour index is BGR + intensity, not RGB. */
+/* VGA's 16-colour index is BGR + intensity, not RGB.  First try an exact
+ * nearest match against the modern CLUT 0..15 so theme colours keep their
+ * dedicated DAC slot; only unmatched arbitrary RGB falls back to the
+ * legacy 3-bit threshold ramp. */
 uint8_t render_rgb_to_vga(uint32_t rgb) {
     int r = CON_RGB_R(rgb), g = CON_RGB_G(rgb), b = CON_RGB_B(rgb);
+    uint8_t best = 0;
+    long best_d = 0x7FFFFFFF;
+    for (int i = 0; i < 16; i++) {
+        int dr = r - CON_RGB_R(clut[i]);
+        int dg = g - CON_RGB_G(clut[i]);
+        int db = b - CON_RGB_B(clut[i]);
+        long d = (long)dr * dr + (long)dg * dg + (long)db * db;
+        if (d < best_d) { best_d = d; best = (uint8_t)i; }
+    }
+    if (best_d < 24 * 24 * 3) return best;
     uint8_t i = (uint8_t)((b >= 128 ? 1 : 0) | (g >= 128 ? 2 : 0) |
                           (r >= 128 ? 4 : 0));
     if (r > 192 || g > 192 || b > 192) i |= 8;

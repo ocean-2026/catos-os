@@ -282,24 +282,26 @@ static int text_enter(void) {
 
 static void text_leave(void) { /* the next back-end programs the hardware */ }
 static void text_set_palette(uint8_t idx, uint32_t rgb) {
-    (void)idx; (void)rgb;               /* 16 fixed VGA colours */
+    /* Program one live DAC entry so `palette`/`rgb` tweaks show in text mode. */
+    if (idx > 15) return;
+    outb(0x3C8, idx);
+    outb(0x3C9, CON_RGB_R(rgb) >> 2);
+    outb(0x3C9, CON_RGB_G(rgb) >> 2);
+    outb(0x3C9, CON_RGB_B(rgb) >> 2);
 }
 
-/* Restore the standard 16-colour text DAC.  gfx_enter reloads all 256
- * DAC entries with the graphics CLUT; without this, text mode keeps
- * rendering through those leftovers after a roundtrip. */
+/* Restore the 16-colour text DAC from the shared modern CLUT (v2.37
+ * theme: bg #0C0C0C, body #DCDCDC, path blue #60A5FA, accent green
+ * #7EE787, semantic red/yellow/cyan).  gfx_enter reloads all 256 DAC
+ * entries with the graphics CLUT; without this reset, text mode would
+ * keep rendering through those leftovers after a roundtrip. */
 static void text_dac_reset(void) {
-    static const uint8_t pal[16][3] = {
-        {0x00,0x00,0x00},{0x00,0x00,0xAA},{0x00,0xAA,0x00},{0x00,0xAA,0xAA},
-        {0xAA,0x00,0x00},{0xAA,0x00,0xAA},{0xAA,0x55,0x00},{0xAA,0xAA,0xAA},
-        {0x55,0x55,0x55},{0x55,0x55,0xFF},{0x55,0xFF,0x55},{0x55,0xFF,0xFF},
-        {0xFF,0x55,0x55},{0xFF,0x55,0xFF},{0xFF,0xFF,0x55},{0xFF,0xFF,0xFF},
-    };
     outb(0x3C8, 0x00);
     for (int i = 0; i < 16; i++) {
-        outb(0x3C9, pal[i][0] >> 2);
-        outb(0x3C9, pal[i][1] >> 2);
-        outb(0x3C9, pal[i][2] >> 2);
+        uint32_t c = render_clut((uint8_t)i);
+        outb(0x3C9, CON_RGB_R(c) >> 2);
+        outb(0x3C9, CON_RGB_G(c) >> 2);
+        outb(0x3C9, CON_RGB_B(c) >> 2);
     }
 }
 
@@ -437,5 +439,6 @@ render_be_t be_text = {
     .set_palette= text_set_palette,
     .scroll     = 0,               /* full redraw rebuilds font slots */
     .draw_cursor= 0,               /* hardware cursor */
-    .diag       = text_diag
+    .diag       = text_diag,
+    .cell_w     = 8, .cell_h = 16
 };

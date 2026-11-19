@@ -194,5 +194,7 @@ int  task_spawn_ce(const char *path, int argc, char **argv, int uid);
  * /appdevelop.  Skips files that already exist; safe to call after
  * format or at boot. */
 void ce_install_builtins(void);
+/* NIGHT-P4: seed /pkg/ package containers + PKGS.TXT on the volume. */
+void ce_install_pkg_repo(void);
 
 #endif

@@ -196,6 +196,10 @@ def show(label, lines, keep=()):
 # ------------------------------------------------------------------- boot --
 
 def boot(iso, qemu, disk):
+    from qemu_driver import _stage_image
+    iso = _stage_image(iso)
+    if disk:
+        disk = _stage_image(disk)
     cmd = [qemu, "-m", "256", "-no-reboot", "-net", "none",
            "-cdrom", iso, "-boot", "order=d",
            "-display", "none",

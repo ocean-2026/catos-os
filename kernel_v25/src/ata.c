@@ -1,14 +1,16 @@
 #include "ata.h"
 #include "task.h"
 #include "io.h"
+#include "hw.h"
 
 /* PIO ATA driver with channel/device discovery.
  *
- * ata_identify() probes four IDE slots (primary/secondary bus x
- * master/slave) and remembers the first one that answers IDENTIFY
- * DEVICE with a non-zero capacity; all later reads/writes go to that
- * slot.  This makes the same kernel work under QEMU, VMware, Bochs
- * and real hardware without any configuration.
+ * ata_scan() probes four IDE slots (primary/secondary bus x
+ * master/slave) and remembers every slot that answers IDENTIFY DEVICE
+ * with a non-zero capacity.  ata_read()/ata_write() then go to the
+ * selected drive.  This makes the same kernel work under QEMU, VMware,
+ * Bochs and real hardware without any configuration, and (P2) lets the
+ * filesystem layer mount partitions on more than one drive.
  */
 
 #define CMD_READ       0x20
@@ -16,31 +18,46 @@
 #define CMD_FLUSH      0xE7
 #define CMD_IDENTIFY   0xEC
 
-/* selected slot (filled by ata_identify) */
-static uint16_t g_base = 0x1F0;   /* data register */
-static uint16_t g_ctrl = 0x3F6;   /* alt status / device control */
-static uint8_t  g_dev  = 0xE0;    /* master, LBA mode (0xE0 master / 0xF0 slave) */
+/* Probe-path wait budget.  A present drive raises BSY then DRQ (or ERR)
+ * within microseconds; the old 10M-iteration bound let an empty slot --
+ * whose status port returns a constant 0x00/0xFF with no BSY/ERR/DRQ --
+ * spin for >1 s per slot on every boot.  A short stable-no-signal run
+ * bails out early; the iteration ceiling stays as a backstop. */
+#define ATA_PROBE_WAIT_MAX    1000000
+#define ATA_PROBE_DEAD_SAMPLE 256
 
-/* cached IDENTIFY strings for the hardware-info API (hw.c) */
+typedef struct {
+    uint16_t base;
+    uint16_t ctrl;
+    uint8_t  dev;          /* master/slave LBA mode device select */
+    uint32_t sectors;
+    uint8_t  present;
+} ata_drv_t;
+
+static ata_drv_t g_drv[ATA_DRIVES];
+static int       g_scanned = 0;
+static int       g_count    = 0;
+
+/* cached IDENTIFY strings for the hardware-info API (drive 0) */
 static char g_model[41], g_serial[21], g_fw[9];
 static int  g_lba48;
 
-static void ata_select(uint32_t lba) {
-    outb(g_base + 6, g_dev | ((lba >> 24) & 0x0F));   /* LBA28 hi nibble */
+static void ata_select(const ata_drv_t *d, uint32_t lba) {
+    outb(d->base + 6, d->dev | ((lba >> 24) & 0x0F));   /* LBA28 hi nibble */
 }
 
 /* Wait until the drive is not busy. */
-static void ata_wait_ready(void) {
+static void ata_wait_ready(const ata_drv_t *d) {
     for (int t = 0; t < 10000000; t++) {
-        if (!(inb(g_base + 7) & 0x80)) break;          /* clear BSY */
+        if (!(inb(d->base + 7) & 0x80)) break;          /* clear BSY */
         task_maybe_yield();                /* let other tasks run */
     }
 }
 
 /* Wait for DRQ (data transfer ready); -1 on error/timeout, 0 on ready. */
-static int ata_wait_drq(void) {
+static int ata_wait_drq(const ata_drv_t *d) {
     for (int t = 0; t < 10000000; t++) {
-        uint8_t st = inb(g_base + 7);
+        uint8_t st = inb(d->base + 7);
         if (st & 0x80) { task_maybe_yield(); continue; }  /* still busy */
         if (st & 0x01) return -1;                    /* error */
         if (st & 0x08) return 0;                     /* DRQ: data ready */
@@ -50,16 +67,22 @@ static int ata_wait_drq(void) {
 
 /* Try IDENTIFY on one slot.  Returns 0 + *sectors on success. */
 static int ata_try_identify(uint16_t base, uint16_t ctrl,
-                            uint8_t dev, uint32_t *sectors) {
+                            uint8_t identify_dev, uint32_t *sectors,
+                            uint16_t *id_out) {
     uint8_t st;
 
     /* wait for the bus to be idle before touching the slot */
-    for (int t = 0; t < 10000000; t++) {
-        st = inb(base + 7);
-        if (!(st & 0x80)) break;
+    {
+        int idle_dead = 0;
+        for (int t = 0; t < ATA_PROBE_WAIT_MAX; t++) {
+            st = inb(base + 7);
+            if (!(st & 0x80)) break;
+            /* open bus: BSY stuck high with no decoder behind the port */
+            if (st == 0xFF && ++idle_dead >= ATA_PROBE_DEAD_SAMPLE) break;
+        }
     }
 
-    outb(base + 6, dev);                    /* select device */
+    outb(base + 6, identify_dev);          /* select device */
     for (int i = 0; i < 4; i++) inb(ctrl);  /* 400ns settle */
     outb(base + 2, 0);                      /* sector count = 0 */
     outb(base + 3, 0);                      /* LBA low  = 0 */
@@ -68,11 +91,20 @@ static int ata_try_identify(uint16_t base, uint16_t ctrl,
     outb(base + 7, CMD_IDENTIFY);
 
     int got = 0;
-    for (int t = 0; t < 10000000; t++) {
+    int dead = 0;
+    for (int t = 0; t < ATA_PROBE_WAIT_MAX; t++) {
         st = inb(base + 7);
-        if (st & 0x80) continue;            /* busy */
-        if (st & 0x01) break;               /* error: no device here */
-        if (st & 0x08) { got = 1; break; }  /* DRQ: data ready */
+        if (st & 0x80) { dead = 0; continue; }  /* busy */
+        if (st & 0x01) break;                   /* error: no device here */
+        if (st & 0x08) { got = 1; break; }      /* DRQ: data ready */
+        /* No BSY/ERR/DRQ.  An empty slave/open bus leaves the status at
+         * a constant 0x00 or 0xFF; after a short stable run there is
+         * no device coming, so stop probing this slot. */
+        if (st == 0x00 || st == 0xFF) {
+            if (++dead >= ATA_PROBE_DEAD_SAMPLE) break;
+        } else {
+            dead = 0;
+        }
     }
     if (!got) return -1;
 
@@ -90,45 +122,12 @@ static int ata_try_identify(uint16_t base, uint16_t ctrl,
                        | ((uint64_t)id[102] << 32)
                        | ((uint64_t)id[103] << 48);
         /* the driver issues 28-bit LBA commands only, so the honest
-         * reportable maximum is 0x0FFFFFFF sectors (128 GiB) - the old
-         * 0xFFFFFFFF clamp advertised space it could not address */
+         * reportable maximum is 0x0FFFFFFF sectors (128 GiB) */
         lba28 = (lba48 > 0x0FFFFFFFu) ? 0x0FFFFFFFu : (uint32_t)lba48;
     }
     if (lba28 == 0) return -1;
     if (sectors) *sectors = lba28;
-
-    /* cache the descriptive strings for the hardware-info API:
-     * every string word is byte-swapped (high byte printed first). */
-    {
-        static uint16_t *idcache;
-        idcache = id;                    /* keep the parse close to the data */
-        int o = 0;
-        for (int w = 27; w <= 46 && o < 39; w++) {
-            g_model[o++] = (char)(id[w] >> 8);
-            g_model[o++] = (char)(id[w] & 0xFF);
-        }
-        g_model[o] = 0;
-        o = 0;
-        for (int w = 10; w <= 19 && o < 19; w++) {
-            g_serial[o++] = (char)(id[w] >> 8);
-            g_serial[o++] = (char)(id[w] & 0xFF);
-        }
-        g_serial[o] = 0;
-        o = 0;
-        for (int w = 23; w <= 26 && o < 7; w++) {
-            g_fw[o++] = (char)(id[w] >> 8);
-            g_fw[o++] = (char)(id[w] & 0xFF);
-        }
-        g_fw[o] = 0;
-        g_lba48 = (id[83] & 0x0400) ? 1 : 0;   /* word 83 bit 10 */
-        (void)idcache;
-        /* trim trailing spaces on model/serial */
-        for (int which = 0; which < 2; which++) {
-            char *s = which ? g_serial : g_model;
-            int l = 0; while (s[l]) l++;
-            while (l > 0 && s[l - 1] == ' ') s[--l] = 0;
-        }
-    }
+    if (id_out) { for (int w = 0; w < 256; w++) id_out[w] = id[w]; }
     return 0;
 }
 
@@ -137,71 +136,137 @@ const char *ata_serial_str(void)  { return g_serial; }
 const char *ata_fw_str(void)      { return g_fw; }
 int         ata_lba48_sup(void)   { return g_lba48; }
 
-/* Probe all four IDE slots; remember the first working one. */
-int ata_identify(uint32_t *sectors) {
-    /* identify_dev selects without LBA bit (0xA0/0xB0, traditional for
-     * IDENTIFY); lba_dev is what subsequent reads/writes must use. */
+/* Probe all four IDE slots; remember every answering drive. */
+int ata_scan(void) {
+    if (g_scanned) return g_count;
     static const struct slot { uint16_t base, ctrl; uint8_t identify_dev, lba_dev; } slots[4] = {
         { 0x1F0, 0x3F6, 0xA0, 0xE0 },   /* primary   master */
         { 0x1F0, 0x3F6, 0xB0, 0xF0 },   /* primary   slave  */
         { 0x170, 0x376, 0xA0, 0xE0 },   /* secondary master */
         { 0x170, 0x376, 0xB0, 0xF0 },   /* secondary slave  */
     };
-    for (int i = 0; i < 4; i++) {
+    g_count = 0;
+    btime_mark("A0 ata_scan 4 slots");
+    for (int i = 0; i < ATA_DRIVES; i++) {
         uint32_t sec = 0;
+        uint16_t id[256];
         if (ata_try_identify(slots[i].base, slots[i].ctrl,
-                             slots[i].identify_dev, &sec) == 0 && sec > 0) {
-            g_base = slots[i].base;
-            g_ctrl = slots[i].ctrl;
-            g_dev  = slots[i].lba_dev;   /* LBA mode for data commands */
-            if (sectors) *sectors = sec;
-            return 0;
+                             slots[i].identify_dev, &sec, id) == 0 && sec > 0) {
+            ata_drv_t *d = &g_drv[g_count];
+            d->base = slots[i].base;
+            d->ctrl = slots[i].ctrl;
+            d->dev  = slots[i].lba_dev;
+            d->sectors = sec;
+            d->present = 1;
+            /* cache descriptive strings for drive 0 only */
+            if (g_count == 0) {
+                int o = 0;
+                for (int w = 27; w <= 46 && o < 39; w++) {
+                    g_model[o++] = (char)(id[w] >> 8);
+                    g_model[o++] = (char)(id[w] & 0xFF);
+                }
+                g_model[o] = 0;
+                o = 0;
+                for (int w = 10; w <= 19 && o < 19; w++) {
+                    g_serial[o++] = (char)(id[w] >> 8);
+                    g_serial[o++] = (char)(id[w] & 0xFF);
+                }
+                g_serial[o] = 0;
+                o = 0;
+                for (int w = 23; w <= 26 && o < 7; w++) {
+                    g_fw[o++] = (char)(id[w] >> 8);
+                    g_fw[o++] = (char)(id[w] & 0xFF);
+                }
+                g_fw[o] = 0;
+                g_lba48 = (id[83] & 0x0400) ? 1 : 0;
+                for (int which = 0; which < 2; which++) {
+                    char *s = which ? g_serial : g_model;
+                    int l = 0; while (s[l]) l++;
+                    while (l > 0 && s[l - 1] == ' ') s[--l] = 0;
+                }
+            }
+            g_count++;
+        }
+        {
+            char tag[12];
+            tag[0] = 'A'; tag[1] = '1'; tag[2] = (char)('0' + i);
+            tag[3] = ' '; tag[4] = sec > 0 ? '1' : '0'; tag[5] = 0;
+            btime_mark(tag);
         }
     }
-    return -1;
+    g_scanned = 1;
+    btime_mark("A2 ata_scan done");
+    return g_count;
 }
 
-int ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
-    uint8_t *p = (uint8_t *)buf;
-    if (count == 0) return -1;
+int ata_drive_count(void) { return g_scanned ? g_count : ata_scan(); }
+uint32_t ata_drive_sectors(int d) {
+    if (d < 0 || d >= ATA_DRIVES || !g_drv[d].present) return 0;
+    return g_drv[d].sectors;
+}
 
-    ata_wait_ready();
-    ata_select(lba);
-    outb(g_base + 2, count);
-    outb(g_base + 3, (uint8_t)lba);
-    outb(g_base + 4, (uint8_t)(lba >> 8));
-    outb(g_base + 5, (uint8_t)(lba >> 16));
-    outb(g_base + 7, CMD_READ);
+static const ata_drv_t *ata_bundle(int d) {
+    if (d < 0 || d >= ATA_DRIVES || !g_drv[d].present) return 0;
+    return &g_drv[d];
+}
+
+int ata_read(int d, uint32_t lba, uint8_t count, void *buf) {
+    const ata_drv_t *drv = ata_bundle(d);
+    uint8_t *p = (uint8_t *)buf;
+    if (!drv || count == 0) return -1;
+
+    ata_wait_ready(drv);
+    ata_select(drv, lba);
+    outb(drv->base + 2, count);
+    outb(drv->base + 3, (uint8_t)lba);
+    outb(drv->base + 4, (uint8_t)(lba >> 8));
+    outb(drv->base + 5, (uint8_t)(lba >> 16));
+    outb(drv->base + 7, CMD_READ);
 
     for (int s = 0; s < count; s++) {
-        if (ata_wait_drq() != 0) {
-
-        }
+        /* #123: a DRQ timeout/error must abort the read and surface -1,
+         * symmetric with ata_write(); continuing to clock the data
+         * port would hand the caller stale/garbage sectors as "success". */
+        if (ata_wait_drq(drv) != 0) return -1;
         uint16_t *w = (uint16_t *)(p + s * ATA_SECTOR_SIZE);
-        for (int i = 0; i < 256; i++) w[i] = inw(g_base);
+        for (int i = 0; i < 256; i++) w[i] = inw(drv->base);
     }
-    ata_wait_ready();
+    ata_wait_ready(drv);
     return 0;
 }
 
-int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
+int ata_write(int d, uint32_t lba, uint8_t count, const void *buf) {
+    const ata_drv_t *drv = ata_bundle(d);
     const uint8_t *p = (const uint8_t *)buf;
-    if (count == 0) return -1;
+    if (!drv || count == 0) return -1;
 
-    ata_wait_ready();
-    ata_select(lba);
-    outb(g_base + 2, count);
-    outb(g_base + 3, (uint8_t)lba);
-    outb(g_base + 4, (uint8_t)(lba >> 8));
-    outb(g_base + 5, (uint8_t)(lba >> 16));
-    outb(g_base + 7, CMD_WRITE);
+    ata_wait_ready(drv);
+    ata_select(drv, lba);
+    outb(drv->base + 2, count);
+    outb(drv->base + 3, (uint8_t)lba);
+    outb(drv->base + 4, (uint8_t)(lba >> 8));
+    outb(drv->base + 5, (uint8_t)(lba >> 16));
+    outb(drv->base + 7, CMD_WRITE);
 
     for (int s = 0; s < count; s++) {
-        if (ata_wait_drq() != 0) return -1;
+        if (ata_wait_drq(drv) != 0) return -1;
         const uint16_t *w = (const uint16_t *)(p + s * ATA_SECTOR_SIZE);
-        for (int i = 0; i < 256; i++) outw(g_base, w[i]);
+        for (int i = 0; i < 256; i++) outw(drv->base, w[i]);
     }
-    outb(g_base + 7, CMD_FLUSH);                       /* flush write cache */
-    ata_wait_ready();
+    outb(drv->base + 7, CMD_FLUSH);                       /* flush write cache */
+    ata_wait_ready(drv);
+    return 0;
+}
+
+/* ---- legacy single-drive wrappers (drive 0) ---- */
+int ata_read_sectors(uint32_t lba, uint8_t count, void *buf) {
+    return ata_read(0, lba, count, buf);
+}
+int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
+    return ata_write(0, lba, count, buf);
+}
+int ata_identify(uint32_t *sectors) {
+    if (ata_scan() == 0) return -1;
+    if (sectors) *sectors = g_drv[0].sectors;
     return 0;
 }

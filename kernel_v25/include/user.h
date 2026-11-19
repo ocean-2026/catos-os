@@ -6,7 +6,7 @@
  * CatOS user + capability security model (v2.13).
  *
  * Two persistent stores on the FAT32 volume:
- *   /etc/passwd  - one line per user:  name:uid:gid:home:shell:caps:passhash
+ *   /etc/passwd  - one line per user:  name:uid:gid:home:shell:caps:pw
  *   /etc/acl     - one line per path:  path:uid:gid:mode   (12-bit unix mode)
  *
  * A task carries its spawning user's uid/gid/caps (task_t).  The kernel
@@ -27,6 +27,18 @@
 #define CAP_SYS      0x0040u   /* reserved (reboot, kernel introspection)          */
 #define CAP_ALL      0xFFFFFFFFu
 
+/* v2.25 fine-grained split (append-only; broad bits stay valid and each
+ * gate accepts the broad bit OR its fine successor):
+ *   CAP_FSADMIN -> CAP_FORMAT (0x0080) + CAP_FSCK (0x0100)
+ *   CAP_DEVICE  -> CAP_RAWIO  (0x0200) + CAP_HWINFO (0x0400)
+ *   CAP_SYS     -> CAP_REBOOT (0x0800) + CAP_DIAG  (0x1000) */
+#define CAP_FORMAT   0x0080u
+#define CAP_FSCK     0x0100u
+#define CAP_RAWIO    0x0200u
+#define CAP_HWINFO   0x0400u
+#define CAP_REBOOT   0x0800u
+#define CAP_DIAG     0x1000u
+
 #define MAX_USERS    32
 #define ACL_MAX      256
 
@@ -37,7 +49,20 @@ typedef struct {
     char     home[48];
     char     shell[32];
     uint32_t caps;
-    uint32_t passhash;   /* 0 = no password (open login)                       */
+    /* password record, stored verbatim in /etc/passwd field 7:
+     *   ""                        = open account (no password)
+     *   "<8 hex>"                 = legacy djb2 (pre-v2.22, verified then
+     *                               transparently upgraded on next login)
+     *   "$S$<8hex salt>$<8hex>"   = v1 salted iterated FNV-1a (v2.22),
+     *                               32-bit digest, 32-bit salt; verified then
+     *                               transparently upgraded on next login.
+     *   "$S$<16hex salt>$<32hex>" = v2 salted iterated FNV-1a (v2.51),
+     *                               128-bit digest (four 32-bit lanes),
+     *                               64-bit salt, rounds configurable.
+     * NOT cryptographic -- no crypto primitives in the kernel; memory-hard
+     * schemes (Argon2/scrypt) are deferred by design.  The goal is to resist
+     * shoulder-surfing AND cheap offline dictionary scans. */
+    char     pw[64];
     int      used;
 } user_rec_t;
 
@@ -63,11 +88,33 @@ int         user_set_pw(const char *name, const char *pw);
 int         user_set_caps(const char *name, uint32_t caps);
 int         user_save(void);                     /* rewrite /etc/passwd          */
 uint32_t    user_hash_pw(const char *pw);       /* djb2, non-cryptographic     */
+/* v2.25 preset capability templates: admin / operator / developer /
+ * viewer / guest.  Returns 0 and fills *out, or -1 for an unknown name. */
+int         user_preset_caps(const char *preset, uint32_t *out);
+int         user_pw_is_set(const user_rec_t *u);/* non-empty password record    */
+void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      */
+
+/* ---- v2.53 supplementary groups (persistent /etc/group) ----
+ * Line format: name:gid:member,member,...  Members are stored as NAMES on
+ * disk and resolved to uids against /etc/passwd at load time.  The check
+ * path (fs_perm_check) consults the table by uid, so a task needs no
+ * per-task credential array; per-task supplementary sets are deferred. */
+#define GROUP_MAX      16
+#define GROUP_MEMBERS   8
+int         group_db_init(void);                /* load /etc/group (or empty)   */
+int         group_add(const char *name, const char *member);
+        /* create (next gid) and/or append a member; returns gid, negative err */
+void        group_remove(const char *name);     /* roll back a created group    */
+int         group_save(void);                   /* rewrite /etc/group           */
+int         user_in_group(int uid, int gid);    /* 1 = uid belongs to gid       */
+int         group_info(int idx, char *name_out, int nlen, int *gid_out);
+        /* iterate used slots; returns member count, -1 past end              */
 
 /* ---- access control list (persistent /etc/acl) ---- */
 void        acl_init(void);
 int         acl_lookup(const char *path, int *uid, int *gid, int *mode);
 int         acl_set(const char *path, int uid, int gid, int mode);  /* insert/replace */
+int         acl_unset(const char *path);   /* v2.24: drop the entry (rm) */
 int         acl_default(const char *path, int uid, int gid, int mode);/* seed only   */
 int         acl_save(void);
 

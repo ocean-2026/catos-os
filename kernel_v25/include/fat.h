@@ -46,18 +46,41 @@ typedef struct {
 } fat_dirent_t;
 
 /* probe the drive; returns 0 if a FAT32 volume is ready, -1 otherwise.
- * On success caches the FAT table and geometry. */
+ * On success caches the FAT table and geometry.  This binds volume
+ * slot 0 (the root volume) to the first FAT32 partition on drive 0. */
 int  fat_probe(void);
 /* build a fresh FAT32 volume (size from ATA IDENTIFY) and standard
  * top-level directories. */
-void fat_mkfs(void);
+int  fat_mkfs(void);            /* v2.32: -1 = no IDE disk */
+
+/* P2: multi-volume support.  Up to FAT_VOL_MAX volumes can be probed;
+ * the active volume is what every fat_* operation touches. */
+#define FAT_VOL_MAX 4
+/* Probe a FAT32 volume at `drive` LBA `part_lba` (partition `size`
+ * sectors, informational).  On success fills *out_slot with the volume
+ * index and activates it.  0 ok / -1 failure. */
+int  fat_mount_partition(uint8_t drive, uint32_t part_lba, uint32_t size,
+                         int *out_slot);
+/* Switch the active volume and reload its FAT #1 into the shared cache. */
+void fat_activate(int slot);
+/* Current active volume slot. */
+int  fat_active_slot(void);
+/* #142+: true if any volume slot (root included) already maps this partition. */
+int  fat_volume_owns(uint8_t drive, uint32_t part_lba);
+/* Release a probed extra volume slot so it can be probed again. */
+void fat_release_slot(int slot);
 
 uint32_t fat_root(void);                    /* root directory cluster */
 uint32_t fat_cluster_size(void);            /* bytes per cluster */
 uint32_t fat_disk_sectors(void);            /* total sectors on the drive */
+uint32_t fat_total_clusters(void);          /* v2.34: volume stats for df */
+uint32_t fat_free_clusters(void);           /* scan FAT for zero entries  */
 
 /* convert a user name ("note", "a.txt") to an 8.3 padded 11-byte name */
 void fat_name83(const char *name, uint8_t out[11]);
+/* v2.48: 1 = name carries a FAT-forbidden character (control code,
+ * `" * / : < > ? \ |`, trailing space/dot) or is empty. */
+int  fat_name_illegal(const char *name);
 /* render an 8.3 name back to a human string (lower-case) */
 void fat_name_show(const uint8_t *n83, char *out);
 
@@ -90,8 +113,6 @@ void fat_list_dir(uint32_t dirclus, void (*cb)(const char *name,
 int  fat_lookup(uint32_t dirclus, const uint8_t *name83, fat_dirent_t *out);
 int  fat_mkdir(uint32_t parent, const uint8_t *name83);   /* 0 ok */
 int  fat_mkfile(uint32_t parent, const uint8_t *name83);  /* 0 ok */
-/* same as fat_mkfile(), but the new entry carries `attr` */
-int  fat_mkfile_attr(uint32_t parent, const uint8_t *name83, uint8_t attr);
 /* update size (and cluster) of an existing entry in dir */
 int  fat_update_entry(uint32_t dirclus, const uint8_t *name83,
                       uint32_t cluster, uint32_t size);

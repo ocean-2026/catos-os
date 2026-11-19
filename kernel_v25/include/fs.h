@@ -39,13 +39,14 @@ typedef struct fs_entry {
 
 void       fs_init(void);                 /* probe FAT32 volume */
 int        fs_fs_ready(void);             /* 1 when a FAT32 volume is mounted */
-void       fs_format(void);               /* create FAT32 volume + std dirs */
+int        fs_format(void);               /* v2.32: -1 = no IDE disk */
 uint16_t   fs_cwd_index(void);
 int        fs_chdir(const char *path);    /* empty path = root */
 int        fs_mkdir(const char *path);
 int        fs_touch(const char *path);    /* create empty file if absent */
 void       fs_list(const char *path);     /* NULL = current dir */
 int        fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn);
+int        fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn); /* v2.28: dirs too, dir names end in '/' */
 void       fs_pwd(char *out, int outlen); /* absolute path of cwd */
 /* Canonical absolute path: abs_path() + ASCII lowercase folding.  FAT32
  * is case-insensitive, so security lookups (ACL) MUST compare this form
@@ -88,5 +89,21 @@ int  fs_set_attr(const char *path, uint8_t attr);
 int  fs_read_at(const char *path, char *buf, int offset, int max);
 int  fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mode);
 int  fs_delete(const char *path);
+/* P2: Linux-style mounting.  fs_mount() binds a probed partition (spec:
+ * partition number on drive 0, or "hd<d>p<e>") to an existing empty
+ * directory.  fs_umount detaches it.  fs_mount_list() prints the mount
+ * table; fs_df() prints per-mountpoint usage. */
+int  fs_mount(const char *spec, const char *dir);
+int  fs_umount(const char *dir);
+void fs_mount_list(void);
+void fs_df(void);
+
+/* v2.24 directory recursion support */
+int  fs_is_dir(const char *path);            /* 1 = resolved path is a dir */
+int  fs_rmdir(const char *path);             /* remove an EMPTY directory:
+                                              * 0 ok, -1 bad/noent, -2 not a dir
+                                              * (or root), -3 not empty */
+int  fs_rmdir_force(const char *path);       /* v2.50: skip the emptiness
+                                              * re-check; for rm -r only */
 
 #endif

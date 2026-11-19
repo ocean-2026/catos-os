@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "usb.h"
 #include "io.h"
 #include "vga.h"
 #include "ime.h"
@@ -48,15 +49,6 @@ void kb_irq(void) {
     console_wake_all();                 /* wake tasks blocked for a key */
 }
 
-/* Feed a scancode from the USB HID path into the same ring buffer;
- * usb_poll() calls this rather than calling kb_irq(), keeping IRQ1
- * and USB input on the same consumer path (kb_getkey / rl_hist). */
-void kb_usb_feed(uint8_t sc) {
-    uint32_t n = (scq_head + 1) % SCQ_SZ;
-    if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
-    console_wake_all();
-}
-
 static int scq_pop(void) {
     if (scq_tail == scq_head) return -1;
     uint8_t sc = scq[scq_tail];
@@ -66,6 +58,15 @@ static int scq_pop(void) {
 
 /* non-blocking: 1 when at least one scancode is pending (for `top`) */
 int kb_peek(void) { return scq_tail != scq_head; }
+
+/* v2.26: USB keyboard path -- HID reports are translated to scancode
+ * set 1 by usb_uhci.c and pushed through the SAME queue as PS/2, so the
+ * whole decoder stack (shift/caps/ctrl, IME, scrollback) works unchanged. */
+void kb_usb_feed(uint8_t sc) {
+    uint32_t n = (scq_head + 1) % SCQ_SZ;
+    if (n != scq_tail) { scq[scq_head] = sc; scq_head = n; }
+    console_wake_all();
+}
 
 void kb_init(void) {
     line_len = line_cur = 0;
@@ -89,6 +90,7 @@ static int sc_to_key(uint8_t sc) {
     case 0x52: return KB_INS;
     case 0x49: return KB_PGUP;
     case 0x51: return KB_PGDN;
+    case 0x0F: return KB_TAB;         /* v2.28: TAB for completion */
     case 0x3B: return KB_F1;
     case 0x3C: return KB_F2;
     case 0x3D: return KB_F3;
@@ -124,9 +126,12 @@ static int e0_map(int k, int ctrl_held) {
 /* blocking: waits for the next scancode (yields the CPU while waiting) */
 static int kb_next_scancode(void) {
     for (;;) {
+        usb_service();                     /* v2.29: latch hot-plug attach */
         int sc = scq_pop();
         if (sc >= 0) return sc;
-        task_block(T_WAIT_KB);
+        /* poll, don't block: usb_service() must run even with no key
+         * producer alive (hot-plugged USB keyboard before attach). */
+        task_sleep_ticks(2);
     }
 }
 
@@ -134,6 +139,7 @@ static int kb_next_scancode(void) {
 extern volatile uint32_t timer_ticks;
 static int kb_next_scancode_timed(uint32_t deadline) {
     for (;;) {
+        usb_service();                     /* v2.29 */
         int sc = scq_pop();
         if (sc >= 0) return sc;
         if ((int32_t)(timer_ticks - deadline) >= 0) return -1;
@@ -253,6 +259,13 @@ int kb_getkey(void) {
 static char rl_hist[RL_HIST][KB_BUF];
 static int  rl_hist_head, rl_hist_count;
 
+int kb_hist_count(void) { return rl_hist_count; }
+const char *kb_hist_get(int i) {           /* 0 = oldest */
+    if (i < 0 || i >= rl_hist_count) return "";
+    int idx = (rl_hist_head - rl_hist_count + i + RL_HIST * 4) % RL_HIST;
+    return rl_hist[idx];
+}
+
 static void rl_hist_push(const char *s) {
     if (!s || !*s) return;
     if (rl_hist_count) {
@@ -328,6 +341,10 @@ static uint8_t rl_tok_color(const char *tok, int n, int index, uint8_t base) {
     return base;
 }
 
+/* v2.28: completer hook registered by the shell. */
+static rl_complete_fn rl_completer;
+void kb_set_completer(rl_complete_fn fn) { rl_completer = fn; }
+
 static void rl_redraw(int x0, int y0, uint8_t base) {
     int cols = con_cols();
     if (x0 >= cols) x0 = cols - 1;
@@ -378,6 +395,7 @@ int kb_readline(char *buf, int len) {
     if (len <= 0) return 0;
     int x0 = 0, y0 = 0;
     con_get_cursor(&x0, &y0);
+    ime_set_anchor(y0);             /* v2.25: candidate bar under the line */
     uint8_t base = con_get_fg();
     int cols = con_cols();
     int hist_pos = -1;                  /* -1 = the draft line being typed */
@@ -420,6 +438,29 @@ int kb_readline(char *buf, int len) {
             }
         }
 
+        if (k == KB_CTRL_C) {          /* v2.28: cancel the line */
+            line_len = line_cur = 0; line[0] = 0;
+            rl_redraw(x0, y0, base);
+            buf[0] = 0;
+            con_set_fg(base);
+            return 2;
+        }
+        if (k == KB_TAB && rl_completer) {
+            char out[KB_BUF], bar[160];
+            out[0] = 0; bar[0] = 0;
+            if (rl_completer(line, line_cur, out, bar) == 1 && out[0]) {
+                int j = 0;
+                for (; out[j] && j < KB_BUF - 1; j++) line[j] = out[j];
+                line[j] = 0; line_len = line_cur = j;
+                rl_redraw(x0, y0, base);
+            }
+            if (bar[0]) {
+                int br = y0 + 1;
+                if (br >= con_rows()) br = y0 - 1;
+                con_status_bar_at(br, bar);
+            }
+            continue;
+        }
         if (k == '\n') {
             int n = line_len;
             if (n >= len) n = len - 1;

@@ -26,6 +26,7 @@ usage:
   python tests/user_regress.py [catos.iso] [--qemu PATH]
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +55,10 @@ def main():
         if i + 1 < len(args):
             qemu = args[i + 1]
 
+    port = MONITOR_PORT
+    if "--port" in args:
+        i = args.index("--port")
+        port = int(args[i + 1])
     iso = os.path.abspath(iso or os.path.join(REPO, "kernel_v25", "catos.iso"))
     qemu = find_qemu(qemu)
     if not qemu:
@@ -68,7 +73,7 @@ def main():
         with open(disk, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)
 
-    proc, s = _qemu_boot(qemu, iso, MONITOR_PORT, disk=disk)
+    proc, s = _qemu_boot(qemu, iso, port, disk=disk)
     results = []
 
     def step(name, ok, note):
@@ -185,6 +190,37 @@ def main():
         do("su", 1.2)
         txt = screen()
         step("su-root", "logged in as root" in txt, "root: no password")
+
+        # 10b) v2.51 password hash: set a password, record is the v2 format
+        #       ($S$<16 hex 64-bit salt>$<32 hex 128-bit digest>).
+        clear()
+        do("passwd user hunter2", 1.2)
+        txt = screen()
+        step("passwd-set", "password set" in txt, "root admin sets user password")
+        clear()
+        do("cat /etc/passwd", 1.2)
+        txt = re.sub(r"\s+", "", screen())
+        v2 = re.search(r"\$S\$[0-9a-f]{16}\$[0-9a-f]{32}", txt)
+        step("pw-record-v2", v2 is not None,
+             "record holds 64-bit salt + 128-bit digest")
+        # 10c) wrong password denied; correct password logs in
+        clear()
+        do("login user wrongpass", 1.2)
+        txt = screen()
+        step("pw-wrong-denied", "incorrect password" in txt,
+             "wrong password rejected")
+        clear()
+        do("login user hunter2", 1.2)
+        txt = screen()
+        step("pw-right-ok", "logged in as user" in txt,
+             "correct password logs in")
+        clear()
+        do("whoami", 1.0)
+        txt = screen()
+        step("session-user-pw", "user@catos" in txt, "session = user")
+        # back to root for the legend step
+        clear()
+        do("su", 1.2)
 
         # 11) capability legend
         clear()

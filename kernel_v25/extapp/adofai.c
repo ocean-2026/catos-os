@@ -603,19 +603,15 @@ int ce_main(void) {
     for (;;) {
         api->cls();
         w("===== ADOFAI (TEXT) =====\n\n");
-        w("  [1] EASY Breeze      (72 tiles, bpm 90)\n");
-        w("  [2] NORMAL Flow      (132 tiles, bpm 120)\n");
-        w("  [3] HARD Surge       (204 tiles, bpm 160)\n");
-        w("  [4] MARATHON Run     (200 tiles, bpm 180)\n");
-        w("  [5] LOAD CUSTOM LEVEL\n\n");
+        w("  [1] DEMO 1 TUTORIAL\n");
+        w("  [2] DEMO 2 TWIRL & SPEED\n");
+        w("  [3] LOAD LEVEL\n\n");
         w("  ESC = EXIT\n\n");
-        c = wait_key();                    /* ASCII: 27 ESC, '1'..'5' */
+        c = wait_key();                    /* ASCII: 27 ESC, '1'..'3' */
         if (c == 27) break;                /* ESC -> exit */
-        if (c == '1') { beep(440, 60); if (load_and_play("/BIN/EASY.TAD")) break; }
-        else if (c == '2') { beep(494, 60); if (load_and_play("/BIN/NORMAL.TAD")) break; }
-        else if (c == '3') { beep(523, 60); if (load_and_play("/BIN/HARD.TAD")) break; }
-        else if (c == '4') { beep(587, 60); if (load_and_play("/BIN/MARATHON.TAD")) break; }
-        else if (c == '5') {
+        if (c == '1') { beep(440, 60); if (load_and_play("/BIN/DEMO1.TAD")) break; }
+        else if (c == '2') { beep(494, 60); if (load_and_play("/BIN/DEMO2.TAD")) break; }
+        else if (c == '3') {
             char path[64];
             api->cls();
             w("Enter level path (.TAD / .AD):\n> ");

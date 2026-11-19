@@ -517,5 +517,6 @@ render_be_t be_vbe = {
     .set_palette= vbe_set_palette,
     .scroll     = vbe_scroll,
     .draw_cursor= vbe_draw_cursor,
-    .diag       = vbe_diag
+    .diag       = vbe_diag,
+    .cell_w     = 8, .cell_h = 16
 };

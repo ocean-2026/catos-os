@@ -1,0 +1,67 @@
+=== A20 taskstat-abuse ===
+under_test_iso_sha256=39d353d317fdbd5b
+host_free_mb=4719 guests=1
+vector  : v2.48 task_get: idx OOB + poison out pointers + page-span
+run     : run /bin/ATKSTAT.CE 
+expect  : OK: -22/EFAULT codes only; slot still works after
+result  : OK  (attacker task killed by its own ring3 fault, shell prompt back (defence held))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+text: back to 80x25 text mode (CJK via dynamic font slots)
+root@catos:/#
+root@catos:/#
+
+--- screen AFTER ---
+ATK-TASKSTAT: v2.48 task_get snapshot surface
+STEP 1: -- idx sweep: -1 .. 0x7FFFFFFF, 0xFFFFFFFF
+idx=-1 -22 idx=0 1 idx=7 0 idx=15 0 idx=16 -22 idx=2147483647 -22
+STEP 2: -- poison out pointers (valid idx 0)
+out=0x00000000 -22 out=0x00000fff -22 out=0x00001000 -22 out=0x000b8000 -22 out=
+0x000fffff -22 out=0x00100000 -22 out=0x00148000 -22 out=0x01ffffff -22 out=0x02
+000000 1 out=0x02080000 1
+[task 1 'ATKSTAT' killed: fault at eip=0x0208001a cr2=0x00000000]
+root@catos:/#
+
+--- faultinfo probe ---
+out=0x00000000 -22 out=0x00000fff -22 out=0x00001000 -22 out=0x000b8000 -22 out=
+0x000fffff -22 out=0x00100000 -22 out=0x00148000 -22 out=0x01ffffff -22 out=0x02
+000000 1 out=0x02080000 1
+[task 1 'ATKSTAT' killed: fault at eip=0x0208001a cr2=0x00000000]
+root@catos:/# faultinfo
+last fault: gpf ring0x00000003 task ATKSTAT tid0x00000001
+eip=0x0208001a cr2=0x00000000 err=0x00000000 efl=0x00010246 at tick 0x00000454
+root@catos:/#
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=017a1108
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010f8000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     016ba2e0 0000002f
+IDT=     016b9ae0 000007ff
+CR0=80000011 CR2=00000000 CR3=016dc000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+

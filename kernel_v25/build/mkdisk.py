@@ -39,7 +39,7 @@ FAT32_EOC = 0x0FFFFFFF
 
 STD_DIRS = ["dev", "etc", "bin", "sbin", "lib", "usr",
             "home", "root", "tmp", "var", "proc", "sys",
-            "mnt", "boot", "appdevelop"]
+            "mnt", "boot", "appdevelop", "pkg"]
 
 # fixed FAT timestamp: 2026-01-01 00:00
 DOS_DATE = ((2026 - 1980) << 9) | (1 << 5) | 1
@@ -346,6 +346,9 @@ def build(out_path, miB, with_files=True):
     for path, src in g.OPTIONAL:
         if os.path.exists(src):
             selected.append((path, src))
+    # NIGHT-P4: packaged .catpkg containers + index live under /pkg/
+    for path, src in getattr(g, "PKG_FILES", []):
+        selected.append((path, src))
     img._file_index = []
     if with_files:
         for path, src in selected:
@@ -359,6 +362,16 @@ def build(out_path, miB, with_files=True):
             img.dir_add(parent, os.path.basename(path), 0x20, first,
                         len(data))
             img._file_index.append((path, first, len(data)))
+        # NIGHT-P4: write the package index so a pre-populated disk has
+        # the same /pkg/PKGS.TXT the kernel seeds on a fresh volume.
+        if getattr(g, "PACKAGES", []):
+            idx = "".join("%s|%s|%s|%s\n" % (p["name"], p["version"],
+                                             p["desc"], p["file"])
+                          for p in g.PACKAGES)
+            pkg_clus = dirs.get("pkg")
+            if pkg_clus is not None:
+                first = img.write_file(idx.encode("utf-8"))
+                img.dir_add(pkg_clus, "PKGS.TXT", 0x20, first, len(idx))
     img.finalize_fsinfo()
 
     with open(out_path, "wb") as fh:

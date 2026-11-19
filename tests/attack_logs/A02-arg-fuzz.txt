@@ -1,0 +1,83 @@
+=== A02 arg-fuzz ===
+under_test_iso_sha256=d7c5176f21d7e7b7
+host_free_mb=4916 guests=1
+vector  : all 65 ABI slots x poison pointer/value tuples
+run     : run /bin/ATKARGS.CE 
+expect  : OK: every slot validates, error codes only
+result  : OK  (attacker task killed by its own ring3 fault, shell prompt back (defence held))
+cpu     : EIP=01021a00 IF=False stuck=False
+
+--- screen BEFORE ---
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$
+
+--- screen AFTER ---
+CatOS 0.3 -- A tiny Unix-like OS on GRUB Multiboot
+Architecture : i386 (32-bit x86)
+Bootloader   : GRUB 2 (ISO9660 / El Torito)
+Filesystem   : FAT32 on IDE (persistent)
+Display      : front-end + text/gfx back-ends
+Runs on      : QEMU / VMware / Bochs / real PC
+Type 'help' for a list of commands.
+autostart: banner.sh (not auto-executed; run it manually: run /etc/autoexec/bann
+er.sh)
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$ run /bin/ATKARGS.CE
+ATK-ARGS: 70-slot argument poison fuzz
+STEP 1: -- tuple (0,0,0,0)
+-3 ?0 -3 1 -1 -3 -3 -3 -3 34603016 0 00 0x000000000 0 0 0 -3 -3 0 -1 -1 0 -1 -1
+-1 -1 -1 0 0 1 0 -1 -1 -3 -3 -3 256 -1 -1 -1 -3 34603008 0 0 0 0 0 -22 -22 0 -22
+ -8 -8 0 -8 -8 -3
+[task 1 'ATKARGS' killed: page fault at eip=0x00000000 cr2=0x00000000]
+root@catos:/$
+
+--- faultinfo probe ---
+-1 -1 -1 0 0 1 0 -1 -1 -3 -3 -3 256 -1 -1 -1 -3 34603008 0 0 0 0 0 -22 -22 0 -22
+ -8 -8 0 -8 -8 -3
+[task 1 'ATKARGS' killed: page fault at eip=0x00000000 cr2=0x00000000]
+root@catos:/$ faultinfo
+last fault: page-fault ring0x00000003 task ATKARGS tid0x00000001
+eip=0x00000000 cr2=0x00000000 err=0x00000005 efl=0x00010246 at tick 0x000004e3
+pf bits: present read user
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000020 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=01645e8c
+EIP=01021a00 EFL=00000012 [----A--] CPL=0 II=0 A20=1 SMM=0 HLT=0
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010d4000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     015ebb40 0000002f
+IDT=     015eb340 000007ff
+CR0=80000011 CR2=00000000 CR3=015ed000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+
