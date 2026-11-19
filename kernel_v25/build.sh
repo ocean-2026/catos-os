@@ -109,6 +109,7 @@ esac
 
 echo "== generating built-in app blobs =="
 if [ -n "$PY" ]; then
+    "$PY" tools/gen_ascii_font.py >/dev/null 2>&1 || echo "WARNING: gen_ascii_font.py failed" >&2
     "$PY" build/gen_builtin.py
 else
     echo "ERROR: no python found for gen_builtin.py" >&2
@@ -120,7 +121,7 @@ $CC -m32 -c boot/boot.s -o build/boot.o
 echo "== compiling cpu.s =="
 $CC -m32 -c src/cpu.s -o build/cpu.o
 
-for src in src/usb_uhci.c src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/svga.c src/stubs.c src/ime.c src/keyboard.c src/keys_table.c src/mouse.c src/clip.c src/pager.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/part.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c src/serial_log.c src/user.c src/lang.c src/e1000.c src/es1371.c; do
+for src in src/usb_uhci.c src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/svga.c src/stubs.c src/ime.c src/keyboard.c src/keys_table.c src/mouse.c src/clip.c src/pager.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/part.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c src/serial_log.c src/user.c src/lang.c src/e1000.c src/es1371.c src/tui.c; do
     obj="build/$(basename $src .c).o"
     echo "== compiling $src =="
     $CC $CFLAGS -c $src -o $obj

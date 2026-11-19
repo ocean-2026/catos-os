@@ -149,15 +149,17 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
     fill_rect(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
+        int italic = (c->attrs & CON_ATTR_ITALIC) ? 1 : 0;
+        int bold   = (c->attrs & CON_ATTR_BOLD)    ? 1 : 0;
         for (int j = 0; j < 15; j++) {
-            unsigned row = g[j >> 1];
-            int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
+            unsigned row = g[j];
+            int ishift = italic && j < 5 ? 1 : 0;
             for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
-                int dx = i + shift;
+                int dx = i + ishift;
                 if (dx >= 7) continue;
                 px(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
+                if (bold && dx + 1 < 7)
                     px(ox + dx + 1, oy + j, f);
             }
         }
