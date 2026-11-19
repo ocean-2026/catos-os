@@ -39,6 +39,8 @@ enum {
     L_JOBS_NONE,
     L_LOG_NOJOB,
     L_ENV_NOSAVE,
+    L_DISPLAY_MODE,      /* v2.60: display mode name + status in help */
+    L_JOB_FOREGROUND,    /* v2.60: ^C foreground interrupt message */
     L_COUNT
 };
 

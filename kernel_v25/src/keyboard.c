@@ -497,6 +497,14 @@ int kb_readline(char *buf, int len) {
             con_set_paste_hook(0);
             return 2;
         }
+        if (k == KB_CTRL_Z) {          /* v2.60: suspend foreground job */
+            line_len = line_cur = 0; line[0] = 0;
+            rl_redraw(x0, y0, base);
+            buf[0] = 0;
+            con_set_fg(base);
+            con_set_paste_hook(0);
+            return 3;                  /* ^Z: signal caller to stop fg task */
+        }
         if (k == KB_TAB && rl_completer) {
             char out[KB_BUF], bar[160];
             out[0] = 0; bar[0] = 0;

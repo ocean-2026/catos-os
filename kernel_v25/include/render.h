@@ -125,6 +125,12 @@ uint32_t    con_palette(uint8_t idx);
 
 void        con_move_cursor(void);
 void        con_set_cursor(uint8_t x, uint8_t y);
+/* v2.60: snapshot cursor to bottom-left of live grid. */
+void        con_reset_cursor(void);
+/* v2.60: begin / end a high-frequency output burst.  Disables the slow
+ * per-char software-cursor sync during the burst so help, banners, etc.
+ * render fast; must always be paired with a matching con_unsuppress(). */
+void        con_suppress_cursor(int on);
 /* v2.21 T51: the shell line editor needs the live cursor position as the
  * anchor for in-place redraw after history / cursor-key edits. */
 void        con_get_cursor(int *x, int *y);

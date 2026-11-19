@@ -30,7 +30,9 @@ static const char *const tbl_en[L_COUNT] = {
     "passwd: passwords differ\n",
     "no background jobs\n",
     "log: no such task\n",
-    "warning: could not save /etc/env (setting is session-only)\n"
+    "warning: could not save /etc/env (setting is session-only)\n",
+    "display: running ",          /* v2.60: followed by mode name */
+    "^C: interrupting foreground task\n"   /* v2.60: ^C during fg task */
 };
 
 static const char *const tbl_zh[L_COUNT] = {
@@ -52,7 +54,9 @@ static const char *const tbl_zh[L_COUNT] = {
     "passwd：两次密码不一致\n",
     "当前没有后台任务\n",
     "log：找不到该任务\n",
-    "警告：无法保存 /etc/env（仅本次会话生效）\n"
+    "警告：无法保存 /etc/env（仅本次会话生效）\n",
+    "显示：运行于 ",             /* v2.60: 后接模式名 */
+    "^C：中断前台任务\n"         /* v2.60: 前台任务中按 Ctrl+C */
 };
 
 const char *tr(int id) {

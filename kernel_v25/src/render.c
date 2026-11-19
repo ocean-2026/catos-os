@@ -61,6 +61,9 @@ static int      u_need;
 /* animation / re-entrancy */
 static volatile uint32_t blink_ticks, blink_phase, blink_pending;
 static volatile int      render_busy;
+/* v2.60: suppress cursor paint during high-frequency output (help, etc.)
+ * to avoid cursor flicker from repeated sync_cursor calls. */
+static volatile int      display_suppress_cursor;
 static int pending_wide;        /* text-mode CJK needs a font-slot rebuild */
 static int dcx = -1, dcy = -1;  /* last software-cursor position */
 
@@ -241,6 +244,9 @@ static void sync_cursor(int force) {
         dcx = dcy = -1;
         return;
     }
+    /* v2.60: skip during bulk output to prevent cursor flicker on help, etc.
+     * Cursor will snap to current position after con_unsuppress_cursor(). */
+    if (display_suppress_cursor) return;
     if (force || dcx != cur_x || dcy != cur_y) {
         if (dcx >= 0) paint(dcx, dcy);
         paint(cur_x, cur_y);
@@ -679,6 +685,34 @@ void con_get_cursor(int *x, int *y) {
     if (y) *y = cur_y;
 }
 
+/* v2.60: snap cursor to bottom-left of live grid. Used after exiting
+ * an explicit scrollback view so the terminal cursor doesn't jump around
+ * when wheel scrolling stops or the user starts typing again. */
+void con_reset_cursor(void) {
+    if (!be) return;
+    cur_x = 0;
+    cur_y = rows - 1;
+    dcx = dcy = -1;
+    sync_cursor(1);
+}
+
+/* v2.60: suppress per-char cursor repaint during high-frequency output */
+void con_suppress_cursor(int on) {
+    display_suppress_cursor = on ? 1 : 0;
+}
+void con_unsuppress_cursor(void) {
+    display_suppress_cursor = 0;
+    /* Snap cursor to its real position — paint() will handle any
+     * movement since the suppression started. */
+    if (be && be->draw_cursor) {
+        if (dcx >= 0) paint(dcx, dcy);
+        paint(cur_x, cur_y);
+        dcx = cur_x; dcy = cur_y;
+    } else if (be && be->set_cursor) {
+        be->set_cursor(cur_x, cur_y);
+    }
+}
+
 void con_putc_at(uint8_t x, uint8_t y, char c) {
     if ((int)x >= cols || (int)y >= rows) return;
     break_block(x, y);
@@ -905,6 +939,7 @@ int con_scrollback(int delta) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) cells[y][x] = sb_live[y][x];
         sb_view = 0;
+        con_reset_cursor();         /* v2.60: cursor stays at bottom */
         sb_repaint();
         return 0;
     }
