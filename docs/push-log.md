@@ -22,3 +22,4 @@ git push https://x-access-token:${TOKEN}@github.com/ocean-2026/CatOS.git main
 | 2026-11-19 ~07:0x | 8c123df | `e8167f6..8c123df  main -> main`（IME 补字母缓冲断言 19/19） | `ls-remote` = 8c123df3c3c7…（复核通过） |
 | 2026-11-19 ~09:1x | e48f8f2 | `8c123df..e48f8f2  main -> main`（含 249e0a1 报告 §7、f437138 清误建目录、IME 光标格防御） | `ls-remote` = e48f8f2b55fa…（复核通过） |
 | 2026-11-19 ~09:2x | f064bd6 | `e48f8f2..f064bd6  main -> main`（#211 根因定案） | `ls-remote` = f064bd6（复核通过） |
+| 2026-11-19 ~09:3x | 5fd43d0 | `0c83e55..5fd43d0  main -> main`（报告 §8 双审结论） | `ls-remote` = 5fd43d061be6…（复核通过） |
