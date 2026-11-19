@@ -41,6 +41,7 @@ enum {
     L_ENV_NOSAVE,
     L_DISPLAY_MODE,      /* v2.60: display mode name + status in help */
     L_JOB_FOREGROUND,    /* v2.60: ^C foreground interrupt message */
+    L_THEME_UPDATED,     /* v2.61: "theme set to <name>"             */
     L_COUNT
 };
 

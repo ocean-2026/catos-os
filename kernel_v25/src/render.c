@@ -599,6 +599,9 @@ void render_init(void) {
         for (int x = 0; x < CON_MAX_COLS; x++) cell_blank(&cells[y][x]);
     be->clear(s_bg_rgb);
     sync_cursor(1);
+    /* v2.61: default to dark theme so the first prompt has proper tokens */
+    extern void con_apply_theme(int dark);
+    con_apply_theme(1);
 }
 
 void con_clear(void) {
@@ -653,6 +656,156 @@ void con_set_fg_rgb(uint32_t c) { s_fg_rgb = c & 0x00FFFFFFu;
 void con_set_attrs(uint8_t at)  { s_attrs = at; }
 uint8_t con_get_fg(void)        { return s_fg_idx; }
 uint8_t con_get_attrs(void)     { return s_attrs; }
+
+/* v2.61: named colour tokens mapped to the dark / light palettes below.
+ * The order MUST stay in sync with the two palette arrays. */
+static const char * const token_names[] = {
+    "canvas","surface","surfaceRaised","border","borderStrong",
+    "text","textMuted","textDisabled",
+    "accent","accentHover","focus","selectionBg",
+    "success","warning","error","info","link",
+    "diffAddBg","diffDelBg"
+};
+#define TOKEN_COUNT ((int)(sizeof(token_names)/sizeof(token_names[0])))
+
+/* Dark theme (default) -- GitHub-inspired, cold-toned near-black canvas.
+ * Light theme is g_light_tokens[]; switch via con_apply_theme(0). */
+static uint32_t g_dark_tokens[TOKEN_COUNT] = {
+    CON_RGB(0x0F,0x11,0x15), /* canvas */
+    CON_RGB(0x16,0x1A,0x20), /* surface */
+    CON_RGB(0x1D,0x23,0x2B), /* surfaceRaised */
+    CON_RGB(0x2A,0x31,0x3B), /* border */
+    CON_RGB(0x3A,0x43,0x50), /* borderStrong */
+    CON_RGB(0xD8,0xDE,0xE9), /* text */
+    CON_RGB(0x8B,0x95,0xA7), /* textMuted */
+    CON_RGB(0x5C,0x66,0x78), /* textDisabled */
+    CON_RGB(0x6C,0xB6,0xFF), /* accent */
+    CON_RGB(0x8C,0xC8,0xFF), /* accentHover */
+    CON_RGB(0x7D,0xD3,0xFC), /* focus */
+    CON_RGB(0x1E,0x3A,0x5F), /* selectionBg */
+    CON_RGB(0x7E,0xE2,0xA8), /* success */
+    CON_RGB(0xF6,0xC1,0x77), /* warning */
+    CON_RGB(0xFF,0x7A,0x85), /* error */
+    CON_RGB(0x79,0xB8,0xFF), /* info */
+    CON_RGB(0x82,0xAA,0xFF), /* link */
+    CON_RGB(0x12,0x35,0x1F), /* diffAddBg */
+    CON_RGB(0x3A,0x1D,0x22), /* diffDelBg */
+};
+static uint32_t g_light_tokens[TOKEN_COUNT] = {
+    CON_RGB(0xF6,0xF8,0xFA), /* canvas */
+    CON_RGB(0xFF,0xFF,0xFF), /* surface */
+    CON_RGB(0xEE,0xF2,0xF6), /* surfaceRaised */
+    CON_RGB(0xD0,0xD7,0xDE), /* border */
+    CON_RGB(0xAF,0xB8,0xC1), /* borderStrong */
+    CON_RGB(0x1F,0x23,0x28), /* text */
+    CON_RGB(0x59,0x63,0x6E), /* textMuted */
+    CON_RGB(0x8C,0x95,0x9F), /* textDisabled */
+    CON_RGB(0x09,0x69,0xDA), /* accent */
+    CON_RGB(0x05,0x50,0xAE), /* accentHover */
+    CON_RGB(0x05,0x50,0xAE), /* focus */
+    CON_RGB(0xDD,0xF4,0xFF), /* selectionBg */
+    CON_RGB(0x1A,0x7F,0x37), /* success */
+    CON_RGB(0x9A,0x67,0x00), /* warning */
+    CON_RGB(0xCF,0x22,0x2E), /* error */
+    CON_RGB(0x09,0x69,0xDA), /* info */
+    CON_RGB(0x09,0x69,0xDA), /* link */
+    CON_RGB(0xDA,0xFB,0xE1), /* diffAddBg */
+    CON_RGB(0xFF,0xEB,0xE9), /* diffDelBg */
+};
+
+static uint32_t parse_hex_rgb(const char **pp);   /* fwd decl */
+
+/* Parse 0..6 hex digits from *pp into a 24-bit RGB value (MSB-first).
+ * Returns 0xFFFFFFFF on malformed input; *pp advances past consumed chars. */
+static uint32_t parse_hex_rgb(const char **pp) {
+    const char *p = *pp;
+    uint32_t v = 0; int bits = 0;
+    while (*p && bits < 6) {
+        int d;
+        if      (*p >= '0' && *p <= '9')      d = *p - '0';
+        else if (*p >= 'a' && *p <= 'f')      d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F')      d = *p - 'A' + 10;
+        else break;
+        v = (v << 4) | (uint32_t)d;
+        bits++; p++;
+    }
+    if (bits == 6) v |= (v & 0xF00000u) ? 0 : 0x000000u;  /* keep as-is */
+    *pp = p;
+    return v;
+}
+
+/* Parse a colour string into RGB.  Handles "#RRGGBB", "RRGGBB", or any of
+ * the named tokens above (case-insensitive, first-match prefix).
+ * Returns 0 on success, -1 when the string is unrecognised. */
+int con_parse_color(const char *s, uint32_t *out_rgb) {
+    if (!s || !*s) return -1;
+    const char *p = s;
+    /* hex literal: optional '#', then exactly 6 hex digits */
+    int has_hash = (*p == '#');
+    if (has_hash) p++;
+    if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
+        uint32_t v = parse_hex_rgb(&p);
+        int n = (int)(p - s);
+        if ((has_hash ? n == 7 : n == 6) && v != 0xFFFFFFFFu) {
+            *out_rgb = v & 0x00FFFFFFu;
+            return 0;
+        }
+        return -1;
+    }
+    /* named token -- case-insensitive prefix match */
+    for (int i = 0; i < TOKEN_COUNT; i++) {
+        const char *t = token_names[i];
+        const char *q = p;
+        while (*t) {
+            int ac = *q >= 'a' && *q <= 'z' ? *q - 32 : *q;
+            int tc = *t >= 'a' && *t <= 'z' ? *t - 32 : *t;
+            if (ac != tc) break;
+            t++; q++;
+        }
+        if (*t == 0 && (*q == 0 || *q == ' ' || *q == ',')) {
+            *out_rgb = g_dark_tokens[i];
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* v2.61: apply a full theme palette to entries 0..TOKEN_COUNT-1 + greys (16+32).
+ * Also resets the default foreground/background style so e.g. switching from
+ * dark -> light after boot looks correct immediately. */
+void con_apply_theme(int dark) {
+    uint32_t *pal = dark ? g_dark_tokens : g_light_tokens;
+    for (int i = 0; i < TOKEN_COUNT; i++) clut[i] = pal[i];
+    /* standard VGA entry mapping for backward compat:
+     * 0=black canvas, 7=light grey text, 15=white, 8-14 reserved dim variants */
+    clut[0]  = pal[0];      /* canvas bg       */
+    clut[1]  = pal[9];      /* accent          */
+    clut[2]  = pal[12];     /* success         */
+    clut[3]  = pal[15];     /* info            */
+    clut[4]  = pal[14];     /* error           */
+    clut[5]  = pal[16];     /* link tint       */
+    clut[6]  = pal[1];      /* surface warm    */
+    clut[7]  = pal[5];      /* text bright     */
+    clut[8]  = pal[6];      /* text muted dim  */
+    clut[9]  = pal[10];     /* focus bright    */
+    clut[10] = pal[2];      /* success bright  */
+    clut[11] = pal[15];     /* info bright     */
+    clut[12] = pal[14];     /* error bright    */
+    clut[13] = pal[13];     /* warning bright  */
+    clut[14] = pal[1];      /* accent bright   */
+    clut[15] = pal[7];      /* white / pure bg */
+    /* extended greys (16..255): linear ramp from surface to near-white */
+    for (int i = 16; i < 256; i++) {
+        uint8_t g = (uint8_t)((i - 16) * 220 / 239);
+        uint32_t base = dark ? CON_RGB(30, 33, 40) : CON_RGB(240, 242, 245);
+        clut[i] = CON_RGB(
+            (uint8_t)((CON_RGB_R(base) + g) & 0xFF),
+            (uint8_t)((CON_RGB_G(base) + g) & 0xFF),
+            (uint8_t)((CON_RGB_B(base) + g) & 0xFF));
+    }
+    clear_bg = s_bg_rgb = clut[s_bg_idx];
+    be->clear(s_bg_rgb);
+}
 
 int con_set_palette(uint8_t idx, uint32_t rgb) {
     clut[idx] = rgb & 0x00FFFFFFu;

@@ -260,7 +260,8 @@ static void cmd_help(void) {
              "\n     MODE = gfx | vbe | gfx24\n     CMD  = svgainfo | size"
              "\n          | rgb FG [BG] | palette IDX RRGGBB | display");
     help_row("text",        "switch back to text mode (needs physical Y confirmation)");
-    help_row("style SPEC",  "bold+italic+underline+inverse+strike+dim / off");
+    help_row("style SPEC",  "bold+italic+underline / style fg #RRGGBB|canvas / style bg surfaceRaised");
+    help_row("theme NAME",  "apply dark or light token palette (v2.61, requires VBE/gfx24)");
     help_row("vdiag",       "raw VGA/VBE register diagnostic");
 
     help_head("Chinese (GB2312 display + pinyin input)");
@@ -518,11 +519,34 @@ static void cmd_style(const char *arg) {
     if (!*arg) {
         vga_write("usage: style SPEC   SPEC = decimal mask, 'off', or names\n"
                   "       bold dim italic underline inverse strike hidden\n"
-                  "       joined with '+' e.g. style bold+underline\n");
+                  "       joined with '+' e.g. style bold+underline\n"
+                  "       style fg #RRGGBB|canvas   style bg surfaceRaised\n");
+        return;
+    }
+    const char *p = arg;
+    /* optional fg/bg specifier before attribute list */
+    while (*p == ' ') p++;
+    if (strncmp(p, "fg ", 3) == 0 || strncmp(p, "fg\t", 3) == 0) {
+        uint32_t rgb;
+        if (con_parse_color(p + 3, &rgb) == 0) {
+            con_set_fg_rgb(rgb);
+            vga_write("fg set to 0x"); print_hex(rgb); vga_write("\n");
+        } else {
+            vga_write("style: bad colour spec (see 'help')\n");
+        }
+        return;
+    }
+    if (strncmp(p, "bg ", 3) == 0 || strncmp(p, "bg\t", 3) == 0) {
+        uint32_t rgb;
+        if (con_parse_color(p + 3, &rgb) == 0) {
+            con_set_bg_rgb(rgb);
+            vga_write("bg set to 0x"); print_hex(rgb); vga_write("\n");
+        } else {
+            vga_write("style: bad colour spec (see 'help')\n");
+        }
         return;
     }
     uint8_t a = 0;
-    const char *p = arg;
     if (*p >= '0' && *p <= '9') {
         while (*p >= '0' && *p <= '9') { a = (uint8_t)(a * 10 + (*p - '0')); p++; }
     } else {
@@ -550,6 +574,33 @@ static void cmd_style(const char *arg) {
     vga_write("style mask = 0x");
     print_hex((uint32_t)a);
     vga_write("\n");
+}
+
+/* v2.61: current theme flag (1=dark default, 0=light). */
+static int g_current_theme_dark = 1;
+
+/* v2.61: switch between the built-in dark / light themes.
+ * Each theme applies its token palette to CLUT entries 0..TOKEN_COUNT-1
+ * plus a full grey ramp (16..255), then redraws the screen. */
+static void cmd_theme(const char *arg) {
+    const char *p = arg;
+    skip_sp(&p);
+    if (!*p) {
+        if (g_current_theme_dark) {
+            vga_write("current theme: dark\n");
+        } else {
+            vga_write("current theme: light\n");
+        }
+        vga_write("usage: theme dark|light\n");
+        return;
+    }
+    int want = 0;   /* 0=light, 1=dark */
+    if (!strncmp(p, "dark", 4))           want = 1;
+    else if (!strncmp(p, "light", 5))     want = 0;
+    else { vga_write("theme: unknown (dark | light)\n"); return; }
+    g_current_theme_dark = want;
+    con_apply_theme(want);
+    vga_write(tr(L_THEME_UPDATED)); vga_write("\n");
 }
 
 static void skip_sp(const char **pp) { while (**pp == ' ') (*pp)++; }
@@ -1200,6 +1251,7 @@ static const char *BUILTIN_NAMES[] = {
     "bsod", "blue", "panicmode",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
+    "theme",                                  /* v2.61: dark / light token palette switch */
     0
 };
 /* tiny Levenshtein for short command words */
@@ -4800,7 +4852,7 @@ static const char *sh_cmds[] = {
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run",
     "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes","shutdown",
+    "users","vdiag","whoami","yes","shutdown","theme",  /* v2.61 */
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -5025,7 +5077,7 @@ void shell_run(void) {
             g_fg_tid = -1;
             if (tid > 0) {
                 task_t *t = task_by_tid(tid);
-                if (t && t->state != T_DEAD)
+                if (t)
                     task_signal(tid, ret == 2 ? SIGINT : SIGTSTP);
                 if (ret == 3 && t) {             /* ^Z -> bg */
                     t->bg_mode = 1;
@@ -5138,6 +5190,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "palette"))    cmd_palette(arg);
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
+        else if (!strcmp_(cmd, "theme"))      cmd_theme(arg);  /* v2.61 */
         else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
         else if (!strcmp_(cmd, "usb")) {
             if (!strcmp_(arg, "scan")) {

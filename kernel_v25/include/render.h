@@ -131,6 +131,16 @@ void        con_reset_cursor(void);
  * per-char software-cursor sync during the burst so help, banners, etc.
  * render fast; must always be paired with a matching con_unsuppress(). */
 void        con_suppress_cursor(int on);
+/* v2.60: end a suppress-burst and immediately repaint cursor position. */
+void        con_unsuppress_cursor(void);
+/* v2.61: parse a color spec into an RGB value.
+ * Recognises "#RRGGBB" (with or without leading #) and the named tokens
+ * defined by con_apply_theme(dark).  Returns 0 on success, -1 on bad input. */
+int         con_parse_color(const char *s, uint32_t *out_rgb);
+/* v2.61: apply a full theme palette (dark=1, light=0) to the CLUT and
+ * default style.  Both palettes are committed to entries 0..47 + greys;
+ * callers should call this after mode-switch so the first prompt uses it. */
+void        con_apply_theme(int dark);
 /* v2.21 T51: the shell line editor needs the live cursor position as the
  * anchor for in-place redraw after history / cursor-key edits. */
 void        con_get_cursor(int *x, int *y);

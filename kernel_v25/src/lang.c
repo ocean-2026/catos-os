@@ -33,6 +33,7 @@ static const char *const tbl_en[L_COUNT] = {
     "warning: could not save /etc/env (setting is session-only)\n",
     "display: running ",          /* v2.60: followed by mode name */
     "^C: interrupting foreground task\n"   /* v2.60: ^C during fg task */
+    "theme set to %s",            /* v2.61: theme applied confirmation */
 };
 
 static const char *const tbl_zh[L_COUNT] = {
@@ -57,6 +58,7 @@ static const char *const tbl_zh[L_COUNT] = {
     "警告：无法保存 /etc/env（仅本次会话生效）\n",
     "显示：运行于 ",             /* v2.60: 后接模式名 */
     "^C：中断前台任务\n"         /* v2.60: 前台任务中按 Ctrl+C */
+    "主题已设置为 %s"          /* v2.61: 主题切换确认 */
 };
 
 const char *tr(int id) {
