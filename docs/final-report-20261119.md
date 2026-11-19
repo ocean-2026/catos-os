@@ -188,3 +188,22 @@ cbf77c3..614b396  main -> main
 ### 7.3 交付包
 
 `CatOS-v2.59-overnight-20261119.zip`（7.2 MB）：含 `CatOs/` 全量源码 + 文档 + 测试 + `catos-v2.59.iso`（11,649,024 字节，可直接 `qemu-system-i386 -cdrom catos-v2.59.iso` 启动）；排除 `.git*`、构建产物（`extapp/bin`、`extapp/pkg`、`node.ce`、`builtin_apps.inc`、`symtab.inc`、`build/`）、截图与回归日志、`*.img`/`*.bak-*`/`*.ppm`/`*.bin`、`night/`、`vmware.log`。
+
+---
+
+## 8 双审结论（2026-11-19 09:30）
+
+### 8.1 功能 / 正确性审（只读，HEAD `0c83e55`，报告见 `review-functional-20261119/review-report.md`）
+
+- **P0 = 0**，结论 **可交付**。三处高风险面逐项判定：
+  - (a) 分页器接管后的双通道输出：条目行已单通道（`ls_print_one` 三分支整行走 `pager_line`；`tree` 走 `pager_line`；`cat` 走 `pager_dump_text`），仅表头/汇总/隐藏计数行仍 `vga_write` → 转记 #212。
+  - (b) IME 两行候选区借用：`saved2_valid` 在切后端 `render.c:548`、`con_clear` `:604`、`con_status_bar_off` `:799`、改字号 `:963`、`con_screen_pop` `:991` 全部清；恢复逐列拷回，无悬挂。
+  - (c) 崩溃屏二次异常护栏：`bsod.c:470-472` depth++，达上限 2 即 `bsod_halt_loop()`；`:605-606` 软退出复位。
+- **P1 = 0**（无阻塞项）。6 条挂账/缺口登记入报告表格（`ls` 辅助行、IME `active` 未清零、编辑器粘贴钩子、前台等待期 mouse poll、提示符 `Ctrl+Z` 未分发、单条 bar 与 held `saved2` 叠加），全部下版跟进。
+- 核心套件实跑：mouse 18/18、pager 27/27、ime 19/19、panic 19/19。
+
+### 8.2 审美审（对比同类 TUI，报告见 `review-aesthetic-20261119/aesthetic-report.md`）
+
+- **7/10，可交付**。功能链路在实机帧上全部闭环，配色克制、浮层保存/恢复机制与 less/nano 一致。
+- 三条 P1（均下版）：`ls` 条目三段定宽对齐（参考 mc 列槽位）；崩溃屏寄存器两栏固定网格（参考 Linux panic）；`help` 命令列宽按最长命令动态定值。
+- 判断：最像成品的是分页器 More 条 / IME 双行候选区 / 鼠标反白选中块；最不像的是开机首屏仍偏调试引导画面（左上纯文本、右半屏空）。
