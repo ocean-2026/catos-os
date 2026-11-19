@@ -120,11 +120,28 @@ $CC -m32 -c boot/boot.s -o build/boot.o
 echo "== compiling cpu.s =="
 $CC -m32 -c src/cpu.s -o build/cpu.o
 
-for src in src/usb_uhci.c src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/svga.c src/stubs.c src/ime.c src/keyboard.c src/keys_table.c src/mouse.c src/clip.c src/pager.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/part.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c src/bsod.c src/serial_log.c src/user.c src/lang.c src/e1000.c src/es1371.c; do
+for src in src/usb_uhci.c src/kernel.c src/vga.c src/render.c src/render_font.c src/be_text.c src/be_gfx.c src/be_vbe.c src/be_vbe24.c src/svga.c src/stubs.c src/ime.c src/keyboard.c src/keys_table.c src/mouse.c src/clip.c src/pager.c src/rtc.c src/shell.c src/fs.c src/ata.c src/fat.c src/part.c src/ce.c src/net.c src/netstack.c src/builtin_apps.c src/intr.c src/paging.c src/vma.c src/task.c src/hw.c src/snd.c src/diag.c src/serial_log.c src/user.c src/lang.c src/e1000.c src/es1371.c; do
     obj="build/$(basename $src .c).o"
     echo "== compiling $src =="
     $CC $CFLAGS -c $src -o $obj
 done
+
+# v2.61: bsod.c #includes symtab.inc which depends on the linked PE.
+# Compile bsod LAST (after all other objects exist) so the provisional
+# link can produce kernel.pe without needing bsod.o.  We use a tiny
+# stub symtab if none exists yet so the one-shot compile does not fail.
+if [ ! -f src/symtab.inc ]; then
+    cat > src/symtab.inc <<'EOF'
+/* stub: no symbols until provisional link produces kernel.pe */
+#include <stdint.h>
+typedef struct { uint32_t addr; const char *name; } sym_t;
+static const sym_t g_symtab[] = {};
+static const unsigned g_symtab_n = 0;
+EOF
+fi
+echo "== compiling src/bsod.c =="
+$CC $CFLAGS -c src/bsod.c -o build/bsod.o
+rm -f src/symtab.inc
 
 # v2.59-crashscreen: gen the CODE symbol table for the BSOD nearest-symbol
 # lookup.  bsod.c #includes src/symtab.inc, so it must exist before the C
@@ -136,7 +153,7 @@ if [ -n "$PY" ]; then
     if [ ! -f build/kernel.pe ]; then
         echo "== provisional link for symbol table =="
         $LD -m i386pe -T pe.ld -o build/kernel.pe.tmp \
-            build/boot.o build/cpu.o build/usb_uhci.o build/kernel.o build/vga.o build/render.o build/render_font.o build/be_text.o build/be_gfx.o build/be_vbe.o build/be_vbe24.o build/svga.o build/stubs.o build/ime.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/part.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o build/snd.o build/diag.o build/bsod.o build/serial_log.o build/user.o build/lang.o build/e1000.o build/es1371.o 2>/dev/null || true
+            build/boot.o build/cpu.o build/usb_uhci.o build/kernel.o build/vga.o build/render.o build/render_font.o build/be_text.o build/be_gfx.o build/be_vbe.o build/be_vbe24.o build/svga.o build/stubs.o build/ime.o build/keyboard.o build/rtc.o build/shell.o build/fs.o build/ata.o build/fat.o build/part.o build/ce.o build/net.o build/netstack.o build/builtin_apps.o build/intr.o build/paging.o build/vma.o build/task.o build/hw.o build/snd.o build/diag.o build/serial_log.o build/user.o build/lang.o build/e1000.o build/es1371.o 2>/dev/null || true
         [ -f build/kernel.pe.tmp ] && mv build/kernel.pe.tmp build/kernel.pe
     fi
     if [ -f build/kernel.pe ]; then

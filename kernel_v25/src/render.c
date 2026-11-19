@@ -653,6 +653,8 @@ void con_set_style_rgb(uint32_t fg, uint32_t bg, uint8_t at) {
 void con_set_fg(uint8_t fi)     { s_fg_idx = fi; s_fg_rgb = clut[fi]; }
 void con_set_fg_rgb(uint32_t c) { s_fg_rgb = c & 0x00FFFFFFu;
                                   s_fg_idx = render_quantize(s_fg_rgb); }
+void con_set_bg_rgb(uint32_t c) { s_bg_rgb = c & 0x00FFFFFFu;
+                                  s_bg_idx = render_quantize(s_bg_rgb); }
 void con_set_attrs(uint8_t at)  { s_attrs = at; }
 uint8_t con_get_fg(void)        { return s_fg_idx; }
 uint8_t con_get_attrs(void)     { return s_attrs; }

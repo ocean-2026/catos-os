@@ -114,6 +114,7 @@ void        con_set_style(uint8_t fg_idx, uint8_t bg_idx, uint8_t attrs);
 void        con_set_style_rgb(uint32_t fg, uint32_t bg, uint8_t attrs);
 void        con_set_fg(uint8_t fg_idx);
 void        con_set_fg_rgb(uint32_t rgb);
+void        con_set_bg_rgb(uint32_t rgb);
 void        con_set_attrs(uint8_t attrs);
 uint8_t     con_get_fg(void);
 uint8_t     con_get_attrs(void);

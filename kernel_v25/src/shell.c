@@ -44,11 +44,22 @@ static int strcmp_(const char *a, const char *b) {
 
 static int slen_(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
 
+/* v2.61: limited-length string compare for gfx subcommand dispatch */
+static int strncmp_(const char *a, const char *b, int n) {
+    while (n-- > 0 && *a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
 /* forward decls: the shared command dispatcher and the boot autostart
  * runner (/etc/autostart scripts, v2.17) */
 static void shell_exec(char *cmd, char *arg);
 static void boot_autostart(void);
 static int  parse_redir(char *arg, char **out_redir, int *append, char **pipe_to);
+static void skip_sp(const char **pp);   /* v2.61: advance past spaces                   */
+/* v2.61: fwd-decl gfx sub-commands referenced from cmd_gfx above */
+static void cmd_svgainfo(void);
+static void cmd_size(const char *arg);
+static void cmd_display(void);
 
 /* P1: set while /etc/autostart scripts run their commands.  Interactive
  * prompts (e.g. the PE->CE conversion offer in `run`) must default to
@@ -526,7 +537,7 @@ static void cmd_style(const char *arg) {
     const char *p = arg;
     /* optional fg/bg specifier before attribute list */
     while (*p == ' ') p++;
-    if (strncmp(p, "fg ", 3) == 0 || strncmp(p, "fg\t", 3) == 0) {
+    if (strncmp_(p, "fg ", 3) == 0 || strncmp_(p, "fg\t", 3) == 0) {
         uint32_t rgb;
         if (con_parse_color(p + 3, &rgb) == 0) {
             con_set_fg_rgb(rgb);
@@ -536,7 +547,7 @@ static void cmd_style(const char *arg) {
         }
         return;
     }
-    if (strncmp(p, "bg ", 3) == 0 || strncmp(p, "bg\t", 3) == 0) {
+    if (strncmp_(p, "bg ", 3) == 0 || strncmp_(p, "bg\t", 3) == 0) {
         uint32_t rgb;
         if (con_parse_color(p + 3, &rgb) == 0) {
             con_set_bg_rgb(rgb);
@@ -595,8 +606,8 @@ static void cmd_theme(const char *arg) {
         return;
     }
     int want = 0;   /* 0=light, 1=dark */
-    if (!strncmp(p, "dark", 4))           want = 1;
-    else if (!strncmp(p, "light", 5))     want = 0;
+    if (!strncmp_(p, "dark", 4))           want = 1;
+    else if (!strncmp_(p, "light", 5))     want = 0;
     else { vga_write("theme: unknown (dark | light)\n"); return; }
     g_current_theme_dark = want;
     con_apply_theme(want);
@@ -704,38 +715,39 @@ static void cmd_gfx(char *arg) {
     /* subcommand dispatch: fall through to legacy handlers with "gfx" prefix */
     {
         const char *p = arg; skip_sp(&p);
-        if (!strncmp(p, "svgainfo", 8) && (p[8] == 0 || p[8] == ' '))
+        if (!strncmp_(p, "svgainfo", 8) && (p[8] == 0 || p[8] == ' '))
             cmd_svgainfo();
-        else if (!strncmp(p, "size", 4) && (p[4] == 0 || p[4] == ' '))
+        else if (!strncmp_(p, "size", 4) && (p[4] == 0 || p[4] == ' '))
             cmd_size(p + 4);
-        else if (!strncmp(p, "rgb", 3) && (p[3] == 0 || p[3] == ' '))
+        else if (!strncmp_(p, "rgb", 3) && (p[3] == 0 || p[3] == ' '))
             cmd_rgb(p + 3);
-        else if (!strncmp(p, "palette", 7) && (p[7] == 0 || p[7] == ' '))
+        else if (!strncmp_(p, "palette", 7) && (p[7] == 0 || p[7] == ' '))
             cmd_palette(p + 7);
-        else if (!strncmp(p, "display", 7) && (p[7] == 0 || p[7] == ' '))
+        else if (!strncmp_(p, "display", 7) && (p[7] == 0 || p[7] == ' '))
             cmd_display();
         else if (!strcmp_(arg, "gfx")   ||
                  !strcmp_(arg, "vbe")   ||
                  !strcmp_(arg, "gfx24") ||
                  !strcmp_(arg, "vbe24")) {
-        int wanted = CON_MODE_QUERY;
-        if (!strcmp_(arg, "gfx"))         wanted = CON_MODE_GFX;
-        else if (!strcmp_(arg, "vbe"))    wanted = CON_MODE_VBE;
-        else                              wanted = CON_MODE_VBE24;
-        int r = con_request_mode(wanted, CON_ORIGIN_CONSOLE);
-        if (r == CON_ENODEV) {
-            vga_write("gfx: "); vga_write(tr(L_GFX_NONE));
-            vga_write("\n");
-        } else if (r != 0) {
-            vga_write("gfx: switch failed\n");
+            int wanted = CON_MODE_QUERY;
+            if (!strcmp_(arg, "gfx"))         wanted = CON_MODE_GFX;
+            else if (!strcmp_(arg, "vbe"))    wanted = CON_MODE_VBE;
+            else                              wanted = CON_MODE_VBE24;
+            int r = con_request_mode(wanted, CON_ORIGIN_CONSOLE);
+            if (r == CON_ENODEV) {
+                vga_write("gfx: "); vga_write(tr(L_GFX_NONE));
+                vga_write("\n");
+            } else if (r != 0) {
+                vga_write("gfx: switch failed\n");
+            } else {
+                con_clear();
+                vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
+            }
         } else {
-            con_clear();
-            vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
+            vga_write("gfx: unknown subcommand '"); vga_write(arg);
+            vga_write("'\nusage: gfx [svgainfo|size|rgb|palette|display|"
+                      "gfx|vbe|gfx24]\n");
         }
-    } else {
-        vga_write("gfx: unknown subcommand '"); vga_write(arg);
-        vga_write("'\nusage: gfx [svgainfo|size|rgb|palette|display|"
-                  "gfx|vbe|gfx24]\n");
     }
 }
 
