@@ -99,7 +99,10 @@ if [ -z "$MAIN" ] || [ "$MAIN" != "02000000" ] && [ "$MAIN" != "2000000" ]; then
 fi
 
 BSS=$("$OBJDUMP" -h "$CEBASE/build/$NAME.exe" | awk '/\.bss/{print $3; exit}')
-API=$("$NM" "$CEBASE/build/$NAME.exe" | awk '/[DR] _*ce_api$/{print $1; exit}')
+# mingw32 nm 2.47 renders weak section symbols as ".weak.___ce_api." rather
+# than a bare "__ce_api"; accept both spellings so -fleading-underscore weak
+# definitions keep working (calc.c uses a strong def, hello.c a weak one).
+API=$("$NM" "$CEBASE/build/$NAME.exe" | awk '/[DR] (\.weak\.)?_*ce_api\.?$/{print $1; exit}')
 if [ -z "$BSS" ]; then BSS=0; fi
 if [ -z "$API" ]; then echo "ERROR: no __ce_api symbol"; exit 1; fi
 
