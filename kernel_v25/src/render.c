@@ -190,7 +190,12 @@ static void paint(int x, int y) {
     if (x < 0 || x >= cols || y < 0 || y >= rows) return;
     con_cell_t *c = &cells[y][x];
     if (c->flags == CELL_F_WIDE_R) return;
-    int is_cur = (be->draw_cursor && x == cur_x && y == cur_y);
+    /* v2.62: while output is suppressed (a foreground command is running or
+     * the viewport is scrolling), do NOT paint the cursor overlay at all.
+     * A reverse-video cursor parked on a cell that output then writes into
+     * is what makes characters look "swallowed". */
+    int is_cur = (!display_suppress_cursor && !sb_view && be->draw_cursor &&
+                  x == cur_x && y == cur_y);
     int show_cur = is_cur && !blink_phase;   /* dark half of the blink */
     /* v2.25 dirty-cell skip: compare against what is REALLY on screen. */
     if (painted_valid[y][x] && painted_cur[y][x] == (uint8_t)show_cur) {
@@ -318,6 +323,15 @@ static void blink_apply(void) {
 
 void con_tick(void) {
     if (!be) return;
+    /* v2.62: drain wheel notches buffered by IRQ12 at a render-safe point.
+     * This runs every 10 ms regardless of blink phase, so wheel scrolling
+     * responds even while a foreground task owns the shell (the old code
+     * only polled the mouse inside the keyboard read loop). */
+    if (!render_busy) {
+        int w = mouse_take_wheel();
+        if (w) con_scrollback(w > 0 ? (w > 8 ? 24 : w * 3)
+                                     : (w < -8 ? -24 : w * 3));
+    }
     if (++blink_ticks < BLINK_TICKS) return;
     blink_ticks = 0;
     blink_phase ^= 1u;
@@ -673,46 +687,50 @@ static const char * const token_names[] = {
 /* Dark theme (default) -- GitHub-inspired, cold-toned near-black canvas.
  * Light theme is g_light_tokens[]; switch via con_apply_theme(0). */
 static uint32_t g_dark_tokens[TOKEN_COUNT] = {
-    CON_RGB(0x0F,0x11,0x15), /* canvas */
-    CON_RGB(0x16,0x1A,0x20), /* surface */
-    CON_RGB(0x1D,0x23,0x2B), /* surfaceRaised */
-    CON_RGB(0x2A,0x31,0x3B), /* border */
-    CON_RGB(0x3A,0x43,0x50), /* borderStrong */
-    CON_RGB(0xD8,0xDE,0xE9), /* text */
-    CON_RGB(0x8B,0x95,0xA7), /* textMuted */
-    CON_RGB(0x5C,0x66,0x78), /* textDisabled */
-    CON_RGB(0x6C,0xB6,0xFF), /* accent */
-    CON_RGB(0x8C,0xC8,0xFF), /* accentHover */
-    CON_RGB(0x7D,0xD3,0xFC), /* focus */
-    CON_RGB(0x1E,0x3A,0x5F), /* selectionBg */
-    CON_RGB(0x7E,0xE2,0xA8), /* success */
-    CON_RGB(0xF6,0xC1,0x77), /* warning */
-    CON_RGB(0xFF,0x7A,0x85), /* error */
-    CON_RGB(0x79,0xB8,0xFF), /* info */
-    CON_RGB(0x82,0xAA,0xFF), /* link */
-    CON_RGB(0x12,0x35,0x1F), /* diffAddBg */
-    CON_RGB(0x3A,0x1D,0x22), /* diffDelBg */
+    /* v2.62: high-contrast vivid dark -- deeper canvas, brighter text,
+     * saturated accents so colours read clearly on the framebuffer. */
+    CON_RGB(0x0A,0x0E,0x14), /* canvas          (deeper navy-black) */
+    CON_RGB(0x14,0x1B,0x26), /* surface */
+    CON_RGB(0x1E,0x28,0x36), /* surfaceRaised */
+    CON_RGB(0x33,0x41,0x53), /* border */
+    CON_RGB(0x4A,0x5B,0x70), /* borderStrong */
+    CON_RGB(0xF2,0xF6,0xFC), /* text            (near-white, crisp) */
+    CON_RGB(0xA2,0xAF,0xC2), /* textMuted       (brighter muted) */
+    CON_RGB(0x6B,0x79,0x8F), /* textDisabled */
+    CON_RGB(0x3D,0xB7,0xFF), /* accent          (vivid azure) */
+    CON_RGB(0x69,0xCB,0xFF), /* accentHover */
+    CON_RGB(0x36,0xE0,0xC8), /* focus           (vivid cyan-teal) */
+    CON_RGB(0x1B,0x4A,0x7A), /* selectionBg */
+    CON_RGB(0x3F,0xE0,0x7A), /* success         (vivid green) */
+    CON_RGB(0xFF,0xC2,0x47), /* warning         (vivid amber) */
+    CON_RGB(0xFF,0x53,0x68), /* error           (vivid red) */
+    CON_RGB(0x4C,0xC8,0xFF), /* info */
+    CON_RGB(0x5B,0x9D,0xFF), /* link */
+    CON_RGB(0x14,0x3D,0x22), /* diffAddBg */
+    CON_RGB(0x45,0x1B,0x24), /* diffDelBg */
 };
 static uint32_t g_light_tokens[TOKEN_COUNT] = {
-    CON_RGB(0xF6,0xF8,0xFA), /* canvas */
-    CON_RGB(0xFF,0xFF,0xFF), /* surface */
-    CON_RGB(0xEE,0xF2,0xF6), /* surfaceRaised */
-    CON_RGB(0xD0,0xD7,0xDE), /* border */
-    CON_RGB(0xAF,0xB8,0xC1), /* borderStrong */
-    CON_RGB(0x1F,0x23,0x28), /* text */
-    CON_RGB(0x59,0x63,0x6E), /* textMuted */
-    CON_RGB(0x8C,0x95,0x9F), /* textDisabled */
-    CON_RGB(0x09,0x69,0xDA), /* accent */
-    CON_RGB(0x05,0x50,0xAE), /* accentHover */
-    CON_RGB(0x05,0x50,0xAE), /* focus */
-    CON_RGB(0xDD,0xF4,0xFF), /* selectionBg */
-    CON_RGB(0x1A,0x7F,0x37), /* success */
-    CON_RGB(0x9A,0x67,0x00), /* warning */
-    CON_RGB(0xCF,0x22,0x2E), /* error */
-    CON_RGB(0x09,0x69,0xDA), /* info */
-    CON_RGB(0x09,0x69,0xDA), /* link */
-    CON_RGB(0xDA,0xFB,0xE1), /* diffAddBg */
-    CON_RGB(0xFF,0xEB,0xE9), /* diffDelBg */
+    /* v2.62: high-contrast vivid light -- pure white surfaces, near-black
+     * text, saturated accents for punchy readability. */
+    CON_RGB(0xFF,0xFF,0xFF), /* canvas */
+    CON_RGB(0xFB,0xFC,0xFE), /* surface */
+    CON_RGB(0xEC,0xF1,0xF7), /* surfaceRaised */
+    CON_RGB(0xC3,0xCF,0xDB), /* border */
+    CON_RGB(0x9A,0xAA,0xBC), /* borderStrong */
+    CON_RGB(0x0D,0x14,0x1E), /* text            (near-black) */
+    CON_RGB(0x42,0x51,0x63), /* textMuted */
+    CON_RGB(0x78,0x86,0x96), /* textDisabled */
+    CON_RGB(0x02,0x5F,0xD6), /* accent          (vivid blue) */
+    CON_RGB(0x01,0x48,0xA8), /* accentHover */
+    CON_RGB(0x00,0x9A,0x88), /* focus           (vivid teal) */
+    CON_RGB(0xCF,0xEC,0xFF), /* selectionBg */
+    CON_RGB(0x0C,0x8A,0x38), /* success         (vivid green) */
+    CON_RGB(0x8A,0x56,0x00), /* warning         (vivid amber-brown) */
+    CON_RGB(0xC8,0x14,0x22), /* error           (vivid red) */
+    CON_RGB(0x02,0x5F,0xD6), /* info */
+    CON_RGB(0x02,0x5F,0xD6), /* link */
+    CON_RGB(0xCE,0xFA,0xD9), /* diffAddBg */
+    CON_RGB(0xFF,0xE1,0xE0), /* diffDelBg */
 };
 
 static uint32_t parse_hex_rgb(const char **pp);   /* fwd decl */

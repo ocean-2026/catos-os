@@ -55,5 +55,10 @@ int         lang_set(int l);
 const char *lang_name(void);
 /* Translated message, always NUL-terminated, never NULL. */
 const char *tr(int id);
+/* v2.62: translate a help text line when UI language is zh.  Unknown
+ * strings pass through unchanged (English), so the mapping table can grow
+ * incrementally without breaking anything.  Command spellings are NEVER
+ * translated -- only the human-readable description/heading text. */
+const char *trhelp(const char *en);
 
 #endif /* LANG_H */

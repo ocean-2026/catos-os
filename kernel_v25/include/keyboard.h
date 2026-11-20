@@ -42,6 +42,10 @@
 #define KB_TAB        0x110
 #define KB_CTRL_C     0x03   /* v2.28: ^C -- kb_readline cancels, ret 2 */
 #define KB_CTRL_Z     0x1A   /* v2.60: ^Z -- suspend foreground job to bg */
+/* v2.62: double-tap Shift toggles the pinyin IME (F2 still works).
+ * Emitted by kb_getkey()/kb_getkey_timed() on the second Shift make within
+ * IME_SHIFT_DBL_TICKS; never collides with ASCII or other special keys. */
+#define KB_IME_TOGGLE 0x126
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */

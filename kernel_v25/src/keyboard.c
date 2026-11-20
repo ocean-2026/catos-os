@@ -34,6 +34,36 @@ static int  line_len = 0, line_cur = 0;   /* bytes: total length / cursor */
 static int  shift = 0, caps = 0, ctrl = 0;
 static int  got_e0 = 0;          /* an 0xE0 prefix was just seen */
 
+/* ---- v2.62: double-tap Shift toggles the pinyin IME --------------------
+ * A "tap" = Shift pressed and released WITHOUT any other key in between.
+ * Two isolated taps within IME_SHIFT_DBL_TICKS emit KB_IME_TOGGLE.  Shift
+ * held with a printable key (Shift+A forcaps, etc.) is a combo, not a tap,
+ * so ordinary capital typing never toggles the IME. */
+#define IME_SHIFT_DBL_TICKS 60   /* 100 Hz PIT -> 600 ms */
+extern volatile uint32_t timer_ticks;
+static uint32_t s_shift_down_tick, s_shift_last_tap;
+static int      s_shift_combo, s_shift_tap_valid;
+
+static void shift_down(void) {
+    shift = 1;
+    s_shift_down_tick = timer_ticks;
+    s_shift_combo = 0;
+}
+/* returns 1 iff a double-tap was just completed */
+static int shift_up(void) {
+    shift = 0;
+    if (s_shift_combo) { s_shift_tap_valid = 0; return 0; }
+    if (s_shift_tap_valid &&
+        (uint32_t)(timer_ticks - s_shift_last_tap) <= IME_SHIFT_DBL_TICKS) {
+        s_shift_tap_valid = 0;
+        return 1;
+    }
+    s_shift_last_tap = s_shift_down_tick;
+    s_shift_tap_valid = 1;
+    return 0;
+}
+#define SHIFT_MARK_COMBO() do { if (shift) s_shift_combo = 1; } while (0)
+
 /* ---- interrupt-driven scancode queue ---------------------------------
  * kb_irq() runs at IRQ1 and only enqueues bytes + wakes waiters; all
  * decoding and echo happens in kb_getkey() at normal kernel context. */
@@ -177,8 +207,11 @@ int kb_getkey_timed(uint32_t ticks) {
         }
         if (sc == 0xE0) { got_e0 = 1; continue; }
 
-        if (sc == 0x2A || sc == 0x36) { shift = 1; continue; }
-        if (sc == 0xAA || sc == 0xB6) { shift = 0; continue; }
+        if (sc == 0x2A || sc == 0x36) { shift_down(); continue; }
+        if (sc == 0xAA || sc == 0xB6) {
+            if (shift_up()) return KB_IME_TOGGLE;   /* v2.62: dbl-tap Shift */
+            continue;
+        }
         if (sc == 0x1D) { ctrl = 1; continue; }
         if (sc == 0x9D) { ctrl = 0; continue; }
         if (sc == 0x3A) { caps = !caps; continue; }
@@ -191,6 +224,7 @@ int kb_getkey_timed(uint32_t ticks) {
 
         char c = (sc < 128) ? (shift ? sc_shift[sc] : sc_unshift[sc]) : 0;
         if (c == 0) continue;
+        SHIFT_MARK_COMBO();          /* a real key while Shift held -> combo */
 
         if (ctrl) {
             if (c >= 'a' && c <= 'z') return c - 'a' + 1;
@@ -222,8 +256,11 @@ int kb_getkey(void) {
         if (sc == 0xE0) { got_e0 = 1; continue; }
 
         /* modifier keys */
-        if (sc == 0x2A || sc == 0x36) { shift = 1; continue; }
-        if (sc == 0xAA || sc == 0xB6) { shift = 0; continue; }
+        if (sc == 0x2A || sc == 0x36) { shift_down(); continue; }
+        if (sc == 0xAA || sc == 0xB6) {
+            if (shift_up()) return KB_IME_TOGGLE;   /* v2.62: dbl-tap Shift */
+            continue;
+        }
         if (sc == 0x1D) { ctrl = 1; continue; }
         if (sc == 0x9D) { ctrl = 0; continue; }
         if (sc == 0x3A) { caps = !caps; continue; }
@@ -237,6 +274,7 @@ int kb_getkey(void) {
 
         char c = (sc < 128) ? (shift ? sc_shift[sc] : sc_unshift[sc]) : 0;
         if (c == 0) continue;
+        SHIFT_MARK_COMBO();          /* a real key while Shift held -> combo */
 
         if (ctrl) {
             if (c >= 'a' && c <= 'z') return c - 'a' + 1;  /* ^A..^Z */

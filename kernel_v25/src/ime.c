@@ -171,7 +171,7 @@ static int ime_commit_raw(char out[IME_OUT_MAX]) {
 int ime_active(void) { return active; }
 
 int ime_feed(int key, char out[IME_OUT_MAX]) {
-    if (key == KB_F2) {
+    if (key == KB_F2 || key == KB_IME_TOGGLE) {
         active = !active;
         if (active) { ime_clear(); ime_show(); }
         else        { ime_clear(); con_status_bar_off(); }
@@ -190,8 +190,15 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
         return IME_CONSUME;
     }
     if (key == '\b') {
-        if (py_len > 0) { py_len--; py[py_len] = 0; page = 0; ime_show(); }
-        return IME_CONSUME;
+        /* v2.62: only swallow Backspace while there is a pinyin draft to
+         * edit.  With an empty composition (candidate page up, or raw text
+         * already committed) pass it through so the line editor erases a
+         * character instead of the key doing nothing. */
+        if (py_len > 0) {
+            py_len--; py[py_len] = 0; page = 0; ime_show();
+            return IME_CONSUME;
+        }
+        return IME_PASS;
     }
     /* Esc: cancel the composition AND close the IME, restoring the two
      * bottom rows verbatim (no residue, plan 3.1.2). */

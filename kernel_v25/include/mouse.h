@@ -64,6 +64,13 @@ void mouse_get_state(int *x, int *y, uint8_t *buttons);
  * the console glue when the display mode / cell metrics change. */
 void mouse_clamp(int px_w, int px_h);
 
+/* v2.62: wheel notches buffered by the IRQ12 top half.  The console drains
+ * them from con_tick() at a render-safe point, so scrolling works even while
+ * the shell is blocked waiting on a foreground task (the old code only
+ * drained wheel events from the keyboard read loop).  Returns the signed sum
+ * and clears it. */
+int  mouse_take_wheel(void);
+
 /* Diagnostics: number of assembled packets since boot (IRQ12/aux drain). */
 uint32_t mouse_packet_count(void);
 uint32_t mouse_irq_count(void);

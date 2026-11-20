@@ -45,6 +45,13 @@ static volatile uint32_t pkt_count;    /* assembled packets (diagnostics)  */
 static volatile uint32_t irq_count;    /* IRQ12 entries (diagnostics) */
 static volatile uint32_t aux_bytes;    /* aux bytes drained (diagnostics) */
 static volatile uint32_t kbd_bytes_irq12; /* kbd-routed bytes on line 12 */
+static volatile int      g_wheel_pending; /* v2.62: notches awaiting scroll  */
+
+int mouse_take_wheel(void) {
+    int w = g_wheel_pending;
+    g_wheel_pending = 0;
+    return w;
+}
 
 /* packet reassembly */
 static uint8_t  pkt[4];
@@ -115,6 +122,19 @@ static void assemble_packet(void) {
 
     pkt_count++;
     enqueue_event(dx, sy, dz, buttons);
+
+    /* v2.62: buffer the wheel notch here in the IRQ12 top half.  The old
+     * design only drained wheel events from the keyboard read loop
+     * (con_mouse_poll in kb_readline/kb_next_scancode), so while a foreground
+     * task ran and the shell was blocked in task_wait_child(), every wheel
+     * notch piled up and scrolling appeared dead.  con_tick() now drains the
+     * buffer at a render-safe point.  Clear dz in the queued event too so
+     * con_mouse_poll() does not scroll a second time. */
+    if (dz) {
+        mouse_event_t *tail = &evq[(evq_head + EVQ_SZ - 1) % EVQ_SZ];
+        if (tail->dz == dz) tail->dz = 0;
+        g_wheel_pending += dz;
+    }
 }
 
 uint32_t mouse_packet_count(void) { return pkt_count; }

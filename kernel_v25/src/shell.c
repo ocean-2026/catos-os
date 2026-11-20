@@ -25,6 +25,7 @@
 #include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
 #include "keys.h"       /* centralized key-binding legend (keys command)  */
 #include "pager.h"      /* v2.59 generic console pager                    */
+#include "reg.h"        /* v2.62 file-backed registry (/etc/reg)          */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -49,6 +50,7 @@ static int strncmp_(const char *a, const char *b, int n) {
     while (n-- > 0 && *a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
+static int session_is_admin(void);   /* v2.62: fwd decl for cmd_reg gate */
 
 /* forward decls: the shared command dispatcher and the boot autostart
  * runner (/etc/autostart scripts, v2.17) */
@@ -216,19 +218,25 @@ static multiboot_info_t *mbi;
  * helpers become no-ops until cmd_help() calls pager_end(). */
 static void help_row(const char *cmd, const char *desc) {
     if (pager_quit()) return;
+    desc = trhelp(desc);                  /* v2.62: localise description */
     char line[160];
     line[0] = 0;
     /* command field is 24 chars wide, description starts in column 26 */
     int n = 0;
     for (const char *p = cmd; *p; p++) { if (n < (int)sizeof(line)-1) line[n++] = *p; }
-    while (n < 24) line[n++] = ' ';
-    line[n++] = ' '; line[n++] = ' ';
-    for (const char *p = desc; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
+    while (n < 24 && n < (int)sizeof(line)-1) line[n++] = ' ';
+    if (n < (int)sizeof(line)-2) { line[n++] = ' '; line[n++] = ' '; }
+    for (const char *p = desc; *p && n < (int)sizeof(line)-1; p++) {
+        /* Chinese descriptions are UTF-8 and 2 cells wide per glyph, but
+         * pager_line prints raw bytes; keep the byte-fit guard. */
+        line[n++] = *p;
+    }
     line[n] = 0;
     pager_line(line);
 }
 static void help_head(const char *s) {
     if (pager_quit()) return;
+    s = trhelp(s);                        /* v2.62: localise heading */
     vga_set_fg(VGA_LIGHT_CYAN);
     char line[128];
     int n = 0; line[n++] = ' '; line[n++] = '-'; line[n++] = ' ';
@@ -237,7 +245,7 @@ static void help_head(const char *s) {
     pager_line(line);
     vga_set_fg(VGA_WHITE);
 }
-static void help_note(const char *s)  { if (pager_quit()) return; char line[128]; line[0] = ' '; int n = 1; for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p; line[n] = 0; pager_line(line); }
+static void help_note(const char *s)  { if (pager_quit()) return; s = trhelp(s); char line[128]; line[0] = ' '; int n = 1; for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p; line[n] = 0; pager_line(line); }
 
 static void cmd_help(void) {
     con_suppress_cursor(1);                       /* v2.60: batch paint, no flicker */
@@ -277,7 +285,7 @@ static void cmd_help(void) {
 
     help_head("Chinese (GB2312 display + pinyin input)");
     help_row("zhdemo",      "built-in UTF-8 Chinese + truecolour demo");
-    help_row("F2",          "toggle pinyin IME (works in shell and edit)");
+    help_row("F2 / dbl-Shift", "toggle pinyin IME (works in shell and edit)");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
     help_row("shutdown",    "power off via APM BIOS (root/CAP_SYS only; falls back to reboot)");
@@ -311,7 +319,11 @@ static void cmd_help(void) {
     help_row("bg [%]TID",   "resume a stopped job in background");
     help_row("stop [%]TID",  "suspend a running job (SIGTSTP; same as Ctrl+Z)");
 
-    help_head("environment (v2.23, persisted in /etc/env)");
+    help_head("environment & registry (v2.62, persisted in /etc/reg)");
+    help_row("reg list [SEC]", "list registry sections, or a section's keys");
+    help_row("reg get SEC KEY", "read a registry value");
+    help_row("reg set SEC KEY VAL", "set a registry value (admin)");
+    help_row("reg del SEC KEY", "delete a registry key (admin)");
     help_row("export K=V",  "set variable (empty V deletes); env lists all");
     help_row("unset K",     "delete variable; $K / ${K} expand in typed lines");
     help_row("PATH",        "drives bare-NAME lookup (default /bin)");
@@ -611,7 +623,76 @@ static void cmd_theme(const char *arg) {
     else { vga_write("theme: unknown (dark | light)\n"); return; }
     g_current_theme_dark = want;
     con_apply_theme(want);
+    reg_set_now("system", "theme", want ? "dark" : "light");  /* v2.62 */
     vga_write(tr(L_THEME_UPDATED)); vga_write("\n");
+}
+
+/* v2.62: file-backed registry shell command.
+ *   reg                 -> list all sections
+ *   reg list [SEC]      -> list sections / keys in SEC
+ *   reg get SEC KEY     -> print a value
+ *   reg set SEC KEY VAL -> set (admin)
+ *   reg del SEC KEY     -> delete (admin) */
+static void cmd_reg(const char *arg) {
+    const char *p = arg;
+    while (*p == ' ') p++;
+    /* default action = list */
+    if (!*p) {
+        int n = reg_section_count();
+        vga_write("registry: ");
+        vga_write(reg_loaded_from_file() ? "loaded from /etc/reg" : "in-memory defaults");
+        vga_write("\n");
+        for (int i = 0; i < n; i++) {
+            vga_write(" ["); vga_write(reg_section_at(i)); vga_write("]\n");
+        }
+        if (!n) vga_write(" (empty)\n");
+        return;
+    }
+    char sub[16], sec[REG_SEC_MAX], key[REG_KEY_MAX], val[REG_VAL_MAX];
+    int k = 0; while (*p && *p != ' ' && k < 15) sub[k++] = *p++; sub[k] = 0;
+    while (*p == ' ') p++;
+    if (!strcmp_(sub, "list")) {
+        if (!*p) { cmd_reg(""); return; }
+        k = 0; while (*p && k < REG_SEC_MAX - 1) sec[k++] = *p++; sec[k] = 0;
+        int n = reg_key_count(sec);
+        vga_write("["); vga_write(sec); vga_write("] ("); print_int(n); vga_write(" keys)\n");
+        for (int i = 0; i < n; i++) {
+            vga_write(" "); vga_write(reg_key_at(sec, i));
+            vga_write(" = "); vga_write(reg_val_at(sec, i)); vga_write("\n");
+        }
+        return;
+    }
+    /* get/set/del need SEC KEY */
+    k = 0; while (*p && *p != ' ' && k < REG_SEC_MAX - 1) sec[k++] = *p++; sec[k] = 0;
+    while (*p == ' ') p++;
+    k = 0; while (*p && *p != ' ' && k < REG_KEY_MAX - 1) key[k++] = *p++; key[k] = 0;
+    while (*p == ' ') p++;
+    if (!strcmp_(sub, "get")) {
+        if (!*sec || !*key) { vga_write("usage: reg get SEC KEY\n"); return; }
+        vga_write("["); vga_write(sec); vga_write("] "); vga_write(key);
+        vga_write(" = "); vga_write(reg_get(sec, key)); vga_write("\n");
+        return;
+    }
+    if (!strcmp_(sub, "set")) {
+        if (!session_is_admin()) { vga_write("reg: permission denied (admin only)\n"); return; }
+        if (!*sec || !*key || !*p) {
+            vga_write("usage: reg set SEC KEY VALUE\n"); return;
+        }
+        k = 0; while (*p && k < REG_VAL_MAX - 1) val[k++] = *p++; val[k] = 0;
+        if (reg_set_now(sec, key, val) != 0) { vga_write("reg: set failed (table full?)\n"); return; }
+        vga_write("reg: ["); vga_write(sec); vga_write("] "); vga_write(key);
+        vga_write(" = "); vga_write(val); vga_write("\n");
+        return;
+    }
+    if (!strcmp_(sub, "del")) {
+        if (!session_is_admin()) { vga_write("reg: permission denied (admin only)\n"); return; }
+        if (!*sec || !*key) { vga_write("usage: reg del SEC KEY\n"); return; }
+        if (reg_del_now(sec, key) != 0) { vga_write("reg: key not found\n"); return; }
+        vga_write("reg: deleted ["); vga_write(sec); vga_write("] "); vga_write(key); vga_write("\n");
+        return;
+    }
+    vga_write("reg: unknown subcommand '"); vga_write(sub); vga_write("'\n");
+    vga_write("usage: reg [list [SEC]] | reg get SEC KEY | reg set SEC KEY VAL | reg del SEC KEY\n");
 }
 
 static void skip_sp(const char **pp) { while (**pp == ' ') (*pp)++; }
@@ -741,6 +822,8 @@ static void cmd_gfx(char *arg) {
                 vga_write("gfx: switch failed\n");
             } else {
                 con_clear();
+                /* v2.62: persist the chosen boot display mode to the registry */
+                reg_set_now("system", "videomode", arg);
                 vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
             }
         } else {
@@ -1264,6 +1347,7 @@ static const char *BUILTIN_NAMES[] = {
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
     "theme",                                  /* v2.61: dark / light token palette switch */
+    "reg",                                    /* v2.62: file-backed registry */
     0
 };
 /* tiny Levenshtein for short command words */
@@ -2921,12 +3005,15 @@ static void cmd_panicmode(char *arg) {
     }
     if (!strcmp_(arg, "halt")) {
         bsod_set_mode(BSOD_MODE_HALT);
-        fs_write_text("/etc/panicmode", "halt\n", 5);
+        reg_set_now("system", "panicmode", "halt");
+        fs_write_text("/etc/panicmode", "halt\n", 5);   /* legacy mirror */
     } else if (!strcmp_(arg, "wait")) {
         bsod_set_wait();
+        reg_set_now("system", "panicmode", "wait");
         fs_write_text("/etc/panicmode", "wait\n", 5);
     } else if (!strcmp_(arg, "reboot")) {
         bsod_set_mode(BSOD_MODE_REBOOT);
+        reg_set_now("system", "panicmode", "reboot");
         fs_write_text("/etc/panicmode", "reboot\n", 7);
     } else {
         vga_write("panicmode: usage: panicmode [reboot|halt|wait] [reboot:Ns]\n");
@@ -4248,6 +4335,10 @@ static void env_list(void) {
 }
 
 int env_save(void) {
+    /* v2.62: registry is canonical; mirror legacy /etc/env for old tools. */
+    for (int i = 0; i < ENV_MAX; i++)
+        if (g_env_used[i]) reg_set("env", g_env[i].key, g_env[i].val);
+    reg_flush();
     static char buf[2048];
     int o = 0;
     for (int i = 0; i < ENV_MAX; i++) {
@@ -4264,25 +4355,33 @@ int env_save(void) {
 void env_init(void) {
     for (int i = 0; i < ENV_MAX; i++) g_env_used[i] = 0;
     if (!fs_fs_ready()) return;
-    static char buf[2048];
-    int n = fs_read_text("/etc/env", buf, (int)sizeof(buf) - 1);
-    int fresh = (n <= 0);
-    if (n > 0) {
-        buf[n] = 0;
-        char *p = buf;
-        while (*p) {
-            char *line = p;
-            while (*p && *p != '\n') p++;
-            if (*p) *p++ = 0;
-            char *eq = line;
-            while (*eq && *eq != '=') eq++;
-            if (!*eq) continue;
-            *eq = 0;
-            env_set_(line, eq + 1);     /* bad keys silently skipped */
+    /* v2.62: primary source = [env] section of the registry. */
+    int used = reg_key_count("env");
+    if (used > 0) {
+        for (int i = 0; i < used; i++)
+            env_set_(reg_key_at("env", i), reg_val_at("env", i));
+    } else {
+        /* legacy fallback: adopt /etc/env into the registry on first boot */
+        static char buf[2048];
+        int n = fs_read_text("/etc/env", buf, (int)sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = 0;
+            char *p = buf;
+            while (*p) {
+                char *line = p;
+                while (*p && *p != '\n') p++;
+                if (*p) *p++ = 0;
+                char *eq = line;
+                while (*eq && *eq != '=') eq++;
+                if (!*eq) continue;
+                *eq = 0;
+                env_set_(line, eq + 1);
+            }
+            env_save();                 /* migrate values into /etc/reg */
         }
     }
     if (!env_get_("PATH")) env_set_("PATH", "/bin");
-    if (fresh) env_save();              /* seed /etc/env with PATH=/bin */
+    if (reg_key_count("env") == 0) env_save();
 }
 
 /* expand $KEY / ${KEY} in place.  Unknown names expand to empty (sh
@@ -4369,17 +4468,22 @@ static void size_apply(int s) {
      * switches scale for non-root, it just is not saved across reboots. */
     if (session_is_admin()) {
         char b[2] = { (char)('0' + s), 0 };
-        fs_write_text("/etc/size", b, 1);
+        reg_set_now("system", "size", b);
+        fs_write_text("/etc/size", b, 1);   /* legacy mirror */
     }
 }
 
 /* Re-apply the persisted scale when entering vbe24 (boot default 1). */
 static void size_restore(void) {
-    char b[8];
-    int n = fs_read_text("/etc/size", b, (int)sizeof(b) - 1);
-    if (n < 1) return;
-    b[n] = 0;
-    if (b[0] >= '0' && b[0] <= '2') con_set_cell_size(b[0] - '0');
+    const char *v = reg_get("system", "size");
+    char c = 0;
+    if (v && *v) c = v[0];
+    else {
+        char b[8];
+        int n = fs_read_text("/etc/size", b, (int)sizeof(b) - 1);
+        if (n >= 1) { c = b[0]; b[n] = 0; reg_set_now("system", "size", b); }
+    }
+    if (c >= '0' && c <= '2') con_set_cell_size(c - '0');
 }
 
 /* ---------- v2.56 boot display mode (/etc/videomode) -----------------------
@@ -4396,9 +4500,18 @@ static char g_fallback_note[128];
 
 static int videomode_parse(void) {
     char buf[32];
-    int n = fs_read_text(VIDEOMODE_PATH, buf, (int)sizeof(buf) - 1);
-    if (n <= 0) return CON_MODE_VBE24;      /* absent / unreadable -> default */
-    buf[n] = 0;
+    /* v2.62: registry first, legacy file as fallback/migration source. */
+    const char *rv = reg_get("system", "videomode");
+    if (rv && *rv) {
+        int k = 0;
+        while (*rv && k < (int)sizeof(buf) - 1) buf[k++] = *rv++;
+        buf[k] = 0;
+    } else {
+        int n = fs_read_text(VIDEOMODE_PATH, buf, (int)sizeof(buf) - 1);
+        if (n <= 0) return CON_MODE_VBE24;  /* absent / unreadable -> default */
+        buf[n] = 0;
+        reg_set_now("system", "videomode", buf);   /* migrate */
+    }
 
     int i = 0;
     while (buf[i] && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' ||
@@ -4864,7 +4977,7 @@ static const char *sh_cmds[] = {
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run",
     "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes","shutdown","theme",  /* v2.61 */
+    "users","vdiag","whoami","yes","shutdown","theme","reg",  /* v2.61/v2.62 */
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -5039,11 +5152,20 @@ void shell_run(void) {
     vga_clear();
     fs_init();
     btime_mark("S1 fs_init done");
-    lang_init();              /* v2.21 T50: load /etc/lang, default en */
+    reg_init();               /* v2.62: load/seed /etc/reg (registry) first */
+    lang_init();              /* v2.21 T50: load lang via reg, default en */
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
-    boot_apply_videomode();   /* v2.56: /etc/videomode boot display mode, default gfx24 */
+    boot_apply_videomode();   /* v2.56: boot display mode via reg, default gfx24 */
+    /* v2.62: restore persisted theme before the banner prints. */
+    {
+        const char *th = reg_get("system", "theme");
+        if (th && *th) {
+            g_current_theme_dark = !(th[0] == 'l' || th[0] == 'L');
+            con_apply_theme(g_current_theme_dark);
+        }
+    }
     bsod_init();              /* v2.59: cache panic action config */
     ce_init();
     btime_mark("S4 ce_init");
@@ -5165,6 +5287,10 @@ void shell_run(void) {
  * program and /bin PATH lookup.  Shared by the interactive loop and the
  * /etc/autostart script runner (identical semantics for both). */
 static void shell_exec(char *cmd, char *arg) {
+    /* v2.62: hide the prompt caret while a command owns the console.  The
+     * reverse-video cursor parked on the input line used to overwrite the
+     * first characters a foreground command printed ("swallowed text"). */
+    con_suppress_cursor(1);
     /* v2.59: parse the redirect/pipe/background marker ONCE, up front, before
      * the line is truncated.  The same out_redir/append/pipe_to feed both the
      * non-interactive pager latch and the builtin stdout tee below. */
@@ -5203,6 +5329,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
         else if (!strcmp_(cmd, "theme"))      cmd_theme(arg);  /* v2.61 */
+        else if (!strcmp_(cmd, "reg"))        cmd_reg(arg);    /* v2.62 */
         else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
         else if (!strcmp_(cmd, "usb")) {
             if (!strcmp_(arg, "scan")) {
@@ -5469,6 +5596,7 @@ static void shell_exec(char *cmd, char *arg) {
         }
     /* v2.59: flush the builtin stdout tee to the redirect target, if armed. */
     redir_flush();
+    con_unsuppress_cursor();             /* v2.62: caret returns for next prompt */
 }
 
 /* ---------- v2.17 boot autostart (/etc/autoexec) ---------- */

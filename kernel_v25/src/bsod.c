@@ -15,6 +15,7 @@
 #include "intr.h"
 #include "cpu.h"
 #include "fs.h"
+#include "reg.h"       /* v2.62: panicmode from registry */
 #include "hw.h"
 #include "diag.h"
 #include "serial_log.h"
@@ -626,9 +627,18 @@ reboot_now:
 void bsod_init(void) {
     if (!fs_fs_ready()) return;
     static char buf[80];
-    int n = fs_read_text("/etc/panicmode", buf, (int)sizeof(buf) - 1);
-    if (n <= 0) return;
-    buf[n] = 0;
+    /* v2.62: registry first, legacy file as fallback/migration source. */
+    const char *rv = reg_get("system", "panicmode");
+    if (rv && *rv) {
+        int i = 0;
+        while (*rv && i < (int)sizeof(buf) - 1) buf[i++] = *rv++;
+        buf[i] = 0;
+    } else {
+        int n = fs_read_text("/etc/panicmode", buf, (int)sizeof(buf) - 1);
+        if (n <= 0) return;
+        buf[n] = 0;
+        reg_set_now("system", "panicmode", buf);   /* migrate */
+    }
     /* P2-9: values are `reboot`, `halt`, `wait`, or `reboot:<seconds>`
      * (e.g. `reboot:30s`).  Parsed once at boot; the crash path itself
      * never opens a file.  Development builds default to WAIT. */
