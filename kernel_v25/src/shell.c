@@ -344,7 +344,8 @@ static void cmd_help(void) {
     help_note("the path verbatim with NO lookup (a bare NAME there is cwd-only).");
 
     help_head("filesystem (FAT32 on IDE, persistent)");
-    help_row("dir [PATH]",  "list a directory");
+    help_row("ls [PATH]",   "list: -l long, -t/-lt tree, --color-scale, --blocks=COLS");
+    help_row("dir [PATH]",  "list a directory (legacy plain listing)");
     help_row("cd [PATH]",   "change directory (use .. or /)");
     help_row("mkdir PATH",  "create a directory");
     help_row("touch FILE",  "create an empty file");
@@ -358,7 +359,7 @@ static void cmd_help(void) {
     help_row("head [-n N] FILE", "print first N lines (default 10)");
     help_row("tail [-n N] FILE", "print last N lines (default 10)");
     help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
-    help_row("tree [DIR]",  "directory tree listing");
+    help_row("tree [DIR]",  "directory tree (alias: ls -t; -lt adds sizes)");
     help_row("format",      "erase the FAT32 volume (y/n confirm)");
     help_row("fsck",        "check FAT mirror + scan dir tree; --purge wipes bad entries");
     help_row("mount",       "list the mount table");
@@ -4204,6 +4205,359 @@ static void cmd_tree(char *arg) {
     pager_end();
 }
 
+/* ---------- v2.64: ls redesign (borrowing eza + lsd) -------------------
+ * The TUI prototype in deliverables/tui-preview explored six display modes.
+ * This is the kernel implementation, using only existing APIs:
+ *   ls                            grid, dirs first, type-coloured
+ *   ls -l                         long, r/w/x permission bits colourised
+ *   ls -t / ls -lt                tree (lsd style: -t == tree; -lt adds sizes)
+ *   ls -l --color-scale[=size]    eza: log(size) heat gradient (size/age)
+ *   ls -l --blocks=perm,size,name lsd: pick + order the metadata columns
+ * Colour goes through con_set_fg_rgb(), which quantises to the CLUT in text
+ * mode and renders true colour under VBE24 -- same as the rest of the shell.
+ * No Nerd-Font glyphs: the CE font is a real IBM VGA 8x16 ROM, so icons stay
+ * ASCII, and no Git column (CatOS has no Git subsystem).
+ */
+
+/* case-insensitive name compare (FAT is case-insensitive) */
+static int ls_icmp_shell(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb) return (unsigned char)ca - (unsigned char)cb;
+        a++; b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+/* unsigned -> decimal, returns digit count */
+static int ls_u2a(uint32_t v, char *o) {
+    char t[12]; int n = 0;
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    for (int i = 0; i < n; i++) o[i] = t[n - 1 - i];
+    return n;
+}
+
+/* human size ("820K", "2.1K", "128") -> length */
+static int ls_sz(uint32_t s, char *o) {
+    int n = 0;
+    if (s >= 1024u * 1024u) {
+        n = ls_u2a(s >> 20, o);
+        int frac = (int)(((s & 0xFFFFFu) * 10u) >> 20);
+        o[n++] = '.'; o[n++] = (char)('0' + frac); o[n++] = 'M';
+    } else if (s >= 1024u) {
+        n = ls_u2a(s >> 10, o);
+        int frac = (int)(((s & 0x3FFu) * 10u) >> 10);
+        o[n++] = '.'; o[n++] = (char)('0' + frac); o[n++] = 'K';
+    } else {
+        n = ls_u2a(s, o);
+    }
+    o[n] = 0;
+    return n;
+}
+
+/* eza-style heat gradient: t 0..100 -> blue->cyan->green->yellow->red */
+static uint32_t ls_heat(int t) {
+    static const uint32_t stop[5] = {
+        CON_RGB(0x1F,0x6F,0xEB), CON_RGB(0x12,0xB8,0x86),
+        CON_RGB(0x7E,0xE7,0x87), CON_RGB(0xF2,0xCC,0x60),
+        CON_RGB(0xFF,0x5F,0x57),
+    };
+    if (t < 0) t = 0; if (t > 100) t = 100;
+    int seg = t / 25; if (seg > 3) seg = 3;
+    int f = t - seg * 25;
+    uint32_t a = stop[seg], b = stop[seg + 1];
+    int r  = (int)CON_RGB_R(a) + (((int)CON_RGB_R(b) - (int)CON_RGB_R(a)) * f) / 25;
+    int g  = (int)CON_RGB_G(a) + (((int)CON_RGB_G(b) - (int)CON_RGB_G(a)) * f) / 25;
+    int bl = (int)CON_RGB_B(a) + (((int)CON_RGB_B(b) - (int)CON_RGB_B(a)) * f) / 25;
+    return CON_RGB(r, g, bl);
+}
+
+/* log2(size+1) scaled so ~1 MiB == 100 (eza --color-scale=size semantics) */
+static int ls_heat_t(uint32_t size) {
+    uint32_t s = size + 1, v = 0;
+    while (s > 1) { s >>= 1; v++; }
+    int t = (int)((v * 100u) / 20u);   /* 2^20 -> 100 */
+    if (t > 100) t = 100;
+    return t;
+}
+
+/* 10-char UNIX-ish permission string from FAT attributes */
+static void ls_perm(const struct fs_raw_ent *e, char out[11]) {
+    int dir = (e->attr & FAT_ATTR_DIR) != 0;
+    int ro  = (e->attr & FAT_ATTR_RO) != 0;
+    out[0] = dir ? 'd' : '-';
+    out[1] = 'r';
+    out[2] = ro ? '-' : 'w';
+    out[3] = dir ? 'x' : '-';
+    out[4] = 'r'; out[5] = '-'; out[6] = '-';
+    out[7] = 'r'; out[8] = '-'; out[9] = '-';
+    out[10] = 0;
+}
+
+/* print the permission string with r/w/x colourised (r blue, w yellow,
+ * x green, '-' grey; the leading type char is directory-cyan) */
+static void ls_perm_colored(const struct fs_raw_ent *e) {
+    char p[11]; ls_perm(e, p);
+    for (int i = 0; i < 10; i++) {
+        if (i == 0)        con_set_fg_rgb(CON_RGB(0x3D,0xB7,0xFF));
+        else if (p[i] == 'r') con_set_fg_rgb(CON_RGB(0x3D,0xB7,0xFF));
+        else if (p[i] == 'w') con_set_fg_rgb(CON_RGB(0xF2,0xCC,0x60));
+        else if (p[i] == 'x') con_set_fg_rgb(CON_RGB(0x7E,0xE7,0x87));
+        else                  con_set_fg_rgb(CON_RGB(0x6B,0x79,0x8F));
+        vga_putc(p[i]);
+    }
+    con_set_fg(VGA_WHITE);
+}
+
+/* resolve an ls argument to an absolute dir path (mirrors cmd_tree) */
+static void ls_dir_arg(const char *arg, char *dir, int cap) {
+    while (*arg == ' ') arg++;
+    if (!*arg || arg[0] == '/') {
+        int n = 0;
+        if (!*arg) fs_pwd(dir, cap);
+        else { for (; *arg && n < cap - 1; arg++) dir[n++] = *arg; dir[n] = 0; }
+        return;
+    }
+    char pwd[FS_PATH_MAX];
+    fs_pwd(pwd, sizeof(pwd));
+    int n = 0;
+    for (const char *q = pwd; *q && n < cap - 1; q++) dir[n++] = *q;
+    if (n > 0 && dir[n - 1] != '/') dir[n++] = '/';
+    for (; *arg && n < cap - 1; arg++) dir[n++] = *arg;
+    dir[n] = 0;
+}
+
+/* Collect live entries via fs_foreach() -- one directory walk gives us
+ * is_dir + name + real dirent size in a single pass.  This avoids the
+ * fs_open_file() trap: that API reads the WHOLE file into a 4 KiB editor
+ * buffer, which is both wrong for `ls` and unstable on many built-in .ce
+ * files.  fs_enum_entries_raw() is also unsuitable (raw=1 -> insane only). */
+struct ls_collect_ud { struct fs_raw_ent *out; int maxn; int n; };
+static void ls_collect_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    struct ls_collect_ud *u = (struct ls_collect_ud *)ud;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    if (u->n >= u->maxn) return;
+    struct fs_raw_ent *e = &u->out[u->n];
+    int m = 0;
+    for (; name[m] && m < (int)sizeof(e->name) - 1; m++) e->name[m] = name[m];
+    e->name[m] = 0;
+    e->attr = is_dir ? FAT_ATTR_DIR : 0;
+    e->size = size;
+    e->first = e->insane = e->slot = 0;
+    u->n++;
+}
+static int ls_collect(const char *dir, struct fs_raw_ent *out, int maxn) {
+    struct ls_collect_ud u = { out, maxn, 0 };
+    if (fs_foreach(dir, ls_collect_cb, &u) != 0) return -1;
+    /* sort: dirs first, then case-insensitive by name */
+    for (int i = 1; i < u.n; i++) {
+        struct fs_raw_ent key = out[i];
+        int j = i - 1;
+        while (j >= 0) {
+            int kd = (key.attr & FAT_ATTR_DIR) != 0;
+            int jd = (out[j].attr & FAT_ATTR_DIR) != 0;
+            int swap = (jd == kd) ? ls_icmp_shell(out[j].name, key.name) > 0
+                                  : (jd && !kd) ? 0 : 1;
+            if (!swap) break;
+            out[j + 1] = out[j]; j--;
+        }
+        out[j + 1] = key;
+    }
+    return u.n;
+}
+
+/* tree via fs_foreach() (is_dir + size in one pass, no file reads) */
+struct ls_tree_ud { int depth; int detail; int stop; char dir[FS_PATH_MAX]; };
+static void ls_tree_cb(int is_dir, const char *name, uint32_t size, void *ud) {
+    struct ls_tree_ud *u = (struct ls_tree_ud *)ud;
+    if (u->stop) return;
+    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
+    tree_line_reset();
+    for (int d = 0; d < u->depth; d++) tree_line_app("  ");
+    tree_line_app(is_dir ? "+- " : "- ");
+    tree_line_app(name);
+    if (is_dir) tree_line_app("/");
+    else if (u->detail) {
+        char sz[12];
+        ls_sz(size, sz);
+        tree_line_app("  [");
+        tree_line_app(sz);
+        tree_line_app("]");
+    }
+    if (!pager_line(g_tree_line)) { u->stop = 1; return; }
+    if (is_dir && u->depth < 6) {
+        char child[FS_PATH_MAX];
+        int n = 0;
+        for (const char *p = u->dir; *p && n < (int)sizeof(child) - 1; p++) child[n++] = *p;
+        if (n == 0 || child[n - 1] != '/') child[n++] = '/';
+        for (const char *p = name; *p && n < (int)sizeof(child) - 1; p++) child[n++] = *p;
+        child[n] = 0;
+        struct ls_tree_ud sub;
+        for (int k = 0; k < (int)sizeof(sub); k++) ((char *)&sub)[k] = 0;
+        sub.depth = u->depth + 1; sub.detail = u->detail;
+        for (int k = 0; child[k] && k < (int)sizeof(sub.dir) - 1; k++) sub.dir[k] = child[k];
+        fs_foreach(child, ls_tree_cb, &sub);
+        if (sub.stop) u->stop = 1;
+    }
+}
+static void ls_tree_walk(const char *dir, int depth, int detail) {
+    struct ls_tree_ud u;
+    for (int k = 0; k < (int)sizeof(u); k++) ((char *)&u)[k] = 0;
+    u.depth = depth; u.detail = detail;
+    for (int k = 0; dir[k] && k < (int)sizeof(u.dir) - 1; k++) u.dir[k] = dir[k];
+    fs_foreach(dir, ls_tree_cb, &u);
+}
+
+static void cmd_ls(char *arg) {
+    int longfmt = 0, tree = 0, scale = 0, raw = 0;
+    char blocks[64] = "perm,size,name";
+    char path[FS_PATH_MAX] = "";
+    while (*arg == ' ') arg++;
+    char tok[80];
+    while (*arg) {
+        int n = 0;
+        while (*arg && *arg != ' ') { if (n < (int)sizeof(tok) - 1) tok[n++] = *arg; arg++; }
+        tok[n] = 0;
+        while (*arg == ' ') arg++;
+        if (!strcmp_(tok, "-l"))                 longfmt = 1;
+        else if (!strcmp_(tok, "-t"))            tree = 1;
+        else if (!strcmp_(tok, "--raw"))         raw = 1;
+        else if (!strcmp_(tok, "--color-scale") ||
+                 !strcmp_(tok, "--color-size"))  { scale = 1; longfmt = 1; }
+        else if (!strncmp_(tok, "--color-scale=", 14) ||
+                 !strncmp_(tok, "--blocks=", 9)) {
+            if (tok[2] == 'c' && !strncmp_(tok, "--color-scale=", 14)) {
+                scale = 1; longfmt = 1;
+            } else {
+                const char *v = tok + 9;
+                int k = 0;
+                for (; *v && k < (int)sizeof(blocks) - 1; v++)
+                    if (*v != ',' && *v != ' ') blocks[k++] = *v;
+                blocks[k] = 0; longfmt = 1;
+            }
+        } else if (tok[0] != '-') {
+            int k = 0;
+            for (; tok[k] && k < (int)sizeof(path) - 1; k++) path[k] = tok[k];
+            path[k] = 0;
+        }
+    }
+
+    char dir[FS_PATH_MAX];
+    ls_dir_arg(path, dir, sizeof(dir));
+
+    /* tree modes: -t / -lt (lsd semantics) */
+    if (tree) {
+        if (!fs_fs_ready()) {
+            vga_write("ls: no FAT32 volume (run 'format' first)\n");
+            return;
+        }
+        char root[FS_PATH_MAX + 2];
+        int rn = 0;
+        for (const char *p = dir; *p && rn < (int)sizeof(root) - 2; p++) root[rn++] = *p;
+        root[rn] = 0;
+        pager_line(root);
+        ls_tree_walk(dir, 0, longfmt);   /* -lt adds [size] per node */
+        return;
+    }
+
+    if (!fs_fs_ready()) {
+        vga_write("ls: no FAT32 volume (run 'format' first)\n");
+        return;
+    }
+    struct fs_raw_ent ents[32];   /* keep small: kernel stack is limited */
+    int n = ls_collect(dir, ents, 32);
+    if (n < 0) {
+        vga_write("ls: cannot read directory (run 'format' first)\n");
+        return;
+    }
+    int cols = 0;
+    for (const char *p = blocks; *p; p++) {
+        if (*p != ',' && *p != ' ') cols++;
+    }
+
+    for (int i = 0; i < n; i++) {
+        struct fs_raw_ent *e = &ents[i];
+        int isdir = (e->attr & FAT_ATTR_DIR) != 0;
+        char sz[12];
+        int sn = ls_sz(e->size, sz);
+
+        if (scale) {
+            /* eza --color-scale=size: whole name tinted by heat level */
+            int t = ls_heat_t(e->size);
+            con_set_fg_rgb(ls_heat(t));
+            pager_line(e->name);
+            con_set_fg(VGA_WHITE);
+            continue;
+        }
+
+        if (!longfmt) {
+            /* default grid: one name per line, dirs cyan, .ce green */
+            int isce = !isdir && slen_(e->name) >= 3 &&
+                       !strcmp_(e->name + slen_(e->name) - 3, ".ce");
+            con_set_fg_rgb(isdir ? CON_RGB(0x3D,0xB7,0xFF)
+                          : isce ? CON_RGB(0x7E,0xE7,0x87)
+                          : (e->attr & FAT_ATTR_RO) ? CON_RGB(0x8B,0x95,0xA7)
+                          : CON_RGB(0xF2,0xCC,0x60));
+            pager_line(e->name);
+            con_set_fg(VGA_WHITE);
+            continue;
+        }
+
+        /* long / blocks: emit only the requested columns, in order.
+         * When 'perm' is the FIRST column (the default and -l), print it
+         * through ls_perm_colored() so r/w/x get their semantic colours;
+         * the rest of the columns stream as one line.  If perm appears
+         * elsewhere we stay monochrome for correct column alignment. */
+        int perm_first = (!strncmp_(blocks, "perm", 4) &&
+                          (blocks[4] == ',' || blocks[4] == 0));
+        if (perm_first) { ls_perm_colored(e); vga_putc(' '); }
+        char line[FS_NAME_MAX + 64];
+        int o = 0;
+        const char *p = blocks;
+        while (*p) {
+            while (*p == ',' || *p == ' ') p++;
+            if (!*p) break;
+            if (!strncmp_(p, "perm", 4)) {
+                if (!perm_first) { ls_perm(e, line + o); o += 10; line[o++] = ' '; }
+                p += 4;
+            } else if (!strncmp_(p, "size", 4)) {
+                for (int q = sn; q < 8; q++) line[o++] = ' ';
+                for (int q = 0; q < sn; q++) line[o++] = sz[q];
+                line[o++] = ' '; p += 4;
+            } else if (!strncmp_(p, "name", 4)) {
+                for (const char *q = e->name; *q && o < (int)sizeof(line) - 1; q++) line[o++] = *q;
+                if (isdir) line[o++] = '/';
+                p += 4;
+            } else {
+                /* unknown block: skip its token */
+                while (*p && *p != ',') p++;
+            }
+        }
+        line[o] = 0;
+        con_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_WHITE);
+        pager_line(line);
+        con_set_fg(VGA_WHITE);
+    }
+
+    char sum[80];
+    int z = 0;
+    const char *tail = " entries";
+    const char *hd = "--- ";
+    for (const char *q = hd; *q; q++) sum[z++] = *q;
+    z += ls_u2a((uint32_t)n, sum + z);
+    for (const char *q = tail; *q; q++) sum[z++] = *q;
+    if (raw) {
+        const char *r = " (--raw)";
+        for (const char *q = r; *q; q++) sum[z++] = *q;
+    }
+    sum[z] = 0;
+    con_set_fg(VGA_WHITE);
+    pager_line(sum);
+    (void)cols;
+}
+
 /* ---------- v2.55: fsck directory integrity scan ---------------------- */
 struct fsck_ud { int bad; int repairable; int purge; };
 
@@ -5374,7 +5728,8 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "bsod") ||
                  !strcmp_(cmd, "blue"))      cmd_bsod(arg);
         else if (!strcmp_(cmd, "panicmode")) cmd_panicmode(arg);
-        else if (!strcmp_(cmd, "dir") || !strcmp_(cmd, "ls")) fs_list(*arg ? arg : 0);
+        else if (!strcmp_(cmd, "dir"))           fs_list(*arg ? arg : 0);
+        else if (!strcmp_(cmd, "ls"))            cmd_ls(arg);  /* v2.64: eza/lsd-style modes */
         else if (!strcmp_(cmd, "cd"))         cmd_cd(arg);
         else if (!strcmp_(cmd, "mkdir")) {
             if (arg[0] == '-' && arg[1] == 'p' && (arg[2] == ' ' || arg[2] == 0)) {
