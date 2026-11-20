@@ -31,10 +31,10 @@ const keys_desc_t keys_desc[] = {
       "unbound on the command line" },
 
     /* ---- scrollback --------------------------------------------------- */
-    { (int[]){ KB_CTRL_UP, KB_CTRL_DOWN, KB_CTRL_PGUP, KB_CTRL_PGDN },
-      "Ctrl+Up/Dn · Ctrl+PgUp/PgDn", KG_SCROLL,
-      "scroll back/forward one line (arrows) or one page (PgUp/PgDn)",
-      "console", "-" },
+    { (int[]){ KB_PGUP, KB_PGDN },
+      "PgUp / PgDn", KG_SCROLL,
+      "scroll back/forward one full page per press",
+      "console / command line", "-" },
 
     /* ---- history ------------------------------------------------------- */
     { (int[]){ KB_UP, KB_DOWN }, "Up / Down", KG_HISTORY,
@@ -57,7 +57,9 @@ const keys_desc_t keys_desc[] = {
 
     /* ---- console line control ----------------------------------------- */
     { (int[]){ 0x03 }, "Ctrl+C", KG_CONSOLE,
-      "cancel the current input line", "command line", "-" },
+      "cancel input line / send SIGINT to fg task", "command line", "-" },
+    { (int[]){ KB_CTRL_Z }, "Ctrl+Z", KG_CONSOLE,
+      "suspend fg task to background (SIGTSTP)", "command line", "-" },
     { (int[]){ KB_TAB }, "Tab", KG_CONSOLE,
       "complete command / path", "command line", "-" },
 

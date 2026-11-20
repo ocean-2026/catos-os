@@ -41,6 +41,7 @@
 #define KB_CTRL_PGDN  0x125
 #define KB_TAB        0x110
 #define KB_CTRL_C     0x03   /* v2.28: ^C -- kb_readline cancels, ret 2 */
+#define KB_CTRL_Z     0x1A   /* v2.60: ^Z -- suspend foreground job to bg */
 
 void kb_init(void);
 void kb_irq(void);            /* PS/2 IRQ1: enqueue scancodes, wake waiters */

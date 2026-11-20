@@ -149,15 +149,17 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
     fill_rect(ox, oy, 8, 16, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
+        int italic = (c->attrs & CON_ATTR_ITALIC) ? 1 : 0;
+        int bold   = (c->attrs & CON_ATTR_BOLD)    ? 1 : 0;
         for (int j = 0; j < 15; j++) {
-            unsigned row = g[j >> 1];
-            int shift = (c->attrs & CON_ATTR_ITALIC) && (j >> 1) < 5 ? 1 : 0;
+            unsigned row = g[j];
+            int ishift = italic && j < 5 ? 1 : 0;
             for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
-                int dx = i + shift;
+                int dx = i + ishift;
                 if (dx >= 7) continue;
                 px(ox + dx, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7)
+                if (bold && dx + 1 < 7)
                     px(ox + dx + 1, oy + j, f);
             }
         }
@@ -171,13 +173,14 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
                       uint8_t f, uint8_t b) {
     const uint8_t *g = render_font_hz(c->cp);
     fill_rect(ox, oy, 16, 16, b);
+    int bold = (c->attrs & CON_ATTR_BOLD) ? 1 : 0;
     if (g) {
         for (int j = 0; j < 16; j++) {
             unsigned row = ((unsigned)g[2 * j] << 8) | g[2 * j + 1];
             for (int i = 0; i < 16; i++) {
                 if (!(row & (1u << (15 - i)))) continue;
                 px(ox + i, oy + j, f);
-                if ((c->attrs & CON_ATTR_BOLD) && i + 1 < 16)
+                if (bold && i + 1 < 16)
                     px(ox + i + 1, oy + j, f);
             }
         }

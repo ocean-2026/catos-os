@@ -114,6 +114,7 @@ void        con_set_style(uint8_t fg_idx, uint8_t bg_idx, uint8_t attrs);
 void        con_set_style_rgb(uint32_t fg, uint32_t bg, uint8_t attrs);
 void        con_set_fg(uint8_t fg_idx);
 void        con_set_fg_rgb(uint32_t rgb);
+void        con_set_bg_rgb(uint32_t rgb);
 void        con_set_attrs(uint8_t attrs);
 uint8_t     con_get_fg(void);
 uint8_t     con_get_attrs(void);
@@ -125,6 +126,22 @@ uint32_t    con_palette(uint8_t idx);
 
 void        con_move_cursor(void);
 void        con_set_cursor(uint8_t x, uint8_t y);
+/* v2.60: snapshot cursor to bottom-left of live grid. */
+void        con_reset_cursor(void);
+/* v2.60: begin / end a high-frequency output burst.  Disables the slow
+ * per-char software-cursor sync during the burst so help, banners, etc.
+ * render fast; must always be paired with a matching con_unsuppress(). */
+void        con_suppress_cursor(int on);
+/* v2.60: end a suppress-burst and immediately repaint cursor position. */
+void        con_unsuppress_cursor(void);
+/* v2.61: parse a color spec into an RGB value.
+ * Recognises "#RRGGBB" (with or without leading #) and the named tokens
+ * defined by con_apply_theme(dark).  Returns 0 on success, -1 on bad input. */
+int         con_parse_color(const char *s, uint32_t *out_rgb);
+/* v2.61: apply a full theme palette (dark=1, light=0) to the CLUT and
+ * default style.  Both palettes are committed to entries 0..47 + greys;
+ * callers should call this after mode-switch so the first prompt uses it. */
+void        con_apply_theme(int dark);
 /* v2.21 T51: the shell line editor needs the live cursor position as the
  * anchor for in-place redraw after history / cursor-key edits. */
 void        con_get_cursor(int *x, int *y);

@@ -91,7 +91,7 @@ static void vga_reload_font(void) {
     font_begin();
     for (int c = 0; c < 256; c++) {
         const unsigned char *g = render_font_glyph((unsigned char)c);
-        for (int r = 0; r < 16; r++) font_put(c, r, g[r >> 1]);
+        for (int r = 0; r < 16; r++) font_put(c, r, g[r]);
     }
     font_end();
 }
@@ -116,6 +116,21 @@ static void text_clear(uint32_t bg_rgb) {
     uint8_t a = attr_byte(render_clut(7), bg_rgb, 0);
     uint16_t blank = (uint16_t)' ' | ((uint16_t)a << 8);
     for (int i = 0; i < 80 * 25; i++) vram[i] = blank;
+}
+
+/* Shift VRAM down by n rows; fill new top rows with blank cells.
+ * Returns 0 to indicate success (no full redraw needed). */
+static int text_scroll(int n, uint32_t bg_rgb) {
+    if (n <= 0 || n >= 25) return -1;
+    uint8_t a = attr_byte(render_clut(7), bg_rgb, 0);
+    uint16_t blank = (uint16_t)' ' | ((uint16_t)a << 8);
+    /* Move (25-n) rows down by n*80 words */
+    int shift = n * 80;
+    for (int i = 0; i < (25 - n) * 80; i++)
+        vram[i + shift] = vram[i];
+    /* Fill scrolled-in rows at top with blanks */
+    for (int i = 0; i < n * 80; i++) vram[i] = blank;
+    return 0;
 }
 
 static void text_draw_cell(int gx, int gy, const con_cell_t *c) {
@@ -437,7 +452,7 @@ render_be_t be_text = {
     .draw_cell  = text_draw_cell,
     .set_cursor = text_set_cursor,
     .set_palette= text_set_palette,
-    .scroll     = 0,               /* full redraw rebuilds font slots */
+    .scroll     = text_scroll,          /* fast VRAM row-shift; no font rebuilds */
     .draw_cursor= 0,               /* hardware cursor */
     .diag       = text_diag,
     .cell_w     = 8, .cell_h = 16

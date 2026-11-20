@@ -422,17 +422,23 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
     fill(ox, oy, cw, ch, b);
     if (c->cp) {
         const unsigned char *g = render_font_glyph((unsigned char)c->cp);
+        /* The 16-byte glyph already fills a scale-1 cell (8×16px).
+         * To keep the scaling invariant we subtract 1 from font_scale when
+         * indexing into the new font, so that font_scale==1 means "no stretch"
+         * (each output pixel reads exactly one font byte).                  */
+        int vshift = font_scale > 1 ? font_scale - 1 : 0;
+        int bold   = (c->attrs & CON_ATTR_BOLD) ? 1 : 0;
         for (int j = 0; j < ch; j++) {
-            unsigned row = g[j >> font_scale];
-            int shift = (c->attrs & CON_ATTR_ITALIC) &&
-                        (j >> font_scale) < 5 ? hx : 0;
+            unsigned row = g[j >> vshift];
+            int italic_off = (c->attrs & CON_ATTR_ITALIC) &&
+                        (j >> vshift) < 5 ? hx : 0;
             for (int i = 0; i < 7; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 for (int sx = 0; sx < hx; sx++) {
-                    int dx = i * hx + sx + shift;
+                    int dx = i * hx + sx + italic_off;
                     if (dx >= 7 * hx) continue;
                     put3(ox + dx, oy + j, f);
-                    if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7 * hx)
+                    if (bold && dx + 1 < 7 * hx)
                         put3(ox + dx + 1, oy + j, f);
                 }
             }
@@ -451,6 +457,7 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
     int cw = v24_cw(), ch = v24_ch();
     int w = cw * 2, hx = cw / 8;
     fill(ox, oy, w, ch, b);
+    int bold = (c->attrs & CON_ATTR_BOLD) ? 1 : 0;
     if (g) {
         for (int j = 0; j < ch; j++) {
             int src = (font_scale == 0) ? j * 2 : j >> (font_scale - 1);
@@ -459,7 +466,7 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
                 if (!(row & (1u << (15 - i)))) continue;
                 for (int sx = 0; sx < hx; sx++) {
                     put3(ox + i * hx + sx, oy + j, f);
-                    if ((c->attrs & CON_ATTR_BOLD) && i * hx + sx + 1 < w)
+                    if (bold && i * hx + sx + 1 < w)
                         put3(ox + i * hx + sx + 1, oy + j, f);
                 }
             }
@@ -482,6 +489,20 @@ static void v24_draw_cell(int gx, int gy, const con_cell_t *c) {
 }
 
 static void v24_set_cursor(int x, int y) { (void)x; (void)y; }
+
+/* Shift framebuffer pixels up by n cell-rows; fill scrolled-in area with bg.
+ * Uses raw byte memcpy loop for portability (no libc). */
+static int v24_scroll(int n, uint32_t bg_rgb) {
+    if (n <= 0 || n >= be_vbe24.rows) return -1;
+    int ch = v24_ch();
+    int keep_rows = be_vbe24.rows - n;
+    uint32_t shift = (uint32_t)n * ch * g_pitch;
+    uint32_t keep   = (uint32_t)keep_rows * ch * g_pitch;
+    for (uint32_t i = 0; i < keep; i++)
+        lfb[i] = lfb[i + shift];
+    fill(0, keep_rows * ch, GFX24_W, n * ch, bg_rgb);
+    return 0;
+}
 static void v24_draw_cursor(int x, int y, uint32_t fg_rgb) {
     /* v2.21: EMPTY cell -> 1 px UNDERLINE on the cell's last scanline
      * (not the old #58 8x8 block).  render.c draws a glyph cell as
@@ -556,7 +577,7 @@ render_be_t be_vbe24 = {
     .draw_cell  = v24_draw_cell,
     .set_cursor = v24_set_cursor,
     .set_palette= v24_set_palette,
-    .scroll     = 0,                    /* front-end full re-render */
+    .scroll     = v24_scroll,                 /* fast pixel-shift, no full redraw */
     .draw_cursor= v24_draw_cursor,
     .mouse_cursor = v24_mouse_cursor,
     .diag       = v24_diag,

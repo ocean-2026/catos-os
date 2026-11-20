@@ -106,8 +106,8 @@ extern render_be_t be_vbe;
 extern render_be_t be_vbe24;
 
 /* ---- shared fonts ------------------------------------------------------ */
-/* 8x8 ASCII (95 printable glyphs), 8 row bytes, MSB = left pixel.
- * All back-ends stretch each row twice to fill the 8x16 cell. */
+/* 8x16 ASCII (95 printable glyphs), one byte per scanline, MSB = left pixel.
+ * Back-ends index g[j] directly -- no software row-doubling needed. */
 const unsigned char *render_font_glyph(unsigned char ch);
 /* 16x16 GB2312 hanzi by Unicode codepoint, 32 row bytes (2 per row),
  * MSB = left pixel.  Returns 0 when the codepoint is not covered. */

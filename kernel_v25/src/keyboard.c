@@ -114,8 +114,9 @@ static int sc_to_key(uint8_t sc) {
 }
 
 /* v2.21 T51: fold the Ctrl modifier into E0-prefixed special keys.
- * Without this, Ctrl+Up is indistinguishable from plain Up, so the shell
- * cannot offer both history and scrollback on the arrow cluster. */
+ * Plain arrows and plain PgUp/PgDn are kept as-is so callers can distinguish
+ * them from their Ctrl variants; only Up/Down map to KB_CTRL_UP/DOWN since
+ * those were used for scrollback (v2.61: PgUp/PgDn now do it directly). */
 static int e0_map(int k, int ctrl_held) {
     if (!ctrl_held) return k;
     switch (k) {
@@ -123,8 +124,7 @@ static int e0_map(int k, int ctrl_held) {
     case KB_DOWN:  return KB_CTRL_DOWN;
     case KB_LEFT:  return KB_CTRL_LEFT;
     case KB_RIGHT: return KB_CTRL_RIGHT;
-    case KB_PGUP:  return KB_CTRL_PGUP;
-    case KB_PGDN:  return KB_CTRL_PGDN;
+    /* v2.61: PgUp/PgDn no longer folded -- handled directly below. */
     default:       return k;
     }
 }
@@ -256,7 +256,7 @@ int kb_getkey(void) {
  * Left/Right   : move the insertion point, UTF-8 aware
  * Home/End     : start / end of line
  * Backspace/Del: delete a whole UTF-8 sequence, not one byte
- * Ctrl+Up/Down : console scrollback (Ctrl+PgUp/PgDn = half a screen)
+ * PgUp/PgDn    : console scrollback (one page per press)
  * Typing       : syntax highlighting (command / option / number / string)
  *
  * All redraw is done with absolute cell writes from the anchor position
@@ -451,18 +451,14 @@ int kb_readline(char *buf, int len) {
         /* Leaving scrollback: any non-scroll key restores the live grid
          * (including the partly typed line) and is then handled normally. */
         if (con_scrollback_view() &&
-            k != KB_CTRL_UP && k != KB_CTRL_DOWN &&
-            k != KB_CTRL_PGUP && k != KB_CTRL_PGDN)
+            k != KB_PGUP && k != KB_PGDN)
             con_scrollback_reset();
 
-        if (k == KB_CTRL_UP   || k == KB_CTRL_DOWN ||
-            k == KB_CTRL_PGUP || k == KB_CTRL_PGDN) {
-            /* Ctrl+Up/Down = 1 line per step; Ctrl+PgUp/PgDn = one full
-             * page (visible text rows - 1) per step.  text and gfx24 both
-             * go through the same con_scrollback() row-granular API. */
-            int d = (k == KB_CTRL_UP || k == KB_CTRL_PGUP) ? 1 : -1;
-            if (k == KB_CTRL_PGUP || k == KB_CTRL_PGDN)
-                d *= (con_rows() > 2 ? con_rows() - 1 : 1);
+        if (k == KB_PGUP || k == KB_PGDN) {
+            /* PgUp/PgDn = one full page (visible text rows - 1) per step.
+             * text and gfx24 both go through the same con_scrollback() API. */
+            int d = k == KB_PGUP ? 1 : -1;
+            d *= (con_rows() > 2 ? con_rows() - 1 : 1);
             con_scrollback(d);
             continue;
         }
@@ -496,6 +492,14 @@ int kb_readline(char *buf, int len) {
             con_set_fg(base);
             con_set_paste_hook(0);
             return 2;
+        }
+        if (k == KB_CTRL_Z) {          /* v2.60: suspend foreground job */
+            line_len = line_cur = 0; line[0] = 0;
+            rl_redraw(x0, y0, base);
+            buf[0] = 0;
+            con_set_fg(base);
+            con_set_paste_hook(0);
+            return 3;                  /* ^Z: signal caller to stop fg task */
         }
         if (k == KB_TAB && rl_completer) {
             char out[KB_BUF], bar[160];
