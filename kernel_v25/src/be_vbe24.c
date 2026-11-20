@@ -427,6 +427,7 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
          * indexing into the new font, so that font_scale==1 means "no stretch"
          * (each output pixel reads exactly one font byte).                  */
         int vshift = font_scale > 1 ? font_scale - 1 : 0;
+        int bold   = (c->attrs & CON_ATTR_BOLD) ? 1 : 0;
         for (int j = 0; j < ch; j++) {
             unsigned row = g[j >> vshift];
             int italic_off = (c->attrs & CON_ATTR_ITALIC) &&
@@ -437,7 +438,7 @@ static void draw_narrow(int ox, int oy, const con_cell_t *c,
                     int dx = i * hx + sx + italic_off;
                     if (dx >= 7 * hx) continue;
                     put3(ox + dx, oy + j, f);
-                    if ((c->attrs & CON_ATTR_BOLD) && dx + 1 < 7 * hx)
+                    if (bold && dx + 1 < 7 * hx)
                         put3(ox + dx + 1, oy + j, f);
                 }
             }
@@ -456,6 +457,7 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
     int cw = v24_cw(), ch = v24_ch();
     int w = cw * 2, hx = cw / 8;
     fill(ox, oy, w, ch, b);
+    int bold = (c->attrs & CON_ATTR_BOLD) ? 1 : 0;
     if (g) {
         for (int j = 0; j < ch; j++) {
             int src = (font_scale == 0) ? j * 2 : j >> (font_scale - 1);
@@ -464,7 +466,7 @@ static void draw_wide(int ox, int oy, const con_cell_t *c,
                 if (!(row & (1u << (15 - i)))) continue;
                 for (int sx = 0; sx < hx; sx++) {
                     put3(ox + i * hx + sx, oy + j, f);
-                    if ((c->attrs & CON_ATTR_BOLD) && i * hx + sx + 1 < w)
+                    if (bold && i * hx + sx + 1 < w)
                         put3(ox + i * hx + sx + 1, oy + j, f);
                 }
             }
