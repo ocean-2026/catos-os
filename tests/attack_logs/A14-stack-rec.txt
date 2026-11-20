@@ -1,0 +1,74 @@
+=== A14 stack-rec ===
+under_test_iso_sha256=d7c5176f21d7e7b7
+host_free_mb=4915 guests=2
+vector  : deep ring3 recursion (600 x 512B) past the 128 KiB stack
+run     : run /bin/ATKSTACK.CE 
+expect  : OK: attacker killed by its own ring3 page fault
+result  : OK  (attacker task killed by its own ring3 fault, shell prompt back (defence held))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$
+
+--- screen AFTER ---
+root@catos:/$ run /bin/ATKSTACK.CE
+ATK-STACK: stack / string-scan / vsyscall abuse
+STEP 1: -- moderate recursion (depth 40, ~20 KiB) -- control
+rec40=3556
+STEP 2: -- unterminated string at the end of a mapped page
+strlen(8K no NUL)=4096 strlen(last byte)=1 strcpy done
+STEP 3: -- vsyscall page is user-writable: peek at the thunks
+thunk[0]=0x02080000 api ptr=0x02080800
+STEP 4: -- self-modify a vsyscall thunk (ring3-only capability?)
+patched=235 restored
+STEP 5: -- deep recursion: depth 600 (~300 KiB > 128 KiB stack)
+[task 1 'ATKSTACK' killed: page fault at eip=0x020003ae cr2=0x021dffe4]
+root@catos:/$
+
+--- faultinfo probe ---
+patched=235 restored
+STEP 5: -- deep recursion: depth 600 (~300 KiB > 128 KiB stack)
+[task 1 'ATKSTACK' killed: page fault at eip=0x020003ae cr2=0x021dffe4]
+root@catos:/$ faultinfo
+last fault: page-fault ring0x00000003 task ATKSTACK tid0x00000001
+eip=0x020003ae cr2=0x021dffe4 err=0x00000006 efl=0x00010206 at tick 0x000004e9
+pf bits: not-present write user
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=01645ee8
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010d4000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     015ebb40 0000002f
+IDT=     015eb340 000007ff
+CR0=80000011 CR2=021dffe4 CR3=015ed000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+

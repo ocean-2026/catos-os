@@ -399,32 +399,99 @@ static uint8_t  rl_paste_base;
 static void rl_redraw(int x0, int y0, uint8_t base);
 static void rl_paste_apply(const char *s, int n) {
     if (n <= 0) return;
-    if (rl_width(line, line_len) + rl_width(s, n) < con_cols() - rl_paste_x0) {
-        rl_insert(s, n);
-        rl_redraw(rl_paste_x0, rl_paste_y0, rl_paste_base);
+    rl_insert(s, n);            /* v2.66: paste wraps instead of truncating */
+    rl_redraw(rl_paste_x0, rl_paste_y0, rl_paste_base);
+}
+
+/* v2.66: soft-wrapped line editor state.  A long command now continues on
+ * the following rows instead of being refused at the right edge; when the
+ * wrapped line outgrows the screen the console scrolls up (rows archived
+ * to scrollback).  rl_y0_adj remembers the (possibly scrolled) start row
+ * between redraws because the callers keep passing the original anchor;
+ * rl_last_rows remembers how many rows the line occupied so the next
+ * redraw can wipe the full old footprint. */
+static int rl_y0_adj    = -1;
+static int rl_last_rows = 1;
+
+/* Write one display char (ASCII byte or one whole UTF-8 sequence) at
+ * (cx,cy), wrapping to column 0 of the next row when it would overflow. */
+static void rl_putc_wrapped(const char *s, int n, int *cx, int *cy, int cols) {
+    int cl = 1;
+    unsigned char c0 = (unsigned char)s[0];
+    if (c0 >= 0x80u)
+        while (cl < n && rl_is_cont((unsigned char)s[cl])) cl++;
+    int w = (c0 >= 0x80u) ? 2 : 1;
+    if (*cx + w > cols) { *cx = 0; (*cy)++; }
+    char tmp[8];
+    if (cl > 7) cl = 7;
+    for (int j = 0; j < cl; j++) tmp[j] = s[j];
+    tmp[cl] = 0;
+    con_write_at_utf8((uint8_t)*cx, (uint8_t)*cy, tmp);
+    *cx += w;
+}
+
+/* Screen position (after wrapping) of byte offset `off` within `line`,
+ * starting from anchor (x0,y0).  Must mirror rl_putc_wrapped exactly. */
+static void rl_screen_pos(int off, int x0, int y0, int cols, int *pcx, int *pcy) {
+    *pcx = x0; *pcy = y0;
+    int i = 0;
+    while (i < off && i < line_len) {
+        int cl = 1;
+        unsigned char c0 = (unsigned char)line[i];
+        if (c0 >= 0x80u)
+            while (i + cl < line_len && rl_is_cont((unsigned char)line[i + cl])) cl++;
+        int w = (c0 >= 0x80u) ? 2 : 1;
+        if (*pcx + w > cols) { *pcx = 0; (*pcy)++; }
+        *pcx += w;
+        i += cl;
     }
 }
 
 static void rl_redraw(int x0, int y0, uint8_t base) {
     int cols = con_cols();
+    int rows = con_rows();
     if (x0 >= cols) x0 = cols - 1;
-    /* wipe the rest of the input row with the original foreground */
-    con_set_fg(base);
-    char pad[128];
-    int room = cols - x0;
-    if (room > 120) room = 120;
-    for (int i = 0; i < room; i++) pad[i] = ' ';
-    pad[room] = 0;
-    con_write_at((uint8_t)x0, (uint8_t)y0, pad);
+    if (rl_y0_adj >= 0 && rl_y0_adj < rows) y0 = rl_y0_adj;
 
-    char seg[KB_BUF];
-    int i = 0, cx = x0, tok = 0;
-    while (i < line_len && cx < cols) {
+    /* rows the wrapped line needs (including the active IME composition) */
+    const char *comp = ime_composition();
+    int comp_w = (comp && *comp) ? rl_width(comp, rl_strlen(comp)) : 0;
+    int total = x0 + rl_width(line, line_len) + comp_w;
+    int need = (total + cols - 1) / cols;
+    if (need < 1) need = 1;
+
+    /* grow downward: scroll the console so the whole wrapped line fits
+     * between the prompt row and the bottom edge */
+    if (y0 + need > rows) {
+        int k = y0 + need - rows;
+        con_scroll_up(k);
+        y0 -= k;
+        if (y0 < 0) y0 = 0;
+        need = rows - y0;
+        if (need < 1) need = 1;
+    }
+    rl_y0_adj = y0;
+
+    /* wipe the previous footprint plus any rows the shorter line no
+     * longer occupies (con_write_at clips at the right edge) */
+    {
+        char pad[160];
+        int room = cols < 159 ? cols : 159;
+        for (int i = 0; i < room; i++) pad[i] = ' ';
+        pad[room] = 0;
+        con_set_fg(base);
+        int wipe = rl_last_rows > need ? rl_last_rows : need;
+        for (int r = 0; r < wipe && y0 + r < rows; r++)
+            con_write_at((uint8_t)(r ? 0 : x0), (uint8_t)(y0 + r), pad);
+    }
+
+    /* draw the wrapped, syntax-coloured line */
+    int cx = x0, cy = y0, tok = 0, i = 0;
+    while (i < line_len) {
         if (line[i] == ' ') {                 /* plain separator */
-            seg[0] = ' '; seg[1] = 0;
             con_set_fg(base);
-            con_write_at_utf8((uint8_t)cx, (uint8_t)y0, seg);
-            cx++; i++;
+            rl_putc_wrapped(line + i, 1, &cx, &cy, cols);
+            i++;
             continue;
         }
         int e = i;
@@ -437,43 +504,51 @@ static void rl_redraw(int x0, int y0, uint8_t base) {
         }
         int n = e - i;
         if (n > KB_BUF - 1) n = KB_BUF - 1;
-        for (int j = 0; j < n; j++) seg[j] = line[i + j];
-        seg[n] = 0;
-        con_set_fg(rl_tok_color(seg, n, tok, base));
-        con_write_at_utf8((uint8_t)cx, (uint8_t)y0, seg);
-        cx += rl_width(seg, n);
+        con_set_fg(rl_tok_color(line + i, n, tok, base));
+        for (int j = 0; j < n; ) {
+            int cl = 1;
+            unsigned char c0 = (unsigned char)line[i + j];
+            if (c0 >= 0x80u)
+                while (j + cl < n && rl_is_cont((unsigned char)line[i + j + cl])) cl++;
+            rl_putc_wrapped(line + i + j, cl, &cx, &cy, cols);
+            j += cl;
+        }
         tok++;
         i = e;
     }
+
+    /* screen position of the text cursor */
+    int curx, cury;
+    rl_screen_pos(line_cur, x0, y0, cols, &curx, &cury);
+
     /* v2.58 stage-1: the active IME composition string is drawn inline at
      * the cursor (it lives outside the fixed bottom candidate area). */
-    const char *comp = ime_composition();
     if (comp && *comp) {
-        int cc = x0 + rl_width(line, line_cur);
-        if (cc >= cols) cc = cols - 1;
         con_set_fg(base);
-        con_write_at_utf8((uint8_t)cc, (uint8_t)y0, comp);
-        int cw = rl_width(comp, rl_strlen(comp));
-        int cur_col = cc + cw;
-        if (cur_col >= cols) cur_col = cols - 1;
-        /* v2.59 fix: the cell the cursor lands on can still carry a glyph
-         * from an earlier frame (the cursor is drawn over it), which shows
-         * up as a stray character right after the pinyin string.  Blank it
-         * explicitly before parking the cursor there. */
-        con_write_at_utf8((uint8_t)cur_col, (uint8_t)y0, " ");
-        con_set_cursor((uint8_t)cur_col, (uint8_t)y0);
-        return;
+        for (const char *p = comp; *p; ) {
+            int cl = 1;
+            unsigned char c0 = (unsigned char)*p;
+            if (c0 >= 0x80u) while (p[cl] && rl_is_cont((unsigned char)p[cl])) cl++;
+            rl_putc_wrapped(p, cl, &curx, &cury, cols);
+            p += cl;
+        }
+        int cur_col = curx;
+        if (cur_col >= cols) { cur_col = 0; cury++; }
+        /* v2.59 fix: blank the cell the cursor lands on so a stale glyph
+         * from an earlier frame never peeks out after the pinyin string. */
+        con_write_at_utf8((uint8_t)cur_col, (uint8_t)cury, " ");
     }
+    if (curx >= cols) { curx = 0; cury++; }
+    rl_last_rows = cury - y0 + 1;
     con_set_fg(base);
-    int cur_col = x0 + rl_width(line, line_cur);
-    if (cur_col >= cols) cur_col = cols - 1;
-    con_set_cursor((uint8_t)cur_col, (uint8_t)y0);
+    con_set_cursor((uint8_t)curx, (uint8_t)cury);
 }
 
 int kb_readline(char *buf, int len) {
     if (len <= 0) return 0;
     int x0 = 0, y0 = 0;
     con_get_cursor(&x0, &y0);
+    rl_y0_adj = -1; rl_last_rows = 1;   /* v2.66: fresh anchor per line */
     ime_set_anchor(y0);             /* v2.25: candidate bar under the line */
     uint8_t base = con_get_fg();
     int cols = con_cols();
@@ -515,10 +590,8 @@ int kb_readline(char *buf, int len) {
             if (r == IME_COMMIT) {
                 int n = 0;
                 while (han[n]) n++;
-                if (rl_width(line, line_len) + rl_width(han, n) < cols - x0) {
-                    rl_insert(han, n);
-                    rl_redraw(x0, y0, base);
-                }
+                rl_insert(han, n);      /* v2.66: wraps, never refused */
+                rl_redraw(x0, y0, base);
                 continue;
             }
         }
@@ -549,7 +622,10 @@ int kb_readline(char *buf, int len) {
                 rl_redraw(x0, y0, base);
             }
             if (bar[0]) {
-                int br = y0 + 1;
+                /* v2.66: put the bar under the LAST row of the (possibly
+                 * wrapped) input line */
+                int last = (rl_y0_adj >= 0 ? rl_y0_adj : y0) + rl_last_rows - 1;
+                int br = last + 1;
                 if (br >= con_rows()) br = y0 - 1;
                 con_status_bar_at(br, bar);
             }
@@ -562,10 +638,17 @@ int kb_readline(char *buf, int len) {
             buf[n] = 0;
             rl_hist_push(line);
             con_set_fg(base);
-            int end_col = x0 + rl_width(line, line_len);
-            if (end_col >= cols) end_col = cols - 1;
-            con_set_cursor((uint8_t)end_col, (uint8_t)y0);
+            /* v2.66: park the cursor after the last wrapped row, then the
+             * newline scrolls naturally from there */
+            int ex, ey;
+            {
+                int ay0 = (rl_y0_adj >= 0) ? rl_y0_adj : y0;
+                rl_screen_pos(line_len, x0, ay0, cols, &ex, &ey);
+            }
+            if (ex >= cols) { ex = 0; ey++; }
+            con_set_cursor((uint8_t)ex, (uint8_t)ey);
             con_putc('\n');
+            rl_y0_adj = -1; rl_last_rows = 1;
             line_len = line_cur = 0; line[0] = 0;
             con_set_paste_hook(0);
             return 1;
@@ -622,10 +705,8 @@ int kb_readline(char *buf, int len) {
         }
         if (k >= 32 && k < 256) {           /* printable, insert anywhere */
             char c = (char)k;
-            if (rl_width(line, line_len) + 1 < cols - x0) {
-                rl_insert(&c, 1);
-                rl_redraw(x0, y0, base);
-            }
+            rl_insert(&c, 1);               /* v2.66: wraps, never refused */
+            rl_redraw(x0, y0, base);
         }
         /* other function keys are ignored in line mode */
     }

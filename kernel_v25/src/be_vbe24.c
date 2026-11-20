@@ -179,6 +179,14 @@ static void fill(int x, int y, int w, int h, uint32_t c) {
 static int      mc_valid, mc_x, mc_y;
 static uint8_t  mc_save[MC_W * MC_H * 4];
 
+/* v2.66: registered by render.c -- force-repaints the CELLS under a pixel
+ * rect from the cell grid.  The arrow is raw LFB pixels and is invisible
+ * to the dirty-cell tracker, so every LFB mutation that is not a paint()
+ * (pixel-shift scroll) must heal the sprite rect this way, or stale
+ * save/restore bytes smear over the text and characters look "eaten". */
+static void (*mc_dirty_cb)(int px, int py, int pw, int ph) = 0;
+void vbe24_set_mouse_dirty_cb(void (*cb)(int, int, int, int)) { mc_dirty_cb = cb; }
+
 static const uint16_t MC_ARROW[MC_H] = {
     0x800, 0xC00, 0xA00, 0x900, 0x880, 0x840,
     0x820, 0x810, 0x888, 0x950, 0xC28, 0x880
@@ -204,14 +212,8 @@ static void mc_restore(void) {
 
 static void mc_invalidate(void) { mc_valid = 0; }
 
-static void v24_mouse_cursor(int x, int y, int visible) {
-    if (!lfb) return;
-    mc_restore();
-    if (!visible) return;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x > GFX24_W - MC_W) x = GFX24_W - MC_W;
-    if (y > GFX24_H - MC_H) y = GFX24_H - MC_H;
+/* Save the pixels under the arrow and draw it (no restore first). */
+static void mc_save_and_draw(int x, int y) {
     mc_x = x; mc_y = y;
     for (int j = 0; j < MC_H; j++) {
         int dy = y + j;
@@ -237,6 +239,28 @@ static void v24_mouse_cursor(int x, int y, int visible) {
         }
     }
     mc_valid = 1;
+}
+
+/* v2.66: called by the front-end after repainting a cell.  If the mouse
+ * arrow overlaps it, refresh the arrow over the new pixels (the cell
+ * paint just overwrote part of the sprite).  Cheap: 12x12 rect check. */
+static void v24_mouse_over_repaint(int gx, int gy) {
+    if (!mc_valid || !lfb) return;
+    int ox = gx * v24_cw(), oy = gy * v24_ch();
+    if (ox > mc_x + MC_W || ox + v24_cw() < mc_x ||
+        oy > mc_y + MC_H || oy + v24_ch() < mc_y) return;
+    mc_save_and_draw(mc_x, mc_y);
+}
+
+static void v24_mouse_cursor(int x, int y, int visible) {
+    if (!lfb) return;
+    mc_restore();
+    if (!visible) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > GFX24_W - MC_W) x = GFX24_W - MC_W;
+    if (y > GFX24_H - MC_H) y = GFX24_H - MC_H;
+    mc_save_and_draw(x, y);
 }
 
 /* ---- public drawing API (gfx24.h) -------------------------------------- */
@@ -495,12 +519,23 @@ static void v24_set_cursor(int x, int y) { (void)x; (void)y; }
 static int v24_scroll(int n, uint32_t bg_rgb) {
     if (n <= 0 || n >= be_vbe24.rows) return -1;
     int ch = v24_ch();
-    int keep_rows = be_vbe24.rows - n;
+    /* v2.66: the mouse arrow is raw LFB pixels that no dirty tracking
+     * sees.  A pixel-shift scroll would carry the arrow pixels up with
+     * the text and leave the save buffer stale (restore then smears old
+     * rows over the glyphs -- "characters eaten by the cursor").  Wipe
+     * the arrow by force-repainting its cell rect from the grid, shift
+     * clean pixels, then redraw the arrow at the SAME screen position. */
+    int had = mc_valid;
+    if (had) {
+        mc_valid = 0;                       /* suppress sprite during heal */
+        if (mc_dirty_cb) mc_dirty_cb(mc_x, mc_y, MC_W, MC_H);
+    }
     uint32_t shift = (uint32_t)n * ch * g_pitch;
-    uint32_t keep   = (uint32_t)keep_rows * ch * g_pitch;
+    uint32_t keep   = (uint32_t)(be_vbe24.rows - n) * ch * g_pitch;
     for (uint32_t i = 0; i < keep; i++)
         lfb[i] = lfb[i + shift];
-    fill(0, keep_rows * ch, GFX24_W, n * ch, bg_rgb);
+    fill(0, (be_vbe24.rows - n) * ch, GFX24_W, n * ch, bg_rgb);
+    if (had) mc_save_and_draw(mc_x, mc_y);
     return 0;
 }
 static void v24_draw_cursor(int x, int y, uint32_t fg_rgb) {
@@ -580,6 +615,7 @@ render_be_t be_vbe24 = {
     .scroll     = v24_scroll,                 /* fast pixel-shift, no full redraw */
     .draw_cursor= v24_draw_cursor,
     .mouse_cursor = v24_mouse_cursor,
+    .mouse_over_repaint = v24_mouse_over_repaint,
     .diag       = v24_diag,
     .cell_w     = 8, .cell_h = 16,
     .set_scale  = v24_set_scale

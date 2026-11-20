@@ -62,6 +62,11 @@ static void skip_sp(const char **pp);   /* v2.61: advance past spaces           
 static void cmd_svgainfo(void);
 static void cmd_size(const char *arg);
 static void cmd_display(void);
+/* v2.65: POSIX-style sndinfo (forward decl; full body after strcat_b) */
+static void cmd_sndinfo(char *arg);
+/* v2.65: exit status of the most recently completed command, readable as
+ * $? in typed lines and /etc/autostart scripts. */
+static int g_last_rc;
 
 /* P1: set while /etc/autostart scripts run their commands.  Interactive
  * prompts (e.g. the PE->CE conversion offer in `run`) must default to
@@ -325,12 +330,12 @@ static void cmd_help(void) {
     help_row("reg set SEC KEY VAL", "set a registry value (admin)");
     help_row("reg del SEC KEY", "delete a registry key (admin)");
     help_row("export K=V",  "set variable (empty V deletes); env lists all");
-    help_row("unset K",     "delete variable; $K / ${K} expand in typed lines");
+    help_row("unset K",     "delete variable; $K / ${K} / $? expand in typed lines");
     help_row("PATH",        "drives bare-NAME lookup (default /bin)");
     help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
 
-    help_head("audio (Sound Blaster 16, ISA)");
-    help_row("sndinfo",     "SB16 probe, DSP version, IRQ/DMA diagnostics");
+    help_head("audio (SB16 ISA / ES1370-1371 PCI, POSIX options)");
+    help_row("sndinfo [OPT]", "audio info: -h -v -l -p -c -d N -w -j -s -q -t (long forms too)");
     help_row("sndtest [HZ MS]", "play a tone (default 440 Hz / 800 ms)");
 
     help_head("network (PCnet)");
@@ -433,42 +438,8 @@ static void cmd_lang(const char *arg) {
     if (r == -2) vga_write(tr(L_LANG_PERSIST_FAIL));
 }
 
-static void cmd_sndinfo(void) {
-    if (!snd_info(SND_INFO_READY)) {
-        vga_write(tr(L_SND_NONE));
-        return;
-    }
-    int be = snd_info(SND_INFO_BACKEND);
-    if (be == 2) {
-        /* v2.21 #56: PCI backend.  Keep the SB16 output below byte-for-byte
-         * unchanged -- tests/snd_regress.py asserts on that text. */
-        vga_write("snd: "); vga_write(snd_backend_name()); vga_write(" ready\n");
-        vga_write("snd: pci dev=0x"); print_hex((uint32_t)snd_info(SND_INFO_DEVICE));
-        vga_write(" iobase=0x");     print_hex((uint32_t)snd_info(SND_INFO_DMASET));
-        vga_write(" irq=");          print_int(snd_info(SND_INFO_IRQSET));
-        vga_write(" dsp(dev)=0x");  print_hex((uint32_t)snd_info(SND_INFO_VERSION));
-        vga_write(" rate=");        print_int(snd_info(SND_INFO_RATE));
-        vga_write(" irqs=");        print_int(snd_info(SND_INFO_IRQS));
-        vga_write("\n");
-        vga_write("snd: pcm buffer "); print_int(snd_info(SND_INFO_BUFSZ));
-        vga_write(" bytes (widened to 16-bit stereo in device DMA)\n");
-        return;
-    }
-    vga_write("snd: SB16 ready iobase=");
-    print_hex(SND_IOBASE);
-    vga_write(" irq=");   print_int(SND_IRQ_LINE);
-    vga_write(" dma=");   print_int(SND_DMA8_CHAN);
-    vga_write(" dsp=0x"); print_hex((uint32_t)snd_info(SND_INFO_VERSION));
-    vga_write(" rate=");  print_int(snd_info(SND_INFO_RATE));
-    vga_write(" irqs=");  print_int(snd_info(SND_INFO_IRQS));
-    vga_write("\n");
-    vga_write("snd: dma buffer ");
-    print_int(snd_info(SND_INFO_BUFSZ));
-    vga_write(" bytes at 0x"); print_hex(SND_DMA_PHYS);
-    vga_write(" mixer irq=");  print_hex((uint32_t)snd_info(SND_INFO_IRQSET));
-    vga_write(" dma=");        print_hex((uint32_t)snd_info(SND_INFO_DMASET));
-    vga_write("\n");
-}
+/* v2.65: the old zero-argument diagnostic was replaced by the full
+ * POSIX-style sndinfo implementation below (after strcat_b). */
 
 /* Read one unsigned decimal from *pp; leave 0 unchanged when absent. */
 static uint32_t snd_parse_u32(const char **pp) {
@@ -1561,6 +1532,314 @@ static int strcat_b(char *d, int size, const char *s) {
     return *s ? -1 : 0;
 }
 
+/* =====================================================================
+ * v2.65: POSIX-style short/long option parser, shared by builtins that
+ * want -x / --long / --long=V / -xV / -x V / -abc clustering.  Spec entries
+ * are indexed; bit i of `seen` marks spec[i].  Other commands can adopt it
+ * by supplying their own spec table -- no per-command hand-written
+ * string walking needed.
+ * ===================================================================== */
+#define SI_OPT_MAX 12
+typedef struct { char sc; const char *ln; int takes_arg; } si_spec_t;
+typedef struct { unsigned seen; char val[SI_OPT_MAX][64]; } si_opts_t;
+#define SI_HAS(o, i) ((o)->seen & (1u << (i)))
+
+static int si_next_token(char **pp, char *out, int cap) {
+    char *p = *pp;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) { *pp = p; return 0; }
+    int n = 0;
+    while (*p && *p != ' ' && *p != '\t' && n < cap - 1) out[n++] = *p++;
+    out[n] = 0; *pp = p;
+    return 1;
+}
+
+/* 0 = ok, -1 unknown, -2 ambiguous, -3 missing value, -4 unexpected value */
+static int si_parse(char *line, const si_spec_t *spec, int nspec,
+                    si_opts_t *o, char *err, int errcap) {
+    o->seen = 0; err[0] = 0;
+    char *p = line;
+    char tok[96];
+    while (si_next_token(&p, tok, sizeof(tok))) {
+        if (tok[0] != '-' || tok[1] == 0) continue;   /* positional (unused) */
+        if (!strcmp_(tok, "--")) break;
+        if (tok[1] == '-') {
+            const char *body = tok + 2;
+            char name[64]; int nl = 0;
+            while (body[nl] && body[nl] != '=' && nl < 63) { name[nl] = body[nl]; nl++; }
+            name[nl] = 0;
+            const char *val = (body[nl] == '=') ? body + nl + 1 : 0;
+            int hit = -1, cnt = 0;
+            for (int i = 0; i < nspec; i++) {
+                if (!strcmp_(name, spec[i].ln)) { hit = i; cnt = 1; break; }
+                if (strncmp_(name, spec[i].ln, nl) == 0) { hit = i; cnt++; }
+            }
+            if (cnt == 0) { strcat_b(err, errcap, "unknown option --"); strcat_b(err, errcap, name); return -1; }
+            if (cnt > 1)  { strcat_b(err, errcap, "ambiguous option --"); strcat_b(err, errcap, name); return -2; }
+            int i = hit;
+            o->seen |= (1u << i);
+            if (spec[i].takes_arg) {
+                char buf[64];
+                if (!val) {
+                    if (!si_next_token(&p, buf, sizeof(buf))) {
+                        strcat_b(err, errcap, "option --"); strcat_b(err, errcap, spec[i].ln);
+                        strcat_b(err, errcap, " needs a value"); return -3;
+                    }
+                    val = buf;
+                }
+                int k = 0; while (val[k] && k < 63) { o->val[i][k] = val[k]; k++; }
+                o->val[i][k] = 0;
+            } else if (val) {
+                strcat_b(err, errcap, "option --"); strcat_b(err, errcap, spec[i].ln);
+                strcat_b(err, errcap, " takes no value"); return -4;
+            }
+            continue;
+        }
+        for (int j = 1; tok[j]; j++) {
+            char c = tok[j];
+            int hit = -1;
+            for (int i = 0; i < nspec; i++) if (spec[i].sc == c) { hit = i; break; }
+            if (hit < 0) {
+                strcat_b(err, errcap, "unknown option -"); strcat_b(err, errcap, &tok[j]);
+                return -1;
+            }
+            int i = hit;
+            o->seen |= (1u << i);
+            if (spec[i].takes_arg) {
+                char buf[64];
+                const char *val = tok[j + 1] ? tok + j + 1 : 0;
+                if (!val && !si_next_token(&p, buf, sizeof(buf))) {
+                    strcat_b(err, errcap, "option -"); strcat_b(err, errcap, &tok[j]);
+                    strcat_b(err, errcap, " needs a value"); return -3;
+                }
+                if (!val) val = buf;
+                int k = 0; while (val[k] && k < 63) { o->val[i][k] = val[k]; k++; }
+                o->val[i][k] = 0;
+                break;                       /* rest of cluster is the value */
+            }
+        }
+    }
+    return 0;
+}
+
+/* ---------- sndinfo: POSIX rewrite (v2.65) ----------------------------
+ * Interface (options / formats / exit codes) follows the spec exactly.
+ * Telemetry comes from the live driver: currently SB16 (ISA) or
+ * ES1370/1371 (PCI).  Fields the driver does not export (period, avail,
+ * underrun counters, AC97 mixer on the PCI path) are reported as n/a
+ * instead of being invented.  Only card 0 exists until multi-card
+ * enumeration lands -- -d N>0 returns exit 3.
+ * -------------------------------------------------------------------- */
+static void si_line(const char *s) { vga_write(s); vga_write("\n"); }
+static void si_num(const char *pre, int v, const char *post) {
+    vga_write(pre); print_int(v); vga_write(post); vga_write("\n");
+}
+
+static const char *si_card_name(int be) {
+    if (be == 2) return (es1371_info(ES1371_INFO_DEVICE) == 0x1371)
+                       ? "ES1371 PCI Audio (VMware)" : "ES1370 PCI Audio";
+    return "Sound Blaster 16";
+}
+
+/* SB16 mixer volume register (4 high bits) -> percent */
+static void si_pct_line(const char *name, int reg) {
+    int v = snd_mixer_read(reg);
+    vga_write(name); vga_write(": ");
+    if (v < 0) { si_line("n/a"); return; }
+    print_int(((v >> 4) * 100) / 15); vga_write("% [unmuted]\n");
+}
+
+static void si_ctrl_block(int be) {
+    si_line("Card 0 mixer controls:");
+    if (be != 1) {
+        si_line("  n/a - this backend has no AC97 mixer register access");
+        return;
+    }
+    si_pct_line("Master Playback", 0x22);
+    si_pct_line("Master Capture",  0x28);
+    int spk = snd_mixer_read(0x2E);
+    vga_write("Speaker: "); si_line(spk >= 0 && (spk & 0x0C) ? "on" : "off");
+    int mic = snd_mixer_read(0x30);
+    vga_write("Mic Boost: ");
+    if (mic < 0) si_line("n/a");
+    else { vga_write("+"); print_int((mic & 0x07) * 3); si_line("dB"); }
+}
+
+static void si_pcm_block(int be, int capture) {
+    if (capture) {
+        si_line("PCM pcm0c (capture):");
+        si_line("State: n/a (no capture path in current driver)");
+        vga_write("\n");
+        return;
+    }
+    si_line("PCM pcm0p (playback):");
+    si_line(snd_info(SND_INFO_PLAYING) ? "State: RUNNING" : "State: STOPPED");
+    vga_write("Sample rate: "); print_int(snd_info(SND_INFO_RATE));
+    vga_write(" Hz, "); vga_write(be == 2 ? "2ch S16LE" : "1ch U8"); vga_write("\n");
+    si_num("Buffer size: ", snd_info(SND_INFO_BUFSZ), 0);
+    si_line(" frames (period/avail not exported by driver)");
+    si_line("Underrun count: n/a");
+    vga_write("\n");
+}
+
+static void si_list_block(int be) {
+    vga_write("Card 0: "); si_line(si_card_name(be));
+    vga_write("Driver: "); vga_write(snd_backend_name());
+    si_line(" (CatOS Audio Subsys v0.3)");
+    if (be == 2) {
+        vga_write("PCI: vendor=0x"); print_hex((uint32_t)es1371_info(ES1371_INFO_VENDOR));
+        vga_write(" device=0x");     print_hex((uint32_t)es1371_info(ES1371_INFO_DEVICE));
+        vga_write(" irq=");          print_int(es1371_info(ES1371_INFO_IRQ));
+        vga_write("\n");
+        /* legacy regression tokens (tests/es1371_regress.py) */
+        vga_write("snd: pci dev=0x"); print_hex((uint32_t)es1371_info(ES1371_INFO_DEVICE));
+        vga_write(" iobase=0x");      print_hex((uint32_t)es1371_info(ES1371_INFO_IOBASE));
+        vga_write(" irq=");           print_int(es1371_info(ES1371_INFO_IRQ));
+        vga_write("\n");
+    } else {
+        vga_write("ISA: iobase=0x"); print_hex(SND_IOBASE);
+        vga_write(" irq="); print_int(SND_IRQ_LINE);
+        vga_write(" dma="); print_int(SND_DMA8_CHAN);
+        vga_write("\n");
+        /* legacy regression token (tests/snd_regress.py asserts on it) */
+        vga_write("snd: SB16 ready iobase="); print_hex(SND_IOBASE);
+        vga_write(" irq="); print_int(SND_IRQ_LINE);
+        vga_write(" dma="); print_int(SND_DMA8_CHAN); vga_write("\n");
+    }
+    si_line("PCM Devices:");
+    if (be == 2) si_line("pcm0p: Playback, channels 1/2, rates 5.5k~44.1k, fmt S16LE");
+    else         si_line("pcm0p: Playback, channels 1, rates 5k~45k, fmt U8");
+    si_line("pcm0c: Capture,  channels n/a, rates n/a, fmt n/a (unsupported)");
+    si_ctrl_block(be);   /* prints its own "Card 0 mixer controls:" header */
+}
+
+static void si_short_block(int be) {
+    vga_write("0 "); vga_write(si_card_name(be));
+    si_line(" pcm0p:play pcm0c:n/a");
+}
+
+static void si_json_block(int be) {
+    si_line("{");
+    si_line("  \"cards\": [");
+    si_line("    {");
+    si_line("      \"card_id\": 0,");
+    vga_write("      \"name\": \""); vga_write(si_card_name(be)); si_line("\",");
+    vga_write("      \"driver\": \""); vga_write(snd_backend_name()); si_line("\",");
+    si_line("      \"pcm\": [");
+    si_line("        {\"id\":\"pcm0p\",\"dir\":\"playback\",\"ch_min\":1,\"ch_max\":2},");
+    si_line("        {\"id\":\"pcm0c\",\"dir\":\"capture\",\"ch_min\":0,\"ch_max\":0}");
+    si_line("      ]");
+    si_line("    }");
+    si_line("  ]");
+    si_line("}");
+}
+
+static void si_help(void) {
+    si_line("Usage: sndinfo [OPTIONS]");
+    si_line("");
+    si_line("  -h, --help           this help");
+    si_line("  -v, --version        sndinfo + audio driver version");
+    si_line("  -l, --list           list sound cards / PCM devices (default)");
+    si_line("  -p, --pcm            live PCM stream state");
+    si_line("  -c, --ctrl           mixer controls (volume / mute / gain)");
+    si_line("  -d N, --dev N        query only card N");
+    si_line("  -w, --watch          continuously refresh until a key is pressed");
+    si_line("  -j, --json           JSON output (for osh scripts / GUI panels)");
+    si_line("  -s, --short          one-line mode for pipes");
+    si_line("  -q, --quiet          set exit code only, print nothing");
+    si_line("  -t, --tone           play one test tone after the query");
+    si_line("");
+    si_line("Exit: 0 ok  1 bad args  2 no audio device  3 bad card id  4 driver query failed");
+}
+
+static void cmd_sndinfo(char *arg) {
+    static const si_spec_t spec[SI_OPT_MAX] = {
+        { 'h', "help",    0 }, { 'v', "version", 0 },
+        { 'l', "list",    0 }, { 'p', "pcm",     0 },
+        { 'c', "ctrl",    0 }, { 'd', "dev",     1 },
+        { 'w', "watch",   0 }, { 'j', "json",    0 },
+        { 's', "short",   0 }, { 'q', "quiet",   0 },
+        { 't', "tone",    0 }, {  0, 0,          0 }
+    };
+    enum { O_H, O_V, O_L, O_P, O_C, O_D, O_W, O_J, O_S, O_Q, O_T };
+    si_opts_t o;
+    char err[128];
+    g_last_rc = 0;
+
+    if (si_parse(arg, spec, 11, &o, err, sizeof(err)) != 0) {
+        vga_write("sndinfo: "); vga_write(err); vga_write("\n");
+        si_line("sndinfo: use -h for help");
+        g_last_rc = 1; return;
+    }
+    int quiet = SI_HAS(&o, O_Q);   /* -q: status only, never print text */
+    if (SI_HAS(&o, O_H)) { si_help(); return; }
+    if (SI_HAS(&o, O_V)) {
+        si_line("sndinfo 0.65.0 (catos-userland)");
+        vga_write("audio driver: "); vga_write(snd_backend_name());
+        si_line(" / CatOS Audio Subsys v0.3");
+        return;
+    }
+    if (!snd_info(SND_INFO_READY)) {
+        if (!quiet) si_line("sndinfo: audio subsystem not initialized / no sound card");
+        g_last_rc = 2; return;
+    }
+    if (snd_info(SND_INFO_ERROR) != 0) {
+        if (!quiet) si_line("sndinfo: driver query interface failed");
+        g_last_rc = 4; return;
+    }
+    if (SI_HAS(&o, O_D)) {
+        char *end = o.val[O_D];
+        int id = 0, any = 0;
+        while (*end >= '0' && *end <= '9') { id = id * 10 + (*end - '0'); end++; any = 1; }
+        if (!any || *end) {
+            if (!quiet) {
+                vga_write("sndinfo: --dev expects a numeric card id, got '");
+                vga_write(o.val[O_D]); si_line("'");
+            }
+            g_last_rc = 1; return;
+        }
+        if (id != 0) {
+            if (!quiet) si_num("sndinfo: card ", id, " does not exist");
+            g_last_rc = 3; return;
+        }
+    }
+    if (quiet) return;                        /* exit code already 0 */
+
+    int be = snd_info(SND_INFO_BACKEND);
+    int have_mode = SI_HAS(&o, O_L) || SI_HAS(&o, O_P) || SI_HAS(&o, O_C) ||
+                    SI_HAS(&o, O_J) || SI_HAS(&o, O_S) || SI_HAS(&o, O_W);
+    if (!have_mode) o.seen |= (1u << O_L);    /* default action = -l */
+
+    int rounds = SI_HAS(&o, O_W) ? -1 : 1;    /* -1 = until keypress */
+    for (int r = 0; rounds < 0 || r < rounds; r++) {
+        if (SI_HAS(&o, O_W)) {
+            vga_write("[watch] refresh "); print_int(r + 1);
+            si_line(" - any key stops");
+        } else if (r) vga_write("\n");
+        if (SI_HAS(&o, O_J))      si_json_block(be);
+        else if (SI_HAS(&o, O_S)) si_short_block(be);
+        else {
+            if (SI_HAS(&o, O_L)) { si_list_block(be); vga_write("\n"); }
+            if (SI_HAS(&o, O_P)) { si_pcm_block(be, 0); si_pcm_block(be, 1); }
+            if (SI_HAS(&o, O_C)) si_ctrl_block(be);
+        }
+        if (rounds >= 0) break;
+        uint32_t until = task_uptime_ms() + 800u;
+        while (task_uptime_ms() < until) {
+            if (kb_peek()) { (void)kb_getkey(); rounds = r + 1; break; }
+            __asm__ volatile ("hlt");
+        }
+    }
+    if (SI_HAS(&o, O_T)) {
+        int rc = snd_tone(880u, 120u);
+        if (rc < 0) { si_line("tone: playback failed"); g_last_rc = 4; return; }
+        uint32_t until = task_uptime_ms() + 1000u;
+        while (snd_info(SND_INFO_PLAYING) && task_uptime_ms() < until)
+            __asm__ volatile ("hlt");
+        si_line("[tone] 880 Hz / 120 ms played");
+    }
+}
+
 /* v2.47: pending-guess one-shot confirm.  Holds the last command the shell
  * itself suggested after an unknown-command error on the MAIN prompt.  A
  * bare y/Y at the next main-prompt line replays it; any other line consumes
@@ -1900,7 +2179,28 @@ static void cmd_netcfg(char *arg) {
     extern void net_dns_server_set(const uint8_t ip[4]);
     extern const uint8_t *net_dns_server_get(void);
     extern void net_arp_flush(void);
+    extern int  net_dhcp_once(void);
+    extern void net_dhcp_retry(void);
+    extern void net_cfg_user_set(void);
+    extern int  net_dhcp_ok(void);
 
+    if (arg && !strcmp_(arg, "dhcp")) {       /* v2.66: DHCP discover */
+        vga_write("netcfg: DHCP discover ...\n");
+        net_dhcp_retry();
+        if (net_dhcp_ok()) {
+            vga_write("netcfg: dhcp ok  ip ");
+            for (int i = 0; i < 4; i++) { print_int(net_our_ip[i]); if (i < 3) vga_write("."); }
+            vga_write("  gw ");
+            for (int i = 0; i < 4; i++) { print_int(net_gw_ip[i]); if (i < 3) vga_write("."); }
+            vga_write("  dns ");
+            const uint8_t *d = net_dns_server_get();
+            for (int i = 0; i < 4; i++) { print_int(d[i]); if (i < 3) vga_write("."); }
+            vga_write("\n");
+        } else {
+            vga_write("netcfg: no DHCP reply (QEMU static defaults kept)\n");
+        }
+        return;
+    }
     if (!*arg) {
         vga_write("ip  : ");
         for (int i = 0; i < 4; i++) { print_int(net_our_ip[i]); if (i < 3) vga_write("."); }
@@ -1909,8 +2209,10 @@ static void cmd_netcfg(char *arg) {
         vga_write("  dns: ");
         const uint8_t *d = net_dns_server_get();
         for (int i = 0; i < 4; i++) { print_int(d[i]); if (i < 3) vga_write("."); }
-        vga_write("\nusage: netcfg IP GATEWAY [DNS]");
+        vga_write(net_dhcp_ok() ? "  [dhcp]\n" : "  [static]\n");
+        vga_write("usage: netcfg IP GATEWAY [DNS]");
         vga_write("   e.g. netcfg 192.168.152.8 192.168.152.1 192.168.152.2\n");
+        vga_write("       netcfg dhcp   (auto-configure via DHCP)\n");
         return;
     }
     uint8_t ip[4], gw[4], dns[4];
@@ -1927,6 +2229,7 @@ static void cmd_netcfg(char *arg) {
     for (int i = 0; i < 4; i++) net_gw_ip[i] = gw[i];
     if (n >= 3 && ip4_parse_(w[2], dns)) net_dns_server_set(dns);
     net_arp_flush();
+    net_cfg_user_set();                    /* v2.66: static wins over DHCP */
     vga_write("netcfg: ip/gw/dns updated, ARP cache cleared\n");
 }
 
@@ -4746,6 +5049,11 @@ static void env_expand(char *line, int cap) {
     for (int i = 0; line[i] && o < (int)sizeof(out) - 1; ) {
         if (line[i] != '$') { out[o++] = line[i++]; continue; }
         if (line[i + 1] == '$') { out[o++] = '$'; i += 2; continue; }
+        /* v2.65: $? expands to the last command's exit status (single digit). */
+        if (line[i + 1] == '?') {
+            if (o < (int)sizeof(out) - 1) out[o++] = (char)('0' + (g_last_rc % 10));
+            i += 2; continue;
+        }
         int brace = 0;
         int j = i + 1;                      /* skip the '$' itself */
         if (line[j] == '{') { brace = 1; j++; }
@@ -5645,6 +5953,7 @@ static void shell_exec(char *cmd, char *arg) {
      * reverse-video cursor parked on the input line used to overwrite the
      * first characters a foreground command printed ("swallowed text"). */
     con_suppress_cursor(1);
+    g_last_rc = 0;                 /* v2.65: each command starts with status 0 */
     /* v2.59: parse the redirect/pipe/background marker ONCE, up front, before
      * the line is truncated.  The same out_redir/append/pipe_to feed both the
      * non-interactive pager latch and the builtin stdout tee below. */
@@ -5818,7 +6127,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "bg"))         cmd_bg(arg);
         else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
-        else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo();
+        else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
         else if (!strcmp_(cmd, "netcfg"))       cmd_netcfg(arg);
         else if (!strcmp_(cmd, "uptime")) {

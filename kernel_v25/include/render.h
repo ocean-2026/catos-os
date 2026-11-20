@@ -201,6 +201,9 @@ void        con_scrollback_reset(void);
  * MIDDLE row of the screen.  The shell calls this before each prompt so
  * the input line stays centred while output pushes it down. */
 void        con_scroll_anchor(void);
+/* v2.66: scroll the live grid up by exactly n rows (archived to
+ * scrollback); used by the line editor for wrapped command lines. */
+void        con_scroll_up(int n);
 
 /* Glyph scale for back-ends that support it (only vbe24 today):
  *   0 = compact  8x8   cell  (100x75 on 800x600)

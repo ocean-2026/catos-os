@@ -291,6 +291,9 @@ static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
 /* ------------------------------------------------------------------ */
 
 int net_dns_lookup(const char *host, uint8_t ip[4]);   /* forward decl (defined below) */
+void net_dhcp_ensure(void);                            /* forward decl (defined below) */
+void net_arp_flush(void);                              /* forward decl (defined below) */
+void net_dns_server_set(const uint8_t ip[4]);          /* forward decl (defined below) */
 
 static uint16_t udp_local_port = 0xC000;          /* ephemeral source port */
 static uint8_t  udp_rx_data[2048];
@@ -354,6 +357,7 @@ static void udp_handle(const uint8_t *iph, const uint8_t *seg, uint32_t seglen) 
 /* public (CE API): send a UDP datagram to "ip:port" (ip may be a hostname) */
 int net_udp_send(const char *ip, uint16_t port, const uint8_t *data, uint32_t len) {
     if (!net_ready || !ip || !data || len == 0 || len > 1460) return -1;
+    net_dhcp_ensure();                      /* v2.66: first-use DHCP */
     uint8_t dst[4];
     if (ip_parse(ip, dst) != 0) {
         if (net_dns_lookup(ip, dst) != 0) return -1;
@@ -389,6 +393,163 @@ int net_udp_recv(char *ip_out, int *port_out, uint8_t *buf, int max) {
 }
 
 /* ------------------------------------------------------------------ */
+/* DHCP client (v2.66)                                                 */
+/* VMware NAT (VMnet8) hands out host-specific subnets (typically      */
+/* 192.168.x.0/24) and does NOT proxy-answer ARP for the hardcoded     */
+/* QEMU-slirp range 10.0.2.x, so the static defaults are dead there.   */
+/* A minimal DISCOVER -> OFFER -> REQUEST -> ACK over broadcast raw    */
+/* frames fixes VMware without changing QEMU: slirp's built-in DHCP    */
+/* server answers with exactly the old static values (10.0.2.15 etc).  */
+/* ------------------------------------------------------------------ */
+
+static int dhcp_tried = 0;          /* one lazy attempt per boot */
+static int dhcp_ok   = 0;           /* last attempt succeeded */
+static int dhcp_user_cfg = 0;       /* user ran 'netcfg IP GW' -> keep it */
+
+static uint32_t dhcp_xid(void) {
+    return 0xC0DE0000u | ((uint32_t)net_mac[2] << 16) |
+           ((uint32_t)net_mac[4] << 8) | (uint32_t)net_mac[5];
+}
+
+/* Build Ethernet + IPv4(broadcast) + UDP(68->67) + DHCP into f[]. */
+static uint32_t dhcp_frame(uint8_t *f, uint32_t xid, uint8_t msg_type,
+                           const uint8_t *extra, uint32_t extra_len) {
+    static const uint8_t bcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    static const uint8_t bcast_ip[4]  = {255,255,255,255};
+    static const uint8_t zero_ip[4]   = {0,0,0,0};
+    for (int i = 0; i < 6; i++) f[i] = bcast_mac[i];
+    for (int i = 0; i < 6; i++) f[6+i] = net_mac[i];
+    wr16(f + 12, 0x0800);
+    uint8_t *ip = f + 14;
+    uint8_t *u  = ip + 20;
+    uint8_t *d  = u + 8;
+    uint32_t o = 0;
+    d[o++] = 1; d[o++] = 1; d[o++] = 6; d[o++] = 0;   /* BOOTREQUEST/eth/hlen */
+    wr32(d + o, xid); o += 4;
+    wr16(d + o, 0);    o += 2;                        /* secs */
+    wr16(d + o, 0x8000); o += 2;                      /* flags: broadcast */
+    for (int i = 0; i < 16; i++) d[o++] = 0;          /* ci/yi/si/gi addr */
+    for (int i = 0; i < 16; i++) d[o++] = (i < 6) ? net_mac[i] : 0;
+    for (int i = 0; i < 64; i++) d[o++] = 0;          /* sname */
+    for (int i = 0; i < 128; i++) d[o++] = 0;         /* file */
+    d[o++] = 0x63; d[o++] = 0x82; d[o++] = 0x53; d[o++] = 0x63;   /* magic */
+    d[o++] = 53; d[o++] = 1; d[o++] = msg_type;
+    for (uint32_t i = 0; i < extra_len && o < 340; i++) d[o++] = extra[i];
+    d[o++] = 255;                                     /* end option */
+    while (o < 300) d[o++] = 0;                       /* pad to minimum size */
+    uint32_t dlen = o;
+    wr16(u + 0, 68); wr16(u + 2, 67);
+    wr16(u + 4, (uint16_t)(8 + dlen));
+    wr16(u + 6, 0);                                   /* UDP checksum optional */
+    ip[0] = 0x45; ip[1] = 0;
+    wr16(ip + 2, (uint16_t)(20 + 8 + dlen));
+    wr16(ip + 4, ++ip_id_counter);
+    wr16(ip + 6, 0);
+    ip[8] = 64; ip[9] = 17;
+    wr16(ip + 10, 0);
+    for (int i = 0; i < 4; i++) ip[12+i] = zero_ip[i];
+    for (int i = 0; i < 4; i++) ip[16+i] = bcast_ip[i];
+    wr16(ip + 10, ip_checksum(ip, 20));
+    return 14 + 20 + 8 + dlen;
+}
+
+/* Take one DHCP reply off the one-shot UDP receive buffer (the normal
+ * udp_handle demux already copied it there).  Returns option-53 type
+ * (2=OFFER, 5=ACK, 6=NAK) or 0 when nothing usable arrived. */
+static int dhcp_poll_reply(uint32_t xid, uint8_t yi[4], uint8_t srv[4],
+                           uint8_t gw[4], uint8_t dns[4]) {
+    if (udp_rx_len == 0) return 0;
+    if (udp_rx_dport != 68) { udp_rx_len = 0; return 0; }
+    const uint8_t *d = udp_rx_data;
+    if (udp_rx_len < 240 || rd32(d + 4) != xid ||
+        d[236] != 0x63 || d[237] != 0x82 || d[238] != 0x53 || d[239] != 0x63) {
+        udp_rx_len = 0; return 0;
+    }
+    int type = 0;
+    for (int i = 0; i < 4; i++) { yi[i] = d[16+i]; srv[i] = gw[i] = dns[i] = 0; }
+    uint32_t o = 240;
+    while (o + 2 <= udp_rx_len) {
+        uint8_t opt = d[o];
+        if (opt == 0) { o++; continue; }              /* pad */
+        if (opt == 255) break;                        /* end */
+        uint8_t l = d[o + 1];
+        if (o + 2 + (uint32_t)l > udp_rx_len) break;
+        if      (opt == 53 && l >= 1) type = d[o+2];
+        else if (opt == 54 && l >= 4) for (int i = 0; i < 4; i++) srv[i] = d[o+2+i];
+        else if (opt == 3  && l >= 4) for (int i = 0; i < 4; i++) gw[i]  = d[o+2+i];
+        else if (opt == 6  && l >= 4) for (int i = 0; i < 4; i++) dns[i] = d[o+2+i];
+        o += 2 + l;
+    }
+    udp_rx_len = 0;
+    return type;
+}
+
+/* one DISCOVER -> OFFER -> REQUEST -> ACK cycle; 0 = configured, -1 = no */
+int net_dhcp_once(void) {
+    if (!net_ready) return -1;
+    uint32_t xid = dhcp_xid();
+    uint8_t f[576];
+    uint8_t yi[4], srv[4], gw[4], dns[4];
+    uint8_t extra[16];
+
+    /* DISCOVER (param request list: 1 mask, 3 router, 6 dns) */
+    extra[0] = 55; extra[1] = 3; extra[2] = 1; extra[3] = 3; extra[4] = 6;
+    net_send(f, dhcp_frame(f, xid, 1, extra, 5));
+    int have_offer = 0;
+    for (long i = 0; i < 1500000L; i++) {
+        net_poll();
+        int t = dhcp_poll_reply(xid, yi, srv, gw, dns);
+        if (t == 2 || t == 5) { have_offer = 1; break; }   /* some skip OFFER */
+    }
+    if (!have_offer) return -1;
+
+    /* claim the offered address before REQUEST so a unicast ACK finds us */
+    for (int i = 0; i < 4; i++) net_our_ip[i] = yi[i];
+    net_arp_flush();
+
+    /* REQUEST: server identifier (54) + requested IP (50) */
+    extra[0] = 54; extra[1] = 4;
+    for (int i = 0; i < 4; i++) extra[2+i] = srv[i];
+    extra[6] = 50; extra[7] = 4;
+    for (int i = 0; i < 4; i++) extra[8+i] = yi[i];
+    net_send(f, dhcp_frame(f, xid, 3, extra, 12));
+    int got_ack = 0;
+    for (long i = 0; i < 1500000L; i++) {
+        net_poll();
+        int t = dhcp_poll_reply(xid, yi, srv, gw, dns);
+        if (t == 5) { got_ack = 1; break; }
+        if (t == 6) break;                                 /* NAK */
+    }
+    if (!got_ack) return -1;
+    for (int i = 0; i < 4; i++) net_our_ip[i] = yi[i];
+    for (int i = 0; i < 4; i++) net_gw_ip[i] = (gw[0] || gw[1] || gw[2] || gw[3])
+                                             ? gw[i] : srv[i];
+    if (dns[0] || dns[1] || dns[2] || dns[3]) net_dns_server_set(dns);
+    net_arp_flush();
+    dhcp_ok = 1;
+    return 0;
+}
+
+/* Lazy one-shot before the first real network use.  Skipped when the
+ * user configured a static address with 'netcfg IP GW'. */
+void net_dhcp_ensure(void) {
+    if (dhcp_tried || dhcp_user_cfg) return;
+    dhcp_tried = 1;
+    net_dhcp_once();
+}
+
+/* 'netcfg dhcp': force a fresh discover, even after a failed one */
+void net_dhcp_retry(void) {
+    dhcp_tried = 1;
+    net_dhcp_once();
+}
+
+/* netcfg static: mark user configuration so DHCP never overrides it */
+void net_cfg_user_set(void) { dhcp_user_cfg = 1; dhcp_ok = 0; }
+
+int net_dhcp_ok(void) { return dhcp_ok; }
+
+/* ------------------------------------------------------------------ */
 /* DNS client (QEMU slirp resolver at 10.0.2.3, UDP :53)              */
 /* ------------------------------------------------------------------ */
 
@@ -417,6 +578,7 @@ static void dns_build_qname(uint8_t *q, uint32_t *out_len, const char *name) {
 int net_dns_lookup(const char *host, uint8_t ip[4]) {
     if (!host || !ip || !*host) return -1;
     if (ip_parse(host, ip) == 0) return 0;                 /* already an IP */
+    net_dhcp_ensure();                      /* v2.66: first-use DHCP */
     if (dns_cache_valid) {
         int same = 1, i = 0;
         for (i = 0; host[i] && dns_cache_name[i]; i++)
@@ -519,6 +681,7 @@ static void icmp_handle(const uint8_t *iph, const uint8_t *icmp, uint32_t len) {
  * Returns 0 on reply, -1 on failure. */
 int net_ping(const char *ipstr) {
     if (!net_ready || !ipstr) return -1;
+    net_dhcp_ensure();                      /* v2.66: first-use DHCP */
     uint8_t dst[4];
     if (ip_parse(ipstr, dst) != 0) {
         if (net_dns_lookup(ipstr, dst) != 0) return -1;
@@ -558,7 +721,13 @@ void net_rx_dispatch(const uint8_t *frame, uint32_t len) {
         if (iplen < 20 || iplen > len - 14) iplen = len - 14;
         if (iplen < 20) return;
         if ((ip[0] & 0xF0) != 0x40) return;
-        for (int i = 0; i < 4; i++) if (ip[16+i] != net_our_ip[i]) return;   /* dst = us */
+        {   /* v2.66: dst must be us OR the IPv4 broadcast address, which
+             * DHCP OFFER/ACK replies use before we have a lease */
+            int bcast = (ip[16] == 255 && ip[17] == 255 &&
+                         ip[18] == 255 && ip[19] == 255);
+            if (!bcast)
+                for (int i = 0; i < 4; i++) if (ip[16+i] != net_our_ip[i]) return;
+        }
         uint32_t hlen = (ip[0] & 0x0F) * 4;
         /* verify the IP header checksum: a correct header (checksum
          * included) sums to 0 - corrupt frames are dropped instead of
@@ -604,6 +773,7 @@ static int http_parse_url(const char *url, uint8_t ip[4], uint16_t *port,
 
 int net_http_get(const char *url, char *out, int max) {
     if (!net_ready || !url || !out || max <= 0) return -1;
+    net_dhcp_ensure();                      /* v2.66: first-use DHCP */
 
     uint8_t peer[4];
     uint16_t port;

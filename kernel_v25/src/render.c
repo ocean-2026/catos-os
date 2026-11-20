@@ -234,6 +234,9 @@ static void paint(int x, int y) {
     } else {
         be->draw_cell(x, y, &t);
     }
+    /* v2.66: the pixel mouse sprite is raw LFB pixels; a cell paint just
+     * overwrote part of it, so the backend refreshes the arrow here. */
+    if (be->mouse_over_repaint) be->mouse_over_repaint(x, y);
     painted[y][x] = t;
     painted_cur[y][x] = (uint8_t)show_cur;
     painted_valid[y][x] = 1;
@@ -549,6 +552,24 @@ static void reflow(int oc, int orow, int nc, int nrow) {
             cells[y][x] = tmp_cells[y][x];
 }
 
+/* v2.66: heal callback registered with be_vbe24.  The pixel mouse sprite
+ * is invisible to the dirty-cell tracker; after any non-paint LFB
+ * mutation (pixel-shift scroll) the backend calls this with the sprite's
+ * pixel rect so every covered cell is force-repainted from the grid. */
+static void con_mc_dirty(int px, int py, int pw, int ph) {
+    if (!be) return;
+    int cw = be->cell_w > 0 ? be->cell_w : 8;
+    int chh = be->cell_h > 0 ? be->cell_h : 16;
+    int x0 = px / cw, x1 = (px + pw - 1) / cw;
+    int y0 = py / chh, y1 = (py + ph - 1) / chh;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+            if (x < 0 || x >= cols || y < 0 || y >= rows) continue;
+            painted_valid[y][x] = 0;
+            paint(x, y);
+        }
+}
+
 static int switch_backend(render_be_t *nb) {
     render_be_t *old = be;
     int oc = cols, orow = rows;
@@ -563,6 +584,8 @@ static int switch_backend(render_be_t *nb) {
     be = nb;
     cols = be->cols;
     rows = be->rows;
+    extern void vbe24_set_mouse_dirty_cb(void (*cb)(int, int, int, int));
+    vbe24_set_mouse_dirty_cb(nb == &be_vbe24 ? con_mc_dirty : 0);
     mouse_clamp((int)be->pixel_w, (int)be->pixel_h);
     saved_row_valid = 0;           /* bottom row changed size/position */
     saved2_valid = 0;
@@ -1108,21 +1131,17 @@ int con_scrollback(int delta) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) sb_live[y][x] = cells[y][x];
 
-    if (want == 0) {
-        for (int y = 0; y < rows; y++)
-            for (int x = 0; x < cols; x++) cells[y][x] = sb_live[y][x];
-        sb_view = 0;
-        con_reset_cursor();         /* v2.60: cursor stays at bottom */
-        sb_repaint();
-        return 0;
-    }
-
+    /* v2.66: no bulk-repaint shortcut on the way back down.  Stepping one
+     * row at a time reproduces the live grid exactly (the step transform is
+     * reversible), so PgDn now scrolls line-by-line just like PgUp does
+     * going up, instead of snapping to the bottom in one frame. */
     int dir = want > sb_view ? 1 : -1;
     while (sb_view != want) {
         if (dir > 0) { if (!sb_step_older()) break; }
         else         { if (!sb_step_newer()) break; }
     }
-    sync_cursor(1);
+    if (sb_view == 0) con_reset_cursor();   /* cursor stays at bottom */
+    else sync_cursor(1);
     return sb_view;
 }
 
@@ -1148,6 +1167,14 @@ void con_scroll_anchor(void) {
     int guard = rows;               /* scroll_one() always decrements cur_y */
     while (cur_y > mid && guard-- > 0) scroll_one();
     sync_cursor(1);
+}
+
+/* v2.66: scroll the live grid up by exactly n rows (each archived to
+ * scrollback).  The line editor uses this when a wrapped command line
+ * grows past the bottom edge. */
+void con_scroll_up(int n) {
+    if (!be || n <= 0) return;
+    while (n-- > 0) scroll_one();
 }
 
 static int vbe24_scale(void) {

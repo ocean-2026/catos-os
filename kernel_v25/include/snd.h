@@ -59,6 +59,12 @@
 #define SND_INFO_DEVICE  10   /* PCI device id for backend 2, else 0      */
 
 const char *snd_backend_name(void);
+/* v2.65: read one mixer register from the active backend.  SB16 exposes
+ * its real mixer (reg 0x22 = master playback L, 0x23 = R, 0x28 = mic,
+ * 0x2E = speaker, ...).  The ES1370/1371 path has no AC97 codec access in
+ * this kernel yet, so it consistently returns -1 ("not available").
+ * New API -- no ABI slot consumed (ring0 builtin use only). */
+int      snd_mixer_read(int reg);
 
 /* Probe + init.  Must be called AFTER intr_enable() (it unmasks IRQ5) and
  * BEFORE shell_run() (which never returns).  0 = ready, negative = absent.

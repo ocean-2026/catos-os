@@ -116,6 +116,15 @@ static uint8_t mixer_read(uint8_t idx) {
     return inb(MIXER_DATA);
 }
 
+/* v2.65: shell-facing mixer read.  SB16 has a real register set; the PCI
+ * backend does not implement AC97 codec access, so report "unavailable"
+ * rather than inventing values. */
+int snd_mixer_read(int reg) {
+    if (!snd_up || snd_backend != 1) return -1;
+    if (reg < 0 || reg > 255) return -1;
+    return (int)mixer_read((uint8_t)reg);
+}
+
 static void mixer_write(uint8_t idx, uint8_t val) {
     outb(MIXER_INDEX, idx);
     for (volatile uint32_t i = 0; i < 16; i++) io_wait();

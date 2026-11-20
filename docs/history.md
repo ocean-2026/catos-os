@@ -174,3 +174,4 @@ CatOS[易错点] 分页容量不能缓存 `con_rows()`：text 与 gfx24 行数�
 CatOS[易错点] 分页器接管 `ls`/`help`/`cat`/`tree` 后，凡是「读最后一屏断言尾部」的旧套件都会假失败，症状还带级联：残留的 More 条会吞掉后续按键，状态机错位后连 prompt 都读不到。所有读屏套件统一加 `drain()`（循环见 `-- more` 就发 `spc`），再判定。
 CatOS[易错点] 种子镜像 `kernel_v25/catos_disk.img` 会被 `build.sh` 重新生成，测试里对「磁盘上原有目录内容」的期望会随之消失（badname 套件原期望 6 entries/4 visible，重建后只剩注入的 4/2）。注入式测试必须自己在镜像里造齐断言所需的正常项，不要依赖种子盘的历史内容。
 CatOS[易错点] 每跑一次 QEMU 套件都会在 `/tmp` 留一份 `catos_qemu_stage_<pid>/` 镜像拷贝（约 65 MB），几百次下来能堆到 3~5 GB 把根盘挤满，表现为后续套件莫名超时/ConnectionReset。`qemu_driver._stage_image()` 里必须 `atexit` 递归删整个 staging 目录，而不是只删文件。
+CatOS[易错点] Windows 侧压缩大于 1GB 的目录不要用 `C:\Windows\System32\tar.exe -czf`：本机实测 1.23 GB 的 trash 目录产出 tar.gz 只写完 262 MB 就报 `Truncated input file`，解压时在第 200 项中断（中文/长路径混合下更明显）。改用 `Compress-Archive` 出 zip（1128 条目可正常读取，1.23 GB→313 MB），压缩率差一点但可靠。另外仓库内受控文件 `nul`、以及带 `&&`/`:` 的垃圾目录，`Remove-Item` 会静默失败，必须用 `\\?\` 前缀的扩展路径才删得掉。

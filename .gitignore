@@ -92,3 +92,16 @@ kernel_v25/extapp/pkg/*.catpkg
 kernel_v25/node/node.ce
 kernel_v25/src/builtin_apps.inc
 kernel_v25/src/symtab.inc
+
+# ---- v2.66 (2026-11-20): VM runtime state, never commit ----
+*.vmem
+*.vmss
+*.lck
+*.lck/
+vmware/*.SCOREBOARD.lock
+
+# ---- v2.66: versioned kernel archives / reference snapshots kept out of git ----
+/kernel-v*.bin
+deliverables/cde-ref/
+deliverables/local-edits-pre-v259/
+deliverables/font-backup-pre-merge-*/

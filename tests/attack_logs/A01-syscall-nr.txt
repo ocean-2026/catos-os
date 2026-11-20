@@ -1,0 +1,81 @@
+=== A01 syscall-nr ===
+under_test_iso_sha256=d7c5176f21d7e7b7
+host_free_mb=13711 guests=1
+vector  : illegal syscall numbers 65..0xFFFFFFFF + illegal int vectors
+run     : run /bin/ATKSYSNR.CE 
+expect  : OK: numbers rejected with -8; task dies on the 1st illegal vector
+result  : OK  (attacker task killed by its own ring3 fault, shell prompt back (defence held))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$
+
+--- screen AFTER ---
+nr=0x000003e8 r=-1 / r0=0 commands.
+nr=0x000003e9 r=-8 / r0=-8auto-executed; run it manually: run /etc/autoexec/bann
+nr=0x00000400 r=-8 / r0=-8
+nr=0x0000ffff r=-8 / r0=-800 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+nr=0x00010000 r=-8 / r0=-800 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+nr=0x7fffffff r=-8 / r0=-8
+nr=0x80000000 r=-8 / r0=-8id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+nr=0xfffffffe r=-8 / r0=-8
+nr=0xffffffff r=-8 / r0=-8
+root@catos:/$ run /bin/ATKSYSNR.CE
+STEP 2: -- same numbers, args = task-internal addressess
+-3 -3 -3 -3 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -1 -1 -1
+ -1 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -8 -
+8 -8 -8 -8 -8 -8 -8  r0=
+STEP 3: -- SYS_LS_NEXT(1000) with poison handles
+0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+STEP 4: -- illegal int vectors from ring3 (expect task kill)
+int 0x0x00000003:
+[task 1 'ATKSYSNR' killed: fault at eip=0x02000286 cr2=0x00000000]
+root@catos:/$
+
+--- faultinfo probe ---
+0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+STEP 4: -- illegal int vectors from ring3 (expect task kill)
+int 0x0x00000003:
+[task 1 'ATKSYSNR' killed: fault at eip=0x02000286 cr2=0x00000000]
+root@catos:/$ faultinfo
+last fault: gpf ring0x00000003 task ATKSYSNR tid0x00000001
+eip=0x02000286 cr2=0x00000000 err=0x0000001a efl=0x00010293 at tick 0x000004f8
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=01645ee8
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010d4000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     015ebb40 0000002f
+IDT=     015eb340 000007ff
+CR0=80000011 CR2=00000000 CR3=015ed000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+

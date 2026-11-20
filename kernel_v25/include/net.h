@@ -62,4 +62,14 @@ int  net_udp_recv(char *ip_out, int *port_out, uint8_t *buf, int max);
 int  net_ping(const char *ip);
 /*   one ICMP echo request (ip or hostname); 0 = reply, -1 = no reply */
 
+/* ---- DHCP (v2.66): VMware NAT / VMnet8 auto-configuration ------------- */
+int  net_dhcp_once(void);
+/*   one DISCOVER->OFFER->REQUEST->ACK cycle; 0 = got a lease, -1 = none.
+ *   Fills ip/gw/dns from the server; slirp (QEMU) answers with the old
+ *   static values, VMware NAT with its own subnet. */
+void net_dhcp_ensure(void);   /* lazy: first network use, unless 'netcfg' static was set */
+void net_dhcp_retry(void);    /* 'netcfg dhcp': force a fresh discover */
+void net_cfg_user_set(void);  /* 'netcfg IP GW': static config wins over DHCP */
+int  net_dhcp_ok(void);       /* 1 when the current config came from DHCP */
+
 #endif

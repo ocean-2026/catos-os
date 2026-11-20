@@ -15,20 +15,16 @@ ide0:0.present = "TRUE"
 ide0:0.fileName = "catos-data.vmdk"
 
 # ---- IDE 1:0 : boot volume as virtual CD (secondary master) ----
-# catos.iso is a GRUB isohybrid image: it carries BOTH an El Torito
+# catos-vX.XX.iso is a GRUB isohybrid image: it carries BOTH an El Torito
 # catalog (CD boot) and an isohybrid MBR (HD boot).  El Torito is the
 # standard VMware path.
 ide1:0.present = "TRUE"
 ide1:0.deviceType = "cdrom-image"
-ide1:0.fileName = "..\kernel_v25\catos.iso"
-ide1:0.startConnected = "TRUE"
+ide1:0.fileName = "D:\CatOs\catos-v2.66.iso"
 
 # ---- boot order: CD first ----
 bios.bootOrder = "cdrom"
 
-floppy0.present = "FALSE"
-serial0.present = "FALSE"
-parallel0.present = "FALSE"
 usb.present = "FALSE"
 sound.present = "TRUE"
 ethernet0.present = "TRUE"
@@ -46,7 +42,7 @@ svga.vramSize = "268435456"
 vmotion.checkpointFBSize = "134217728"
 vmotion.checkpointSVGAPrimarySize = "268435456"
 monitor.phys_bits_used = "43"
-cleanShutdown = "TRUE"
+cleanShutdown = "FALSE"
 softPowerOff = "FALSE"
 tools.syncTime = "FALSE"
 sound.autoDetect = "TRUE"
@@ -59,3 +55,6 @@ ethernet0.pciSlotNumber = "17"
 ethernet0.generatedAddress = "00:0c:29:e3:61:3b"
 ethernet0.generatedAddressOffset = "0"
 checkpoint.vmState = ""
+floppy0.present = "FALSE"
+serial0.present = "FALSE"
+parallel0.present = "FALSE"

@@ -118,18 +118,23 @@ static void text_clear(uint32_t bg_rgb) {
     for (int i = 0; i < 80 * 25; i++) vram[i] = blank;
 }
 
-/* Shift VRAM down by n rows; fill new top rows with blank cells.
+/* Shift VRAM UP by n rows; fill the new bottom rows with blank cells.
+ * render.c's scroll_one() moves cells[y] -> cells[y-1], so the framebuffer
+ * must follow the same direction.  The old code copied toward HIGHER
+ * addresses with a forward loop: every source row after the first was read
+ * after it had already been overwritten, so a single scroll turned the
+ * whole screen into copies of the old top row.  Long command output
+ * (help, sndinfo -h/-j, ...) was therefore unreadable in text mode.
  * Returns 0 to indicate success (no full redraw needed). */
 static int text_scroll(int n, uint32_t bg_rgb) {
     if (n <= 0 || n >= 25) return -1;
     uint8_t a = attr_byte(render_clut(7), bg_rgb, 0);
     uint16_t blank = (uint16_t)' ' | ((uint16_t)a << 8);
-    /* Move (25-n) rows down by n*80 words */
     int shift = n * 80;
-    for (int i = 0; i < (25 - n) * 80; i++)
-        vram[i + shift] = vram[i];
-    /* Fill scrolled-in rows at top with blanks */
-    for (int i = 0; i < n * 80; i++) vram[i] = blank;
+    /* Source index is always ahead of destination -> forward copy is safe. */
+    for (int i = shift; i < 25 * 80; i++)
+        vram[i - shift] = vram[i];
+    for (int i = (25 - n) * 80; i < 25 * 80; i++) vram[i] = blank;
     return 0;
 }
 

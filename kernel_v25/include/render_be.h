@@ -91,6 +91,10 @@ typedef struct render_be {
      * under the arrow itself, so moving it restores the old dirty rect
      * and repaints only the new one -- no full-frame redraw. */
     void (*mouse_cursor)(int x, int y, int visible);
+    /* v2.66 optional: called by the front-end after repainting one cell
+     * so the back-end can refresh its pixel mouse sprite when it overlaps
+     * (the sprite is raw LFB pixels invisible to the dirty tracker). */
+    void (*mouse_over_repaint)(int gx, int gy);
     void (*diag)(void);
 
     /* v2.25: adjustable glyph scale (vbe24 only today).  NULL = fixed

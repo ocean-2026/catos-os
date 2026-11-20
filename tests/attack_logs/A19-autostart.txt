@@ -1,0 +1,84 @@
+=== A19 autostart ===
+under_test_iso_sha256=d7c5176f21d7e7b7
+host_free_mb=13711 guests=1
+vector  : boot-time auto-execution: drop a script into /etc/autoexec and reboot
+run     : run /bin/ATKAUTOS.CE 
+expect  : OK: file may be written, but the boot screen must NOT contain the marker
+result  : OK  (attack completed (ATK-DONE))
+cpu     : EIP=01000310 IF=True stuck=False
+
+--- screen BEFORE ---
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$
+
+--- screen AFTER ---
+Bootloader   : GRUB 2 (ISO9660 / El Torito)
+Filesystem   : FAT32 on IDE (persistent)
+Display      : front-end + text/gfx back-ends
+Runs on      : QEMU / VMware / Bochs / real PC
+Type 'help' for a list of commands.
+autostart: banner.sh (not auto-executed; run it manually: run /etc/autoexec/bann
+er.sh)
+net: no usable NIC (no e1000 8086:100e or PCnet 1022:2000); PCI bus 0: vend=8086
+ dev=1237 vend=8086 dev=7000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev
+=1111
+net: QEMU -> -netdev user,id=n0 -device e1000,netdev=n0 or -device pcnet,netdev=
+n0
+root@catos:/$ run /bin/ATKAUTOS.CE
+ATK-AUTOS: boot-time auto-execution surface
+STEP 1: drop a script into /etc/autoexec
+write=0
+STEP 2: the script must exist on disk (the directory stays writable)
+fsize_pwn=18
+STEP 3: the kernel banner file must still be there
+fsize_banner=504
+ATK-DONE
+[task 1 'ATKAUTOS' exit(0)]
+root@catos:/$
+
+--- faultinfo probe ---
+fsize_pwn=18
+STEP 3: the kernel banner file must still be there
+fsize_banner=504
+ATK-DONE
+[task 1 'ATKAUTOS' exit(0)]
+root@catos:/$ faultinfo
+no fault recorded since boot
+root@catos:/$
+
+--- info registers ---
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo r[K[D[D[D[D[D[Dinfo re[K[D[D[D[D[D[D[Dinfo reg[K[D[D[D[D[D[D[D[Dinfo regi[K[D[D[D[D[D[D[D[D[Dinfo regis[K[D[D[D[D[D[D[D[D[D[Dinfo regist[K[D[D[D[D[D[D[D[D[D[D[Dinfo registe[K[D[D[D[D[D[D[D[D[D[D[D[Dinfo register[K[D[D[D[D[D[D[D[D[D[D[D[D[Dinfo registers[K
+
+CPU#0
+EAX=00000000 EBX=00000010 ECX=00000010 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=01645ee8
+EIP=01000310 EFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT=1
+ES =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+CS =0008 00000000 ffffffff 00ff9a00 DPL=0 CS64 [-R-]
+SS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+DS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+FS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+GS =0010 00000000 ffffffff 00ff9300 DPL=0 DS   [-WA]
+LDT=0000 00000000 0000ffff 00008200 DPL=0 LDT
+TR =0028 010d4000 0000005b 00008900 DPL=0 TSS32-avl
+GDT=     015ebb40 0000002f
+IDT=     015eb340 000007ff
+CR0=80000011 CR2=00000000 CR3=015ed000 CR4=00000010
+DR0=00000000 DR1=00000000 DR2=00000000 DR3=00000000 
+DR6=ffff0ff0 DR7=00000400
+EFER=0000000000000000
+FCW=037f FSW=0000 [ST=0] FTW=00 MXCSR=00001f80
+FPR0=0000000000000000 0000 FPR1=0000000000000000 0000
+FPR2=0000000000000000 0000 FPR3=0000000000000000 0000
+FPR4=0000000000000000 0000 FPR5=0000000000000000 0000
+FPR6=0000000000000000 0000 FPR7=0000000000000000 0000
+XMM00=0000000000000000 0000000000000000 XMM01=0000000000000000 0000000000000000
+XMM02=0000000000000000 0000000000000000 XMM03=0000000000000000 0000000000000000
+XMM04=0000000000000000 0000000000000000 XMM05=0000000000000000 0000000000000000
+XMM06=0000000000000000 0000000000000000 XMM07=0000000000000000 0000000000000000
+(qemu) 
+
