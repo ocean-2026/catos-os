@@ -2,23 +2,18 @@
 #define PAGER_H
 
 /*
- * pager.h -- v2.59 generic console pager (minimal deliverable).
+ * pager.h -- v2.63: paging REMOVED.  This header is kept only as a
+ * pass-through API so the ~40 shell.c call sites (help/cat/tree/...) do
+ * not need rewriting.  Semantics now:
  *
- * A line-oriented pager layered on top of the EXISTING console output
- * path (vga_write / con_write).  It does NOT own a second screen driver
- * and does not repaint the whole framebuffer: callers feed it whole output
- * lines one at a time; the pager prints each line through the normal
- * vga_write() path and, once a screenful has been shown, parks a transient
- * status bar on the bottom row and waits for a key:
+ *   pager_begin()  -> 0 (never engages)
+ *   pager_line()   -> prints line + "\n" immediately, returns 1
+ *   pager_end()    -> clears any stale status bar
+ *   pager_quit()   -> always 0
+ *   pager_set_noninteractive() -> no-op
  *
- *   Enter  : advance one line
- *   Space  : advance one screenful
- *   q / Q  : quit the pager; the rest of the output is discarded and the
- *            caller returns straight to the prompt.
- *
- * Non-interactive contexts (redirected to a file, background job, piped
- * command, script / non-tty execution) disable the pager: every line is
- * printed straight through without ever waiting for a key.
+ * Long listings are viewed with the normal scrollback (PgUp/PgDn/wheel),
+ * not a "-- More --" bar.  Scrollback archiving is independent of pager.
  */
 
 /* Begin a paged output block.  `active` is the caller's non-interactive
