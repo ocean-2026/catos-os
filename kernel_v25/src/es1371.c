@@ -464,6 +464,11 @@ int es1371_info(int what) {
     }
 }
 
+int es1371_rd_raw(int off) {
+    if (!es_probed || off < 0 || off > 0x3C || (off & 3)) return -1;
+    return (int)rr((uint8_t)off);
+}
+
 int es1371_tone(uint32_t freq_hz, uint32_t ms) {
     if (!es_ready) return -8;
     if (freq_hz == 0 || freq_hz > 20000u || ms == 0) return -22;

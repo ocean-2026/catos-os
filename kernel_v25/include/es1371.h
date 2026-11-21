@@ -83,6 +83,9 @@ int      es1371_irq(void);
 int      es1371_irq_line(void);
 
 int      es1371_info(int what);
+/* v2.72: read-only raw dword at register offset `off` (0x00..0x3C).
+ * Pure readback: no write, no side effect, safe on any ES137x part. */
+int      es1371_rd_raw(int off);
 uint32_t es1371_io_base(void);
 
 /* Integer sine into the internal DMA buffer, then es1371_play(). */

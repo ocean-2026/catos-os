@@ -291,6 +291,7 @@ static void cmd_help(void) {
     help_row("about",       "system info banner");
     help_row("sndregs",     "raw ES1370/ES1371 register readback");
     help_row("fprobe",      "paint the whole frame + 4 corner marks (coverage probe)");
+    help_row("sndmap",      "read-only dump of all ES137x registers 0x00..0x3C");
     help_row("autostart",   "re-run /etc/autostart scripts");
     help_row("uname",       "print OS name");
     help_row("date",        "show RTC date/time");
@@ -947,6 +948,36 @@ static void cmd_fprobe(void) {
     geom_num(b, (int)sizeof(b), h); strcat_b(b, (int)sizeof(b), " with 4 corner marks\n");
     con_write(b);
     con_write("if a corner is missing, the host surface is smaller than the mode\n");
+}
+
+static void cmd_sndmap(void) {
+    if (!es1371_info(ES1371_INFO_READY)) {
+        con_write("sndmap: no ensoniq device ready\n");
+        return;
+    }
+    con_write("sndmap: dword readback at io_base+off (read-only, no writes)\n");
+    char b[24];
+    for (int row = 0; row < 4; row++) {
+        for (int i = 0; i < 4; i++) {
+            int off = row * 16 + i * 4;
+            char ob[8]; ob[0] = 0;
+            const char *hx = "0123456789ABCDEF";
+            ob[0] = '0'; ob[1] = 'x';
+            ob[2] = hx[(off >> 4) & 15]; ob[3] = hx[off & 15]; ob[4] = 0;
+            con_write(" ");
+            con_write(ob); con_write("=");
+            int v = es1371_rd_raw(off);
+            if (v < 0) { con_write("----"); continue; }
+            con_write("0x");
+            b[0] = 0;
+            for (int k = 0; k < 8; k++) {
+                char c = hx[((uint32_t)v >> ((7 - k) * 4)) & 15];
+                b[k] = c; b[k + 1] = 0;
+            }
+            con_write(b);
+        }
+        con_write("\n");
+    }
 }
 
 /* v2.72: `sndregs` -- raw ES1370/ES1371 readback.  The VMware box is silent
@@ -6958,6 +6989,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
         else if (!strcmp_(cmd, "fprobe"))      cmd_fprobe();    /* v2.72 */
+        else if (!strcmp_(cmd, "sndmap"))      cmd_sndmap();    /* v2.72 */
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
         else if (!strcmp_(cmd, "netcfg"))       cmd_netcfg(arg);
         else if (!strcmp_(cmd, "uptime")) {
