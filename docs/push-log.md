@@ -25,3 +25,4 @@ git push https://x-access-token:${TOKEN}@github.com/ocean-2026/CatOS.git main
 | 2026-11-19 ~09:3x | 5fd43d0 | `0c83e55..5fd43d0  main -> main`（报告 §8 双审结论） | `ls-remote` = 5fd43d061be6…（复核通过） |
 | 2026-11-21 ~08:3x | 6e50779 | `f336725..6e50779  main -> main`（v2.67 hive/POSIX/能力/审计/TUI/消闪/ACPI） | — |
 | 2026-11-21 ~09:2x | 25d7348 | `f336725..25d7348  main -> main`（v2.67.1 前台看门狗 + 可写目录拒绝 + dash 分页） | `ls-remote` = 25d7348e6fdc…（与本地 HEAD 一致） |
+| 2026-11-21 ~11:4x | 61059be | `f41c4ac..61059be  main -> main`（v2.68.3 i18n/sudo/IME/包签名/ls表头 + CDE设计原型） | `ls-remote` = 61059befd295…（与本地 HEAD 一致） |
