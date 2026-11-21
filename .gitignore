@@ -107,3 +107,7 @@ vmware/*.vmdk
 deliverables/cde-ref/
 deliverables/local-edits-pre-v259/
 deliverables/font-backup-pre-merge-*/
+
+# ---- v2.71 (2026-11-21): sshd debug dumps / host selftest binaries ----
+tests/dumps/
+kernel_v25/build/*.exe

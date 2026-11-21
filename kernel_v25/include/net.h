@@ -66,6 +66,20 @@ int  net_udp_recv(char *ip_out, int *port_out, uint8_t *buf, int max);
 int  net_ping(const char *ip);
 /*   one ICMP echo request (ip or hostname); 0 = reply, -1 = no reply */
 
+/* ---- TCP server (v2.71): passive listener for sshd ----------------- */
+int  net_tcp_listen(uint16_t port);
+/*   arm the listener on `port` (one pending connection at a time) */
+int  net_tcp_saccept(void);
+/*   blocking wait for a completed handshake; 0 = established, -1 timeout */
+int  net_tcp_ssend(const uint8_t *data, uint32_t len);
+/*   send data on the accepted connection (chunked at MSS); 0 = ok */
+int  net_tcp_srecv(uint8_t *buf, int max);
+/*   drain buffered RX bytes; returns count, 0 = nothing yet, -1 = closed */
+int  net_tcp_srecv_all(uint8_t *buf, int n);
+/*   blocking exact-n read (polls the NIC while waiting); -1 = closed */
+void net_tcp_sclose(void);
+/*   FIN|ACK and tear the listener down */
+
 /* ---- DHCP (v2.66): VMware NAT / VMnet8 auto-configuration ------------- */
 int  net_dhcp_once(void);
 /*   one DISCOVER->OFFER->REQUEST->ACK cycle; 0 = got a lease, -1 = none.

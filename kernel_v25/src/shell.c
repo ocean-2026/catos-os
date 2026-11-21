@@ -32,6 +32,7 @@
 #include "posix.h"
 #include "sec.h"
 #include "dash.h"    /* v2.67 `hive` command front-end                   */
+#include "ssh.h"     /* v2.71 SSH-2 server session serving               */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -73,6 +74,7 @@ static void shell_exec(char *cmd, char *arg);
 static void cmd_cat(const char *arg);
 static void cmd_head(char *arg);
 static void cmd_tail(char *arg);
+static void env_expand(char *line, int cap);   /* v2.71: fwd decl for the sshd bridge */
 static int  atoi_(const char *s);
 static int  ls_u2a(uint32_t v, char *o);
 static void boot_autostart(void);
@@ -1306,7 +1308,7 @@ static const char *BUILTIN_NAMES[] = {
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
     "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
-    "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag",
+    "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag", "sshd",
     "faultinfo", "crashlog", "fsck", "color",
     "bsod", "blue", "panicmode",
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
@@ -2734,6 +2736,98 @@ static void cmd_ping(const char *arg) {
         if (ok != 0) break;
         for (volatile long d = 0; d < 800000L; d++) { }  /* small gap between tries */
     }
+}
+
+/* ---------- v2.71 sshd: SSH-2 server on port 22 ---------------------- */
+
+/* console capture for remote command execution: mirrors every character
+ * the builtin prints (same mechanism as the `>` redirect tee) with \n
+ * promoted to \r\n for the wire. */
+#define SSH_CAP_BUF 8192
+static char     ssh_cap_buf[SSH_CAP_BUF];
+static uint32_t ssh_cap_len;
+static int      ssh_cap_on;
+
+static void ssh_cap_char(char c) {
+    if (!ssh_cap_on) return;
+    if (c == '\n') {
+        if (ssh_cap_len < SSH_CAP_BUF - 1) ssh_cap_buf[ssh_cap_len++] = '\r';
+    }
+    if (ssh_cap_len < SSH_CAP_BUF - 1) ssh_cap_buf[ssh_cap_len++] = c;
+}
+
+/* Run one line as if typed at the prompt; capture builtin output into
+ * `out` (NUL-terminated, \r\n line endings), report the exit status. */
+int shell_ssh_exec_line(const char *line, char *out, int outmax, int *rc) {
+    static char buf[256];
+    int i;
+    for (i = 0; line[i] && i < 255; i++) buf[i] = line[i];
+    buf[i] = 0;
+    env_expand(buf, (int)sizeof(buf));
+
+    /* split first token (same convention as the main loop) */
+    char *cmd = buf;
+    while (*cmd == ' ') cmd++;
+    char *arg = cmd;
+    while (*arg && *arg != ' ') arg++;
+    if (*arg) { *arg = 0; arg++; while (*arg == ' ') arg++; }
+    if (!*cmd) { if (rc) *rc = 0; if (out) out[0] = 0; return 0; }
+
+    ssh_cap_len = 0;
+    ssh_cap_on = 1;
+    int saved_script = g_script_mode;
+    g_script_mode = 1;                       /* pager streams, no -- More -- */
+    vga_set_tee(ssh_cap_char);
+    shell_exec(cmd, arg);
+    vga_set_tee(0);
+    g_script_mode = saved_script;
+    ssh_cap_on = 0;
+    ssh_cap_buf[ssh_cap_len] = 0;
+
+    int n = (int)ssh_cap_len;
+    if (n > outmax - 1) n = outmax - 1;
+    for (i = 0; i < n; i++) out[i] = ssh_cap_buf[i];
+    out[n] = 0;
+    if (rc) *rc = g_last_rc;
+    return 0;
+}
+
+static void cmd_sshd(char *arg) {
+    (void)arg;
+    if (!net_up()) {
+        vga_write(trs("sshd: network not ready", "sshd: 网络未就绪"));
+        net_why_down();
+        return;
+    }
+    net_dhcp_ensure();
+    net_tcp_listen(22);
+    vga_write("sshd: listening on port 22 (ESC stops)\n");
+    vga_write("sshd: try from the host:\n");
+    vga_write("  ssh -p 2222 -o StrictHostKeyChecking=no \\\n");
+    vga_write("       -o KexAlgorithms=curve25519-sha256 \\\n");
+    vga_write("       -o HostKeyAlgorithms=ssh-ed25519 -o Ciphers=aes128-ctr \\\n");
+    vga_write("       -o MACs=hmac-sha2-256 user@localhost\n");
+    int sessions = 0;
+    for (;;) {
+        if (net_tcp_saccept() == 0) {
+            vga_write("sshd: session opened\n");
+            ssh_serve_session();
+            sessions++;
+            vga_write("sshd: session closed\n");
+            continue;
+        }
+        /* idle cycle: ESC stops the server.  kb_getkey() would BLOCK
+         * forever on a stray modifier/break scancode (kb_next_scancode
+         * waits for a "real key"), so use the bounded timed variant. */
+        if (kb_peek()) {
+            int k = kb_getkey_timed(2);
+            if (k == 0x1B) break;            /* ESC */
+        }
+    }
+    net_tcp_sclose();
+    vga_write("sshd: stopped, ");
+    print_int(sessions);
+    vga_write(" session(s) served\n");
 }
 
 /* ---------- dns: resolve a hostname ---------- */
@@ -6049,7 +6143,7 @@ static const char *sh_cmds[] = {
     "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo",
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
-    "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run",
+    "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
     "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vdiag","whoami","yes","shutdown","theme","hive","reg",  /* v2.67 */
@@ -6733,6 +6827,7 @@ static void shell_exec(char *cmd, char *arg) {
                 else if (kr != 0) vga_write(trs("kill: no such task\n", "kill: 找不到任务\n"));
             }
         }
+        else if (!strcmp_(cmd, "sshd"))         cmd_sshd(arg);
         else if (!strcmp_(cmd, "curl"))        cmd_curl(arg);
         else if (!strcmp_(cmd, "ping"))        cmd_ping(arg);
         else if (!strcmp_(cmd, "dns"))         cmd_dns(arg);
@@ -6797,6 +6892,7 @@ static void shell_exec(char *cmd, char *arg) {
                     con_set_fg_rgb(pal_rgb(PAL_ERROR));
                     vga_write(trs("catos: unknown command: ", "catos: 未知 command: ")); vga_write(cmd); vga_write("\n");
                     con_set_fg_rgb(pal_rgb(PAL_FG));
+                    g_last_rc = 127;             /* POSIX: command not found */
                 } else if (pipe_to && *pipe_to) {
                     char *file2 = pipe_to;
                     char *sp = pipe_to;
@@ -6823,6 +6919,7 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write(trs("catos: unknown command: ", "catos: 未知 command: "));
                 vga_write(cmd); vga_write("\n");
                 con_set_fg_rgb(pal_rgb(PAL_FG));
+                g_last_rc = 127;             /* POSIX: command not found */
                 /* NIGHT-P3: friendly nearest-command suggestion (yellow hint) */
                 const char *sug = suggest_cmd(cmd);
                 if (sug) {

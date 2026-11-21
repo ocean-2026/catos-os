@@ -9,7 +9,6 @@
 #include "net.h"
 #include "task.h"
 extern volatile uint32_t timer_ticks;
-#include "vga.h"
 
 /* ---- configuration (defaults: QEMU user-net) ----
  * net.c overwrites these for VMware NAT (192.168.64.x) after layout probe. */
@@ -231,6 +230,26 @@ static struct {
     int      rcv_buf_len;
 } tcp;
 
+/* ---- v2.71 TCP server context: declared before tcp_handle so the
+ * RX router can see it; the state machine lives further below. ---- */
+#define TS_CLOSED       0
+#define TS_SYN_RCVD     1
+#define TS_ESTABLISHED  2
+
+static struct {
+    int      listening;       /* listener armed */
+    uint16_t listen_port;     /* host order */
+    int      state;
+    uint8_t  peer_ip[4];
+    uint16_t peer_port;       /* host order */
+    uint32_t seq;             /* next seq we send */
+    uint32_t iss;
+    uint32_t rcv_next;
+    uint8_t  rcv_buf[16384];
+    int      rcv_buf_len;
+    int      peer_closed;     /* FIN or RST received */
+} tcps;
+
 static void tcp_do_send(uint8_t flags, const uint8_t *payload, uint32_t plen) {
     uint8_t seg[20 + 1460];
     wr16(seg + 0,  (uint16_t)tcp.local_port);
@@ -247,6 +266,10 @@ static void tcp_do_send(uint8_t flags, const uint8_t *payload, uint32_t plen) {
     ip_send(tcp.peer_ip, 6, seg, 20 + plen);
 }
 
+static void tcp_server_handle(const uint8_t *ip, const uint8_t *t,
+                              uint8_t flags, uint32_t seq, uint32_t ack,
+                              uint32_t seglen);   /* v2.71 fwd decl */
+
 static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
     if (iplen < 20) return;
     uint32_t hlen = (ip[0] & 0x0F) * 4;
@@ -257,6 +280,11 @@ static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
     uint32_t seq  = rd32(t + 4);
     uint32_t ack  = rd32(t + 8);
     uint8_t  flags = t[13];
+    /* v2.71: route sshd listener traffic to the server state machine */
+    if (tcps.listening && dport == tcps.listen_port) {
+        tcp_server_handle(ip, t, flags, seq, ack, seglen);
+        return;
+    }
     if (!tcp.active || dport != tcp.local_port) return;
 
     if (tcp.state == TCP_SYN_SENT) {
@@ -288,6 +316,167 @@ static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
         }
         return;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* TCP server (v2.71): one passive connection for the sshd command.   */
+/* Separate context from the client `tcp` struct; net_rx_dispatch     */
+/* routes by destination port.  Minimal handshake + data + FIN, same  */
+/* level of sophistication as the client side (lossless QEMU/VMnet).  */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* TCP server (v2.71): one passive connection for the sshd command.   */
+/* (context struct `tcps` is declared up top, before tcp_handle)      */
+/* ------------------------------------------------------------------ */
+
+static void tcps_send_seg(uint8_t flags, const uint8_t *payload, uint32_t plen) {
+    uint8_t seg[20 + 1460];
+    wr16(seg + 0,  (uint16_t)tcps.listen_port);   /* our source port */
+    wr16(seg + 2,  tcps.peer_port);
+    wr32(seg + 4,  tcps.seq);
+    wr32(seg + 8,  tcps.rcv_next);
+    seg[12] = 0x50;
+    seg[13] = flags;
+    wr16(seg + 14, 4096);
+    wr16(seg + 16, 0);
+    wr16(seg + 18, 0);
+    for (uint32_t i = 0; i < plen; i++) seg[20+i] = payload[i];
+    wr16(seg + 16, tcp_checksum(net_our_ip, tcps.peer_ip, seg, 20 + plen));
+    ip_send(tcps.peer_ip, 6, seg, 20 + plen);
+}
+
+static void tcp_server_handle(const uint8_t *ip, const uint8_t *t,
+                              uint8_t flags, uint32_t seq, uint32_t ack,
+                              uint32_t seglen) {
+    uint32_t plen = (seglen > 20) ? seglen - 20 : 0;
+    if (tcps.state == TS_CLOSED) {
+        if ((flags & 0x02) && !(flags & 0x04)) {          /* SYN */
+            for (int i = 0; i < 4; i++) tcps.peer_ip[i] = ip[12+i];
+            tcps.peer_port = rd16(t + 0);
+            tcps.rcv_next = seq + 1;
+            tcps.iss = 0x20000000u + (uint32_t)(tcp.local_port << 8)
+                       + (uint32_t)ip_id_counter * 7919u;
+            tcps.seq = tcps.iss;
+            tcps.rcv_buf_len = 0;
+            tcps.peer_closed = 0;
+            tcps_send_seg(0x12, 0, 0);                    /* SYN+ACK */
+            tcps.state = TS_SYN_RCVD;
+        }
+        return;
+    }
+    if (tcps.state == TS_SYN_RCVD) {
+        if ((flags & 0x10) && ack == tcps.iss + 1) {      /* handshake ACK */
+            tcps.seq = tcps.iss + 1;
+            tcps.state = TS_ESTABLISHED;
+            /* fall through: the client's ACK often CARRIES the first
+             * data segment (e.g. the SSH banner).  Dropping it here
+             * deadlocks both sides (server waits for banner the client
+             * already sent). */
+        } else {
+            return;
+        }
+    }
+    /* TS_ESTABLISHED */
+    if (flags & 0x04) {                                   /* RST */
+        tcps.state = TS_CLOSED;
+        tcps.peer_closed = 1;
+        return;
+    }
+    if (plen > 0) {
+        uint32_t n = plen;
+        if ((uint32_t)tcps.rcv_buf_len + n > sizeof(tcps.rcv_buf))
+            n = sizeof(tcps.rcv_buf) - tcps.rcv_buf_len;
+        for (uint32_t i = 0; i < n; i++) tcps.rcv_buf[tcps.rcv_buf_len + i] = t[20+i];
+        tcps.rcv_buf_len += (int)n;
+        tcps.rcv_next = seq + n;
+        tcps_send_seg(0x10, 0, 0);                        /* ACK the data */
+    }
+    if (flags & 0x01) {                                   /* FIN */
+        tcps.rcv_next = seq + plen + 1;
+        tcps_send_seg(0x10, 0, 0);
+        tcps.peer_closed = 1;
+    }
+}
+
+/* ---- server-side public API (net.h) ---- */
+
+int net_tcp_listen(uint16_t port) {
+    tcps.listening = 1;
+    tcps.listen_port = port;
+    tcps.state = TS_CLOSED;
+    return 0;
+}
+
+int net_tcp_saccept(void) {
+    /* reset any previous session state */
+    tcps.state = TS_CLOSED;
+    tcps.rcv_buf_len = 0;
+    tcps.peer_closed = 0;
+    for (long i = 0; i < 3000000L; i++) {     /* ~2s idle window (sshd ESC check) */
+        net_poll();
+        task_maybe_yield();
+        if (tcps.state == TS_ESTABLISHED) return 0;
+    }
+    return -1;
+}
+
+int net_tcp_ssend(const uint8_t *data, uint32_t len) {
+    if (tcps.state != TS_ESTABLISHED) return -1;
+    while (len > 0) {
+        uint32_t n = (len > 1400) ? 1400 : len;
+        tcps_send_seg(0x18, data, n);                     /* PSH|ACK */
+        tcps.seq += n;
+        data += n;
+        len -= n;
+    }
+    return 0;
+}
+
+/* non-blocking drain: returns bytes copied, 0 = nothing, -1 = peer closed */
+int net_tcp_srecv(uint8_t *buf, int max) {
+    if (tcps.rcv_buf_len == 0) return tcps.peer_closed ? -1 : 0;
+    int n = tcps.rcv_buf_len;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) buf[i] = tcps.rcv_buf[i];
+    /* compact the remainder */
+    for (int i = n; i < tcps.rcv_buf_len; i++)
+        tcps.rcv_buf[i - n] = tcps.rcv_buf[i];
+    tcps.rcv_buf_len -= n;
+    return n;
+}
+
+/* blocking exact-n read with net polling; -1 on peer close or ~30s idle */
+int net_tcp_srecv_all(uint8_t *buf, int n) {
+    int got = 0;
+    long idle = 0;
+    while (got < n) {
+        int r = net_tcp_srecv(buf + got, n - got);
+        if (r < 0) return -1;
+        if (r == 0) {
+            net_poll();
+            task_maybe_yield();
+            if (++idle > 30000000L) return -1;   /* no data for ~30s */
+        } else {
+            idle = 0;
+            got += r;
+        }
+    }
+    return got;
+}
+
+void net_tcp_sclose(void) {
+    if (tcps.state == TS_ESTABLISHED) {
+        tcps_send_seg(0x11, 0, 0);                        /* FIN|ACK */
+        tcps.seq += 1;
+        /* drain peer's FIN/ACK briefly */
+        for (long i = 0; i < 300000L && tcps.state == TS_ESTABLISHED; i++) {
+            net_poll();
+            task_maybe_yield();
+        }
+    }
+    tcps.state = TS_CLOSED;
+    tcps.listening = 0;
 }
 
 /* ------------------------------------------------------------------ */
