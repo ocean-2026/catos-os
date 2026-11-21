@@ -29,6 +29,8 @@
 #include "../include/net.h"
 #include "../include/ssh.h"
 #include "../include/shell.h"
+#include "../include/fs.h"
+#include "../include/task.h"
 #include "vga.h"
 
 /* ------------------------------------------------------------------ */
@@ -482,6 +484,51 @@ static int ssh_do_shell(uint32_t peer) {
     }
 }
 
+/* v2.72: persistent host key -- /etc/ssh_host.key holds the 64-byte
+ * Ed25519 private key (sk[0..31] seed, sk[32..63] public).  Generated on
+ * first use, reused afterwards so client known_hosts entries stay valid. */
+#define SSH_HOSTKEY_PATH "/etc/ssh_host.key"
+static void ssh_host_key_load(void) {
+    uint8_t sk[64];
+    int have = 0;
+    if (fs_fs_ready()) {
+        int n = fs_read_at(SSH_HOSTKEY_PATH, (char *)sk, 0, 64);
+        if (n == 64) {
+            ssh_memcpy(S.host_priv, sk, 64);
+            ssh_memcpy(S.host_pub, sk + 32, 32);
+            have = 1;
+        }
+    }
+    if (!have) {
+        crypto_ed25519_keypair(S.host_pub, S.host_priv);
+        if (fs_fs_ready())
+            fs_write_raw(SSH_HOSTKEY_PATH, (const char *)S.host_priv, 64);
+    }
+}
+
+/* v2.72: background daemon entry -- spawned via task_spawn_r0() from the
+ * `sshd -d` command or the /etc/autoexec boot script ("@sshd").  NEVER
+ * returns.  Waits for the NIC, brings up DHCP, listens on 22 and serves
+ * sessions forever; ESC handling only exists in the foreground cmd_sshd. */
+void sshd_daemon_main(void) {
+    int listening = 0;
+    for (;;) {
+        if (!net_up()) { task_maybe_yield(); continue; }
+        if (!listening) {
+            net_dhcp_ensure();
+            net_tcp_listen(22);
+            listening = 1;
+            vga_write("sshd[daemon]: listening on port 22\n");
+        }
+        if (net_tcp_saccept() == 0) {
+            vga_write("sshd[daemon]: session opened\n");
+            ssh_serve_session();
+            vga_write("sshd[daemon]: session closed\n");
+        }
+        task_maybe_yield();          /* saccept already polled ~2s inside */
+    }
+}
+
 int ssh_serve_session(void) {
     static uint8_t payload[SSH_IN_MAX];
     S.encrypted = 0;
@@ -491,8 +538,8 @@ int ssh_serve_session(void) {
     S.q_c_len = 0;
     S.Kmp_len = 0;
 
-    /* fresh host key every session (v1: no persistence yet) */
-    crypto_ed25519_keypair(S.host_pub, S.host_priv);
+    /* persistent host key (v2.72): loaded from /etc/ssh_host.key */
+    ssh_host_key_load();
 
     if (ssh_read_banner() < 0) return -1;
     if (ssh_send_banner() != 0) return -1;

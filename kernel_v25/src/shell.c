@@ -2793,7 +2793,19 @@ int shell_ssh_exec_line(const char *line, char *out, int outmax, int *rc) {
 }
 
 static void cmd_sshd(char *arg) {
-    (void)arg;
+    while (*arg == ' ') arg++;
+    /* v2.72: -d spawns the detached ring0 daemon (survives the shell,
+     * also used by the /etc/autoexec "@sshd" boot line) */
+    if (arg[0] == '-' && arg[1] == 'd') {
+        int tid = task_spawn_r0(sshd_daemon_main, "sshd", 1);
+        if (tid > 0) {
+            vga_write("[daemon tid "); print_int(tid);
+            vga_write("] sshd (waits for the NIC, then :22)\n");
+        } else {
+            vga_write("sshd: no free task slot\n");
+        }
+        return;
+    }
     if (!net_up()) {
         vga_write(trs("sshd: network not ready", "sshd: 网络未就绪"));
         net_why_down();
@@ -6962,12 +6974,19 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"                                CatOS v259                          \"\n"
     "echo \"\"\n";
 
+/* v2.72: sshd autostart seed -- a daemon line ("@" prefix) spawns the
+ * ring0 sshd at boot; it waits for the NIC and then serves :22.  Seeded
+ * only on volumes that don't have it yet (fs_write_raw skips existing). */
+static const char *const AUTOSTART_SSHD = "@sshd\n";
+
 static void boot_autostart(void) {
     if (!fs_fs_ready()) return;
     /* seed dir + default banner (fs_write_raw skips an existing file) */
     fs_mkdir(AUTOSTART_DIR);
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
+    fs_write_raw(AUTOSTART_DIR "/sshd.sh", AUTOSTART_SSHD,
+                 (uint32_t)slen_(AUTOSTART_SSHD));
 
     char names[8][FS_NAME_MAX];
     int n = fs_enum_files(AUTOSTART_DIR, names, 8);
@@ -7016,6 +7035,19 @@ static void boot_autostart(void) {
                 while (*larg == ' ' || *larg == '\t') larg++;
             }
             if (as_daemon) {
+                /* v2.72: builtin daemons (no .ce on disk) -- only sshd
+                 * today; runs as a detached ring0 thread instead. */
+                if (!strcmp_(lcmd, "sshd")) {
+                    int dtid = task_spawn_r0(sshd_daemon_main, "sshd", 1);
+                    if (dtid > 0)
+                        vga_write("autostart: sshd daemon spawned\n");
+                    else {
+                        vga_write("autostart: sshd spawn FAILED rc=");
+                        print_int(dtid);
+                        vga_write("\n");
+                    }
+                    continue;
+                }
                 char *dargv[16];
                 int dargc = 1;
                 dargv[0] = lcmd;

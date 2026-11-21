@@ -15,7 +15,12 @@
 int  ssh_serve_session(void);
 /*   serve one SSH connection end-to-end (KEX + auth + one session
  *   channel).  Returns 0 when the session finished normally, negative
- *   on protocol errors.  Regenerates a fresh host key every call
- *   (clients should connect with StrictHostKeyChecking=no for now). */
+ *   on protocol errors.  Host key is persistent (/etc/ssh_host.key)
+ *   since v2.72 -- known_hosts entries stay valid across sessions. */
+
+/* v2.72: ring0 daemon entry (task_spawn_r0).  Waits for the NIC, listens
+ * on 22 and serves sessions forever; never returns.  Started by `sshd -d`
+ * or by the /etc/autoexec boot script line "@sshd". */
+void sshd_daemon_main(void);
 
 #endif

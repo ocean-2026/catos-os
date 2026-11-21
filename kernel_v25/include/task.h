@@ -102,6 +102,8 @@ void     tasks_init(void);
 task_t  *task_current(void);
 int      tasks_ready(void);
 int      task_spawn_ce(const char *path, int argc, char **argv, int uid);
+/* v2.71: spawn a ring0 kernel thread (entry never returns; cooperative) */
+int      task_spawn_r0(void (*entry)(void), const char *name, int daemon);
 /* P1: flatten a supported PE32 into a CE01 .ce file (shell convert-on-run).
  * err/errsz receive a human-readable failure reason; returns 0 / negative.
  * uid/gid are the session identity used for the target-path write check

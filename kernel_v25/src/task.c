@@ -2469,6 +2469,66 @@ int pe_to_ce_file(const char *pe_path, const char *ce_path,
     return 0;
 }
 
+/* ---- v2.71: spawn a ring0 kernel thread -------------------------------
+ * entry NEVER RETURNS (a return jumps to garbage -- the frame has no
+ * exit trampoline).  Scheduled cooperatively like the idle pseudo-task:
+ * hand-built cpu_switch_to frame, ring0, root caps, no address space.
+ * The thread must call task_maybe_yield()/task_block() at blocking
+ * points (this kernel is non-preemptive in ring0).  daemon=1 marks the
+ * task as a detached service (`jobs` shows it with a D marker). */
+int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
+    int slot = -1;
+    for (int i = 1; i < MAX_TASKS; i++)
+        if (tasks[i].state == T_UNUSED) { slot = i; break; }
+    if (slot < 0) return -1;
+
+    task_t *t = &tasks[slot];
+    t->out_pipe = -1;
+    t->in_pipe = -1;
+    t->out_file[0] = 0;
+    t->out_append = 0;
+    t->bg_mode = 1;              /* log ring for any SYS_WRITE (defensive:
+                                    ring0 vga_write goes to console anyway) */
+    t->daemon = daemon;
+    t->pending_sig = 0;
+    t->log_head = 0;
+    t->log_tail = 0;
+    t->log_lost = 0;
+
+    uint8_t *ks = task_kstacks[slot - 1];
+    uint32_t ks_top = (uint32_t)ks + sizeof(task_kstacks[0]);
+    for (uint32_t i = 0; i < sizeof(task_kstacks[0]); i++) ks[i] = 0;
+
+    t->tid = slot;
+    t->uid = UID_ROOT;
+    t->gid = 0;
+    t->caps = CAP_ALL;
+    t->ring0 = 1;
+    t->state = T_READY;
+    t->kstack_top = ks_top;
+    t->ksp = ks_top - 20;        /* pop edi/esi/ebx/ebp + ret -> entry */
+    t->resume_frame = 0;
+    t->space.pt = 0;
+    t->space.dir = 0;
+    t->vm = 0;
+    t->wake_tick = 0;
+    t->exit_code = 0;
+    t->parent = cur_task;
+    t->pgid = slot;
+    t->heap_end = 0;
+    heap_free_root[slot] = 0;
+    t->ls_count = 0;
+    t->ls_step = 0;
+    t->cpu_ticks = 0;
+    *(uint32_t *)(ks_top - 4) = (uint32_t)entry;
+    {
+        int i;
+        for (i = 0; name && name[i] && i < 15; i++) t->name[i] = name[i];
+        t->name[i] = 0;
+    }
+    return slot;
+}
+
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
