@@ -290,6 +290,7 @@ static void cmd_help(void) {
     help_row("cls",         "clear the screen (alias of clear)");
     help_row("about",       "system info banner");
     help_row("sndregs",     "raw ES1370/ES1371 register readback");
+    help_row("fprobe",      "paint the whole frame + 4 corner marks (coverage probe)");
     help_row("autostart",   "re-run /etc/autostart scripts");
     help_row("uname",       "print OS name");
     help_row("date",        "show RTC date/time");
@@ -919,6 +920,34 @@ static void cmd_about(void) {
                   "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
 }
 
+
+/* v2.72: `fprobe` -- answers "does the host really show the whole frame?".
+ * Fills the entire 800x600 surface, then marks the four corners and the
+ * last pixel column/row.  If a corner mark is cut off, the surface the
+ * host displays is smaller than the mode we programmed and the fix belongs
+ * in the SVGA mode set, not in the console renderer.  On a healthy path the
+ * window is edge-to-edge dark with four bright corner blocks. */
+static void geom_num(char *dst, int max, int v);   /* v2.72, defined below */
+static int  strcat_b(char *dst, int max, const char *src);
+static void cmd_fprobe(void) {
+    int w = con_info(CON_INFO_PIXEL_W), h = con_info(CON_INFO_PIXEL_H);
+    if (w <= 0 || h <= 0) { con_write("fprobe: no graphics mode active\n"); return; }
+    gfx24_clear(0x000000);
+    gfx24_rect(0, 0, w, 2, 0x00FF00);          /* top edge    */
+    gfx24_rect(0, h - 2, w, 2, 0x00FF00);      /* bottom edge */
+    gfx24_rect(0, 0, 2, h, 0x00FF00);          /* left edge   */
+    gfx24_rect(w - 2, 0, 2, h, 0x00FF00);      /* right edge  */
+    gfx24_rect(0, 0, 40, 40, 0xFF0000);        /* top-left    RED   */
+    gfx24_rect(w - 40, 0, 40, 40, 0x00FFFF);   /* top-right   CYAN  */
+    gfx24_rect(0, h - 40, 40, 40, 0xFFFF00);   /* bottom-left YELLOW*/
+    gfx24_rect(w - 40, h - 40, 40, 40, 0xFF00FF); /* bottom-right MAGENTA */
+    con_write("fprobe: filled ");
+    char b[48]; b[0] = 0;
+    geom_num(b, (int)sizeof(b), w); strcat_b(b, (int)sizeof(b), "x");
+    geom_num(b, (int)sizeof(b), h); strcat_b(b, (int)sizeof(b), " with 4 corner marks\n");
+    con_write(b);
+    con_write("if a corner is missing, the host surface is smaller than the mode\n");
+}
 
 /* v2.72: `sndregs` -- raw ES1370/ES1371 readback.  The VMware box is silent
  * and QEMU has no ES1371 model, so this command exists to get real numbers
@@ -5792,6 +5821,13 @@ static void boot_apply_videomode(void) {
     int r = con_request_mode(want, CON_ORIGIN_KERNEL);
     if (r == 0) {
         if (want == CON_MODE_VBE24) size_restore();
+        /* v2.72: the mode switch does its own clear+redraw, but it runs
+         * while the grid is still the pre-switch one; every later stage
+         * (scale restore / reflow) can leave a corner of the frame in the
+         * pre-theme backdrop colour.  One clear+repaint here, after the
+         * geometry is final, is the last word on the backdrop -- and it is
+         * what makes the window edge-to-edge one colour. */
+        con_repaint_frame();
         vga_write("[display] boot mode: ");
         vga_write(con_mode_name(want));
         /* v2.72: state the geometry we really got, so a host/window that
@@ -6921,6 +6957,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
+        else if (!strcmp_(cmd, "fprobe"))      cmd_fprobe();    /* v2.72 */
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
         else if (!strcmp_(cmd, "netcfg"))       cmd_netcfg(arg);
         else if (!strcmp_(cmd, "uptime")) {
