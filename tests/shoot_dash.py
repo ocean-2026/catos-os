@@ -22,11 +22,15 @@ def main():
     disk = sys.argv[3] if len(sys.argv) > 3 else None
     os.makedirs(outdir, exist_ok=True)
     qemu = qd.find_qemu()
-    proc, s = qd.boot(qemu, iso, 4456, disk=disk)
+    proc, s = qd.boot(qemu, iso, 4455, disk=disk)
     try:
-        if not qd.wait_for_prompt(s, timeout=100.0):
-            print("no prompt"); return 1
+        # GRUB + kernel install of the built-in apps takes ~20 s; a prompt
+        # probe before that reads a half-drawn screen and always fails.
+        time.sleep(22.0)
+        if not qd.wait_for_prompt(s, timeout=60.0):
+            print("no prompt; screen:\n" + qd.read_screen(s)); return 1
         qd.force_text(s)
+        qd.wait_for_prompt(s, timeout=30.0)
         qd.type_text(s, "dash")
         qd.sendkey(s, "ret", 2.5)
         time.sleep(1.0)
