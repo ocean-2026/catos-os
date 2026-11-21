@@ -28,3 +28,4 @@ git push https://x-access-token:${TOKEN}@github.com/ocean-2026/CatOS.git main
 | 2026-11-21 ~11:4x | 61059be | `f41c4ac..61059be  main -> main`（v2.68.3 i18n/sudo/IME/包签名/ls表头 + CDE设计原型） | `ls-remote` = 61059befd295…（与本地 HEAD 一致） |
 | 2026-11-21 ~12:2x | fc84532 | `c9f3eba..fc84532  main -> main`（v2.69 CDE P1 可拆卸桌面 + ABI槽65修复 + 鼠标原语） | `ls-remote` = fc845320b3f8…（与本地 HEAD 一致） |
 | 2026-11-21 ~14:0x | 93133e1 | `d07c433..93133e1  main -> main`（v2.70 pkg HTTP 远程仓库 + SSH-2 可行性原型） | `ls-remote` = 93133e12a011…（与本地 HEAD 一致） |
+| 2026-11-21 ~15:2x | 1db6898 | `5555b50..1db6898  main -> main`（v2.71 内核 SSH-2 服务端：crypto/TCP server/sshd，探针 6/6） | `ls-remote` = 1db6898…（与本地 HEAD 一致） |
