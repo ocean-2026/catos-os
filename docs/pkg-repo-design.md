@@ -128,8 +128,8 @@ catos-repo/
 | 示例包（bc / stats / rps） | 已实现并实机验证 |
 | 签名校验（CPKG02 / RSA-512） | v2.68 已实现（`pkg_verify`），验签不符拒装 |
 | **可拆卸桌面扩展（desktop.catpkg）** | **v2.69 P1 已实现，10/10 实机验证**（见下） |
+| **HTTP 远程仓库拉包（`pkg repo/update/fetch`）** | **v2.70 已实现，7/7 实机验证**（见下） |
 | 交叉编译上游源码入仓 | 设计预留，未实现 |
-| 联网拉包 | 设计预留，未实现（`pkg install` 仅读本地 `/pkg/`） |
 
 ## 4. 范例：desktop.catpkg —— 图形桌面作为可装卸扩展（v2.69）
 
@@ -147,3 +147,27 @@ catos-repo/
 - 安装前后内核二进制字节一致，证明桌面语义确实不在内核里。
 - 生命周期实机验证：`tests/desktop_pkg_v269_probe.py` 10/10 PASS。
 - 设计细节见 `docs/CDE-模块化设计.md` §8。
+
+## 5. 远程仓库（v2.70）：pkg repo / update / fetch
+
+本地仓库之外，`pkg` 现在可以从 HTTP 远程仓库拉包，全程复用同一套 RSA-512
+验签——远程来源的包和本地包走完全相同的 `pkg_verify()`，签名不符一律拒装。
+
+```
+pkg repo http://10.0.2.2:8125/repo   # 设置/查看远程仓库 base URL（存 hive）
+pkg update                           # GET <repo>/PKGS.TXT -> /pkg/PKGS.TXT
+pkg fetch NAME                       # 按索引文件名拉 <repo>/<file>，验签后装到 /bin
+pkg fetch http://IP[:port]/file.catpkg  # 显式 URL 直拉
+```
+
+- **二进制安全传输**：现有 `net_http_get()` 是文本 API（`char*`+NUL 结尾、
+  rcv_buf 4096、按 Content-Length 截断），不能承载含 0 字节的 `.catpkg`。
+  v2.70 抽公共核 `http_fetch()`，新增 `net_http_download(url, uint8_t*, max)`
+  返回精确字节数、不做 NUL 结尾；`tcp.rcv_buf` 扩到 20480 容纳整包。
+- **验签零分叉**：本地 install 与远程 fetch 共用抽出的 `pkg_install_payload()`，
+  包含 magic/length 校验、`pkg_verify()`、写盘 + ACL。篡改 payload 一字节即拒装。
+- **安全边界**：仓库 URL 仅接受 `http://`；私钥不进内核，内核只嵌公钥 N。
+  传输本身不加密（公开软件包无需机密性，apt/npm 同理），完整性与来源由签名保证。
+- 实机验证：`tests/pkg_remote_v270_probe.py` 7/7 PASS——含宿主 HTTP 服务器可达性
+  marker、`pkg update` 拉索引、`pkg fetch` 装远程 desktop 并能运行、篡改包被拒。
+- 宿主协议原型：`deliverables/pkg-remote-prototype/pkg_remote_proto.py`（真实包字节级验签）。

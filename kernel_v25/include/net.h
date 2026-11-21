@@ -44,6 +44,10 @@ uint16_t netdbg_csr(int i);
 
 /* ---- protocol API (beginner friendly) ---- */
 int  net_http_get(const char *url, char *buf, int max);
+int  net_http_download(const char *url, uint8_t *buf, int max);
+/*   v2.70: binary-safe HTTP GET for .catpkg downloads.  Returns the exact
+ *   body byte count (>=0) without NUL-terminating (packages contain zero
+ *   bytes), or the same negative error codes as net_http_get. */
 /*   HTTP GET; returns bytes copied into buf (>=0) or an error code:
  *     -1 NIC not initialised       -2 could not resolve host
  *     -3 connect failed/timeout    -4 HTTP status not 2xx

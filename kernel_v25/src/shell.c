@@ -383,7 +383,10 @@ static void cmd_help(void) {
     help_row("cp SRC DST",  "copy a file");
     help_row("mv SRC DST",  "move a file (copy + delete)");
     /* NIGHT-P4: package manager + migrated tools */
-    help_row("pkg list|info|install|remove NAME", "local package manager (/pkg)");
+    help_row("pkg list|info|install|remove NAME", "package manager (/pkg + remote HTTP)");
+    help_row("pkg repo [URL]",     "set/show remote package repository base URL");
+    help_row("pkg update",         "download <repo>/PKGS.TXT into local index");
+    help_row("pkg fetch NAME|URL", "download + verify + install a signed .catpkg");
     help_row("head [-n N] FILE", "print first N lines (default 10)");
     help_row("tail [-n N] FILE", "print last N lines (default 10)");
     help_row("wc [-l] [-w] [-c] FILE", "line/word/byte count");
@@ -4395,6 +4398,170 @@ static int pkg_verify(const uint8_t *buf, uint32_t plen) {
     return bn_cmp(&calc, &want) == 0 ? 0 : -1;
 }
 
+/* ---- v2.70: remote package repository (HTTP) -------------------------
+ * `pkg repo URL`        set/show the remote base URL (persisted in hive)
+ * `pkg update`          GET <repo>/PKGS.TXT -> /pkg/PKGS.TXT
+ * `pkg fetch NAME|URL`  GET a signed .catpkg over HTTP, verify with the
+ *                       SAME pkg_verify() as local installs, then drop the
+ *                       payload into /bin/<cmd>.ce.  A remote package is
+ *                       never trusted until its RSA-512 signature checks.
+ *
+ * The transport is binary-safe net_http_download(); the existing
+ * net_http_get() is text-only (NUL-terminated, truncates at 0 bytes) and
+ * cannot carry a .catpkg. */
+#define PKG_REPO_KEY "HKLM\\Software\\CatOS\\Net\\PkgRepo"
+
+static const char *pkg_repo_get(void) {
+    const char *v = hive_sz(PKG_REPO_KEY, "");
+    return (v && *v) ? v : 0;
+}
+
+static void cmd_pkg_repo(const char *arg) {
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        const char *v = pkg_repo_get();
+        if (!v) {
+            vga_write(trs("pkg: no remote repo set\n", "pkg：未设置远程仓库\n"));
+            vga_write(trs("usage: pkg repo http://IP[:port]/dir\n",
+                          "用法：pkg repo http://IP[:port]/dir\n"));
+            return;
+        }
+        vga_write("pkg: remote repo = "); vga_write(v); vga_write("\n");
+        return;
+    }
+    /* reject non-http URLs early */
+    if (arg[0] != 'h' || arg[1] != 't' || arg[2] != 't' || arg[3] != 'p' ||
+        arg[4] != ':' || arg[5] != '/' || arg[6] != '/') {
+        vga_write(trs("pkg: repo URL must start with http://\n",
+                      "pkg：仓库 URL 必须以 http:// 开头\n"));
+        return;
+    }
+    if (hive_set_sz(PKG_REPO_KEY, arg) == 0) {
+        hive_save();
+        vga_write("pkg: remote repo -> "); vga_write(arg); vga_write("\n");
+    } else {
+        vga_write(trs("pkg: failed to save repo URL\n", "pkg：保存仓库 URL 失败\n"));
+    }
+}
+
+/* Join <base>/<file> into out (base has no trailing slash). */
+static void pkg_url_join(char *out, int cap, const char *base, const char *file) {
+    int n = 0;
+    while (base[n] && n < cap - 1) { out[n] = base[n]; n++; }
+    if (n > 0 && out[n-1] == '/') n--;
+    if (n < cap - 1) out[n++] = '/';
+    int k = 0;
+    while (file[k] && n < cap - 1) out[n++] = file[k++];
+    out[n] = 0;
+}
+
+static void cmd_pkg_update(void) {
+    const char *base = pkg_repo_get();
+    if (!base) {
+        vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n",
+                      "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
+    }
+    if (!net_up()) { vga_write(trs("pkg: network not ready\n", "pkg：网络未就绪\n")); net_why_down(); return; }
+    char url[FS_PATH_MAX];
+    pkg_url_join(url, sizeof(url), base, "PKGS.TXT");
+    vga_write("pkg: fetching "); vga_write(url); vga_write(" ...\n");
+    int n = net_http_download(url, (uint8_t *)pkg_payload, PKG_BUF_MAX - 1);
+    if (n < 0) {
+        vga_write(trs("pkg: download failed (code ", "pkg：下载失败（错误码 "));
+        print_int(n); vga_write(")\n"); return;
+    }
+    if (n == 0) { vga_write(trs("pkg: empty index\n", "pkg：索引为空\n")); return; }
+    pkg_payload[n] = 0;
+    if (fs_write_text(PKG_INDEX, pkg_payload, (uint32_t)n) != 0) {
+        vga_write(trs("pkg: failed to write local index\n", "pkg：写入本地索引失败\n")); return;
+    }
+    vga_write("pkg: index updated ("); print_int(n); vga_write(" bytes)\n");
+}
+
+/* Install a signed .catpkg image already loaded in pkg_payload (size rd).
+ * Shared by local install and remote fetch so verification cannot diverge. */
+static void pkg_install_payload(int rd) {
+    if (rd < PKG_HDR_SIZE ||
+        pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
+        pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
+        pkg_payload[4] != '0' || pkg_payload[5] != '2') {
+        vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n",
+                      "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
+    }
+    char cmd[16];
+    pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
+    uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
+                    ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
+                    ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
+                    ((uint32_t)(unsigned char)pkg_payload[139] << 24);
+    if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
+        vga_write(trs("pkg: corrupt package (length mismatch)\n", "pkg：包损坏（长度不匹配）\n")); return;
+    }
+    if (pkg_verify((const uint8_t *)pkg_payload, plen) != 0) {
+        vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n",
+                      "pkg：签名校验失败——拒绝安装\n"));
+        return;
+    }
+    char dst[FS_PATH_MAX];
+    dst[0] = 0;
+    strcat_b(dst, sizeof(dst), "/bin/");
+    strcat_b(dst, sizeof(dst), cmd);
+    strcat_b(dst, sizeof(dst), ".ce");
+    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
+        vga_write(trs("pkg: permission denied writing to /bin\n", "pkg：权限不足 writing to /bin\n")); return;
+    }
+    if (fs_write_raw_mode(dst, pkg_payload + PKG_HDR_SIZE, plen, 0) != 0) {
+        vga_write(trs("pkg: install failed (disk full?)\n", "pkg: install 失败 (disk full?)\n")); return;
+    }
+    acl_set(dst, g_uid, g_gid, 0755);
+    vga_write("pkg: installed "); vga_write(cmd);
+    vga_write(" -> "); vga_write(dst); vga_write("\n");
+}
+
+/* Fetch a signed package by NAME (via configured repo) or by an explicit
+ * http:// URL.  Downloads raw bytes, then runs the shared verifier. */
+static void cmd_pkg_fetch(const char *arg) {
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        vga_write(trs("usage: pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n",
+                      "用法：pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n")); return;
+    }
+    if (!net_up()) { vga_write(trs("pkg: network not ready\n", "pkg：网络未就绪\n")); net_why_down(); return; }
+    if (!fs_fs_ready()) { vga_write(trs("pkg: no FAT32 volume\n", "pkg：没有 FAT32 卷\n")); return; }
+
+    char url[FS_PATH_MAX];
+    if (arg[0]=='h' && arg[1]=='t' && arg[2]=='t' && arg[3]=='p' && arg[4]==':') {
+        /* explicit URL */
+        int n = 0;
+        while (*arg && n < (int)sizeof(url) - 1) url[n++] = *arg++;
+        url[n] = 0;
+    } else {
+        /* by name: look up the filename in the (possibly just updated) index */
+        const char *base = pkg_repo_get();
+        if (!base) {
+            vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n",
+                          "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
+        }
+        pkg_rec_t recs[16];
+        int nr = pkg_load_index(recs, 16);
+        int i = pkg_find(arg, recs, nr);
+        if (i < 0) {
+            vga_write(trs("pkg: no such package in index: ", "pkg：索引中无此软件包: "));
+            vga_write(arg); vga_write("\n"); return;
+        }
+        pkg_url_join(url, sizeof(url), base, recs[i].file);
+    }
+    vga_write("pkg: downloading "); vga_write(url); vga_write(" ...\n");
+    int rd = net_http_download(url, (uint8_t *)pkg_payload, PKG_BUF_MAX);
+    if (rd < 0) {
+        vga_write(trs("pkg: download failed (code ", "pkg：下载失败（错误码 "));
+        print_int(rd); vga_write(")\n"); return;
+    }
+    if (rd == 0) { vga_write(trs("pkg: empty response\n", "pkg：响应为空\n")); return; }
+    vga_write("pkg: got "); print_int(rd); vga_write(" bytes, verifying ...\n");
+    pkg_install_payload(rd);   /* magic + length + RSA-512 signature + write */
+}
+
 static void cmd_pkg_install(const char *name) {
     if (!*name) { vga_write(trs("usage: pkg install NAME\n", "用法：pkg install NAME\n")); return; }
     if (!fs_fs_ready()) { vga_write(trs("pkg: no FAT32 volume\n", "pkg: 没有 FAT32 卷\n")); return; }
@@ -4417,46 +4584,7 @@ static void cmd_pkg_install(const char *name) {
     int rd = fs_read_at(cpath, pkg_payload, 0, (int)sz);
     if (rd <= 0) { vga_write(trs("pkg: read error\n", "pkg: read 错误\n")); return; }
 
-    /* validate magic: "CPKG02\0" (signed container) */
-    if (rd < PKG_HDR_SIZE ||
-        pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
-        pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
-        pkg_payload[4] != '0' || pkg_payload[5] != '2') {
-        vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n",
-                      "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
-    }
-
-    char cmd[16];
-    pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
-    uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
-                    ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
-                    ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
-                    ((uint32_t)(unsigned char)pkg_payload[139] << 24);
-    if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
-        vga_write(trs("pkg: corrupt package (length mismatch)\n", "pkg：包损坏（长度不匹配）\n")); return;
-    }
-    if (pkg_verify((const uint8_t *)pkg_payload, plen) != 0) {
-        vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n",
-                      "pkg：签名校验失败——拒绝安装\n"));
-        return;
-    }
-
-    char dst[FS_PATH_MAX];
-    dst[0] = 0;
-    strcat_b(dst, sizeof(dst), "/bin/");
-    strcat_b(dst, sizeof(dst), cmd);
-    strcat_b(dst, sizeof(dst), ".ce");
-
-    if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
-        vga_write(trs("pkg: permission denied writing to /bin\n", "pkg: 权限不足 writing to /bin\n")); return;
-    }
-    /* truncate-replace, matching fs_copy_file's installed-app semantics */
-    if (fs_write_raw_mode(dst, pkg_payload + PKG_HDR_SIZE, plen, 0) != 0) {
-        vga_write(trs("pkg: install failed (disk full?)\n", "pkg: install 失败 (disk full?)\n")); return;
-    }
-    acl_set(dst, g_uid, g_gid, 0755);
-    vga_write("pkg: installed "); vga_write(recs[i].name);
-    vga_write(" -> "); vga_write(dst); vga_write("\n");
+    pkg_install_payload(rd);   /* v2.70: shared with remote fetch, same verifier */
 }
 
 static void cmd_pkg_remove(const char *name) {
@@ -4492,8 +4620,12 @@ static void cmd_pkg(char *arg) {
     else if (!strcmp_(sub, "info"))  cmd_pkg_info(arg);
     else if (!strcmp_(sub, "install")) cmd_pkg_install(arg);
     else if (!strcmp_(sub, "remove") || !strcmp_(sub, "rm")) cmd_pkg_remove(arg);
+    else if (!strcmp_(sub, "repo"))   cmd_pkg_repo(arg);
+    else if (!strcmp_(sub, "update")) cmd_pkg_update();
+    else if (!strcmp_(sub, "fetch"))  cmd_pkg_fetch(arg);
     else {
         vga_write(trs("usage: pkg list | info NAME | install NAME | remove NAME\n", "用法：pkg list | info NAME | install NAME | remove NAME\n"));
+        vga_write("       pkg repo [URL] | pkg update | pkg fetch NAME\n");
     }
 }
 

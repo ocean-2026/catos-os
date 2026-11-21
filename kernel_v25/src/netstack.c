@@ -223,7 +223,11 @@ static struct {
     int      err;
     uint8_t  rcv[4096];
     int      rcv_len;
-    uint8_t  rcv_buf[4096];
+    uint8_t  rcv_buf[20480];   /* v2.70: enlarged from 4096 for binary
+                                * .catpkg downloads (up to 16 KiB payload
+                                * + HTTP headers).  net_http_download()
+                                * cannot NUL-terminate, so this must hold
+                                * a whole package. */
     int      rcv_buf_len;
 } tcp;
 
@@ -771,7 +775,11 @@ static int http_parse_url(const char *url, uint8_t ip[4], uint16_t *port,
     return 0;
 }
 
-int net_http_get(const char *url, char *out, int max) {
+/* v2.70: shared HTTP GET core.  Fetches the response body into `out` up to
+ * `max` bytes, returns the exact body length on success (no NUL appended)
+ * or a negative error code.  Both net_http_get() (text, NUL-terminated) and
+ * net_http_download() (binary-safe, verbatim) wrap this. */
+static int http_fetch(const char *url, uint8_t *out, int max) {
     if (!net_ready || !url || !out || max <= 0) return -1;
     net_dhcp_ensure();                      /* v2.66: first-use DHCP */
 
@@ -891,10 +899,25 @@ int net_http_get(const char *url, char *out, int max) {
     int avail = tcp.rcv_buf_len - body_start;
     if (avail < 0) avail = 0;
     if (content_len >= 0 && avail > content_len) avail = content_len;
-    if (avail > max - 1) avail = max - 1;
-    for (int i = 0; i < avail; i++) out[i] = (char)tcp.rcv_buf[body_start + i];
-    out[avail] = 0;
-    return avail;
+    if (avail > max) avail = max;
+    for (int i = 0; i < avail; i++) out[i] = tcp.rcv_buf[body_start + i];
+    return avail;                                /* exact byte count, no NUL */
+}
+
+/* v2.70: text HTTP GET for `curl`.  NUL-terminates the body. */
+int net_http_get(const char *url, char *out, int max) {
+    if (max <= 0) return -1;
+    int n = http_fetch(url, (uint8_t *)out, max - 1);
+    if (n < 0) return n;
+    out[n] = 0;
+    return n;
+}
+
+/* v2.70: binary-safe HTTP GET for .catpkg downloads.  Copies the body
+ * verbatim (no NUL, zero bytes preserved) and returns the exact length.
+ * Negative return values are the shared http_fetch() error codes. */
+int net_http_download(const char *url, uint8_t *out, int max) {
+    return http_fetch(url, out, max);
 }
 
 /* netcfg hook: change the DNS resolver (e.g. for VMware NAT) */
