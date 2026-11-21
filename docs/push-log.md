@@ -23,3 +23,5 @@ git push https://x-access-token:${TOKEN}@github.com/ocean-2026/CatOS.git main
 | 2026-11-19 ~09:1x | e48f8f2 | `8c123df..e48f8f2  main -> main`（含 249e0a1 报告 §7、f437138 清误建目录、IME 光标格防御） | `ls-remote` = e48f8f2b55fa…（复核通过） |
 | 2026-11-19 ~09:2x | f064bd6 | `e48f8f2..f064bd6  main -> main`（#211 根因定案） | `ls-remote` = f064bd6（复核通过） |
 | 2026-11-19 ~09:3x | 5fd43d0 | `0c83e55..5fd43d0  main -> main`（报告 §8 双审结论） | `ls-remote` = 5fd43d061be6…（复核通过） |
+| 2026-11-21 ~08:3x | 6e50779 | `f336725..6e50779  main -> main`（v2.67 hive/POSIX/能力/审计/TUI/消闪/ACPI） | — |
+| 2026-11-21 ~09:2x | 25d7348 | `f336725..25d7348  main -> main`（v2.67.1 前台看门狗 + 可写目录拒绝 + dash 分页） | `ls-remote` = 25d7348e6fdc…（与本地 HEAD 一致） |
