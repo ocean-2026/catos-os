@@ -20,6 +20,14 @@ def main():
     iso = sys.argv[1]
     outdir = sys.argv[2]
     disk = sys.argv[3] if len(sys.argv) > 3 else None
+    if disk is None:
+        # v2.67.1: the previous "empty screen, no prompt" failures were the
+        # guest booting without the FAT32 image and therefore without /bin -
+        # it sat in the "no filesystem" path instead of the shell.  Default
+        # to the disk that ships next to the ISO.
+        cand = os.path.join(os.path.dirname(os.path.abspath(iso)), "catos_disk.img")
+        if os.path.exists(cand):
+            disk = cand
     os.makedirs(outdir, exist_ok=True)
     qemu = qd.find_qemu()
     proc, s = qd.boot(qemu, iso, 4455, disk=disk)

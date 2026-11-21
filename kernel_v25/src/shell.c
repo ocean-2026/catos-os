@@ -1333,8 +1333,22 @@ static void cmd_reboot(void) {
     while (1) __asm__ volatile ("hlt");
 }
 
+/* v2.67.1: `hang` used to be an unconditional cli/hlt -- one keystroke and
+ * the machine is gone, which is exactly the "foreground task can seize the
+ * console" hole.  It now honours the foreground budget: it still wedges the
+ * CPU (that is the point of the command) but only until the watchdog says
+ * the budget is spent, then it gives the console back.  AllowUnbounded=1
+ * restores the old, deliberately fatal behaviour. */
 static void cmd_hang(void) {
-    vga_write("Halting. Press Ctrl-Alt-Del or close the VM.\n");
+    int unbounded = hive_dw("HKSEC\\Policy\\Foreground\\AllowUnbounded", 0);
+    vga_write(unbounded ? "Halting (unbounded). Press Ctrl-Alt-Del or close the VM.\n"
+                        : "Halting until the foreground budget expires...\n");
+    if (!unbounded) {
+        while (!sec_fg_expired()) __asm__ volatile ("hlt");
+        vga_write("hang: budget spent, interrupts re-enabled -- console returned\n");
+        sec_audit(g_uid, "fg-timeout", "hang", 124);
+        return;
+    }
     __asm__ volatile ("cli");
     while (1) __asm__ volatile ("hlt");
 }
@@ -1853,6 +1867,8 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
 
     /* 1) current directory (bounded: never overflow like the old code) */
     p[0] = 0;
+    /* v2.67.1: don't emit "//name" when cwd is "/" -- the extra slash is
+     * harmless to FAT but ugly in every diagnostic and audit line. */
     if (!(pwd[0] == '/' && pwd[1] == 0)) {
         if (strcat_b(p, sizeof(p), pwd) != 0) return -1;
         if (strcat_b(p, sizeof(p), "/") != 0) return -1;
@@ -5922,7 +5938,9 @@ void shell_run(void) {
             char *ra = rc;
             while (*ra && *ra != ' ') ra++;
             if (*ra) { *ra = 0; ra++; while (*ra == ' ') ra++; }
+            sec_fg_arm(rc);
             shell_exec(rc, ra);
+            sec_fg_disarm();
             continue;
         }
         pend_clear();                   /* any other line covers the offer */
@@ -5938,10 +5956,14 @@ void shell_run(void) {
             char *earg = expanded;
             while (*earg && *earg != ' ') earg++;
             if (*earg) { *earg = 0; earg++; while (*earg == ' ') earg++; }
+            sec_fg_arm(expanded);
             shell_exec(expanded, earg);
+            sec_fg_disarm();
             continue;
         }
+        sec_fg_arm(cmd);
         shell_exec(cmd, arg);
+        sec_fg_disarm();
     }
 }
 
@@ -6119,7 +6141,23 @@ static void shell_exec(char *cmd, char *arg) {
                  !strcmp_(cmd, "reg"))        cmd_reg(arg);    /* v2.67 */
         else if (!strcmp_(cmd, "audit"))      cmd_audit(arg);  /* v2.67 */
         else if (!strcmp_(cmd, "dash") ||
-                 !strcmp_(cmd, "sysmon"))     dash_run(g_uid, g_caps); /* v2.67 TUI */
+                 !strcmp_(cmd, "sysmon")) {   /* v2.67 TUI */
+            int pg = 0;
+            if (arg && *arg) {
+                if      (!strcmp_(arg, "system"))   pg = 0;
+                else if (!strcmp_(arg, "storage"))  pg = 1;
+                else if (!strcmp_(arg, "network"))  pg = 2;
+                else if (!strcmp_(arg, "security")) pg = 3;
+                else if (arg[0] >= '1' && arg[0] <= '4') pg = arg[0] - '1';
+                else {
+                    vga_write("dash: unknown page '"); vga_write(arg);
+                    vga_write("' (system|storage|network|security)\n");
+                    g_last_rc = 2;
+                    pg = -1;
+                }
+            }
+            if (pg >= 0) dash_run(g_uid, g_caps, pg);
+        }
         else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
         else if (!strcmp_(cmd, "usb")) {
             if (!strcmp_(arg, "scan")) {

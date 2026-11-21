@@ -151,8 +151,8 @@ static void draw_tab(int tab, int uid, uint32_t caps) {
                 " q quit    tab next    1-4 jump    r refresh");
 }
 
-void dash_run(int uid, uint32_t caps) {
-    int tab = 0, quit = 0;
+void dash_run(int uid, uint32_t caps, int start) {
+    int tab = (start >= 0 && start < DTABS) ? start : 0, quit = 0;
     con_clear();
     draw_tab(tab, uid, caps);
     while (!quit) {

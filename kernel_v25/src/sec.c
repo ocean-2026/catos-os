@@ -263,6 +263,61 @@ int sec_audit_dump(int n) {
     return printed;
 }
 
+
+/* ---- foreground watchdog ----------------------------------------------
+ * "怀疑一切" applies to our own commands too: a bug in the pager, a spin
+ * inside `hang`, a driver that never returns -- any of them used to mean
+ * "the user loses the machine".  The dispatcher arms a budget; the
+ * command polls.  Nothing here tries to preempt a running function from
+ * the timer IRQ (that is how you get a corrupted kernel), so this is a
+ * *cooperative* watchdog and it is documented as such.
+ */
+static uint32_t fg_start;      /* timer_ticks when armed */
+static int      fg_armed;
+static uint32_t fg_budget_s;   /* 0 = no budget */
+static char     fg_cmd[24];
+
+void sec_fg_arm(const char *cmd) {
+    fg_start = timer_ticks;
+    fg_armed = 1;
+    fg_budget_s = (uint32_t)hive_dw("HKSEC\\Policy\\Foreground\\TimeoutSec", 60);
+    if (hive_dw("HKSEC\\Policy\\Foreground\\AllowUnbounded", 0)) fg_budget_s = 0;
+    int i = 0;
+    if (cmd) while (cmd[i] && i < (int)sizeof(fg_cmd) - 1) { fg_cmd[i] = cmd[i]; i++; }
+    fg_cmd[i] = 0;
+}
+
+void sec_fg_disarm(void) { fg_armed = 0; fg_cmd[0] = 0; }
+
+uint32_t sec_fg_used(void) {
+    if (!fg_armed) return 0;
+    /* timer_ticks is 100 Hz (see intr.c); integer maths, wrap-safe */
+    return (timer_ticks - fg_start) / 100u;
+}
+
+int sec_fg_expired(void) {
+    if (!fg_armed || fg_budget_s == 0) return 0;
+    return sec_fg_used() >= fg_budget_s;
+}
+
+const char *sec_fg_cmd(void) { return fg_cmd[0] ? fg_cmd : "(none)"; }
+
+/* Print the refusal a command must show when it gives the console back. */
+static void fg_report(void) {
+    out("\nfg: '"); out(sec_fg_cmd()); out("' exceeded the foreground budget (");
+    char line[12]; s_num(line, sizeof(line), (int)fg_budget_s); out(line);
+    out(" s) -- control returned to the shell\n");
+    out("fg: raise HKSEC\\Policy\\Foreground\\TimeoutSec, or set AllowUnbounded=1\n");
+    sec_audit(UID_ROOT, "fg-timeout", fg_cmd, 124);
+}
+
+/* Public helper for command loops: returns 1 when the caller must abort. */
+int sec_fg_should_abort(void) {
+    if (!sec_fg_expired()) return 0;
+    fg_report();
+    return 1;
+}
+
 int sec_exec_check(const char *path, int uid, char *why, int whymax) {
     if (why && whymax > 0) why[0] = 0;
     if (!path || !*path) return -1;
@@ -283,6 +338,31 @@ int sec_exec_check(const char *path, int uid, char *why, int whymax) {
         if (why) s_cat(why, whymax, "group-writable binary in a shared group");
         return -1;
     }
+    /* v2.67.1: HKSEC\Policy\UnknownBinary\AllowFromWritableDir was a
+     * default value nothing consulted.  The *directory* matters as much
+     * as the file: a 0755 binary inside a 0777 directory is still
+     * replaceable by anyone who can write there.  Walk up to the parent
+     * component and judge its mode too. */
+    if (!hive_dw("HKSEC\\Policy\\UnknownBinary\\AllowFromWritableDir", 0)) {
+        char dir[FS_PATH_MAX];
+        int n = s_len(path), k = -1;
+        for (int i = n - 1; i >= 0; i--) { if (path[i] == '/') { k = i; break; } }
+        if (k > 0) {
+            for (int i = 0; i < k && i < (int)sizeof(dir) - 1; i++) dir[i] = path[i];
+            dir[k < (int)sizeof(dir) ? k : (int)sizeof(dir) - 1] = 0;
+            int duid = UID_ROOT, dgid = 0, dmode = 0755;
+            if (acl_lookup(dir, &duid, &dgid, &dmode) == 0) {
+                if (dmode & 0002) {
+                    if (why) s_cat(why, whymax, "binary sits in a world-writable directory");
+                    return -1;
+                }
+                if (dmode & 0020) {
+                    if (why) s_cat(why, whymax, "binary sits in a group-writable directory");
+                    return -1;
+                }
+            }
+        }
+    }
     (void)uid;
     return 0;
 }
@@ -294,6 +374,11 @@ int sec_policy_brief(char *out_s, int max) {
     s_cat(out_s, max, hive_dw("HKSEC\\Policy\\Foreground\\AllowCtrlC", 1) ? "1" : "0");
     s_cat(out_s, max, " AllowCtrlZ=");
     s_cat(out_s, max, hive_dw("HKSEC\\Policy\\Foreground\\AllowCtrlZ", 1) ? "1" : "0");
+    s_cat(out_s, max, " Foreground.TimeoutSec=");
+    char tb[12]; s_num(tb, sizeof(tb), (int)hive_dw("HKSEC\\Policy\\Foreground\\TimeoutSec", 60));
+    s_cat(out_s, max, tb);
+    s_cat(out_s, max, " AllowUnbounded=");
+    s_cat(out_s, max, hive_dw("HKSEC\\Policy\\Foreground\\AllowUnbounded", 0) ? "1" : "0");
     s_cat(out_s, max, " UnknownBinary.AllowUnsigned=");
     s_cat(out_s, max, hive_dw("HKSEC\\Policy\\UnknownBinary\\AllowUnsigned", 1) ? "1" : "0");
     s_cat(out_s, max, " UnknownBinary.AllowFromWritableDir=");

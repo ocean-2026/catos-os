@@ -402,6 +402,10 @@ static void seed_defaults(void) {
     hive_set_dw("HKSEC\\Policy\\Audit\\TrackExec", 1);
     hive_set_dw("HKSEC\\Policy\\Foreground\\AllowCtrlC", 1);
     hive_set_dw("HKSEC\\Policy\\Foreground\\AllowCtrlZ", 1);
+    /* v2.67.1 foreground watchdog: seconds a builtin may hold the console
+     * before it must give it back (0/AllowUnbounded=1 disables). */
+    hive_set_dw("HKSEC\\Policy\\Foreground\\TimeoutSec", 60);
+    hive_set_dw("HKSEC\\Policy\\Foreground\\AllowUnbounded", 0);
     /* empty string = "use the built-in table"; a set path upgrades the
      * lookup for that command without a rebuild. */
     hive_set_sz("HKSEC\\Policy\\Cmd\\format\\Caps", "FSADMIN");

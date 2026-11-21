@@ -49,6 +49,19 @@ void sec_audit_clear(void);
  * returns 0 = allowed, -1 = refused (why may carry a short reason). */
 int  sec_exec_check(const char *path, int uid, char *why, int whymax);
 
+/* ---- foreground watchdog (v2.67.1) --------------------------------------
+ * The dispatcher arms a deadline before a builtin runs.  Long-running
+ * builtins (hang / sleep / pager waits) poll sec_fg_expired(); when the
+ * budget is spent the command must release the console instead of
+ * freezing the machine.  HKSEC\Policy\Foreground\TimeoutSec sets the
+ * budget, AllowUnbounded=1 disables it (old behaviour, opt-in). */
+void     sec_fg_arm(const char *cmd);
+void     sec_fg_disarm(void);
+int      sec_fg_expired(void);      /* 1 = budget spent */
+int      sec_fg_should_abort(void);/* poll + print + audit; 1 = abort */
+uint32_t sec_fg_used(void);         /* seconds since arm */
+const char *sec_fg_cmd(void);       /* command currently holding the console */
+
 /* Effective policy snapshot for the audit report. */
 int sec_policy_brief(char *out, int max);
 
