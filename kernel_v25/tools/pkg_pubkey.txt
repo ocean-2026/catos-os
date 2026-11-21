@@ -1,0 +1,2 @@
+# Public key (RSA-512, e=65537), embedded in kernel shell.c
+n=d058737a20f1fb25b3fa74682e7b67c2964da1b0658b5756811563c34cfddb11275775bb6be155e40acf3b0c670ca69f1a18f783b6e502bfec106e5ea27859d9

@@ -3,7 +3,7 @@
 一个面向 32 位 x86 的实验性操作系统内核，目标是向**可通用命令行操作系统**挺进
 （路线图见 `docs/ROADMAP-通用操作系统.md`）。内核以 GRUB El Torito no-emulation ISO
 引导启动，用户态 CE（CatOS Executable）应用通过一组**只增不改（append-only）** 的
-65 槽系统调用表（v2.14，0..64）与内核通信。
+66 槽系统调用表（v2.21，0..65，末槽 `gotoxy`）与内核通信。当前最新版本 **v2.68.3**。
 
 ## 能力一览
 
@@ -15,12 +15,16 @@
 | 诊断 | 致命故障记录（向量/ring/任务/eip/CR2）+ `faultinfo` 命令、`panic()` 统一入口 |
 | 图形 | VGA 文本 + 800x600 24 位真彩，双后端（QEMU/Bochs VBE dispi 24bpp、VMware SVGA II 32bpp XRGB 承载 RGB24），用户态绘图 ABI（gfx_info/rect/blit）；`vbe` / `vbe24` / `gfx24` / `svgainfo` |
 | 音频 | Sound Blaster 16（ISA DMA）PCM 驱动 |
-| 网络 | 用户态网络栈（curl/netinfo 等应用，能力位门控） |
-| 应用 | 22+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、ocntools 工具箱（文件管理器/十六进制编辑/搜索/版本控制）、adofai 音游、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback |
+| 网络 | 用户态网络栈（curl/netinfo 等应用，能力位门控）+ DHCP 客户端（VMware NAT 可用） |
+| 安全 | 二进制注册表 hive、命令契约（POSIX 风格参数校验）、能力策略/审计、CPKG02 签名包（RSA-512） |
+| 应用 | 22+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、ocntools 工具箱（文件管理器/十六进制编辑/搜索/版本控制）、adofai 音游、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback；`pkg install/remove` 装卸签名扩展 |
+| 桌面 | 可拆卸图形桌面扩展（设计中，见 `docs/CDE-模块化设计.md`）：桌面语义做成 CE 程序经 pkg 装卸，内核只留通用图形原语 |
 
 ## 文档索引
 
 - `docs/ROADMAP-通用操作系统.md` —— **通用化路线图（行动纲领，先读这个）**
+- `docs/v2.68-变更说明.md` —— 最新版本（v2.68/v2.68.3）中文输出/命令合并/包签名/表头修复
+- `docs/CDE-模块化设计.md` —— 可拆卸可安装图形桌面扩展的架构设计
 - `docs/PROGRESS.md` —— 最新进度汇报（滚动更新）
 - `docs/CatOS-内核问题清单.md` —— 已知缺陷与遗留问题追踪（编号至 #95）
 - `kernel_v25/extapp/docs/API.txt` —— CE ABI 系统调用表（v2.14）

@@ -20,7 +20,7 @@ ide0:0.fileName = "catos-data.vmdk"
 # standard VMware path.
 ide1:0.present = "TRUE"
 ide1:0.deviceType = "cdrom-image"
-ide1:0.fileName = "D:\CatOs\catos-v2.66.iso"
+ide1:0.fileName = "D:\CatOs\catos-v2.68.3.iso"
 
 # ---- boot order: CD first ----
 bios.bootOrder = "cdrom"

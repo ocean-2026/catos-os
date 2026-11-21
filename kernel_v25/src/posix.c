@@ -45,24 +45,19 @@ typedef struct {
 
 static const spec_t SPECS[] = {
  /* name        synopsis                              short opts      long opts  min max  checks */
- {"cat",     "cat [OPTION]... [FILE]...",             "",             "",         1, -1, EXIST1|HELP},
  {"wc",      "wc [-lwc] FILE",                         "lwc",          "",         1,  1, EXIST1|HELP},
- {"head",    "head [-n N] FILE",                       "n:",           "",         1,  1, EXIST1|HELP},
- {"tail",    "tail [-n N] FILE",                       "n:",           "",         1,  1, EXIST1|HELP},
- {"ls",      "ls [-l] [-t] [--raw] [--blocks=LIST] [PATH]", "lt",      "--raw --blocks= --color-scale --color-size", 0, 1, HELP},
+ {"ls",      "ls [-l] [-t] [--raw] [--color-scale[=SCALE]] [--blocks=LIST] [PATH]", "lt", "--raw --blocks= --color-scale --color-size --color-scale= --color-size=", 0, 1, HELP},
  {"dir",     "dir [-l] [-t] [PATH]",                   "lt",           "",         0,  1, HELP},
  {"tree",    "tree [--raw] [PATH]",                    "",             "--raw",    0,  1, DIR1|HELP},
  {"mkdir",   "mkdir [-p] DIR...",                      "p",            "",         1, -1, HELP},
- {"rmdir",   "rmdir DIR...",                           "",             "",         1, -1, EXIST1|HELP},
- {"rm",      "rm [-r] [-f] FILE...",                   "rf",           "",         1, -1, HELP},
+ {"rm",      "rm [-d|-r] [-f] FILE...",                "rdf",          "",         1, -1, HELP},
  {"cp",      "cp [-r] SRC... DST",                     "r",            "",         2, -1, EXIST1|HELP},
  {"mv",      "mv SRC... DST",                          "",             "",         2, -1, EXIST1|HELP},
- {"touch",   "touch FILE...",                          "",             "",         1, -1, HELP},
  {"chmod",   "chmod OCTAL MODE FILE...",               "",             "",         2, -1, EXIST2|HELP},
  {"chown",   "chown UID[:GID] FILE...",                "",             "",         2, -1, EXIST2|HELP},
  {"du",      "du [-s] [PATH]",                         "s",            "",         0,  1, DIR1|HELP},
  {"df",      "df",                                     "",             "",         0,  0, HELP},
- {"edit",    "edit FILE",                              "",             "",         1,  1, HELP},
+ {"edit",    "edit [-c|--cat] [+N|-N] FILE",           "c",            "--cat",    1,  2, HELP},
  {"kill",    "kill [-s SIG] PID...",                   "s:",           "",         1, -1, HELP},
  {"ps",      "ps",                                     "",             "",         0,  0, HELP},
  {"free",    "free",                                   "",             "",         0,  0, HELP},
@@ -76,7 +71,7 @@ static const spec_t SPECS[] = {
  {"pwd",     "pwd",                                    "",             "",         0,  0, HELP},
  {"uptime",  "uptime",                                 "",             "",         0,  0, HELP},
  {"mem",     "mem",                                    "",             "",         0,  0, HELP},
- {"useradd", "useradd NAME",                           "",             "",         1,  1, HELP},
+ {"useradd", "useradd [NAME]",                         "",             "",         0,  1, HELP},
  {"userdel", "userdel NAME",                           "",             "",         1,  1, HELP},
  {"passwd",  "passwd [USER [NEWPW]]",                 "",             "",         0,  2, HELP},
  {"su",      "su [USER]",                              "",             "",         0,  1, HELP},
@@ -90,6 +85,7 @@ static const spec_t SPECS[] = {
  {"format",  "format",                                 "",             "",         0,  0, HELP},
  {"fsck",    "fsck",                                   "",             "",         0,  0, HELP},
  {"pkg",     "pkg {list|install|remove|info} [NAME]",  "",             "",         0, -1, HELP},
+ {"sudo",    "sudo CMD [ARGS...]",                     "",             "",         1, -1, HELP},
  {"curl",    "curl URL",                               "",             "",         1,  1, HELP},
  {"ping",    "ping HOST",                              "",             "",         1,  1, HELP},
  {"dns",     "dns NAME",                               "",             "",         1,  1, HELP},
@@ -260,13 +256,25 @@ int cli_validate(const char *cmd, const char *arg) {
     int endopts = 0;
     int help = 0;
 
+    /* v2.68.1: `sudo CMD [ARGS...]` forwards everything after the first
+     * operand to the subcommand.  Once a positional operand has been seen
+     * for those commands, stop option parsing entirely so `sudo ls -l`
+     * passes `-l` through instead of rejecting it as a sudo option. */
+    int passthrough_after_first = p_eq(cmd, "sudo") || p_eq(cmd, "run") ||
+                                  p_eq(cmd, "cowsay") || p_eq(cmd, "echo") ||
+                                  p_eq(cmd, "yes");
     for (int i = 0; i < nt; i++) {
         char *t = tok[i];
+        if (passthrough_after_first && np > 0) { if (np < 24) pos[np++] = t; continue; }
         if (!endopts && t[0] == '-' && t[1] == '-' && t[2] == 0) { endopts = 1; continue; }
         if (!endopts && t[0] == '-' && t[1] == '-') {
             if (p_eq(t, "--help") && (s->checks & HELP)) { help = 1; continue; }
             if (p_eq(t, "--version")) { help = 1; continue; }
             if (!long_ok(s, t)) return bad_long(cmd, t);
+            continue;
+        }
+        if (!endopts && p_eq(cmd, "edit") && t[0] == '-' && t[1] >= '0' && t[1] <= '9') {
+            if (np < 24) pos[np++] = t;                 /* -N = tail N lines */
             continue;
         }
         if (!endopts && t[0] == '-' && t[1]) {

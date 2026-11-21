@@ -16,20 +16,25 @@ CatOS 客户机在 QEMU 下以 `-net none` 启动，没有可用的网络栈链�
 
 ### 1.1 `.catpkg` 容器格式（宿主侧 `tools/mkpkg.py` 生成）
 
-定长 140 字节头 + 原始 CE01 镜像负载，小端序，字段 NUL 填充 ASCII：
+> v2.68 更新：格式从 `CPKG01` 升级为带 RSA-512 签名的 `CPKG02`。
+> 下面以当前代码为准（`tools/mkpkg.py` + `shell.c:pkg_verify`）。
+
+定长 204 字节头 + 原始 CE01 镜像负载，小端序 ASCII 字段，签名 64 字节大端：
 
 | 偏移 | 长度 | 字段 | 说明 |
 |------|------|------|------|
-| 0    | 8    | magic | `CPKG01\0\0` |
+| 0    | 8    | magic | `CPKG02\0\0` |
 | 8    | 16   | name  | 包名（索引键） |
 | 24   | 16   | version | 版本字符串 |
 | 40   | 16   | cmd   | 安装后的命令名 → `/bin/<cmd>.ce` |
 | 56   | 80   | desc  | 一行描述 |
 | 136  | 4    | payload_len | 负载字节数（uint32 LE） |
-| 140  | …    | payload | 原始 `.ce` 镜像（含 CE01 头） |
+| 140  | 64   | signature | RSA-512 签名（大端）：`pow(0x01<<56 \| FNV1a64(header\|payload), d, n)` |
+| 204  | …    | payload | 原始 `.ce` 镜像（含 CE01 头） |
 
-内核侧 `pkg install` 校验 magic、长度一致性后，把负载写入
-`/bin/<cmd>.ce`。容器格式与 CE01 解耦：未来更换负载格式（ELF/压缩）
+私钥 `tools/pkg_devkey.txt` 只在宿主侧，内核仅嵌公钥模数 `PKG_PUB_N`；
+`pkg install` 用 `pow(sig, 65537, n)` 验签，失败即拒绝安装。旧 `CPKG01`
+无签名容器不再被接受。容器格式与 CE01 解耦：未来更换负载格式（ELF/压缩）
 只需扩展头部，安装器按 magic 分派。
 
 ### 1.2 客户机命令

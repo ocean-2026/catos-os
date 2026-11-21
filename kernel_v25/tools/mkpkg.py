@@ -28,12 +28,34 @@ import os
 import struct
 import sys
 
-MAGIC = b"CPKG01\x00\x00"
+MAGIC = b"CPKG02\x00\x00"
 HDR_NAME = 16
 HDR_VERSION = 16
 HDR_CMD = 16
 HDR_DESC = 80
-HEADER_SIZE = 8 + HDR_NAME + HDR_VERSION + HDR_CMD + HDR_DESC + 4
+HEADER_SIZE = 8 + HDR_NAME + HDR_VERSION + HDR_CMD + HDR_DESC + 4 + 64
+SIG_SIZE = 64
+E = 65537
+
+
+def fnv1a64(data):
+    h = 1469598103934665603
+    for b in data:
+        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def load_key(path):
+    kv = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                kv[k.strip()] = int(v.strip(), 16)
+    if "n" not in kv or "d" not in kv:
+        raise ValueError("bad key file (need n= and d= hex)")
+    return kv["n"], kv["d"]
 
 
 def pad_field(text, width):
@@ -59,6 +81,8 @@ def main():
     ap.add_argument("--cmd", required=True,
                     help="installed command (/bin/<cmd>.ce)")
     ap.add_argument("--desc", default="", help="one-line description")
+    ap.add_argument("--key", default=os.path.join(os.path.dirname(__file__),
+                    "pkg_devkey.txt"), help="RSA private key file (n=,d= hex)")
     args = ap.parse_args()
 
     if not os.path.exists(args.ce):
@@ -72,10 +96,22 @@ def main():
 
     header = build_header(args.name, args.version, args.cmd,
                           args.desc, len(payload))
-    assert len(header) == HEADER_SIZE
+    assert len(header) == HEADER_SIZE - SIG_SIZE
+
+    # v2.68: real key-based signature.  The 64-bit FNV digest of
+    # header|payload is encoded as 0x01<<56 | digest and signed with
+    # the RSA private key.  The kernel embeds only the public modulus.
+    n, d = load_key(args.key)
+    digest = fnv1a64(header + payload)
+    m = (1 << 56) | digest
+    if m >= n:
+        print("ERROR: message representative >= modulus", file=sys.stderr)
+        return 3
+    signature = pow(m, d, n).to_bytes(SIG_SIZE, "big")
 
     with open(args.catpkg, "wb") as fh:
         fh.write(header)
+        fh.write(signature)
         fh.write(payload)
     print("OK -> %s (%d bytes payload, %d bytes total)"
           % (args.catpkg, len(payload), HEADER_SIZE + len(payload)))

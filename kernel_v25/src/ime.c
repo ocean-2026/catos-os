@@ -25,6 +25,7 @@ static int  active;
 static char py[IME_COMPOSE_MAX];
 static int  py_len;
 static int  page;
+static int  sel;                 /* v2.68: arrow-selected candidate */
 
 static int py_cmp(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
@@ -75,7 +76,7 @@ static int page_capacity(int cols, int total) {
     return n < 1 ? 1 : n;
 }
 
-static void ime_clear(void) { py_len = 0; py[0] = 0; page = 0; }
+static void ime_clear(void) { py_len = 0; py[0] = 0; page = 0; sel = 0; }
 
 static void ime_show(void) {
     char cand[BAR_MAX];
@@ -85,7 +86,7 @@ static void ime_show(void) {
 
     if (py_len == 0) {
         bar_put(cand, &n,
-            "[IME] F2 on: type pinyin, 1-9 select, space first, -/= page");
+            "[IME] on: 1-9 pick, Up/Down select, Space confirm");
         cand[n] = 0;
         con_status_bar2("", cand);
         return;
@@ -117,6 +118,8 @@ static void ime_show(void) {
     if (page >= pages) page = 0;
     if (page < 0) page = 0;
     int start = page * per;
+    if (sel >= per) sel = per - 1;
+    if (sel < 0) sel = 0;
 
     int used = prefix_w;
     if (pages > 1) {
@@ -127,7 +130,7 @@ static void ime_show(void) {
     }
     for (int i = 0; i < per && start + i < total; i++) {
         int d = 1 + (i >= 9) + (i >= 99);
-        int w = d + 1 + 2;
+        int w = d + 1 + 2 + (i == sel ? 1 : 0);
         int with_space = used + w + 1 <= cols;
         int no_space   = used + w <= cols;
         if (!with_space && !no_space) break;
@@ -135,6 +138,7 @@ static void ime_show(void) {
         bar_put(cand, &n, ".");
         for (int k = 0; k < 3 && n < BAR_MAX - 1; k++)
             cand[n++] = e->hz[(start + i) * 3 + k];
+        if (i == sel && n < BAR_MAX - 1) cand[n++] = '*';
         used += with_space ? w + 1 : w;
         if (with_space) bar_put(cand, &n, " ");
     }
@@ -166,6 +170,38 @@ static int ime_commit_raw(char out[IME_OUT_MAX]) {
     ime_clear();
     ime_show();
     return IME_COMMIT;
+}
+
+/* v2.68: commit the arrow-highlighted candidate on the current page. */
+static int ime_commit_selected(char out[IME_OUT_MAX]) {
+    int per = page_capacity(con_cols(), 64);
+    if (sel < 0) sel = 0;
+    if (sel >= per) sel = per - 1;
+    return ime_commit(sel, out);
+}
+
+/* ASCII punctuation -> GB2312 full-width form while the IME is active. */
+static int ime_punct(int key, char out[IME_OUT_MAX]) {
+    static const struct { int key; unsigned char b[2]; } P[] = {
+        {',', {0xA3,0xAC}}, {'.', {0xA1,0xA3}}, {'!', {0xA3,0xA1}},
+        {'?', {0xA3,0xBF}}, {':', {0xA3,0xBA}}, {';', {0xA3,0xBB}},
+        {'`', {0xA1,0xA2}}, {'\'',{0xA1,0xAE}}, {'"', {0xA1,0xB0}},
+        {'(', {0xA3,0xA8}}, {')', {0xA3,0xA9}}, {'<', {0xA1,0xB6}},
+        {'>', {0xA1,0xB7}}, {'[', {0xA1,0xBE}}, {']', {0xA1,0xBF}},
+        {'{', {0xA1,0xB0}}, {'}', {0xA1,0xB1}}, {'/', {0xA3,0xAF}},
+        {'\\',{0xA3,0xDC}}, {'|', {0xA1,0xAB}}, {'@', {0xA3,0xC0}},
+        {'#', {0xA3,0xA3}}, {'$', {0xA3,0xA4}}, {'%', {0xA3,0xA5}},
+        {'^', {0xA1,0xAD}}, {'&', {0xA3,0xA6}}, {'*', {0xA3,0xAA}},
+        {'-', {0xA3,0xAD}}, {'_', {0xA1,0xAB}}, {'+', {0xA3,0xAB}},
+        {'=', {0xA3,0xBD}}, {'~', {0xA1,0xAB}},
+    };
+    for (unsigned i = 0; i < sizeof(P)/sizeof(P[0]); i++)
+        if (P[i].key == key) {
+            out[0] = (char)P[i].b[0]; out[1] = (char)P[i].b[1]; out[2] = 0;
+            ime_clear(); ime_show();
+            return IME_COMMIT;
+        }
+    return IME_PASS;
 }
 
 int ime_active(void) { return active; }
@@ -208,24 +244,41 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
         con_status_bar_off();
         return IME_CONSUME;
     }
-    if (key == '-' || key == '[') {
-        if (page > 0) page--;
-        ime_show();
-        return IME_CONSUME;
-    }
-    if (key == '=' || key == ']') {
-        page++;
+    if ((key == KB_UP || key == KB_DOWN) && py_len > 0) {
+        int per = page_capacity(con_cols(), 64);
+        if (per < 1) per = 1;
+        if (key == KB_UP)   sel = (sel > 0) ? sel - 1 : per - 1;
+        else                sel = (sel + 1 < per) ? sel + 1 : 0;
         ime_show();
         return IME_CONSUME;
     }
     if (key == KB_LEFT || key == KB_RIGHT) {
         if (py_len == 0) return IME_PASS;     /* empty: let cursor move */
         if (key == KB_LEFT) { if (page > 0) page--; } else page++;
+        sel = 0;
         ime_show();
         return IME_CONSUME;
     }
-    if (key >= '1' && key <= '9') return ime_commit(key - '1', out);
-    if (key == ' ' && py_len > 0) return ime_commit(0, out);
+    /* digits pick the Nth candidate of the current page (1..9, 0 = 10th) */
+    if (key >= '1' && key <= '9') {
+        int idx = key - '1';
+        int per = page_capacity(con_cols(), 64);
+        if (idx >= per) return IME_CONSUME;
+        sel = idx;
+        return ime_commit(idx, out);
+    }
+    if (key == '0') {
+        int per = page_capacity(con_cols(), 64);
+        if (per <= 9) return IME_CONSUME;
+        sel = 9;
+        return ime_commit(9, out);
+    }
+    if (key == ' ' && py_len > 0) return ime_commit_selected(out);
+    /* all ASCII punctuation becomes full-width Chinese punctuation here */
+    {
+        int pr = ime_punct(key, out);
+        if (pr == IME_COMMIT) return pr;
+    }
     if (key == '\n') {
         if (py_len > 0) return ime_commit_raw(out);
         return IME_PASS;

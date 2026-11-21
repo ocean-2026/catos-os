@@ -169,7 +169,56 @@ static const struct { const char *en, *zh; } help_zh[] = {
     {"nano-style full-screen editor", "nano 风格全屏编辑器"},
     {"get / set a registry value (v2.62)", "查看/设置注册表键值"},
     {"list all registry sections / a section's keys", "列出所有注册表节 / 某节的键"},
+    {"alias of ls (all options supported)", "ls 的别名（支持全部选项）"},
+    {"create/edit a file (new file is created on open)", "创建/编辑文件（打开不存在的文件时自动创建）"},
+    {"print a file (was cat)", "打印文件（原 cat）"},
+    {"first N / last N lines (was head/tail)", "前 N 行 / 后 N 行（原 head/tail）"},
+    {"recursive delete (-f suppresses errors)", "递归删除（-f 忽略错误）"},
+    {"show PATH; drives bare-NAME lookup (default /bin)", "显示 PATH；裸名称按 PATH 查找（默认 /bin）"},
+    {"run builtin or CE program as root (uid 0)", "以 root（uid 0）运行内置命令或 CE 程序"},
+    {"Shift / F2", "Shift / F2"},
+    {"toggle pinyin IME; 1-9 pick, Up/Down select, Space confirm", "切换拼音输入法；1-9 选第 N 个，上下键选择，空格确认"},
+    {"nano-style full-screen editor; -c/-c N/-c -N prints", "nano 风格全屏编辑器；-c/-c N/-c -N 为打印模式"},
+    {"gfx [MODE|CMD]", "gfx [模式|命令]"},
+    {"edit", "编辑"},
+    {"scroll", "回卷"},
+    {"history", "历史"},
+    {"IME", "输入法"},
+    {"console", "控制台"},
+    {"file", "文件"},
+    {"move cursor left / right (UTF-8 aware)", "左右移动光标（识别 UTF-8）"},
+    {"page IME candidates while IME active", "输入法开启时翻页候选词"},
+    {"jump to line start / end", "跳到行首 / 行尾"},
+    {"delete char before cursor", "删除光标前的字符"},
+    {"delete char at cursor", "删除光标处的字符"},
+    {"move one word left / right", "左右移动一个单词"},
+    {"page up / down one editor screen", "编辑器中上下翻一屏"},
+    {"unbound on the command line", "命令行中未绑定"},
+    {"scroll back/forward one full page per press", "每次向前/向后回卷一整页"},
+    {"console / command line", "控制台 / 命令行"},
+    {"previous / next command in history", "上一条 / 下一条历史命令"},
+    {"toggle pinyin IME", "切换拼音输入法"},
+    {"pick candidate by number", "按数字选择候选词"},
+    {"pick the first candidate", "选择第一个候选词"},
+    {"candidate page up / down", "候选词翻页"},
+    {"arrows page too", "方向键也可翻页"},
+    {"cancel composition, clear pinyin string", "取消输入，清空拼音串"},
+    {"commit the raw pinyin string", "直接提交原始拼音"},
+    {"cancel input line / send SIGINT to fg task", "取消当前输入 / 向前台任务发 SIGINT"},
+    {"suspend fg task to background (SIGTSTP)", "把前台任务挂到后台（SIGTSTP）"},
+    {"complete command / path", "补全命令 / 路径"},
+    {"save file", "保存文件"},
+    {"exit editor; ask on modified / discard", "退出编辑器；有改动时询问"},
+    {"Ctrl+Y discards", "Ctrl+Y 放弃修改"},
+    {"delete line / clear all / help", "删除行 / 清空 / 帮助"},
+    {"command line / editor / IME", "命令行 / 编辑器 / 输入法"},
+    {"command line / editor", "命令行 / 编辑器"},
+    {"command line", "命令行"},
+    {"editor", "编辑器"},
+    {"IME active", "输入法开启时"},
+    {"-", "—"},
 };
+
 #define HELP_ZH_COUNT ((int)(sizeof(help_zh)/sizeof(help_zh[0])))
 
 static int help_zh_cmp(const char *a, const char *b) {
@@ -183,4 +232,8 @@ const char *trhelp(const char *en) {
         if (help_zh[i].en && en && 0 == help_zh_cmp(help_zh[i].en, en))
             return help_zh[i].zh;
     return en;
+}
+
+const char *trs(const char *en, const char *zh) {
+    return (g_lang == LANG_ZH && zh) ? zh : en;
 }

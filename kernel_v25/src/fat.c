@@ -1556,9 +1556,10 @@ int fat_mkfs(void) {
             dent_init(d0, dotname, FAT_ATTR_DIR, nc, 0, 0);
             dent_init(d1, dotdotname, FAT_ATTR_DIR, ROOT_CLUS, 0, 0);
             if (fat_write_cluster(nc, rbuf) != 0) break;
-            struct dent de;
-            dent_init(&de, n83, FAT_ATTR_DIR, nc, 0, 0);
-            if (dir_write_dent(ROOT_CLUS, &de) != 0) break;
+            /* v2.68: write a real VFAT LFN so `appdevelop` is not
+             * displayed as its truncated 8.3 alias `appdevel`. */
+            if (dir_write_lfn(ROOT_CLUS, std_dirs[i], n83,
+                              FAT_ATTR_DIR, nc, 0) != 0) break;
         }
     }
     write_fat_region(PART_START + RESERVED);           /* flush FAT #1 */

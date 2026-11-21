@@ -89,7 +89,7 @@ def main():
               0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00]
     if a != expect:
         raise SystemExit("'A' does not match canonical IBM VGA bitmap")
-    with open(OUT, "w", encoding="utf-8") as f:
+    with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         f.write(HEADER)
         for cp in range(0x20, 0x7F):
             ch = chr(cp)

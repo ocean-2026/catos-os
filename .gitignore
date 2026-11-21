@@ -99,6 +99,8 @@ kernel_v25/src/symtab.inc
 *.lck
 *.lck/
 vmware/*.SCOREBOARD.lock
+vmware/*.scoreboard
+vmware/*.vmdk
 
 # ---- v2.66: versioned kernel archives / reference snapshots kept out of git ----
 /kernel-v*.bin

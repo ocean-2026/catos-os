@@ -65,7 +65,7 @@ hive save
 | 面 | 说明 | 现状 |
 |---|---|---|
 | `/etc/autoexec` | 开机以 root 执行脚本 = 持久化后门 | 目录应 root 0755；`ls -l` + `chmod` 自检 |
-| `pkg install` | 解包无签名校验 | 只从自己控制的目录安装 |
+| `pkg install` | v2.68 起为 CPKG02 + RSA-512 验签（`pkg_verify`），签名不符拒绝安装；私钥不进内核 | 只从自己控制的目录安装 |
 | 无隔离 | `.ce` 与内核同地址空间 | 架构性限制 |
 | 无签名 | `UnknownBinary.AllowUnsigned=1` 默认允许 | 策略键存在，校验器尚未实现 |
 | 中断风暴 | 旧 ES1370 驱动不使能 INTEN；若使能会 IRQ storm | 驱动层已规避 |

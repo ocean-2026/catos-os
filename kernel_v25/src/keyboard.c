@@ -49,18 +49,15 @@ static void shift_down(void) {
     s_shift_down_tick = timer_ticks;
     s_shift_combo = 0;
 }
-/* returns 1 iff a double-tap was just completed */
+/* v2.68: ONE isolated Shift tap toggles the pinyin IME.  Shift held
+ * together with any other key is a combo (capital letters, shortcuts)
+ * and never toggles. */
 static int shift_up(void) {
     shift = 0;
     if (s_shift_combo) { s_shift_tap_valid = 0; return 0; }
-    if (s_shift_tap_valid &&
-        (uint32_t)(timer_ticks - s_shift_last_tap) <= IME_SHIFT_DBL_TICKS) {
-        s_shift_tap_valid = 0;
-        return 1;
-    }
     s_shift_last_tap = s_shift_down_tick;
     s_shift_tap_valid = 1;
-    return 0;
+    return 1;
 }
 #define SHIFT_MARK_COMBO() do { if (shift) s_shift_combo = 1; } while (0)
 

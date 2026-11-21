@@ -1,0 +1,5 @@
+# CatOS DEVELOPMENT package signing key (RSA-512).
+# Production: generate a new key, replace PKG_PUB_N in shell.c
+# and keep the private key OUTSIDE the repository.
+n=d058737a20f1fb25b3fa74682e7b67c2964da1b0658b5756811563c34cfddb11275775bb6be155e40acf3b0c670ca69f1a18f783b6e502bfec106e5ea27859d9
+d=29ba6d767a7ebcb47275a936ec885ee1c444cc2b8e4af8352529698fc62dd9e01b14edb6b88d871ef3baf2816319d140603ccf7df589f501de94e8560bb2cb01
