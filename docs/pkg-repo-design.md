@@ -126,5 +126,24 @@ catos-repo/
 | `.catpkg` 容器格式 + `mkpkg.py` | 已实现 |
 | `pkg list/info/install/remove` | 已实现 |
 | 示例包（bc / stats / rps） | 已实现并实机验证 |
+| 签名校验（CPKG02 / RSA-512） | v2.68 已实现（`pkg_verify`），验签不符拒装 |
+| **可拆卸桌面扩展（desktop.catpkg）** | **v2.69 P1 已实现，10/10 实机验证**（见下） |
 | 交叉编译上游源码入仓 | 设计预留，未实现 |
-| 联网拉包 / 签名校验 | 设计预留，未实现 |
+| 联网拉包 | 设计预留，未实现（`pkg install` 仅读本地 `/pkg/`） |
+
+## 4. 范例：desktop.catpkg —— 图形桌面作为可装卸扩展（v2.69）
+
+这是包机制最有力的证明：`desktop` 是**整个图形桌面环境**，走普通
+`.catpkg` 通道装卸，内核代码零改动：
+
+```
+/pkg/desktop.catpkg --pkg install--> 验签(RSA-512) --> /bin/desktop.ce
+   --裸名 desktop--> 运行纯用户态桌面(窗口/焦点/任务栏全在 CE 侧)
+   --pkg remove desktop--> 删除 /bin/desktop.ce --> 回到纯 shell
+```
+
+- `desktop.ce` 只用普通 CE ABI：新增的 mouse_x/y/buttons（槽 66..68）
+  + 已有 gotoxy/write/pollkey；窗口语义不在内核。
+- 安装前后内核二进制字节一致，证明桌面语义确实不在内核里。
+- 生命周期实机验证：`tests/desktop_pkg_v269_probe.py` 10/10 PASS。
+- 设计细节见 `docs/CDE-模块化设计.md` §8。

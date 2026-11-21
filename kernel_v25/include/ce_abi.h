@@ -238,6 +238,16 @@ typedef struct catos_api {
      * full repaint, shows the blank frame in between ("flicker"). */
     int     (*gotoxy)(int x, int y);               /* 65
          0 on success, -3 if x/y is outside the screen. */
+
+    /* ---- P1 (v2.69): generic mouse state (append-only) ----------------
+     * For user-mode desktop event loops.  Old binaries see NULL here:
+     * ALWAYS check for NULL before calling.  These are pure snapshots of
+     * the live PS/2 pointer; no framebuffer pointer is exposed.  Slot 68
+     * returns the button bitmask (1=left, 2=middle, 4=right), matching the
+     * kernel MOUSE_BTN_* values. */
+    int     (*mouse_x)(void);                      /* 66 absolute px */
+    int     (*mouse_y)(void);                      /* 67 absolute px */
+    int     (*mouse_buttons)(void);                /* 68 bitmask */
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

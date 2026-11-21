@@ -12,3 +12,4 @@
 bc|1.0|tiny integer calculator (A op B)|bc.catpkg|bc
 stats|1.0|lines/words/bytes text statistics|stats.catpkg|stats
 rps|1.0|rock-paper-scissors one round vs cpu|rps.catpkg|rps
+desktop|1.0|detachable graphical desktop environment|desktop.catpkg|desktop

@@ -3,7 +3,7 @@
 一个面向 32 位 x86 的实验性操作系统内核，目标是向**可通用命令行操作系统**挺进
 （路线图见 `docs/ROADMAP-通用操作系统.md`）。内核以 GRUB El Torito no-emulation ISO
 引导启动，用户态 CE（CatOS Executable）应用通过一组**只增不改（append-only）** 的
-66 槽系统调用表（v2.21，0..65，末槽 `gotoxy`）与内核通信。当前最新版本 **v2.68.3**。
+69 槽系统调用表（末槽 `mouse_buttons`，含 v2.69 新增鼠标原语 66..68）与内核通信。当前最新版本 **v2.69**。
 
 ## 能力一览
 
@@ -18,13 +18,14 @@
 | 网络 | 用户态网络栈（curl/netinfo 等应用，能力位门控）+ DHCP 客户端（VMware NAT 可用） |
 | 安全 | 二进制注册表 hive、命令契约（POSIX 风格参数校验）、能力策略/审计、CPKG02 签名包（RSA-512） |
 | 应用 | 22+ 内置 CE 应用（node.js 子集解释器、微型 C 编译器 cc、ocntools 工具箱（文件管理器/十六进制编辑/搜索/版本控制）、adofai 音游、calc、curl…）；应用可从磁盘分发，内核内嵌副本仅作 fallback；`pkg install/remove` 装卸签名扩展 |
-| 桌面 | 可拆卸图形桌面扩展（设计中，见 `docs/CDE-模块化设计.md`）：桌面语义做成 CE 程序经 pkg 装卸，内核只留通用图形原语 |
+| 桌面 | 可拆卸图形桌面扩展（v2.69 P1 已落地，见 `docs/CDE-模块化设计.md`）：`desktop.ce` 纯用户态桌面经 `pkg install/remove desktop` 装卸，内核只提供鼠标原语(gotoxy/gfx)+通用图形原语；新增 CE 槽 66..68 mouse_x/y/buttons |
 
 ## 文档索引
 
 - `docs/ROADMAP-通用操作系统.md` —— **通用化路线图（行动纲领，先读这个）**
-- `docs/v2.68-变更说明.md` —— 最新版本（v2.68/v2.68.3）中文输出/命令合并/包签名/表头修复
-- `docs/CDE-模块化设计.md` —— 可拆卸可安装图形桌面扩展的架构设计
+- `docs/v2.69-变更说明.md` —— 最新版本：CDE P1 可拆卸桌面扩展 + CE ABI 槽 65 漂移修复 + 鼠标原语
+- `docs/v2.68-变更说明.md` —— v2.68/v2.68.3 中文输出/命令合并/包签名/表头修复
+- `docs/CDE-模块化设计.md` —— 可拆卸可安装图形桌面扩展的架构设计与 P1 实现状态
 - `docs/PROGRESS.md` —— 最新进度汇报（滚动更新）
 - `docs/CatOS-内核问题清单.md` —— 已知缺陷与遗留问题追踪（编号至 #95）
 - `kernel_v25/extapp/docs/API.txt` —— CE ABI 系统调用表（v2.14）

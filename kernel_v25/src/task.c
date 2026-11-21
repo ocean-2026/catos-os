@@ -27,6 +27,7 @@
 #include "vma.h"     /* for vma_t */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
+#include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -617,6 +618,10 @@ enum {
      * visible.  With gotoxy a program rewrites only the lines that changed
      * (dirty-region redraw).  66 thunks still fit in the 2 KiB area. */
     SYS_GOTOXY,
+    /* P1 (v2.69): generic mouse state for user-mode desktop event loops.
+     * The reference CDE needed mouse_x/y/buttons; CatOS CE ABI had none.
+     * These are pure snapshots of the existing PS/2 driver state. */
+    SYS_MOUSE_X, SYS_MOUSE_Y, SYS_MOUSE_BUTTONS,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -685,6 +690,10 @@ static void build_vsyscall_page(uint8_t *page) {
         /*57*/1, /*58*/3, /*59*/0, /*60*/2,     /* snd_info/play/stop/tone */
         /*61*/1, /*62*/1, /*63*/1,               /* gfx_info/rect/blit */
         /*64*/0,                                 /* pollkey */
+        /*65*/2,                                 /* gotoxy(x,y) -- was missing,
+             * implicitly 0: thunk never forwarded ebx/ecx so gotoxy saw
+             * stale args.  Fixed v2.69. */
+        /*66*/0, /*67*/0, /*68*/0,               /* mouse_x/y/buttons: no args */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -1369,6 +1378,19 @@ void isr_syscall(int_frame_t *f) {
         if (x < 0 || y < 0 || x >= mc || y >= mr) { ret = (uint32_t)CON_EINVAL; break; }
         con_set_cursor((uint8_t)x, (uint8_t)y);
         ret = 0;
+        break;
+    }
+    case SYS_MOUSE_X:
+    case SYS_MOUSE_Y:
+    case SYS_MOUSE_BUTTONS: {
+        /* P1 (v2.69): snapshots of the live PS/2 pointer for user-mode
+         * desktop event loops.  No framebuffer pointer is exposed; the CE
+         * desk.ce reads these each poll tick and does its own hit-testing. */
+        int mx = 0, my = 0; uint8_t btn = 0;
+        mouse_get_state(&mx, &my, &btn);
+        if (nr == SYS_MOUSE_X)          ret = (uint32_t)mx;
+        else if (nr == SYS_MOUSE_Y)     ret = (uint32_t)my;
+        else                            ret = (uint32_t)btn;
         break;
     }
     case SYS_FILE_EXISTS: {

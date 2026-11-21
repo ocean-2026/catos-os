@@ -131,15 +131,48 @@ CatOS 同理，追加每个槽必须同时改：
 - **P4 可拆卸性回归**：装 → 用 → 卸 → 系统回到纯 shell，内核二进制
   前后一致（证明桌面语义确实不在内核里）。
 
-## 8. 当前状态
+## 8. 当前状态（v2.69 / P1 已落地）
 
 - 参考源码已解包至 `deliverables/cde-ref/upstream-isofiles/`；
   分析结论见本设计 §1/§6。
 - 架构路径已定：纯 CE 程序 + pkg 安装（用户 2026-11-21 确认）。
 - 已按"新工具先出原型"规则写宿主命令行原型
-  `deliverables/cde-prototype/cde_shell.py`，用 `--demo` 可看到完整生命周期：
-  `pkg list` → `pkg install desktop`（验签+写 /bin）→ `desktop`（图形桌面 ASCII 模拟）
-  → `pkg remove desktop`（卸载）→ 系统回到纯 shell，**内核不变**。
-  这是设计意图的可视化验证，不是内核代码。
-- 下一步：P1 原语补齐（修 ABI 漂移 + 追加最小 GUI 槽），先在宿主原型
-  验证 `win_demo.ce` 的窗口/绘制/事件，再移植进内核。
+  `deliverables/cde-prototype/cde_shell.py`（生命周期）与
+  `gfx_primitive_proto.py`（窗口/绘制/事件循环），两者 `--demo`/直接运行
+  均可看到完整效果。
+
+### P1 实际实现（与 §3 原计划的差异）
+
+经盘点，参考实现桌面依赖的核心底层能力是**鼠标状态 + 文本绘制 +
+键盘事件**。现有 CE ABI 已有 gfx_rect/gfx_blit/gotoxy/pollkey，唯一
+完全缺失的是鼠标。因此 P1 按"最小可用"收窄为：
+
+1. **修 ABI 漂移**：`include/ce.h` 内核镜像补槽 65 `gotoxy`；
+   `task.c:nargs[]` 补槽 65 的 `nargs=2`（此前隐式 0 → thunk 不转发
+   ebx/ecx，`gotoxy(x,y)` 拿到陈旧参数）。实机 `tests/gotoxy_v269_probe.py`
+   验证标记精确落在 (10,3)，2/2 PASS。
+2. **追加 3 个通用鼠标原语槽**（append-only，66/67/68）：
+   `mouse_x()/mouse_y()/mouse_buttons()`，均薄包装内核 `mouse_get_state()`。
+   三处同序同步：`include/ce_abi.h`、`include/ce.h`、`task.c` 的 enum/
+   nargs/isr case。`tests/mouse_abi_v269_probe.py` 验证 CE 读数与内核
+   `mouse` 命令状态完全一致，4/4 PASS（本 QEMU 无 PS/2 鼠标，事件注入
+   检查按环境跳过）。
+3. **`desk.ce`（源 `extapp/desktop.c`）**：纯用户态桌面，全部窗口语义
+   （焦点/命中测试/任务栏/事件循环）在 CE 侧，内核只提供原语。当前用
+   text 后端 ASCII 窗口（`gotoxy`+`write`），可在 QEMU/VMware 目视与
+   text buffer 探针验证。
+4. **可安装扩展包**：`build/pkg.list` 增加 `desktop|1.0|...|desktop.catpkg|
+   desktop`，复用 CPKG02 + RSA-512 签名；`pkg install desktop` 验签后写
+   `/bin/desktop.ce`，裸名 `desktop`（PATH=/bin）直接运行，无需改 shell。
+   `tests/desktop_pkg_v269_probe.py` 完整生命周期 **10/10 PASS**：
+   list→install→运行桌面→q 退出→remove→命令消失，内核二进制不变。
+
+### 尚未实现（P1b / P2）
+
+- §3 原计划里的 `gfx_text`、`key_peek`、`key_mods`、`video_*`、`buf_*`
+  尚未追加。当前桌面在 text 后端；gfx 24bpp 文字绘制需要 `gfx_text`
+  （用 `font_ascii` 8x16 位图逐像素写 `gfx24_pixel`），列为 P1b。
+- P2：把窗口做成 retained 自绘 + 脏矩形合成，移植参考实现的开始菜单/
+  文件管理器/编辑器，切到 gfx 后端。
+- 环境注：本 QEMU 无 PS/2 鼠标（`mouse` 命令 pk 恒 0），鼠标事件注入类
+  验证需在带鼠标的 VMware/真机完成；ABI 接线已由 CE==内核状态断言证明。

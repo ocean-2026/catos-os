@@ -180,6 +180,17 @@ typedef struct catos_api {
     /* ---- v2.14: non-blocking keyboard (append-only).  Keep in
      * lockstep with ce_abi.h slot 64; old binaries see NULL. */
     int      (*pollkey)(void);
+    /* ---- #60 (v2.21): line addressing (append-only).  Keep in lockstep
+     * with ce_abi.h slot 65 (gotoxy); old binaries see NULL.  Was missing
+     * from this kernel-side mirror until v2.69 -- the API table is built
+     * from SYS_COUNT so the pointer existed, but any kernel code that
+     * sized/offset this struct was one slot short. */
+    int      (*gotoxy)(int x, int y);
+    /* ---- P1 (v2.69): generic mouse state (append-only).  Keep in
+     * lockstep with ce_abi.h slots 66..68; old binaries see NULL. */
+    int      (*mouse_x)(void);
+    int      (*mouse_y)(void);
+    int      (*mouse_buttons)(void);
 } catos_api_t;
 
 /* install the API (called once at boot) */
