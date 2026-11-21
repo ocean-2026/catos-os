@@ -25,7 +25,13 @@
 #include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
 #include "keys.h"       /* centralized key-binding legend (keys command)  */
 #include "pager.h"      /* v2.59 generic console pager                    */
-#include "reg.h"        /* v2.62 file-backed registry (/etc/reg)          */
+#include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
+#include "palette.h"    /* v2.67 semantic colour roles from the hive        */
+#include "power.h"      /* v2.67 ACPI power-off (no APM INT 15h)            */
+#include "hivecmd.h"
+#include "posix.h"
+#include "sec.h"
+#include "dash.h"    /* v2.67 `hive` command front-end                   */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
 
@@ -67,6 +73,7 @@ static void cmd_sndinfo(char *arg);
 /* v2.65: exit status of the most recently completed command, readable as
  * $? in typed lines and /etc/autostart scripts. */
 static int g_last_rc;
+static uint32_t g_caps;      /* v2.67: fwd decl for the hive command gate */
 
 /* P1: set while /etc/autostart scripts run their commands.  Interactive
  * prompts (e.g. the PE->CE conversion offer in `run`) must default to
@@ -242,13 +249,13 @@ static void help_row(const char *cmd, const char *desc) {
 static void help_head(const char *s) {
     if (pager_quit()) return;
     s = trhelp(s);                        /* v2.62: localise heading */
-    vga_set_fg(VGA_LIGHT_CYAN);
+    con_set_fg_rgb(pal_rgb(PAL_ACCENT));
     char line[128];
     int n = 0; line[n++] = ' '; line[n++] = '-'; line[n++] = ' ';
     for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p;
     line[n++] = ' '; line[n++] = '-'; line[n] = 0;
     pager_line(line);
-    vga_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
 }
 static void help_note(const char *s)  { if (pager_quit()) return; s = trhelp(s); char line[128]; line[0] = ' '; int n = 1; for (const char *p = s; *p && n < (int)sizeof(line)-1; p++) line[n++] = *p; line[n] = 0; pager_line(line); }
 
@@ -293,7 +300,7 @@ static void cmd_help(void) {
     help_row("F2 / dbl-Shift", "toggle pinyin IME (works in shell and edit)");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
-    help_row("shutdown",    "power off via APM BIOS (root/CAP_SYS only; falls back to reboot)");
+    help_row("shutdown",    "power off via ACPI PM1_CNT (root/CAP_SYS; honest reboot fallback)");
     help_row("bsod|blue",   "render the full-screen crash report (--no-reboot for test)");
     help_row("panicmode",   "show/set post-crash action: reboot|halt (/etc/panicmode)");
 
@@ -385,11 +392,11 @@ static void cmd_help(void) {
  * there shows up here automatically (no second hand-written list). */
 static void cmd_keys(void) {
     for (int g = 0; g < KG__COUNT; g++) {
-        vga_set_fg(VGA_LIGHT_CYAN);
+        con_set_fg_rgb(pal_rgb(PAL_ACCENT));
         vga_write("  -- ");
         vga_write(keys_group_name((enum keys_group)g));
         vga_write(" --\n");
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         for (int i = 0; i < keys_desc_count; i++) {
             const keys_desc_t *r = &keys_desc[i];
             if (r->group != g) continue;
@@ -571,100 +578,47 @@ static void cmd_style(const char *arg) {
     vga_write("\n");
 }
 
-/* v2.61: current theme flag (1=dark default, 0=light). */
-static int g_current_theme_dark = 1;
-
-/* v2.61: switch between the built-in dark / light themes.
- * Each theme applies its token palette to CLUT entries 0..TOKEN_COUNT-1
- * plus a full grey ramp (16..255), then redraws the screen. */
+/* v2.67: theme = a named colour scheme written into the hive.  Every role
+ * the shell paints (prompt, command, argument, error, warning, hint, and
+ * the crash screen) is a registry value now; no colour is compiled in. */
 static void cmd_theme(const char *arg) {
     const char *p = arg;
     skip_sp(&p);
     if (!*p) {
-        if (g_current_theme_dark) {
-            vga_write("current theme: dark\n");
-        } else {
-            vga_write("current theme: light\n");
-        }
-        vga_write("usage: theme dark|light\n");
+        vga_write("current theme: "); vga_write(pal_scheme_name()); vga_write("\n");
+        vga_write("background "); vga_write(pal_hex(PAL_BG));
+        vga_write("  foreground "); vga_write(pal_hex(PAL_FG)); vga_write("\n");
+        vga_write("usage: theme dark|light|solarized|mono [--crash]\n");
+        vga_write("       --crash also rewrites the crash-screen roles\n");
+        vga_write("       one role: hive set HKLM\\Software\\CatOS\\Terminal\\Colors\\Error \"#F85149\"\n");
         return;
     }
-    int want = 0;   /* 0=light, 1=dark */
-    if (!strncmp_(p, "dark", 4))           want = 1;
-    else if (!strncmp_(p, "light", 5))     want = 0;
-    else { vga_write("theme: unknown (dark | light)\n"); return; }
-    g_current_theme_dark = want;
-    con_apply_theme(want);
-    reg_set_now("system", "theme", want ? "dark" : "light");  /* v2.62 */
-    vga_write(tr(L_THEME_UPDATED)); vga_write("\n");
+    char name[16];
+    int n = 0;
+    while (*p && *p != ' ' && n < 15) name[n++] = *p++;
+    name[n] = 0;
+    skip_sp(&p);
+    int crash = 0;
+    if (!strncmp_(p, "--crash", 7)) crash = 1;
+    if (pal_apply_scheme(name, crash) != 0) {
+        vga_write("theme: unknown scheme '"); vga_write(name);
+        vga_write("' (dark|light|solarized|mono)\n");
+        return;
+    }
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+    /* v2.67: the i18n entry is a TEMPLATE ("theme set to %s"); printing
+     * it raw leaked the %s into the terminal. */
+    vga_write("theme: applied '"); vga_write(name);
+    vga_write("' -- colors stored in HKLM\\Software\\CatOS\\Terminal\\Colors");
+    vga_write(hive_dirty() ? " (run `hive save` to persist)\n" : " and saved\n");
 }
 
-/* v2.62: file-backed registry shell command.
- *   reg                 -> list all sections
- *   reg list [SEC]      -> list sections / keys in SEC
- *   reg get SEC KEY     -> print a value
- *   reg set SEC KEY VAL -> set (admin)
- *   reg del SEC KEY     -> delete (admin) */
+/* v2.67: `hive` (alias `reg`) -- binary tree registry front-end.
+ *   hive / hive ls [-R] [PATH] / hive get PATH / hive set PATH VALUE /
+ *   hive setdw PATH N / hive mkkey PATH / hive del PATH / hive delkey PATH /
+ *   hive export / hive import / hive chk / hive save                     */
 static void cmd_reg(const char *arg) {
-    const char *p = arg;
-    while (*p == ' ') p++;
-    /* default action = list */
-    if (!*p) {
-        int n = reg_section_count();
-        vga_write("registry: ");
-        vga_write(reg_loaded_from_file() ? "loaded from /etc/reg" : "in-memory defaults");
-        vga_write("\n");
-        for (int i = 0; i < n; i++) {
-            vga_write(" ["); vga_write(reg_section_at(i)); vga_write("]\n");
-        }
-        if (!n) vga_write(" (empty)\n");
-        return;
-    }
-    char sub[16], sec[REG_SEC_MAX], key[REG_KEY_MAX], val[REG_VAL_MAX];
-    int k = 0; while (*p && *p != ' ' && k < 15) sub[k++] = *p++; sub[k] = 0;
-    while (*p == ' ') p++;
-    if (!strcmp_(sub, "list")) {
-        if (!*p) { cmd_reg(""); return; }
-        k = 0; while (*p && k < REG_SEC_MAX - 1) sec[k++] = *p++; sec[k] = 0;
-        int n = reg_key_count(sec);
-        vga_write("["); vga_write(sec); vga_write("] ("); print_int(n); vga_write(" keys)\n");
-        for (int i = 0; i < n; i++) {
-            vga_write(" "); vga_write(reg_key_at(sec, i));
-            vga_write(" = "); vga_write(reg_val_at(sec, i)); vga_write("\n");
-        }
-        return;
-    }
-    /* get/set/del need SEC KEY */
-    k = 0; while (*p && *p != ' ' && k < REG_SEC_MAX - 1) sec[k++] = *p++; sec[k] = 0;
-    while (*p == ' ') p++;
-    k = 0; while (*p && *p != ' ' && k < REG_KEY_MAX - 1) key[k++] = *p++; key[k] = 0;
-    while (*p == ' ') p++;
-    if (!strcmp_(sub, "get")) {
-        if (!*sec || !*key) { vga_write("usage: reg get SEC KEY\n"); return; }
-        vga_write("["); vga_write(sec); vga_write("] "); vga_write(key);
-        vga_write(" = "); vga_write(reg_get(sec, key)); vga_write("\n");
-        return;
-    }
-    if (!strcmp_(sub, "set")) {
-        if (!session_is_admin()) { vga_write("reg: permission denied (admin only)\n"); return; }
-        if (!*sec || !*key || !*p) {
-            vga_write("usage: reg set SEC KEY VALUE\n"); return;
-        }
-        k = 0; while (*p && k < REG_VAL_MAX - 1) val[k++] = *p++; val[k] = 0;
-        if (reg_set_now(sec, key, val) != 0) { vga_write("reg: set failed (table full?)\n"); return; }
-        vga_write("reg: ["); vga_write(sec); vga_write("] "); vga_write(key);
-        vga_write(" = "); vga_write(val); vga_write("\n");
-        return;
-    }
-    if (!strcmp_(sub, "del")) {
-        if (!session_is_admin()) { vga_write("reg: permission denied (admin only)\n"); return; }
-        if (!*sec || !*key) { vga_write("usage: reg del SEC KEY\n"); return; }
-        if (reg_del_now(sec, key) != 0) { vga_write("reg: key not found\n"); return; }
-        vga_write("reg: deleted ["); vga_write(sec); vga_write("] "); vga_write(key); vga_write("\n");
-        return;
-    }
-    vga_write("reg: unknown subcommand '"); vga_write(sub); vga_write("'\n");
-    vga_write("usage: reg [list [SEC]] | reg get SEC KEY | reg set SEC KEY VAL | reg del SEC KEY\n");
+    g_last_rc = hive_cmd_run((char *)arg, g_uid, g_caps);
 }
 
 static void skip_sp(const char **pp) { while (**pp == ' ') (*pp)++; }
@@ -795,7 +749,7 @@ static void cmd_gfx(char *arg) {
             } else {
                 con_clear();
                 /* v2.62: persist the chosen boot display mode to the registry */
-                reg_set_now("system", "videomode", arg);
+                hive_set_sz("HKLM\\System\\VideoMode", arg); hive_save();
                 vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
             }
         } else {
@@ -902,7 +856,7 @@ static void cmd_svgainfo(void) {
 
 static void cmd_about(void) {
     vga_clear();
-    vga_set_fg(VGA_LIGHT_CYAN);
+    con_set_fg_rgb(pal_rgb(PAL_ACCENT));
     vga_write(
         "###          ##    ####   #####\n"
         "##             ##   ##  ## ##\n"
@@ -912,7 +866,7 @@ static void cmd_about(void) {
         "##    ##  ##   ##   ##  ##     ##\n"
         "###  #####    ###  ####  #####\n"
     );
-    vga_set_fg(VGA_LIGHT_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
     vga_write("  A tiny Unix-like OS on GRUB Multiboot\n");
     vga_write("  Architecture : i386 (32-bit x86)\n");
     vga_write("  Bootloader   : GRUB 2 (ISO9660 / El Torito)\n");
@@ -1319,7 +1273,7 @@ static const char *BUILTIN_NAMES[] = {
     "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "head", "tail", "wc", "tree",       /* NIGHT-P4 */
     "theme",                                  /* v2.61: dark / light token palette switch */
-    "reg",                                    /* v2.62: file-backed registry */
+    "hive", "reg",                            /* v2.67: binary tree registry */
     0
 };
 /* tiny Levenshtein for short command words */
@@ -1389,19 +1343,23 @@ static void cmd_hang(void) {
  * Falls back to a warm reboot if the APM call is unavailable or fails.
  * Needs CAP_SYS or root. */
 static void cmd_shutdown(void) {
-    __asm__ volatile (
-        "pushfl\n\t"
-        "cli\n\t"
-        "movw $0x0000, %%bx\n\t"      /* APM func 0x5001 = power-off */
-        "movw $0x5001, %%ax\n\t"
-        "int $0x15\n\t"
-        "popfl\n\t"
-        : : : "ax", "bx", "memory"
-    );
-    /* If we reach here the machine did not shut down (APM absent/failed).
-     * Last resort: warm reboot. The user gets power-off semantics on most
-     * modern BIOS / UEFI firmware; on bare metal without APM this reboots. */
-    vga_write("shutdown: APM unavailable — issuing warm reboot\n");
+    /* v2.67: NO APM INT 15h.  A protected-mode INT 15h / AX=5001h went
+     * through our own IDT gate (vector 0x15), raised an exception, and the
+     * panic path drew a BSOD -- that was the "shutdown always bluescreens"
+     * report.  ACPI PM1_CNT is what QEMU / VMware / UEFI implement. */
+    g_last_rc = 1;
+    con_write("shutdown: ACPI PM1_CNT (SLP_EN)\n");
+    if (power_shutdown() == 0) {
+        /* if the write worked the machine is already off */
+        for (volatile uint32_t spin = 0; spin < 4000000u; spin++)
+            if ((spin & 0xFFFFFu) == 0) outb(0x80, 0);
+        con_write("shutdown: ACPI had no effect, trying legacy power ports\n");
+    }
+    power_shutdown_ports();
+    for (volatile uint32_t spin = 0; spin < 2000000u; spin++)
+        if ((spin & 0xFFFFFu) == 0) outb(0x80, 0);
+    /* honest last resort: this firmware cannot power off */
+    con_write("shutdown: firmware reports no power-off; rebooting instead\n");
     outb(0x64, 0xFE);
     while (1) __asm__ volatile ("hlt");
 }
@@ -1904,6 +1862,14 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
     if (strcat_b(p, sizeof(p), cmd) != 0) return -1;
     if (strcat_b(p, sizeof(p), ext) != 0) return -1;
     if (fs_resolve_file(p, &c, &s) == 0) {
+        char why[56];
+        if (sec_exec_check(p, uid, why, sizeof(why)) != 0) {
+            vga_write("exec: refused '"); vga_write(p); vga_write("': ");
+            vga_write(why); vga_write("\n");
+            sec_audit(uid, "deny-exec", p, 13);
+            return -2;
+        }
+        sec_audit(uid, "exec-ce", p, 0);
         spawn_and_maybe_wait(p, argc, argv, bg, uid);
         return 0;
     }
@@ -1925,6 +1891,14 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
         if (strcat_b(p, sizeof(p), cmd) != 0) continue;
         if (strcat_b(p, sizeof(p), ext) != 0) continue;
         if (fs_resolve_file(p, &c, &s) == 0) {
+            char why[56];
+            if (sec_exec_check(p, uid, why, sizeof(why)) != 0) {
+                vga_write("exec: refused '"); vga_write(p); vga_write("': ");
+                vga_write(why); vga_write("\n");
+                sec_audit(uid, "deny-exec", p, 13);
+                return -2;
+            }
+            sec_audit(uid, "exec-ce", p, 0);
             spawn_and_maybe_wait(p, argc, argv, bg, uid);
             return 0;
         }
@@ -2820,10 +2794,10 @@ static int ed_max_cols(void) {
 static void ed_status_msg(const char *m) {
     int row = con_rows() - 1;
     if (row < 1) row = 1;
-    vga_set_color(VGA_WHITE, VGA_LIGHT_BLUE);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_SELECTION), 0);
     for (int x = 0; x < con_cols(); x++) vga_putc_at((uint8_t)x, (uint8_t)row, ' ');
     vga_write_at_utf8(0, (uint8_t)row, m);
-    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
 }
 
 static void ed_load(fs_entry_t *f) {
@@ -2865,13 +2839,13 @@ static void ed_redraw(void) {
     if (last < 2) last = 2;
     int view = ed_view_rows();
 
-    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     for (int y = 0; y <= last; y++)
         for (int x = 0; x < sc; x++)
             vga_putc_at((uint8_t)x, (uint8_t)y, ' ');
 
     /* title row */
-    vga_set_color(VGA_BLACK, VGA_LIGHT_GREY);
+    con_set_style_rgb(pal_rgb(PAL_BG), pal_rgb(PAL_SELECTION), 0);
     int sx = 0;
     vga_write_at_utf8((uint8_t)sx, 0, "CatOS nano  "); sx += 12;
     vga_write_at_utf8((uint8_t)sx, 0, ed_fname); sx += ed_strlen(ed_fname);
@@ -2883,7 +2857,7 @@ static void ed_redraw(void) {
     if (ed_modified) vga_write_at_utf8((uint8_t)sx, 0, "  [modified]");
 
     /* content rows (UTF-8 aware, so Chinese file contents display) */
-    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     for (int r = 0; r < view && r + 1 < last; r++) {
         int ln = ed_top + r;
         if (ln >= ed_nlines) break;
@@ -2891,10 +2865,10 @@ static void ed_redraw(void) {
     }
 
     /* bottom bar */
-    vga_set_color(VGA_WHITE, VGA_LIGHT_BLUE);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_SELECTION), 0);
     vga_write_at_utf8(0, (uint8_t)last,
         "^G Help  ^O Save  ^X Exit  ^K Del Line  ^U Clear  F2 IME");
-    vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
 
     int scr_y = 1 + (ed_cy - ed_top);
     if (scr_y < 1) scr_y = 1;
@@ -3022,9 +2996,9 @@ static void cmd_edit(const char *arg) {
     }
     fs_entry_t *f = fs_create_file(arg);
     if (!f) {
-        vga_set_fg(VGA_LIGHT_RED);
+        con_set_fg_rgb(pal_rgb(PAL_ERROR));
         vga_write("edit: cannot create/open file\n");
-        vga_set_fg(VGA_LIGHT_GREY);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         return;
     }
 
@@ -3065,7 +3039,7 @@ static void cmd_edit(const char *arg) {
                 }
                 if (!do_exit) continue;
             }
-            vga_set_color(VGA_LIGHT_GREY, VGA_BLACK);
+            con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
             ime_off();
             vga_clear();
             vga_write("edit: saved ");
@@ -3309,15 +3283,15 @@ static void cmd_panicmode(char *arg) {
     }
     if (!strcmp_(arg, "halt")) {
         bsod_set_mode(BSOD_MODE_HALT);
-        reg_set_now("system", "panicmode", "halt");
+        hive_set_sz("HKLM\\System\\Crash\\Mode", "halt"); hive_save();
         fs_write_text("/etc/panicmode", "halt\n", 5);   /* legacy mirror */
     } else if (!strcmp_(arg, "wait")) {
         bsod_set_wait();
-        reg_set_now("system", "panicmode", "wait");
+        hive_set_sz("HKLM\\System\\Crash\\Mode", "wait"); hive_save();
         fs_write_text("/etc/panicmode", "wait\n", 5);
     } else if (!strcmp_(arg, "reboot")) {
         bsod_set_mode(BSOD_MODE_REBOOT);
-        reg_set_now("system", "panicmode", "reboot");
+        hive_set_sz("HKLM\\System\\Crash\\Mode", "reboot"); hive_save();
         fs_write_text("/etc/panicmode", "reboot\n", 7);
     } else {
         vga_write("panicmode: usage: panicmode [reboot|halt|wait] [reboot:Ns]\n");
@@ -4121,18 +4095,18 @@ static void cmd_pkg_list(void) {
     for (int i = 0; i < n; i++) {
         int installed = pkg_installed(&recs[i]);
         vga_write("  ");
-        vga_set_fg(VGA_LIGHT_BLUE);
+        con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH));
         pkg_pad(recs[i].name, 10);
-        vga_set_fg(VGA_DARK_GREY);
+        con_set_fg_rgb(pal_rgb(PAL_DIM));
         vga_write("[");
         pkg_pad(recs[i].version, 8);
         vga_write("]  ");
-        vga_set_fg(installed ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
+        con_set_fg_rgb(pal_rgb(installed ? PAL_SUCCESS : PAL_DIM));
         pkg_pad(installed ? "installed" : "available", 11);
-        vga_set_fg(VGA_LIGHT_GREY);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         vga_write("- ");
         vga_write(recs[i].desc);
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         vga_write("\n");
     }
 }
@@ -4143,23 +4117,23 @@ static void cmd_pkg_info(const char *name) {
     int n = pkg_load_index(recs, 16);
     int i = pkg_find(name, recs, n);
     if (i < 0) { vga_write("pkg: no such package: "); vga_write(name); vga_write("\n"); return; }
-    vga_set_fg(VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_DIM));
     vga_write("name:    ");
-    vga_set_fg(VGA_LIGHT_BLUE); vga_write(recs[i].name); vga_write("\n");
-    vga_set_fg(VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH)); vga_write(recs[i].name); vga_write("\n");
+    con_set_fg_rgb(pal_rgb(PAL_DIM));
     vga_write("version: ");
-    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].version); vga_write("\n");
-    vga_set_fg(VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_FG)); vga_write(recs[i].version); vga_write("\n");
+    con_set_fg_rgb(pal_rgb(PAL_DIM));
     vga_write("desc:    ");
-    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].desc); vga_write("\n");
-    vga_set_fg(VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_FG)); vga_write(recs[i].desc); vga_write("\n");
+    con_set_fg_rgb(pal_rgb(PAL_DIM));
     vga_write("file:    ");
-    vga_set_fg(VGA_LIGHT_GREY); vga_write(recs[i].file); vga_write("\n");
-    vga_set_fg(VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(PAL_FG)); vga_write(recs[i].file); vga_write("\n");
+    con_set_fg_rgb(pal_rgb(PAL_DIM));
     vga_write("status:  ");
-    vga_set_fg(pkg_installed(&recs[i]) ? VGA_LIGHT_GREEN : VGA_DARK_GREY);
+    con_set_fg_rgb(pal_rgb(pkg_installed(&recs[i]) ? PAL_SUCCESS : PAL_DIM));
     vga_write(pkg_installed(&recs[i]) ? "installed" : "available");
-    vga_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
     vga_write("\n");
 }
 
@@ -4611,7 +4585,7 @@ static void ls_perm_colored(const struct fs_raw_ent *e) {
         else                  con_set_fg_rgb(CON_RGB(0x6B,0x79,0x8F));
         vga_putc(p[i]);
     }
-    con_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
 }
 
 /* resolve an ls argument to an absolute dir path (mirrors cmd_tree) */
@@ -4791,7 +4765,7 @@ static void cmd_ls(char *arg) {
             int t = ls_heat_t(e->size);
             con_set_fg_rgb(ls_heat(t));
             pager_line(e->name);
-            con_set_fg(VGA_WHITE);
+            con_set_fg_rgb(pal_rgb(PAL_FG));
             continue;
         }
 
@@ -4804,7 +4778,7 @@ static void cmd_ls(char *arg) {
                           : (e->attr & FAT_ATTR_RO) ? CON_RGB(0x8B,0x95,0xA7)
                           : CON_RGB(0xF2,0xCC,0x60));
             pager_line(e->name);
-            con_set_fg(VGA_WHITE);
+            con_set_fg_rgb(pal_rgb(PAL_FG));
             continue;
         }
 
@@ -4839,9 +4813,9 @@ static void cmd_ls(char *arg) {
             }
         }
         line[o] = 0;
-        con_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(isdir ? PAL_PROMPT_PATH : PAL_FG));
         pager_line(line);
-        con_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
     }
 
     char sum[80];
@@ -4856,7 +4830,7 @@ static void cmd_ls(char *arg) {
         for (const char *q = r; *q; q++) sum[z++] = *q;
     }
     sum[z] = 0;
-    con_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
     pager_line(sum);
     (void)cols;
 }
@@ -4992,10 +4966,24 @@ static void env_list(void) {
 }
 
 int env_save(void) {
-    /* v2.62: registry is canonical; mirror legacy /etc/env for old tools. */
-    for (int i = 0; i < ENV_MAX; i++)
-        if (g_env_used[i]) reg_set("env", g_env[i].key, g_env[i].val);
-    reg_flush();
+    /* v2.67: the hive is canonical.  Rewrite HKLM\Environment wholesale
+     * (delete + recreate) so a variable that was unset stops existing;
+     * a stale key would otherwise keep coming back on the next boot.
+     * /etc/env is still mirrored for old tools, marked as a legacy copy. */
+    hive_delkey("HKLM\\Environment");
+    hive_mkkey("HKLM\\Environment");
+    for (int i = 0; i < ENV_MAX; i++) {
+        if (!g_env_used[i]) continue;
+        char path[HIVE_PATH_MAX];
+        int o = 0;
+        const char *base = "HKLM\\Environment\\";
+        for (int j = 0; base[j] && o < HIVE_PATH_MAX - 1; j++) path[o++] = base[j];
+        for (int j = 0; g_env[i].key[j] && o < HIVE_PATH_MAX - 1; j++) path[o++] = g_env[i].key[j];
+        path[o] = 0;
+        hive_set_sz(path, g_env[i].val);       /* refuses over-long values */
+    }
+    hive_save();
+
     static char buf[2048];
     int o = 0;
     for (int i = 0; i < ENV_MAX; i++) {
@@ -5005,40 +4993,49 @@ int env_save(void) {
         for (int j = 0; g_env[i].val[j]; j++) buf[o++] = g_env[i].val[j];
         buf[o++] = '\n';
     }
-    if (o == 0) return 0;               /* empty table: nothing to persist */
+    if (o == 0) return 0;
     return fs_write_text("/etc/env", buf, (uint32_t)o) == 0 ? 0 : -1;
 }
 
 void env_init(void) {
     for (int i = 0; i < ENV_MAX; i++) g_env_used[i] = 0;
     if (!fs_fs_ready()) return;
-    /* v2.62: primary source = [env] section of the registry. */
-    int used = reg_key_count("env");
+
+    /* v2.67: primary source = HKLM\Environment in the hive. */
+    int used = hive_child_count("HKLM\\Environment");
     if (used > 0) {
-        for (int i = 0; i < used; i++)
-            env_set_(reg_key_at("env", i), reg_val_at("env", i));
+        for (int i = 0; i < used; i++) {
+            char name[HIVE_NAME_MAX];
+            uint8_t kind;
+            if (hive_child_at("HKLM\\Environment", i, name, HIVE_NAME_MAX, &kind) != HIVE_OK) break;
+            if (kind != HIVE_SZ) continue;
+            char path[HIVE_PATH_MAX];
+            hive_child_path("HKLM\\Environment", i, path, HIVE_PATH_MAX);
+            env_set_(name, hive_sz(path, ""));
+        }
     } else {
-        /* legacy fallback: adopt /etc/env into the registry on first boot */
+        /* legacy fallback: adopt /etc/env on the very first boot without
+         * a hive (hive_init() normally already imported it). */
         static char buf[2048];
         int n = fs_read_text("/etc/env", buf, (int)sizeof(buf) - 1);
         if (n > 0) {
             buf[n] = 0;
-            char *p = buf;
-            while (*p) {
-                char *line = p;
-                while (*p && *p != '\n') p++;
-                if (*p) *p++ = 0;
+            char *q = buf;
+            while (*q) {
+                char *line = q;
+                while (*q && *q != '\n') q++;
+                if (*q) *q++ = 0;
                 char *eq = line;
                 while (*eq && *eq != '=') eq++;
                 if (!*eq) continue;
                 *eq = 0;
                 env_set_(line, eq + 1);
             }
-            env_save();                 /* migrate values into /etc/reg */
+            env_save();
         }
     }
     if (!env_get_("PATH")) env_set_("PATH", "/bin");
-    if (reg_key_count("env") == 0) env_save();
+    if (hive_child_count("HKLM\\Environment") == 0) env_save();
 }
 
 /* expand $KEY / ${KEY} in place.  Unknown names expand to empty (sh
@@ -5130,20 +5127,20 @@ static void size_apply(int s) {
      * switches scale for non-root, it just is not saved across reboots. */
     if (session_is_admin()) {
         char b[2] = { (char)('0' + s), 0 };
-        reg_set_now("system", "size", b);
+        hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\FontSize", b); hive_save();
         fs_write_text("/etc/size", b, 1);   /* legacy mirror */
     }
 }
 
 /* Re-apply the persisted scale when entering vbe24 (boot default 1). */
 static void size_restore(void) {
-    const char *v = reg_get("system", "size");
+    const char *v = hive_sz("HKLM\\Software\\CatOS\\Terminal\\FontSize", "");
     char c = 0;
     if (v && *v) c = v[0];
     else {
         char b[8];
         int n = fs_read_text("/etc/size", b, (int)sizeof(b) - 1);
-        if (n >= 1) { c = b[0]; b[n] = 0; reg_set_now("system", "size", b); }
+        if (n >= 1) { c = b[0]; b[n] = 0; hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\FontSize", b); hive_save(); }
     }
     if (c >= '0' && c <= '2') con_set_cell_size(c - '0');
 }
@@ -5163,7 +5160,7 @@ static char g_fallback_note[128];
 static int videomode_parse(void) {
     char buf[32];
     /* v2.62: registry first, legacy file as fallback/migration source. */
-    const char *rv = reg_get("system", "videomode");
+    const char *rv = hive_sz("HKLM\\System\\VideoMode", "");
     if (rv && *rv) {
         int k = 0;
         while (*rv && k < (int)sizeof(buf) - 1) buf[k++] = *rv++;
@@ -5172,7 +5169,7 @@ static int videomode_parse(void) {
         int n = fs_read_text(VIDEOMODE_PATH, buf, (int)sizeof(buf) - 1);
         if (n <= 0) return CON_MODE_VBE24;  /* absent / unreadable -> default */
         buf[n] = 0;
-        reg_set_now("system", "videomode", buf);   /* migrate */
+        hive_set_sz("HKLM\\System\\VideoMode", buf); hive_save(); /* migrate */
     }
 
     int i = 0;
@@ -5639,7 +5636,7 @@ static const char *sh_cmds[] = {
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run",
     "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes","shutdown","theme","reg",  /* v2.61/v2.62 */
+    "users","vdiag","whoami","yes","shutdown","theme","hive","reg",  /* v2.67 */
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -5740,31 +5737,31 @@ static void prompt(void) {
      * \$ = $; anything else passes through).  Unset PS1 -> default. */
     const char *ps1 = env_get_("PS1");
     if (ps1 && *ps1) {
-        vga_set_fg(VGA_LIGHT_GREEN);
+        vga_set_fg(pal_vga(PAL_PROMPT_USER));
         for (const char *p = ps1; *p; p++) {
             if (*p == '\\' && p[1]) {
                 p++;
                 if (*p == 'u' && u) vga_write(u->name);
                 else if (*p == 'h') vga_write("catos");
-                else if (*p == 'w') { vga_set_fg(VGA_LIGHT_BLUE); vga_write(pwd); vga_set_fg(VGA_LIGHT_GREEN); }
+                else if (*p == 'w') { vga_set_fg(pal_vga(PAL_PROMPT_PATH)); vga_write(pwd); vga_set_fg(pal_vga(PAL_PROMPT_USER)); }
                 else if (*p == '$') vga_write(g_uid == UID_ROOT ? "#" : "$");
                 else { vga_write("\\"); vga_putc(*p); }
             } else vga_putc(*p);
         }
         vga_write(" ");
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         return;
     }
 
-    vga_set_fg(VGA_LIGHT_GREEN);
+    vga_set_fg(pal_vga(PAL_PROMPT_USER));
     if (u) { vga_write(u->name); vga_write("@"); }
     vga_write("catos");
-    vga_set_fg(VGA_LIGHT_BLUE);
+    vga_set_fg(pal_vga(PAL_PROMPT_PATH));
     vga_write(":");
     vga_write(pwd);
-    vga_set_fg(VGA_LIGHT_GREEN);
+    vga_set_fg(pal_vga(PAL_PROMPT_SYMBOL));
     vga_write(g_uid == UID_ROOT ? "# " : "$ ");
-    vga_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
 }
 
 /* show the NIC state on the boot screen (kernel's net_init line is
@@ -5814,19 +5811,22 @@ void shell_run(void) {
     vga_clear();
     fs_init();
     btime_mark("S1 fs_init done");
-    reg_init();               /* v2.62: load/seed /etc/reg (registry) first */
+    hive_set_user(g_uid);     /* v2.67: HKCU -> HKU\<uid>                      */
+    hive_init();              /* v2.67: binary hive; migrates /etc/reg + files */
+    pal_init();               /* v2.67: colour roles from the hive             */
     lang_init();              /* v2.21 T50: load lang via reg, default en */
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
     boot_apply_videomode();   /* v2.56: boot display mode via reg, default gfx24 */
-    /* v2.62: restore persisted theme before the banner prints. */
+    /* v2.67: the persisted theme name is applied to the ROLE table; the
+     * palette was already loaded from the hive, so this only needs to
+     * put the console's live style back in sync after the video mode. */
     {
-        const char *th = reg_get("system", "theme");
-        if (th && *th) {
-            g_current_theme_dark = !(th[0] == 'l' || th[0] == 'L');
-            con_apply_theme(g_current_theme_dark);
-        }
+        const char *th = pal_scheme_name();
+        if (th && *th && th[0] != 'c')      /* "custom" keeps the stored roles */
+            pal_apply_scheme(th, 0);
+        con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     }
     bsod_init();              /* v2.59: cache panic action config */
     ce_init();
@@ -5866,9 +5866,9 @@ void shell_run(void) {
         prompt();
         int ret = kb_readline(input, sizeof(input));
         if (ret == 2 || ret == 3) {               /* ^C cancels / ^Z suspends */
-            vga_set_fg(VGA_LIGHT_GREEN);
+            con_set_fg_rgb(pal_rgb(PAL_SUCCESS));
             vga_write(ret == 2 ? "^C\n" : "^Z\n");
-            vga_set_fg(VGA_WHITE);
+            con_set_fg_rgb(pal_rgb(PAL_FG));
             int tid = g_fg_tid;
             g_fg_tid = -1;
             if (tid > 0) {
@@ -5910,13 +5910,13 @@ void shell_run(void) {
             }
             pend_clear();               /* one-shot: consumed on replay */
             /* echo the actual line being run so the replay is obvious */
-            vga_set_fg(VGA_YELLOW);
+            con_set_fg_rgb(pal_rgb(PAL_WARNING));
             vga_write("-> ");
-            vga_set_fg(VGA_LIGHT_BLUE);
+            con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH));
             vga_write(replay);
-            vga_set_fg(VGA_YELLOW);
+            con_set_fg_rgb(pal_rgb(PAL_WARNING));
             vga_write("\n");
-            vga_set_fg(VGA_WHITE);
+            con_set_fg_rgb(pal_rgb(PAL_FG));
             char *rc = replay;
             while (*rc == ' ') rc++;
             char *ra = rc;
@@ -5948,6 +5948,83 @@ void shell_run(void) {
 /* Execute one parsed command line: builtins first, then current-dir
  * program and /bin PATH lookup.  Shared by the interactive loop and the
  * /etc/autostart script runner (identical semantics for both). */
+/* ---------- v2.67 security audit --------------------------------------
+ * `audit` is the honest answer to "what could take this box away from me".
+ * It prints the live policy, the conclusions drawn from the code as it
+ * stands today, and the decision log kept by sec.c. */
+static void cmd_audit(char *arg) {
+    int limit = 0, clear = 0;
+    if (arg) {
+        char *p = arg;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            if (p[0] == '-' && p[1] == '-' && !strcmp_(p, "--clear")) { clear = 1; }
+            else if (p[0] == '-' && p[1] == 'n') {
+                p += 2;
+                while (*p == ' ') p++;
+                int v = 0;
+                while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+                limit = v;
+                continue;
+            }
+            while (*p && *p != ' ') p++;
+        }
+    }
+    if (clear) { sec_audit_clear(); vga_write("audit: ring cleared\n"); return; }
+
+    char brief[128];
+    pager_begin(1);
+    pager_line("CatOS security audit -- v2.67 (policy: trust nothing)");
+    pager_line("");
+    pager_line("[live policy]");
+    sec_policy_brief(brief, sizeof(brief));
+    pager_line(brief);
+    pager_line("Exec.Strict = world/group-writable binaries refused");
+    pager_line("");
+    pager_line("[1] foreground task taking the console");
+    pager_line("  Any builtin runs ring0 with interrupts on and never yields;");
+    pager_line("  the keyboard IRQ still buffers keys, but the shell cannot read");
+    pager_line("  them until the command returns.  Ctrl+C is honoured only by");
+    pager_line("  loops that poll it (yes, pager, sleep).  `hang` therefore freezes");
+    pager_line("  the console until Ctrl-Alt-Del -- by design, but it is exactly");
+    pager_line("  the shape a malicious CE program can take.  There is no");
+    pager_line("  watchdog and no per-task CPU quota yet: a busy ring3 task can");
+    pager_line("  still starve the scheduler.  Mitigation today: Ctrl-Alt-Del,");
+    pager_line("  and do not run untrusted .ce binaries.");
+    pager_line("");
+    pager_line("[2] virus surface");
+    pager_line("  - .ce executables are loaded from the FAT32 volume; anything that");
+    pager_line("    can write a file can plant one.  sec_exec_check refuses");
+    pager_line("    world/group-writable binaries (HKSEC\\Policy\\Exec\\Strict=1).");
+    pager_line("  - /etc/autoexec scripts run as root at boot: that IS persistence.");
+    pager_line("    Keep the directory root-owned 0755; chmod it and check ACLs.");
+    pager_line("  - `pkg install` unpacks unsigned packages; only install from a");
+    pager_line("    directory you control.");
+    pager_line("  - there is no NX/ASLR and no user/kernel isolation in ring0 code.");
+    pager_line("");
+    pager_line("[3] hijack surface");
+    pager_line("  - bare NAME lookup is cwd first, then $PATH.  A planted foo.ce in a");
+    pager_line("    writable cwd runs instead of the intended tool.  Set");
+    pager_line("    HKSEC\\Policy\\Exec\\Strict=1 and keep cwd clean; builtins always");
+    pager_line("    win over files, so core commands cannot be shadowed.");
+    pager_line("  - PATH itself is registry-backed (HKLM\\Environment\\PATH).  A user");
+    pager_line("    who can edit HKLM can point it at a writable directory; hive");
+    pager_line("    writes need root or CAP_USERADM.");
+    pager_line("  - redirects and pipes go through fs_perm_check with the session");
+    pager_line("    identity, so a non-root session cannot truncate /etc files.");
+    pager_line("");
+    pager_line("[4] capability model");
+    pager_line("  root passes everything; everyone else needs every bit of the");
+    pager_line("  command's requirement.  Override per command in");
+    pager_line("  HKSEC\\Policy\\Cmd\\<name>\\Caps (e.g. \"NET|KILL\", \"none\").  A");
+    pager_line("  malformed policy string fails CLOSED.");
+    pager_line("");
+    pager_line("[decision log]  (newest first; `audit -n 10`, `audit --clear`)");
+    sec_audit_dump(limit ? limit : 24);
+    pager_end();
+}
+
 static void shell_exec(char *cmd, char *arg) {
     /* v2.62: hide the prompt caret while a command owns the console.  The
      * reverse-video cursor parked on the input line used to overwrite the
@@ -5969,6 +6046,52 @@ static void shell_exec(char *cmd, char *arg) {
     /* v2.59: arm the ring0 builtin stdout tee for a plain file redirect.
      * Pipes and `&` keep their existing task ring/pipe wiring below. */
     redir_arm(out_redir, append, pipe_to);
+
+    /* ---- v2.67 efficiency + safety gate ------------------------------
+     * Two checks run BEFORE any builtin body:
+     *   1. cli_validate() -- the syntax contract (posix.c).  An invalid
+     *      option or a missing operand is reported as a usage error with
+     *      status 2, and "cat -z" can no longer be mistaken for a file
+     *      called "-z".
+     *   2. sec_allow() -- the capability gate (sec.c).  A command can
+     *      never forget its own permission check, and the requirement is
+     *      overridable per command in the registry.
+     * Root bypasses the capability check, never the syntax check. */
+    {
+        int v = cli_validate(cmd, (const char *)arg);
+        if (v == -200) {                       /* --help printed; skip body */
+            redir_flush();
+            con_unsuppress_cursor();
+            return;
+        }
+        if (v != 0) {
+            g_last_rc = v;
+            sec_audit(g_uid, "usage", cmd, v);
+            redir_flush();
+            con_unsuppress_cursor();
+            return;
+        }
+        int bad_policy = 0;
+        int al = sec_allow(cmd, g_uid, g_caps);
+        if (al != SEC_ALLOW) {
+            char need[64]; need[0] = 0;
+            sec_caps_str(sec_required(cmd, &bad_policy), need, sizeof(need));
+            vga_write(cmd); vga_write(": permission denied");
+            if (al == SEC_HOSTILE) {
+                vga_write(" (policy string for '"); vga_write(cmd);
+                vga_write("' is malformed -- failing closed)");
+            } else {
+                vga_write(" (need CAP_"); vga_write(need); vga_write(")");
+            }
+            vga_write("\n");
+            g_last_rc = 13;                    /* EACCES */
+            sec_audit(g_uid, "deny", cmd, 13);
+            redir_flush();
+            con_unsuppress_cursor();
+            return;
+        }
+        sec_audit(g_uid, "exec", cmd, 0);
+    }
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "keys") ||
                  !strcmp_(cmd, "shortcuts")) cmd_keys();
@@ -5992,7 +6115,11 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
         else if (!strcmp_(cmd, "theme"))      cmd_theme(arg);  /* v2.61 */
-        else if (!strcmp_(cmd, "reg"))        cmd_reg(arg);    /* v2.62 */
+        else if (!strcmp_(cmd, "hive") ||
+                 !strcmp_(cmd, "reg"))        cmd_reg(arg);    /* v2.67 */
+        else if (!strcmp_(cmd, "audit"))      cmd_audit(arg);  /* v2.67 */
+        else if (!strcmp_(cmd, "dash") ||
+                 !strcmp_(cmd, "sysmon"))     dash_run(g_uid, g_caps); /* v2.67 TUI */
         else if (!strcmp_(cmd, "useredit"))   cmd_useredit();
         else if (!strcmp_(cmd, "usb")) {
             if (!strcmp_(arg, "scan")) {
@@ -6085,10 +6212,10 @@ static void shell_exec(char *cmd, char *arg) {
                 argv[0] = scmd;
                 argc += split_words(sarg, argv + 1, 15);
                 if (run_from_path(scmd, argv, argc, 0, UID_ROOT) != 0) {
-                    vga_set_fg(VGA_LIGHT_RED);
+                    con_set_fg_rgb(pal_rgb(PAL_ERROR));
                     vga_write("catos: unknown command: ");
                     vga_write(scmd); vga_write("\n");
-                    vga_set_fg(VGA_LIGHT_GREY);
+                    con_set_fg_rgb(pal_rgb(PAL_FG));
                 }
             }
             }
@@ -6214,9 +6341,9 @@ static void shell_exec(char *cmd, char *arg) {
                         fs_resolve_file(p, &c, &s) != 0) p[0] = 0;
                 }
                 if (!p[0]) {
-                    vga_set_fg(VGA_LIGHT_RED);
+                    con_set_fg_rgb(pal_rgb(PAL_ERROR));
                     vga_write("catos: unknown command: "); vga_write(cmd); vga_write("\n");
-                    vga_set_fg(VGA_LIGHT_GREY);
+                    con_set_fg_rgb(pal_rgb(PAL_FG));
                 } else if (pipe_to && *pipe_to) {
                     char *file2 = pipe_to;
                     char *sp = pipe_to;
@@ -6239,20 +6366,20 @@ static void shell_exec(char *cmd, char *arg) {
                                       out_redir, append, -1, -1);
                 }
             } else if (run_from_path(cmd, argv, argc, bg, g_uid) != 0) {
-                vga_set_fg(VGA_LIGHT_RED);
+                con_set_fg_rgb(pal_rgb(PAL_ERROR));
                 vga_write("catos: unknown command: ");
                 vga_write(cmd); vga_write("\n");
-                vga_set_fg(VGA_LIGHT_GREY);
+                con_set_fg_rgb(pal_rgb(PAL_FG));
                 /* NIGHT-P3: friendly nearest-command suggestion (yellow hint) */
                 const char *sug = suggest_cmd(cmd);
                 if (sug) {
-                    vga_set_fg(VGA_YELLOW);
+                    con_set_fg_rgb(pal_rgb(PAL_WARNING));
                     vga_write("catos: did you mean: ");
-                    vga_set_fg(VGA_LIGHT_BLUE);
+                    con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH));
                     vga_write(sug);
-                    vga_set_fg(VGA_YELLOW);
+                    con_set_fg_rgb(pal_rgb(PAL_WARNING));
                     vga_write("?\n");
-                    vga_set_fg(VGA_WHITE);
+                    con_set_fg_rgb(pal_rgb(PAL_FG));
                     /* v2.47: arm the one-shot y-confirm for this guess. */
                     pend_arm(sug, arg);
                 }

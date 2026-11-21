@@ -17,6 +17,7 @@
 
 void     paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb);
 uint32_t paging_kdir(void);
+uint32_t paging_phys_top(void);   /* v2.67: end of the identity-mapped window */
 
 uint32_t frame_alloc(void);
 void     frame_stats(uint32_t *total, uint32_t *used);   /* 4 KiB frames */

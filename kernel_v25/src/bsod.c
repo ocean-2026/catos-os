@@ -15,7 +15,8 @@
 #include "intr.h"
 #include "cpu.h"
 #include "fs.h"
-#include "reg.h"       /* v2.62: panicmode from registry */
+#include "hive.h"
+#include "palette.h"       /* v2.62: panicmode from registry */
 #include "hw.h"
 #include "diag.h"
 #include "serial_log.h"
@@ -281,7 +282,9 @@ static void draw_cpus_page(const snap_t *s) {
 
 static void draw_summary(const snap_t *s, const char *msg, int soft,
                          int timed_out) {
-    vga_set_color(CON_WHITE, CON_BLUE);
+    /* v2.67: crash colours come from HKLM\System\Crash\Colors; the
+     * values are read once at boot (no FS access on the panic path). */
+    con_set_style_rgb(pal_rgb(PAL_BSOD_FG), pal_rgb(PAL_BSOD_BG), 0);
     vga_clear();
 
     /* P2-9 narrow screen: on a small/serial-only surface the wide layout
@@ -291,9 +294,9 @@ static void draw_summary(const snap_t *s, const char *msg, int soft,
 
     /* Title bar, inverse video so it stays legible without colour:
      * "!!! PANIC !!!" on a white/blue reversed row. */
-    vga_set_color(CON_BLUE, CON_WHITE);
+    con_set_style_rgb(pal_rgb(PAL_BSOD_BG), pal_rgb(PAL_BSOD_TITLE), 0);
     vga_write_at(2, 0, "!!! PANIC !!!  " BSOD_KERNEL_TAG);
-    vga_set_color(CON_WHITE, CON_BLUE);
+    con_set_style_rgb(pal_rgb(PAL_BSOD_FG), pal_rgb(PAL_BSOD_BG), 0);
 
     /* ASCII art smiley ":(" */
     vga_write_at(4, 1, "  ###    #");
@@ -628,7 +631,7 @@ void bsod_init(void) {
     if (!fs_fs_ready()) return;
     static char buf[80];
     /* v2.62: registry first, legacy file as fallback/migration source. */
-    const char *rv = reg_get("system", "panicmode");
+    const char *rv = hive_sz("HKLM\\System\\Crash\\Mode", "");
     if (rv && *rv) {
         int i = 0;
         while (*rv && i < (int)sizeof(buf) - 1) buf[i++] = *rv++;
@@ -637,7 +640,7 @@ void bsod_init(void) {
         int n = fs_read_text("/etc/panicmode", buf, (int)sizeof(buf) - 1);
         if (n <= 0) return;
         buf[n] = 0;
-        reg_set_now("system", "panicmode", buf);   /* migrate */
+        hive_set_sz("HKLM\\System\\Crash\\Mode", buf); hive_save(); /* migrate */
     }
     /* P2-9: values are `reboot`, `halt`, `wait`, or `reboot:<seconds>`
      * (e.g. `reboot:30s`).  Parsed once at boot; the crash path itself

@@ -8,7 +8,7 @@
 
 #include "lang.h"
 #include "fs.h"
-#include "reg.h"
+#include "hive.h"
 
 static int g_lang = LANG_EN;
 
@@ -84,7 +84,7 @@ void lang_init(void) {
     g_lang = LANG_EN;
     if (!fs_fs_ready()) return;
     /* v2.62: registry first. */
-    const char *v = reg_get("system", "lang");
+    const char *v = hive_sz("HKLM\\System\\Language", "");
     if (v && *v) { g_lang = lang_parse(v); return; }
     /* legacy fallback: adopt /etc/lang */
     char buf[16];
@@ -92,14 +92,14 @@ void lang_init(void) {
     if (n <= 0) return;
     buf[n] = 0;
     g_lang = lang_parse(buf);
-    reg_set_now("system", "lang", g_lang == LANG_ZH ? "zh" : "en");
+    hive_set_sz("HKLM\\System\\Language", g_lang == LANG_ZH ? "zh" : "en");
 }
 
 int lang_set(int l) {
     if (l != LANG_EN && l != LANG_ZH) return -1;
     g_lang = l;
     if (!fs_fs_ready()) return -2;
-    reg_set_now("system", "lang", l == LANG_ZH ? "zh" : "en");
+    hive_set_sz("HKLM\\System\\Language", l == LANG_ZH ? "zh" : "en");
     /* legacy mirror */
     const char *v = (l == LANG_ZH) ? "zh\n" : "en\n";
     if (fs_write_text("/etc/lang", v, 3) != 0) return -2;

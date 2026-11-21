@@ -1,89 +1,58 @@
 /*
- * tui.h -- CatOS Terminal User Interface primitives.
+ * tui.h -- CatOS Terminal User Interface toolkit (v2.67 rewrite).
  *
- * Cell-coordinate based widgets that work uniformly across all display
- * back-ends (text / Mode 13h / VBE32).  Uses con_write_utf8_at() when
- * the current back-end is text-mode oriented; falls back to gfx24_*
- * pixel drawing when in VBE24 graphics mode.
- *
- * Box-drawing glyphs: ┌ ┐ └ ┘ ├ ┤ ─ │ ┌─┐│└─┘
- * In pure-text back-ends these arrive as 3-byte UTF-8 sequences each;
- * VGA plane-2 font slots handle them the same way they handle CJK
- * glyphs (right-half glyph appended at cp & ~0x0F).
+ * Lessons borrowed from ratatui / bubbletea / btop:
+ *   - widgets draw into the terminal CELL GRID, never straight into
+ *     pixels, so the front-end dirty tracker stays authoritative (no
+ *     ghosts, no full-screen flash);
+ *   - only single-cell ASCII glyphs are used, so a widget cannot depend on
+ *     the dynamic CJK font-slot table;
+ *   - colour comes from the registry palette (palette.c), so a theme change
+ *     restyles every TUI screen without touching widget code.
  */
 #ifndef CATOS_TUI_H
 #define CATOS_TUI_H
 
 #include <stdint.h>
 
-/* ---- colour palette --------------------------------------------------- */
-#define TUI_CLR_BLACK   0x000000u
-#define TUI_CLR_WHITE   0xFFFFFFu
-#define TUI_CLR_RED     0xCC0000u
-#define TUI_CLR_GREEN   0x00AA00u
-#define TUI_CLR_BLUE    0x0066CCu
-#define TUI_CLR_YELLOW  0xFFCC00u
-#define TUI_CLR_CYAN    0x00CCCCu
-#define TUI_CLR_MAGENTA 0xAA00AAu
-#define TUI_CLR_GRAY    0xAAAAAAlu
-#define TUI_CLR_DGRAY   0x555555ul
-#define TUI_CLR_BG      0x1A1A2Eul  /* dark navy panel background */
-#define TUI_CLR_FG      0xE0E0E0ul  /* off-white text */
-#define TUI_CLR_ACCENT  0x4FC3F7ul  /* light cyan accent */
+/* Empty colour role = "take it from the palette". */
+#define TUI_C_AUTO   0u
 
-/* ---- box / frame characters ------------------------------------------- */
-#define TUI_UL "┌"   /* top-left  corner */
-#define TUI_UR "┐"   /* top-right corner */
-#define TUI_BL "└"   /* bottom-left corner */
-#define TUI_BR "┘"   /* bottom-right corner */
-#define TUI_H  "─"   /* horizontal edge  */
-#define TUI_V  "│"   /* vertical   edge  */
-#define TUI_TL "┬"   /* T-junction up    */
-#define TUI_TB "┴"   /* T-junction down  */
-#define TUI_LT "├"   /* T-junction left  */
-#define TUI_RT "┤"   /* T-junction right */
-#define TUI_CR "╋"   /* cross            */
-
-/* ---- widget types ----------------------------------------------------- */
-enum {
-    TUI_BOX,          /* bordered rectangle                          */
-    TUI_PANEL,        /* bordered + filled background                */
-    TUI_PROGRESS,     /* horizontal progress bar                     */
-    TUI_BUTTON,       /* interactive button (label-only, no event)   */
-    TUI_CHECKBOX,     /* checkbox label [x] / [ ]                    */
-    TUI_LABEL,        /* plain label                                 */
-    TUI_SEPARATOR,    /* thin separator line                         */
-};
-
-/* ---- public API ------------------------------------------------------- */
-/* Draw a rectangular border at (gx,gy)..(gx+w-1,gy+h-1).
- * title: non-empty string → header row inside the top border.           */
-void tui_box(int gx, int gy, int w, int h, uint32_t fg_rgb,
-             const char *title);
-
-/* Same as tui_box but fills the interior with bg_rgb.                 */
-void tui_panel(int gx, int gy, int w, int h,
-               uint32_t fg_rgb, uint32_t bg_rgb,
+/* ---- primitives -------------------------------------------------------- */
+void tui_fill(int gx, int gy, int w, int h, uint32_t bg_rgb);
+void tui_box(int gx, int gy, int w, int h, uint32_t fg_rgb, const char *title);
+void tui_panel(int gx, int gy, int w, int h, uint32_t fg_rgb, uint32_t bg_rgb,
                const char *title);
-
-/* Horizontal progress bar from pct (0..100). Label drawn above if len>0.*/
-void tui_progress(int gx, int gy, int w, int pct,
-                  uint32_t fg_rgb, uint32_t bg_rgb,
-                  const char *label);
-
-/* Simple button: framed label, visually inactive until handled elsewhere*/
-void tui_button(int gx, int gy, int w, int h,
-                uint32_t fg_rgb, const char *text);
-
-/* Checkbox: "[ ] label" or "[x] label", aligned at gx/gy             */
-void tui_checkbox(int gx, int gy, int checked,
-                  uint32_t fg_rgb, const char *label);
-
-/* Plain text label at cell position                                */
-void tui_label(int gx, int gy, uint32_t fg_rgb,
-               const char *text);
-
-/* Thin separator line across cols (y fixed), colour fg_rgb            */
+void tui_label(int gx, int gy, uint32_t fg_rgb, const char *text);
+void tui_label_bg(int gx, int gy, uint32_t fg_rgb, uint32_t bg_rgb, const char *text);
 void tui_hline_sep(int gx, int gy, int w, uint32_t fg_rgb);
+
+/* ---- widgets ---------------------------------------------------------- */
+/* Ratio bar + percentage: the btop/gitui "gauge". */
+void tui_gauge(int gx, int gy, int w, int pct, uint32_t fg_rgb,
+               uint32_t bg_rgb, const char *label);
+
+/* key/value row, value right-aligned inside `w`. */
+void tui_kv(int gx, int gy, int w, uint32_t kfg, uint32_t vfg,
+            const char *key, const char *val);
+
+/* tab strip; the selected tab is inverted. */
+void tui_tabs(int gx, int gy, int w, const char *const *names, int count,
+              int selected, uint32_t accent, uint32_t dim);
+
+/* section header: " title " with a rule to the right. */
+void tui_section(int gx, int gy, int w, uint32_t fg, const char *title);
+
+/* footer key hints. */
+void tui_hintbar(int gy, int w, uint32_t fg, uint32_t bg, const char *hints);
+
+/* table row: fixed column widths, last column takes the remainder.
+ * vals[] may contain NULL for an empty cell. */
+void tui_row(int gx, int gy, int w, const int *colw, int ncol,
+             uint32_t fg, uint32_t bg, const char *const *vals, int header);
+
+/* horizontal sparkline built from 0..100 samples. */
+void tui_spark(int gx, int gy, int w, const uint8_t *v, int n,
+               uint32_t fg, uint32_t bg);
 
 #endif /* CATOS_TUI_H */

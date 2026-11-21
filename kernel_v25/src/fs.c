@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "palette.h"
 #include "fat.h"
 #include "part.h"
 #include "vga.h"
@@ -475,13 +476,13 @@ static int ls_fmt_size(uint32_t size, char *out) {
     return i;
 }
 static void ls_print_raw_detail(const struct ls_ent *e) {
-    vga_set_fg(VGA_LIGHT_RED);
+    con_set_fg_rgb(pal_rgb(PAL_ERROR));
     vga_write("  c="); print_int((int)e->cluster);
     vga_write(" o="); print_int(e->slot * 32);
     vga_write(" first=0x"); ls_hexbyte(e->first);
     vga_write(" raw=");
     for (int k = 0; k < 11; k++) { ls_hexbyte(e->raw[k]); vga_putc(' '); }
-    vga_set_fg(VGA_WHITE);
+    con_set_fg_rgb(pal_rgb(PAL_FG));
 }
 
 static void ls_print_one(const struct ls_ent *e, const char *parent,
@@ -503,9 +504,9 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
         if (ismount) for (const char *p = suf; *p; p++) line[n++] = *p;
         if (isdir && !ismount) line[n++] = '/';
         line[n] = 0;
-        vga_set_fg(isdir ? VGA_LIGHT_CYAN : VGA_LIGHT_GREY);
+        con_set_fg_rgb(pal_rgb(isdir ? PAL_PROMPT_PATH : PAL_FG));
         pager_line(line);
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         return;
     }
     if (isdir) {
@@ -519,9 +520,9 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
          * rest fed to pager_line() -- two geometry paths that desynchronise
          * once the pager owns the output (and it skipped row accounting for
          * the prefix).  Emit the whole line through the pager instead. */
-        vga_set_fg(VGA_LIGHT_CYAN);
+        con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH));
         pager_line(line);
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         if (raw && e->insane) ls_print_raw_detail(e);
     } else {
         n = 0;
@@ -536,9 +537,9 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
          * previous split printed the file name twice ("[FILE] a.ce a.ce
          * ( 100 bytes)") because the tail handed to pager_line() still
          * contained the name. */
-        vga_set_fg(VGA_LIGHT_GREY);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         pager_line(line);
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         if (raw && e->insane) ls_print_raw_detail(e);
     }
 }
@@ -593,7 +594,7 @@ void fs_list(const char *path) {
         ls_print_one(&ls_buf[i], abs, longfmt, raw);
     }
     if (!pager_quit()) {
-        vga_set_fg(VGA_WHITE);
+        con_set_fg_rgb(pal_rgb(PAL_FG));
         vga_write("--- ");
         print_int(ls_n);
         vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");

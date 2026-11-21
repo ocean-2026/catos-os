@@ -312,6 +312,41 @@ static void redraw_all(void) {
     sync_cursor(1);
 }
 
+/* v2.67 anti-flicker: repaint the grid WITHOUT be->clear().
+ * redraw_all() blanks the whole screen first, so every CJK write and every
+ * scroll that the backend could not pan showed a full white/black flash.
+ * Every painted cell covers its own background rectangle, so drawing all
+ * cells over the previous frame is flicker-free (and in text mode it is a
+ * plain VRAM overwrite). */
+static void repaint_all(void) {
+    if (be->mode == CON_MODE_TEXT) hz_rebuild_map();
+    clear_bg = s_bg_rgb;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) painted_valid[y][x] = 0;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) {
+            if (cells[y][x].flags == CELL_F_WIDE_R) continue;
+            paint(x, y);
+        }
+    sync_cursor(1);
+}
+
+/* Text mode rebuilds its 128 dynamic font slots whenever the set of visible
+ * hanzi changes.  Only the wide cells can differ, so repaint just those:
+ * a full-screen redraw for every typed Chinese character was the single
+ * biggest source of "the screen blinks on every refresh". */
+static void repaint_wide_only(void) {
+    hz_rebuild_map();
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++) {
+            if (cells[y][x].flags != CELL_F_WIDE_L) continue;
+            painted_valid[y][x] = 0;
+            if (x + 1 < cols) painted_valid[y][x + 1] = 0;
+            paint(x, y);
+        }
+    sync_cursor(1);
+}
+
 /* Repaint only cells whose appearance changes with the blink phase. */
 static void blink_apply(void) {
     if (!be || !be->sw_blink) return;
@@ -343,7 +378,7 @@ void con_tick(void) {
 }
 
 static void render_flush(void) {
-    if (pending_wide) { pending_wide = 0; redraw_all(); }
+    if (pending_wide) { pending_wide = 0; repaint_wide_only(); }
     else if (blink_pending && !render_busy) {
         blink_pending = 0; blink_apply();
     }
@@ -383,8 +418,10 @@ static void scroll_one(void) {
         sync_cursor(1);
     } else {
         /* Full re-render from the grid: write-only, never reads VRAM
-         * (text mode also rebuilds its dynamic font-slot map here). */
-        redraw_all();
+         * (text mode also rebuilds its dynamic font-slot map here).
+         * v2.67: no be->clear() here -- that blank frame was the visible
+         * "scroll flash".  repaint_all() overwrites cell by cell. */
+        repaint_all();
     }
 }
 

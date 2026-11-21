@@ -107,6 +107,11 @@ void frame_free(uint32_t pa) {
 
 /* ---- kernel paging init ------------------------------------------------ */
 
+/* v2.67: highest physical address the kernel identity-maps.  Callers that
+ * dereference firmware-provided pointers (ACPI tables, SMBIOS) MUST bound
+ * them with this before reading, or a bogus pointer becomes a #PF. */
+uint32_t paging_phys_top(void) { return mem_top; }
+
 void paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb) {
     (void)mem_lower_kb;
     /* KB -> bytes in 64-bit math: near 4 GiB, mem_upper_kb << 10 would

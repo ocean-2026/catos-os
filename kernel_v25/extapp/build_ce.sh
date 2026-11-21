@@ -75,6 +75,15 @@ CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check \
 "$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$CEBASE/ce_app.c" \
     -o "$CEBASE/build/ce_app.o"
 
+# v2.67 build fix: modern GCC emits a .comment section.  With ce.ld that
+# section lands BELOW the 0x2000000 image base ("ld: .comment: section
+# below image base"), which pushes ce_main off file offset 0 and trips the
+# entry-point check below.  Strip it from every object before linking.
+for o in "$NAME" ce_stub ce_app; do
+    "$OBJCOPY" --remove-section=.comment --remove-section=.note.GNU-stack \
+        "$CEBASE/build/$o.o" 2>/dev/null || true
+done
+
 # ce_main must be at offset 0: force it via the linker script.
 # (MinGW mangles C symbols with a leading underscore: _ce_main; GNU ld on
 # Linux does not: ce_main)
