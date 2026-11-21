@@ -439,6 +439,17 @@ int es1371_info(int what) {
     case ES1371_INFO_VENDOR:   return (int)es_vendor;
     case ES1371_INFO_DEVICE:   return (int)es_device;
     case ES1371_INFO_STATUS:   return es_probed ? (int)rr(R_STATUS) : 0;
+    case ES1371_INFO_CONTROL:  return es_probed ? (int)rr(R_CONTROL) : 0;
+    case ES1371_INFO_SERIAL:   return es_probed ? (int)rr(R_SERIAL_CONTROL) : 0;
+    case ES1371_INFO_SERR:     return es_probed ? (int)rr(0x20) : 0;
+    case ES1371_INFO_SCOUNT: {
+        if (!es_probed) return 0;
+        uint32_t saved = rr(R_MEMPAGE);
+        set_dac1_page();
+        uint32_t v = rr(R_DAC1_SCOUNT);
+        wr(R_MEMPAGE, saved & 0xFu);
+        return (int)v;
+    }
     case ES1371_INFO_FRAMECNT: {
         if (!es_probed) return 0;
         /* Save/restore MEMPAGE so this diagnostic has no lasting side

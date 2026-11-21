@@ -289,6 +289,7 @@ static void cmd_help(void) {
     help_row("echo TEXT",   "print text back (-n no newline, -c COLOR)");
     help_row("cls",         "clear the screen (alias of clear)");
     help_row("about",       "system info banner");
+    help_row("sndregs",     "raw ES1370/ES1371 register readback");
     help_row("autostart",   "re-run /etc/autostart scripts");
     help_row("uname",       "print OS name");
     help_row("date",        "show RTC date/time");
@@ -916,6 +917,57 @@ static void cmd_about(void) {
                   "  文件系统     : IDE 上的 FAT32（持久化）\n"));
     vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n",
                   "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
+}
+
+
+/* v2.72: `sndregs` -- raw ES1370/ES1371 readback.  The VMware box is silent
+ * and QEMU has no ES1371 model, so this command exists to get real numbers
+ * back from the machine that actually misbehaves:
+ *   - if FRAMECNT never moves while a tone plays, the DMA channel was never
+ *     armed (register map / sample-rate programming bug);
+ *   - if FRAMECNT moves but there is no sound, the AK4531 codec is still
+ *     muted (the codec is write-only, so it cannot be read back).
+ * Deliberately prints raw words: interpreting them is a separate step. */
+static void cmd_sndregs(void) {
+    vga_write("snd: ensoniq id=");
+    print_hex(0x1274u);
+    vga_write(" dev=");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_DEVICE));
+    vga_write(" io=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_IOBASE) & 0xFFFFu);
+    vga_write(" irq=");
+    print_int(es1371_info(ES1371_INFO_IRQ));
+    vga_write(" ready=");
+    print_int(es1371_info(ES1371_INFO_READY));
+    vga_write("\n  CONTROL=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_CONTROL) & 0xFFFFu);
+    vga_write("  STATUS=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_STATUS) & 0xFFFFu);
+    vga_write("  SERIAL=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_SERIAL) & 0xFFFFu);
+    vga_write("\n  SCOUNT=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_SCOUNT));
+    vga_write("  FRAMECNT=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_FRAMECNT));
+    vga_write("  PORT20=0x");
+    print_hex((uint32_t)es1371_info(ES1371_INFO_SERR) & 0xFFFFu);
+    vga_write("\n  rate=");
+    print_int(es1371_info(ES1371_INFO_RATE));
+    vga_write(" bufsz=");
+    print_int(es1371_info(ES1371_INFO_BUFSZ));
+    vga_write("\n");
+    if ((uint32_t)es1371_info(ES1371_INFO_DEVICE) == 0x1371u) {
+        vga_write("  note: ES1371 (VMware).  This driver programs it with the\n"
+                  "        ES1370 register layout and never configures the\n"
+                  "        AK4531 codec (its codec interface is write-only and\n"
+                  "        unverified), so silence here is expected until that\n"
+                  "        is rewritten against these readings.\n");
+        g_last_rc = 3;   /* distinct status: 'device known, path unverified' */
+    } else {
+        vga_write("  note: ES1370 (QEMU).  Codec unmute is unnecessary on\n"
+                  "        this model; silence means arm_dma() failed.\n");
+        g_last_rc = 0;
+    }
 }
 
 static void cmd_uname(void) {
@@ -6413,6 +6465,26 @@ void shell_run(void) {
             vga_write(g_fallback_note);
             vga_write("\n");
         }
+        /* v2.72: the boot banner script starts with `clear`, so the
+         * "[display] boot mode: ..." line printed before autostart is gone
+         * by the time the user sees a prompt.  Re-state the geometry once
+         * here -- this is the line to quote when a host window and the
+         * framebuffer disagree. */
+        {
+            char g[80];
+            int w = con_info(CON_INFO_PIXEL_W), h = con_info(CON_INFO_PIXEL_H);
+            int c = con_info(CON_INFO_COLS), r = con_info(CON_INFO_ROWS);
+            int cw = con_info(CON_INFO_CELL_W), chh = con_info(CON_INFO_CELL_H);
+            g[0] = 0;
+            strcat_b(g, (int)sizeof(g), "[display] frame ");
+            geom_num(g, (int)sizeof(g), w);   strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), h);   strcat_b(g, (int)sizeof(g), ", ");
+            geom_num(g, (int)sizeof(g), c);   strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), r);   strcat_b(g, (int)sizeof(g), " cells @");
+            geom_num(g, (int)sizeof(g), cw);  strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), chh); strcat_b(g, (int)sizeof(g), ")\n");
+            vga_write(g);
+        }
     }
 
     kb_set_completer(sh_complete);        /* v2.28: TAB completion */
@@ -6848,6 +6920,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
+        else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
         else if (!strcmp_(cmd, "sndtest"))     cmd_sndtest(arg);
         else if (!strcmp_(cmd, "netcfg"))       cmd_netcfg(arg);
         else if (!strcmp_(cmd, "uptime")) {
@@ -7005,7 +7078,7 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
     "echo \"      |  \\_/ / ____ \\| |           \"\n"
     "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                                CatOS v259                          \"\n"
+    "echo \"                             CatOS v2.72                            \"\n"
     "echo \"\"\n";
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see

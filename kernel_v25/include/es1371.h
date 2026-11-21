@@ -52,6 +52,12 @@
 #define ES1371_INFO_DEVICE    9  /* PCI device id (0x5000 / 0x1371)        */
 #define ES1371_INFO_FRAMECNT 10  /* raw DAC1_FRAMECNT readback             */
 #define ES1371_INFO_STATUS   11  /* raw STATUS readback                    */
+/* v2.72 diagnostics: the raw values VMware support needs to tell a
+ * register-map bug apart from a muted AK4531 codec. */
+#define ES1371_INFO_CONTROL  12  /* raw CONTROL readback                   */
+#define ES1371_INFO_SERIAL   13  /* raw SERIAL_CONTROL readback            */
+#define ES1371_INFO_SCOUNT   14  /* raw DAC1_SCOUNT (paged) readback       */
+#define ES1371_INFO_SERR     15  /* raw 0x20 SERR/status readback          */
 
 /* ---- hardware geometry ---- */
 #define ES1371_DMA_PHYS      0x550000u  /* 64 KiB aligned, identity-mapped  */
