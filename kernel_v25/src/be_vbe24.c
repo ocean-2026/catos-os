@@ -373,7 +373,6 @@ static int v24_enter_bochs(void) {
             return -3;
         }
         active = 1;
-        gfx24_clear(0x0C0C0C);
         return 0;
     }
     return -1;
@@ -392,8 +391,10 @@ static int v24_enter_svga(void) {
     g_r = s.off_r; g_g = s.off_g; g_b = s.off_b; g_x = s.off_x;
     svga_backend = 1;
     active = 1;
-    gfx24_clear(0x0C0C0C);
-    svga_flush();
+    /* v2.72: no clear here -- render.c's switch_backend() calls
+     * be->clear(clear_bg) + a full repaint immediately after enter(), and
+     * doing it twice is a visible full-screen flash on the SVGA path
+     * (the host re-blits the whole surface at 25 Hz). */
     return 0;
 }
 
@@ -555,7 +556,12 @@ static int v24_set_scale(int s) {
     be_vbe24.rows = (uint16_t)(GFX24_H / v24_ch());
     be_vbe24.cell_w = (uint16_t)v24_cw();
     be_vbe24.cell_h = (uint16_t)v24_ch();
-    gfx24_clear(0x0C0C0C);      /* v2.37: wipe old-scale demo pixels full-frame */
+    /* v2.72: no gfx24_clear() here.  At boot `size_restore()` runs right
+     * after the mode switch, which already cleared the frame once; a third
+     * full-frame write to a VMware SVGA surface that the host re-blits at
+     * 25 Hz is one of the visible "flashes" during the first seconds.
+     * The caller (render.c) owns the frame: it repaints every cell at the
+     * new scale anyway, and every cell writes its own background. */
     return 0;
 }
 static void v24_set_palette(uint8_t idx, uint32_t rgb) {

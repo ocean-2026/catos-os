@@ -251,6 +251,11 @@ int pal_apply_scheme(const char *name, int with_crash) {
      * this the palette went back to the previous scheme on every reboot
      * while `hive chk` still reported the change as dirty. */
     hive_save();
+    /* v2.72: repaint the whole frame with the NEW background.  Without this
+     * only the cells that later got written carried the new colour and the
+     * untouched area kept the old one -- the "font background is not the
+     * background" and "leftover rectangle" complaints on VMware. */
+    con_repaint_frame();
     return 0;
 }
 

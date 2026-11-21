@@ -887,16 +887,16 @@ static void cmd_about(void) {
     vga_clear();
     con_set_fg_rgb(pal_rgb(PAL_ACCENT));
     vga_write(trs(
-        "###   ###  #####  ###   ####\n"
+        " ###   ###  #####  ###   ####\n"
         "#   # #   #   #   #   # #\n"
         "#     #####   #   #   #  ###\n"
         "#   # #   #   #   #   #     #\n"
-        "###  #   #   #    ###  ####\n",
-        "###   ###  #####  ###   ####\n"
+        " ###  #   #   #    ###  ####\n",
+        " ###   ###  #####  ###   ####\n"
         "#   # #   #   #   #   # #\n"
         "#     #####   #   #   #  ###\n"
         "#   # #   #   #   #   #     #\n"
-        "###  #   #   #    ###  ####\n"));
+        " ###  #   #   #    ###  ####\n"));
     con_set_fg_rgb(pal_rgb(PAL_FG));
     vga_write(trs("  A tiny Unix-like OS on GRUB Multiboot\n",
                   "  基于 GRUB Multiboot 的微型类 Unix 操作系统\n"));
@@ -5679,6 +5679,20 @@ static void size_restore(void) {
  * stay visible on the text console, not scroll away under the banner. */
 static char g_fallback_note[128];
 
+
+/* v2.72: minimal "append a decimal int" for the boot geometry line.  print_int
+ * writes straight to the console, so it cannot be used to build a buffer. */
+static void geom_num(char *dst, int max, int v) {
+    char t[12]; int i = 0;
+    if (v < 0) { strcat_b(dst, max, "-"); v = -v; }
+    if (!v) t[i++] = '0';
+    while (v > 0 && i < 11) { t[i++] = (char)('0' + v % 10); v /= 10; }
+    char r[12]; int j = 0;
+    while (i > 0) r[j++] = t[--i];
+    r[j] = 0;
+    strcat_b(dst, max, r);
+}
+
 static int videomode_parse(void) {
     char buf[32];
     /* v2.62: registry first, legacy file as fallback/migration source. */
@@ -5728,6 +5742,24 @@ static void boot_apply_videomode(void) {
         if (want == CON_MODE_VBE24) size_restore();
         vga_write("[display] boot mode: ");
         vga_write(con_mode_name(want));
+        /* v2.72: state the geometry we really got, so a host/window that
+         * disagrees with the surface is diagnosable from the boot log
+         * instead of from a screenshot.  `vdiag` repeats it on demand. */
+        {
+            char g[64];
+            int w = con_info(CON_INFO_PIXEL_W), h = con_info(CON_INFO_PIXEL_H);
+            int c = con_info(CON_INFO_COLS), r = con_info(CON_INFO_ROWS);
+            int cw = con_info(CON_INFO_CELL_W), chh = con_info(CON_INFO_CELL_H);
+            g[0] = 0;
+            strcat_b(g, (int)sizeof(g), " (");
+            geom_num(g, (int)sizeof(g), w);   strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), h);   strcat_b(g, (int)sizeof(g), ", ");
+            geom_num(g, (int)sizeof(g), c);   strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), r);   strcat_b(g, (int)sizeof(g), " cells @");
+            geom_num(g, (int)sizeof(g), cw);  strcat_b(g, (int)sizeof(g), "x");
+            geom_num(g, (int)sizeof(g), chh); strcat_b(g, (int)sizeof(g), ")");
+            vga_write(g);
+        }
         vga_write("\n");
         return;
     }
@@ -6340,16 +6372,18 @@ void shell_run(void) {
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */
     btime_mark("S3 env_init");
-    boot_apply_videomode();   /* v2.56: boot display mode via reg, default gfx24 */
-    /* v2.67: the persisted theme name is applied to the ROLE table; the
-     * palette was already loaded from the hive, so this only needs to
-     * put the console's live style back in sync after the video mode. */
+    /* v2.72 boot order fix: the theme must be resolved BEFORE the frame is
+     * painted.  Applying it afterwards left the backdrop in the OLD
+     * background colour while the cells used the new one -- on screen that
+     * is a lighter/darker rectangle around the text (the "font boxes" and
+     * the leftover region the user reported on VMware). */
     {
         const char *th = pal_scheme_name();
         if (th && *th && th[0] != 'c')      /* "custom" keeps the stored roles */
             pal_apply_scheme(th, 0);
         con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     }
+    boot_apply_videomode();   /* v2.56: boot display mode via reg, default gfx24 */
     bsod_init();              /* v2.59: cache panic action config */
     ce_init();
     btime_mark("S4 ce_init");
@@ -6974,10 +7008,9 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"                                CatOS v259                          \"\n"
     "echo \"\"\n";
 
-/* v2.72: sshd autostart seed -- a daemon line ("@" prefix) spawns the
- * ring0 sshd at boot; it waits for the NIC and then serves :22.  Seeded
- * only on volumes that don't have it yet (fs_write_raw skips existing). */
-static const char *const AUTOSTART_SSHD = "@sshd\n";
+/* v2.72 final: the sshd boot seed was removed on purpose (see
+ * boot_autostart()); keeping the constant would invite someone to re-seed
+ * it by accident. */
 
 static void boot_autostart(void) {
     if (!fs_fs_ready()) return;
@@ -6985,8 +7018,10 @@ static void boot_autostart(void) {
     fs_mkdir(AUTOSTART_DIR);
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
-    fs_write_raw(AUTOSTART_DIR "/sshd.sh", AUTOSTART_SSHD,
-                 (uint32_t)slen_(AUTOSTART_SSHD));
+    /* v2.72 final: sshd is NOT started at boot any more.  The seed below
+     * is deliberately gone -- an always-on :22 listener on a hobby OS with
+     * an unsigned package path is a liability, not a feature.  `sshd` (or
+     * `sshd -d`) still starts it by hand when a session needs it. */
 
     char names[8][FS_NAME_MAX];
     int n = fs_enum_files(AUTOSTART_DIR, names, 8);
@@ -7035,19 +7070,11 @@ static void boot_autostart(void) {
                 while (*larg == ' ' || *larg == '\t') larg++;
             }
             if (as_daemon) {
-                /* v2.72: builtin daemons (no .ce on disk) -- only sshd
-                 * today; runs as a detached ring0 thread instead. */
-                if (!strcmp_(lcmd, "sshd")) {
-                    int dtid = task_spawn_r0(sshd_daemon_main, "sshd", 1);
-                    if (dtid > 0)
-                        vga_write("autostart: sshd daemon spawned\n");
-                    else {
-                        vga_write("autostart: sshd spawn FAILED rc=");
-                        print_int(dtid);
-                        vga_write("\n");
-                    }
-                    continue;
-                }
+                /* v2.72 final: the builtin-daemon branch is gone.  It existed
+                 * only to boot-start sshd, and that is exactly what the user
+                 * asked to remove (an unattended network listener).  An
+                 * explicit `@sshd` line now falls through to the .ce lookup
+                 * below, which cannot load a builtin and says so. */
                 char *dargv[16];
                 int dargc = 1;
                 dargv[0] = lcmd;

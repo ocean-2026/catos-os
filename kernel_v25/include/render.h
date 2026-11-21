@@ -182,6 +182,8 @@ const char *con_mode_name(int mode);
  *      even a shell-typed `text` command must confirm.
  */
 int         con_request_mode(int mode, int origin);
+/* v2.72: full-frame repaint with the live palette background, text kept. */
+void        con_repaint_frame(void);
 int         con_force_text(void);   /* kernel-only emergency, no syscall */
 void        con_diag(void);
 

@@ -678,6 +678,19 @@ void render_init(void) {
     con_apply_theme(1);
 }
 
+/* v2.72: repaint the WHOLE frame with the current palette background without
+ * losing the text.  con_clear() blanks the cells too, so pal_apply_scheme()
+ * could not use it; the result was a frame painted with the OLD background
+ * (#0C0C0C) and cells painted with the NEW one -- the visible "font boxes /
+ * leftover rectangle" complaint.  One be->clear() plus a full cell repaint
+ * keeps the text and makes the backdrop and the cells the same colour. */
+void con_repaint_frame(void) {
+    if (!be) return;
+    clear_bg = s_bg_rgb;
+    be->clear(clear_bg);
+    repaint_all();
+}
+
 void con_clear(void) {
     for (int y = 0; y < CON_MAX_ROWS; y++)
         for (int x = 0; x < CON_MAX_COLS; x++) cell_blank(&cells[y][x]);
