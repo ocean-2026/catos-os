@@ -15,6 +15,7 @@
 #include "../include/tls.h"
 #include "../include/tls_aes.h"
 #include "../include/crypto.h"
+#include "../include/kstring.h"
 #include "third_party/uecc/uECC.h"
 
 /* ---- transport hooks provided by netstack.c ---- */

@@ -38,6 +38,7 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 /* freestanding kernel build: memcpy resolved at link (implicit decl),
  * no libc <string.h> available. */
 #include "aes.h"
+#include "../../../include/kstring.h"
 
 /*****************************************************************************/
 /* Defines:                                                                  */

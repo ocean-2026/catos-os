@@ -9,6 +9,7 @@
 #include "net.h"
 #include "task.h"
 #include "../include/tls.h"
+#include "../include/kstring.h"
 extern volatile uint32_t timer_ticks;
 
 /* ---- configuration (defaults: QEMU user-net) ----
@@ -1431,8 +1432,13 @@ int net_http_download_stream(const char *url, long range_from,
 
     for (int hop = 0; hop <= 4; hop++) {
         uint8_t peer[4]; uint16_t port; const char *path; char host[128];
-        int r = http_parse_url(cur, peer, &port, &path, host, sizeof(host));
+        int is_https = 0;
+        int r = http_parse_url(cur, peer, &port, &path, host, sizeof(host),
+                               &is_https);
         if (r != 0) return r;
+        /* Streamed HTTPS is not implemented: the TLS client returns a
+         * body it has already buffered (see tls_https_get / -7). */
+        if (is_https) return -7;
 
         tcp.active = 0; tcp.rcv_buf_len = 0;
         for (int i = 0; i < 4; i++) tcp.peer_ip[i] = peer[i];

@@ -1,4 +1,5 @@
 /* stubs.c - minimal runtime stubs for freestanding i386 builds */
+#include "../include/kstring.h"
 /* These replace compiler-inserted runtime calls that we don't need. */
 
 /* Stack check stub: GCC may insert __chkstk_ms for large stack frames.

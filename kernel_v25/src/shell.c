@@ -3044,9 +3044,9 @@ static void net_why_down(void) {
 static void cmd_curl(const char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
-        vga_write(trs("usage: curl [http://]HOST[:port][/path]\n", "用法：curl [http://]HOST[:port][/路径]\n"));
-        vga_write(trs("  the scheme is optional; only plain http is supported\n", "  协议头可省略；仅支持明文 http\n"));
-        vga_write("e.g.   curl example.com/      curl 10.0.2.2:8080/API.txt\n");
+        vga_write(trs("usage: curl [http://|https://]HOST[:port][/path]\n", "用法：curl [http://|https://]HOST[:port][/路径]\n"));
+        vga_write(trs("  the scheme is optional; http and https (TLS 1.2) are supported\n", "  协议头可省略；支持 http 与 https（TLS 1.2）\n"));
+        vga_write("e.g.   curl example.com/      curl https://10.0.2.2:8443/   curl 10.0.2.2:8080/API.txt\n");
         return;
     }
     if (!net_up()) { vga_write(trs("curl: network not ready", "curl: 网络未就绪")); net_why_down(); return; }
@@ -3068,7 +3068,7 @@ static void cmd_curl(const char *arg) {
             vga_write(lo);
             vga_write("\n");
             if (n == -7)
-                vga_write(trs("curl: that hop is https -- TLS is not implemented, use an http-only host\n", "curl: 该跳转是 https —— 未实现 TLS，请改用仅 http 的站点\n"));
+                vga_write(trs("curl: redirected to https -- cross-scheme https redirects are not supported yet; request that https URL directly\n", "curl: 该跳转指向 https —— 暂不支持跨协议跳转到 https，请直接请求该 https 地址\n"));
         }
         return;
     }

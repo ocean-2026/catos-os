@@ -60,8 +60,14 @@ ART = os.path.join(REPO, "artifacts", "d10-stream")
 # host-side package preparation
 # ---------------------------------------------------------------------------
 def ce_image():
-    """The well-formed acceptance .ce (48 KiB blob baked into the image)."""
+    """The well-formed acceptance .ce (46 KiB blob baked into the image)."""
     ce_in = os.path.join(REPO, "kernel_v25", "extapp", "bin", "d10big.ce")
+    if not os.path.exists(ce_in):
+        # .ce images are build artifacts (gitignored); build the fixture
+        # on demand so a fresh clone can run the probe.
+        subprocess.run(["sh", "build_ce.sh", "d10big.c"],
+                       cwd=os.path.join(REPO, "kernel_v25", "extapp"),
+                       check=True)
     raw = open(ce_in, "rb").read()
     if raw[:4] != b"CE01":
         raise RuntimeError("d10big.ce missing CE01 magic (build extapp first)")
