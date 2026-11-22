@@ -24,6 +24,7 @@ usage:
 import http.server
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -37,8 +38,8 @@ from qemu_driver import (find_qemu, kill_qemu, screen_text, sendkey,  # noqa: E4
                          type_text, wait_for_prompt, _stage_image)  # noqa: E402
 
 REPO = os.path.dirname(HERE)
-MONITOR_PORT = 4502
-HTTP_PORT = 8126
+MONITOR_PORT = int(os.environ.get("D10_MONITOR", "4502"))
+HTTP_PORT = int(os.environ.get("D10_HTTP", "8126"))
 
 # The acceptance .ce carries a 48 KiB read-only blob (see extapp/d10big.c),
 # so its payload is comfortably above the old 16 KiB PKG_BUF_MAX ceiling and
@@ -177,8 +178,15 @@ def main():
 
     disk = os.path.join(HERE, "qemu_disk_d10.img")
     if not os.path.exists(disk):
-        with open(disk, "wb") as fh:
-            fh.truncate(64 * 1024 * 1024)
+        # A freshly truncated 64 MiB disk has no FAT boot/root and the shell
+        # never comes up; seed it from the built-in reference image (the
+        # guest runs `format` below anyway).
+        seed = os.path.join(REPO, "kernel_v25", "catos_disk.img")
+        if os.path.exists(seed):
+            shutil.copyfile(seed, disk)
+        else:
+            with open(disk, "wb") as fh:
+                fh.truncate(64 * 1024 * 1024)
     iso_i = _stage_image(iso)
     disk_i = _stage_image(disk)
     cmdline = [qemu, "-m", "256", "-no-reboot",
@@ -187,6 +195,8 @@ def main():
         "-boot", "order=d", "-display", "none",
         "-netdev", "user,id=n0", "-device", "e1000,netdev=n0",
         "-monitor", "tcp:127.0.0.1:%d,server,nowait" % MONITOR_PORT]
+    if os.environ.get("D10_SERIAL"):
+        cmdline += ["-serial", "file:" + os.environ["D10_SERIAL"]]
     proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     s = None

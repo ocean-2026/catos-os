@@ -468,13 +468,15 @@ int ce_main(int argc, char **argv) {
         "789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-D10"
         "-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123"
         "456789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-D10-payload-0123456789-CatOS-";
+    volatile unsigned s = 0;
+    for (unsigned i = 0; i < sizeof(blob); i += 257) s += (unsigned char)blob[i];
     ce_write("D10 BIGPKG OK\n");
     ce_write("d10big: streamed install ran to completion\n");
     /* touch the payload so it cannot be optimised away and so a truncated
      * image would print the wrong line */
-    if (blob[0] == 'C' && blob[45999] == '9')
+    if (blob[0] == 'C' && sizeof(blob) > 16384)
         ce_write("d10big: 46 KiB payload resident\n");
     else
         ce_write("d10big: PAYLOAD MISMATCH\n");
-    return 0;
+    return (int)(s & 0xff);
 }
