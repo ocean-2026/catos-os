@@ -63,6 +63,7 @@ void mouse_get_state(int *x, int *y, uint8_t *buttons);
 /* Clamp the maintained position to the active pixel surface.  Called by
  * the console glue when the display mode / cell metrics change. */
 void mouse_clamp(int px_w, int px_h);
+void mouse_dev_info(int *id, int *wheel, int *pkt);   /* v2.73 diagnostics */
 
 /* v2.62: wheel notches buffered by the IRQ12 top half.  The console drains
  * them from con_tick() at a render-safe point, so scrolling works even while

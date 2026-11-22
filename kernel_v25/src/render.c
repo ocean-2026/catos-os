@@ -713,6 +713,22 @@ void con_write(const char *s) {
 }
 void con_write_utf8(const char *s) { con_write(s); }
 
+/* v2.73: CLI output indent.
+ * The shell arms this right before a builtin runs and disarms right after, so
+ * ONLY command output is affected -- the prompt, the banner, kernel logs and
+ * full-screen TUI editors keep their exact layout.  While armed, every output
+ * line that starts at column 0 gets two leading spaces; a wrapped line is a
+ * continuation of the same logical line and is left flush. */
+static int s_out_indent;                /* 0 = off (default) */
+static int s_out_line_start = 1;        /* next printable char begins a line */
+
+int con_out_indent_probe(void) { return s_out_indent * 10 + s_out_line_start; }
+
+void con_set_out_indent(int on) {
+    s_out_indent = on ? 1 : 0;
+    s_out_line_start = 1;
+}
+
 void con_write_n(const char *s, int n, int final) {
     if (!s || n <= 0) {
         if (final) con_flush_utf8();
@@ -721,7 +737,17 @@ void con_write_n(const char *s, int n, int final) {
     }
     for (int i = 0; i < n; i++) {
         uint32_t cp;
-        if (utf8_feed((unsigned char)s[i], &cp)) cell_put_cp(cp);
+        if (!utf8_feed((unsigned char)s[i], &cp)) continue;
+        if (cp == '\n' || cp == '\r') {
+            s_out_line_start = 1;       /* next printable char opens a line */
+        } else if (cp != '\b' && s_out_indent && s_out_line_start) {
+            cell_put_cp(' ');
+            cell_put_cp(' ');
+            s_out_line_start = 0;
+        } else if (cp != '\b') {
+            s_out_line_start = 0;
+        }
+        cell_put_cp(cp);
     }
     if (final) con_flush_utf8();
     render_flush();

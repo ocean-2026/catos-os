@@ -44,6 +44,8 @@ uint16_t netdbg_csr(int i);
 
 /* ---- protocol API (beginner friendly) ---- */
 int  net_http_get(const char *url, char *buf, int max);
+int  net_http_last_status(void);              /* v2.73: last HTTP status code */
+const char *net_http_last_location(void);     /* v2.73: last 3xx Location       */
 int  net_http_download(const char *url, uint8_t *buf, int max);
 /*   v2.70: binary-safe HTTP GET for .catpkg downloads.  Returns the exact
  *   body byte count (>=0) without NUL-terminating (packages contain zero

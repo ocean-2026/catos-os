@@ -41,6 +41,7 @@ static volatile uint32_t evq_head, evq_tail;
 static int      abs_x = 400, abs_y = 300;
 static uint8_t  last_buttons;
 static int      wheel_mode;            /* 1 = 4-byte IntelliMouse packets */
+static int      dev_id;                /* byte returned by 0xF2 identify     */
 static volatile uint32_t pkt_count;    /* assembled packets (diagnostics)  */
 static volatile uint32_t irq_count;    /* IRQ12 entries (diagnostics) */
 static volatile uint32_t aux_bytes;    /* aux bytes drained (diagnostics) */
@@ -76,9 +77,48 @@ static void aux_write(uint8_t cmd) {
     outb(PS2_DATA, cmd);
 }
 
-static uint8_t aux_read_ack(void) {
-    wait_out_full();
-    return inb(PS2_DATA);
+/* v2.73: bytes that belong to the mouse during bring-up must not be eaten by
+ * the IRQ12 top half.  The 8042 reports the same "output full" condition from
+ * both contexts, and IRQ12 is already unmasked here, so a plain inb() could
+ * lose the ACK/ID byte to ps2_drain().  While init_mode is set, ps2_drain()
+ * parks aux bytes in this tiny inbox and the init code consumes them here. */
+static uint8_t init_inbox[16];
+static volatile int init_in_head, init_in_tail;
+static volatile int init_mode;
+
+static void inbox_push(uint8_t b) {
+    int n = (init_in_head + 1) % 16;
+    if (n != init_in_tail) { init_inbox[init_in_head] = b; init_in_head = n; }
+}
+
+/* Read one byte from the aux device: inbox first, then the 8042, and keyboard
+ * scancodes that happen to share the buffer are routed to the kbd driver
+ * instead of being silently dropped.  0xFF = timeout. */
+static uint8_t aux_read_byte(void) {
+    for (int i = 0; i < 100000; i++) {
+        if (init_in_tail != init_in_head) {
+            uint8_t v = init_inbox[init_in_tail];
+            init_in_tail = (init_in_tail + 1) % 16;
+            return v;
+        }
+        if (inb(PS2_STATUS) & ST_OUT_FULL) {
+            uint8_t st = inb(PS2_STATUS);
+            uint8_t b  = inb(PS2_DATA);
+            if (st & ST_AUX_DATA) return b;
+            kbd_feed_byte(b);
+            continue;
+        }
+    }
+    return 0xFF;
+}
+
+/* 0xFA = ACK.  Devices that do not ACK at all are tolerated once, so a single
+ * stray byte never desynchronises the whole negotiation. */
+static int aux_read_ack(void) {
+    uint8_t v = aux_read_byte();
+    if (v == 0xFA) return 1;
+    (void)aux_read_byte();
+    return 0;
 }
 
 /* ---- packet reassembly --------------------------------------------------- */
@@ -145,8 +185,11 @@ uint32_t mouse_kbd_bytes_irq12(void) { return kbd_bytes_irq12; }
 static void mouse_feed(uint8_t b) {
     /* Byte 0 sanity: bit3 must be 1.  A desynchronised stream resyncs on
      * the next plausible byte0 instead of sliding the packet window. */
+    /* Byte 0 must have bit3 set and bits 6-7 clear (0x08/0xC8 mask).  The old
+     * test only looked at bit3, so a mis-framed 0xFF/0x00 stream still seeded
+     * a packet and every delta came out as a 200+ pixel jump. */
     if (phase == 0) {
-        if (!(b & 0x08)) return;
+        if ((b & 0xC8) != 0x08) return;
         pkt[0] = b; phase = 1; return;
     }
     pkt[phase] = b;
@@ -172,6 +215,14 @@ void mouse_get_state(int *x, int *y, uint8_t *buttons) {
     if (buttons) *buttons = last_buttons;
 }
 
+/* v2.73: expose what the device actually negotiated so `mouse` can show it:
+ * dev id, wheel mode and the byte width we are parsing packets with. */
+void mouse_dev_info(int *id, int *wheel, int *pkt) {
+    if (id) *id = dev_id;
+    if (wheel) *wheel = wheel_mode;
+    if (pkt) *pkt = pkt_size;
+}
+
 void mouse_clamp(int px_w, int px_h) {
     if (px_w > 0 && abs_x >= px_w) abs_x = px_w - 1;
     if (px_h > 0 && abs_y >= px_h) abs_y = px_h - 1;
@@ -193,7 +244,10 @@ void ps2_drain(void) {
     while ((inb(PS2_STATUS) & ST_OUT_FULL) && guard-- > 0) {
         uint8_t st = inb(PS2_STATUS);
         uint8_t b  = inb(PS2_DATA);
-        if (st & ST_AUX_DATA) { aux_bytes++; mouse_feed(b); }
+        if (st & ST_AUX_DATA) {
+            aux_bytes++;
+            if (init_mode) inbox_push(b); else mouse_feed(b);
+        }
         else                   { kbd_bytes_irq12++; kbd_feed_byte(b); }
     }
 }
@@ -226,17 +280,45 @@ void mouse_init(void) {
      * puts the device into wheel mode; 0xF2 identify returns 3 for a
      * wheel mouse.  A plain 3-byte mouse answers with ID 0 or 2 and we
      * stay on 3-byte packets. */
-    aux_write(0xF3); aux_write(200); aux_read_ack();
-    aux_write(0xF3); aux_write(100); aux_read_ack();
-    aux_write(0xF3); aux_write(80);  aux_read_ack();
-    aux_write(0xF2);                  /* identify */
-    wait_out_full();
-    uint8_t id = inb(PS2_DATA);
-    if (id == 3) { wheel_mode = 1; pkt_size = 4; }
+    init_mode = 1;
+    init_in_head = init_in_tail = 0;
+    uint8_t id = 0;
+    /* Two identify attempts: the 200/100/80 sequence is stateful and some
+     * controllers drop its last ACK, which used to leave the device in plain
+     * 3-byte mode. */
+    for (int attempt = 0; attempt < 2 && id != 3 && id != 4; attempt++) {
+        aux_write(0xF3); aux_write(200); aux_read_ack();
+        aux_write(0xF3); aux_write(100); aux_read_ack();
+        aux_write(0xF3); aux_write(80);  aux_read_ack();
+        aux_write(0xF2);                  /* identify: ACK then TELL ME ID */
+        aux_read_ack();
+        /* v2.73 ROOT CAUSE of the "wheel teleports the pointer to the
+         * bottom-left corner" bug: the old code read ONE byte here and
+         * treated it as the id.  That byte is the 0xFA ACK, so id never
+         * equalled 3, wheel_mode stayed 0 / pkt_size stayed 3 while the
+         * device had been switched to 4-byte wheel packets.  Every 4th
+         * byte (the wheel nibble) was then parsed as the next packet's
+         * flag byte, the following bytes as dx/dy -- a garbage 200+ pixel
+         * jump straight into the clamped corner.  Read the ACK first, then
+         * the actual device id (skipping any duplicated 0xFA). */
+        id = 0xFF;
+        for (int k = 0; k < 4; k++) {
+            uint8_t v = aux_read_byte();
+            if (v == 0xFF) break;
+            if (v == 0xFA) continue;
+            id = v;
+            break;
+        }
+    }
+    dev_id = (int)id;
+    if (id == 3 || id == 4) { wheel_mode = 1; pkt_size = 4; }
 
     /* 5. defaults, enable streaming */
     aux_write(0xF6); aux_read_ack();
     aux_write(0xF4); aux_read_ack();
+    init_mode = 0;
+    init_in_head = init_in_tail = 0;
+    phase = 0;
 
     /* Re-enable the keyboard port (disabled in step 1); otherwise every
      * scancode stays gated behind the 8042 and the shell sees no input. */

@@ -1467,6 +1467,10 @@ static void cmd_mouse(void) {
     vga_write(" irq="); print_int((int)mouse_irq_count());
     vga_write(" ab="); print_int((int)mouse_aux_bytes());
     vga_write(" kb="); print_int((int)mouse_kbd_bytes_irq12());
+    int id, wh, pk; mouse_dev_info(&id, &wh, &pk);
+    vga_write(" id="); print_int(id);
+    vga_write(" wheel="); print_int(wh);
+    vga_write(" pkt="); print_int(pk);
     vga_putc('\n');
 }
 
@@ -2897,8 +2901,11 @@ static void net_why_down(void) {
 static void cmd_curl(const char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
-        vga_write(trs("usage: curl http://IP[:port]/path\n", "用法：curl http://IP[:port]/path\n"));
-        vga_write("e.g.   curl http://10.0.2.2:8080/API.txt\n");
+        vga_write(trs("usage: curl [http://]HOST[:port][/path]\n",
+                      "用法：curl [http://]HOST[:port][/path]\n"));
+        vga_write(trs("  the scheme is optional; only plain http is supported\n",
+                      "  协议头可省略；仅支持明文 http\n"));
+        vga_write("e.g.   curl example.com/      curl 10.0.2.2:8080/API.txt\n");
         return;
     }
     if (!net_up()) { vga_write(trs("curl: network not ready", "curl: 网络未就绪")); net_why_down(); return; }
@@ -2907,11 +2914,28 @@ static void cmd_curl(const char *arg) {
     if (n < 0) {
         vga_write(trs("curl: error ", "curl: 错误 "));
         print_int(n);
-        vga_write(" (1=NIC 2=host 3=connect 4=http 5=resp 6=send)\n");
+        vga_write(" (1=NIC 2=host 3=connect 4=http 5=resp 6=send 7=https 8=redirects)\n");
+        int st = net_http_last_status();
+        const char *lo = net_http_last_location();
+        if (st) {
+            vga_write(trs("curl: server answered HTTP ", "curl: 服务器返回 HTTP "));
+            print_int(st);
+            vga_write("\n");
+        }
+        if (lo && *lo) {
+            vga_write(trs("curl: Location: ", "curl: 跳转到 "));
+            vga_write(lo);
+            vga_write("\n");
+            if (n == -7)
+                vga_write(trs("curl: that hop is https -- TLS is not implemented, use an http-only host\n",
+                              "curl: 该跳转是 https —— 未实现 TLS，请改用仅 http 的站点\n"));
+        }
         return;
     }
     vga_write("--- ");
+    int st = net_http_last_status();
     vga_write(arg);
+    if (st) { vga_write(" (HTTP "); print_int(st); vga_write(")"); }
     vga_write(" ---\n");
     vga_write(buf);
     if (n > 0 && buf[n-1] != '\n') vga_write("\n");
@@ -6890,6 +6914,9 @@ static void shell_exec(char *cmd, char *arg) {
         }
         sec_audit(g_uid, "exec", cmd, 0);
     }
+    /* v2.73: from here to the single exit below, everything printed is
+     * command output -- indent every new output line by two spaces. */
+    con_set_out_indent(1);
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "keys") ||
                  !strcmp_(cmd, "shortcuts")) cmd_keys();
@@ -7213,6 +7240,7 @@ static void shell_exec(char *cmd, char *arg) {
         }
     /* v2.59: flush the builtin stdout tee to the redirect target, if armed. */
     redir_flush();
+    con_set_out_indent(0);               /* v2.73: prompt stays flush left */
     con_unsuppress_cursor();             /* v2.62: caret returns for next prompt */
 }
 

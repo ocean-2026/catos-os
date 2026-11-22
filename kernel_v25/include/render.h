@@ -104,6 +104,10 @@ void        con_write_utf8(const char *s);   /* decode UTF-8, then flush */
 /* Streaming write: `final` = 0 keeps an incomplete UTF-8 sequence alive
  * across chunks, so a long string can be split at ANY byte boundary. */
 void        con_write_n(const char *s, int n, int final);
+int         con_out_indent_probe(void);
+void        con_set_out_indent(int on);   /* v2.73: CLI output 2-space indent */
+int         con_out_indent_probe(void);
+void        con_set_out_indent(int on);   /* v2.73: CLI output 2-space indent */
 void        con_flush_utf8(void);            /* flush a dangling sequence */
 /* Called from the 100 Hz PIT IRQ: animates BLINK and the software cursor. */
 void        con_tick(void);

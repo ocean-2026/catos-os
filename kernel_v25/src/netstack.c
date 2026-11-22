@@ -938,47 +938,175 @@ void net_rx_dispatch(const uint8_t *frame, uint32_t len) {
 /* HTTP GET                                                           */
 /* ------------------------------------------------------------------ */
 
-static int http_parse_url(const char *url, uint8_t ip[4], uint16_t *port,
-                          const char **path) {
+/* ---------------------------------------------------------------- */
+/* v2.73 HTTP client                                                 */
+/*                                                                  */
+/* The v2.70 client was strict: "http://" was mandatory, any 3xx was  */
+/* an error (-4) and Transfer-Encoding: chunked was copied verbatim.  */
+/* `curl baidu.com` therefore could never work: the scheme check      */
+/* failed, and `curl http://baidu.com/` got a 302 with an empty body. */
+/* This version accepts a bare host, follows up to FOUR http->http    */
+/* redirects, decodes chunked bodies, and reports the real status and */
+/* Location so the shell can explain *why* a fetch failed.            */
+/* ---------------------------------------------------------------- */
+
+static int s_http_status;
+static char s_http_location[192];
+
+int net_http_last_status(void)   { return s_http_status; }
+const char *net_http_last_location(void) { return s_http_location; }
+
+static int hl_lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+static int hl_ci_starts(const char *s, const char *pre) {
+    while (*pre) { if (hl_lower((int)*s) != hl_lower((int)*pre)) return 0; s++; pre++; }
+    return 1;
+}
+
+/* Find a header value in a raw response.  `buf[0..len)` is the whole reply;
+ * the status line is skipped, then every "Name: value" line is compared
+ * case-insensitively.  On success *vp points INTO buf and *vlen is the
+ * trimmed value length. */
+static int http_hdr(const uint8_t *buf, int len, const char *name,
+                    const uint8_t **vp, int *vlen) {
+    int i = 0;
+    while (i < len - 1 && !(buf[i] == '\r' && buf[i+1] == '\n')) i++;
+    if (i >= len - 1) return 0;
+    i += 2;                                   /* first header line */
+    while (i < len && !(buf[i] == '\r' && buf[i+1] == '\n')) {
+        int nl = i;
+        while (nl < len - 1 && !(buf[nl] == '\r' && buf[nl+1] == '\n')) nl++;
+        int c = i, k = 0;
+        while (c < nl && buf[c] != ':' && name[k] &&
+               hl_lower(buf[c]) == hl_lower((int)name[k])) { c++; k++; }
+        if (!name[k] && c < nl && buf[c] == ':') {
+            c++;
+            while (c < nl && (buf[c] == ' ' || buf[c] == '\t')) c++;
+            int e = nl;
+            while (e > c && (buf[e-1] == ' ' || buf[e-1] == '\t')) e--;
+            if (e > c) {
+                if (vp) *vp = buf + c;
+                if (vlen) *vlen = e - c;
+                return 1;
+            }
+            return 1;
+        }
+        i = nl + 2;
+    }
+    return 0;
+}
+
+/* Decode a chunked body.  Tolerant: on malformed/truncated input it returns
+ * the bytes decoded so far instead of failing the whole fetch. */
+static int http_dechunk(const uint8_t *b, int len, uint8_t *out, int max) {
+    int i = 0, n = 0;
+    while (i < len) {
+        int sz = 0, digits = 0;
+        while (i < len) {
+            int c = b[i], v;
+            if (c >= '0' && c <= '9') v = c - '0';
+            else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+            else break;
+            sz = sz * 16 + v; digits++; i++;
+        }
+        if (!digits) return n;
+        while (i < len && b[i] != '\n') i++;      /* chunk-ext + CRLF */
+        i++;
+        if (sz == 0) return n;                    /* last chunk */
+        if (i + sz > len) return n;               /* truncated: keep what we have */
+        for (int k = 0; k < sz && n < max; k++) out[n++] = b[i + k];
+        i += sz;
+        while (i < len && b[i] != '\n') i++;      /* trailing CRLF */
+        i++;
+    }
+    return n;
+}
+
+/* v2.73: scheme is optional ("baidu.com" == "http://baidu.com/").  Returns
+ * 0 ok, -1 bad URL, -2 DNS failure, -7 https (TLS is not implemented -- say
+ * so instead of pretending a connect failed). */
+static int http_parse_url(const char *in, uint8_t ip[4], uint16_t *port,
+                          const char **path, char *host, int hostmax) {
+    while (*in == ' ') in++;
+    if (hl_ci_starts(in, "https://")) return -7;
+    if (hl_ci_starts(in, "http://")) in += 7;
     *port = 80;
-    if (url[0]=='h' && url[1]=='t' && url[2]=='t' && url[3]=='p' &&
-        url[4]==':' && url[5]=='/' && url[6]=='/') url += 7;
-    else return -1;
-    char host[128];
     int hi = 0;
-    while (*url && *url != ':' && *url != '/' && hi < 127) host[hi++] = *url++;
+    while (*in && *in != ':' && *in != '/' && *in != '?' && hi < hostmax - 1)
+        host[hi++] = *in++;
     host[hi] = 0;
-    if (*url == ':') {
-        url++;
+    if (hi == 0) return -1;
+    if (*in == ':') {
+        in++;
         int p = 0;
-        while (*url >= '0' && *url <= '9') { p = p * 10 + (*url - '0'); url++; }
-        if (p == 0 || p > 65535) return -1;
+        while (*in >= '0' && *in <= '9') { p = p * 10 + (*in - '0'); in++; }
+        if (p <= 0 || p > 65535) return -1;
         *port = (uint16_t)p;
     }
-    if (*url == '/') *path = url;
-    else *path = "/";
+    *path = (*in == '/') ? in : "/";
     if (ip_parse(host, ip) != 0) {
-        /* hostname: resolve via the UDP DNS client (10.0.2.3 in QEMU) */
         if (net_dns_lookup(host, ip) != 0) return -2;
     }
     return 0;
 }
 
-/* v2.70: shared HTTP GET core.  Fetches the response body into `out` up to
- * `max` bytes, returns the exact body length on success (no NUL appended)
- * or a negative error code.  Both net_http_get() (text, NUL-terminated) and
- * net_http_download() (binary-safe, verbatim) wrap this. */
-static int http_fetch(const char *url, uint8_t *out, int max) {
-    if (!net_ready || !url || !out || max <= 0) return -1;
-    net_dhcp_ensure();                      /* v2.66: first-use DHCP */
+/* Build the next hop from a Location value: absolute, "//host/…", "/path" or
+ * a relative path.  Returns 0, or -7 when the hop is https. */
+static int hl_copy(char *dst, int max, const char *src) {
+    int n = 0;
+    while (src[n] && n < max - 1) { dst[n] = src[n]; n++; }
+    dst[n] = 0;
+    return n;
+}
 
+static int http_make_next(const char *cur, const char *loc, char *next, int max) {
+    if (hl_ci_starts(loc, "https://")) return -7;
+    if (hl_ci_starts(loc, "http://")) { hl_copy(next, max, loc); return 0; }
+    if (loc[0] == '/' && loc[1] == '/') {          /* //host/path */
+        hl_copy(next, max, "http:");
+        int n = 5; hl_copy(next + n, max - n, loc);
+        return 0;
+    }
+    /* origin = scheme://host[:port] of the current hop */
+    int o = 0;
+    if (hl_ci_starts(cur, "http://")) o = 7;
+    int e = o;
+    while (cur[e] && cur[e] != '/') e++;
+    char origin[160];
+    int n = 0;
+    while (n < e && n < 159) { origin[n] = cur[n]; n++; }
+    origin[n] = 0;
+    if (loc[0] == '/') {
+        hl_copy(next, max, origin);
+        int k = 0; while (next[k]) k++;
+        hl_copy(next + k, max - k, loc);
+        return 0;
+    }
+    /* relative: keep everything up to the last '/' of the current path */
+    char base[160];
+    int m = 0;
+    while (m < e && m < 159) { base[m] = cur[m]; m++; }
+    int last = m;
+    while (last > 0 && cur[last - 1] != '/') last--;
+    base[last] = 0;
+    hl_copy(next, max, base);
+    int k = 0; while (next[k]) k++;
+    hl_copy(next + k, max - k, loc);
+    return 0;
+}
+
+/* One HTTP GET, no redirect handling.  Returns body length (>=0) or a
+ * negative code; *status_out receives the HTTP status when a reply parsed. */
+static int http_fetch_once(const char *url, uint8_t *out, int max,
+                           int *status_out, uint8_t *loc, int locmax) {
     uint8_t peer[4];
     uint16_t port;
     const char *path;
-    int r = http_parse_url(url, peer, &port, &path);
-    if (r != 0) return r;                               /* -2 = hostname unsupported */
+    char host[128];
+    int r = http_parse_url(url, peer, &port, &path, host, sizeof(host));
+    if (r != 0) return r;                       /* -2 DNS, -7 https */
 
-    /* reset connection */
     tcp.active = 0;
     tcp.rcv_buf_len = 0;
     for (int i = 0; i < 4; i++) tcp.peer_ip[i] = peer[i];
@@ -989,11 +1117,8 @@ static int http_fetch(const char *url, uint8_t *out, int max) {
     tcp.state = TCP_SYN_SENT;
     tcp.active = 1;
     tcp.err = 0;
+    tcp_do_send(0x02, 0, 0);                    /* SYN */
 
-    /* SYN */
-    tcp_do_send(0x02, 0, 0);
-
-    /* wait for SYN+ACK (poll) */
     for (long i = 0; i < 3000000L && tcp.state == TCP_SYN_SENT; i++) {
         net_poll();
         task_maybe_yield();
@@ -1001,96 +1126,113 @@ static int http_fetch(const char *url, uint8_t *out, int max) {
     }
     if (tcp.state != TCP_ESTABLISHED) return -3;
 
-    /* build and send GET request (HTTP/1.0: server closes after reply) */
     {
         uint8_t req[512];
         int n = 0;
         const char *m = "GET ";
         while (*m) req[n++] = (uint8_t)*m++;
         const char *p = path;
-        while (*p && n < 500) req[n++] = (uint8_t)*p++;
+        while (*p && n < 470) req[n++] = (uint8_t)*p++;
         const char *v = " HTTP/1.0\r\nHost: ";
         while (*v) req[n++] = (uint8_t)*v++;
-        /* Host header: use the hostname from the URL (IP for IP URLs).
-         * IP-only Host headers get 403 from name-based vhosts (e.g. Cloudflare). */
-        const char *hp = url + 7;                  /* skip "http://" */
-        while (*hp && *hp != ':' && *hp != '/' && n < 505) req[n++] = (uint8_t)*hp++;
+        const char *hp = host;
+        while (*hp && n < 495) req[n++] = (uint8_t)*hp++;
         if (port != 80) {
             req[n++] = ':';
             int d = port; char t[8]; int ti = 0;
             while (d > 0) { t[ti++] = (char)('0' + d % 10); d /= 10; }
             while (ti > 0) req[n++] = (uint8_t)t[--ti];
         }
-        const char *v2 = "\r\nUser-Agent: CatOS-curl/1.0\r\nConnection: close\r\n\r\n";
+        const char *v2 = "\r\nUser-Agent: CatOS-curl/1.0\r\nAccept: */*\r\n"
+                         "Accept-Encoding: identity\r\nConnection: close\r\n\r\n";
         while (*v2 && n < 510) req[n++] = (uint8_t)*v2++;
-        tcp_do_send(0x18, req, (uint32_t)n);            /* PSH|ACK */
+        tcp_do_send(0x18, req, (uint32_t)n);     /* PSH|ACK */
     }
 
-    /* receive until FIN (HTTP/1.0 + Connection: close) or timeout.
-     * Local python http.server closes cleanly (FIN), so waiting for FIN
-     * is correct; the buffer-full guard keeps us from spinning forever
-     * against keep-alive servers. */
     for (long i = 0; i < 15000000L; i++) {
         net_poll();
         task_maybe_yield();
-        if (!tcp.active) break;                          /* FIN received */
-        if (tcp.rcv_buf_len >= (int)sizeof(tcp.rcv_buf)) break;   /* full */
+        if (!tcp.active) break;                  /* FIN */
+        if (tcp.rcv_buf_len >= (int)sizeof(tcp.rcv_buf)) break;
     }
     if (tcp.rcv_buf_len <= 0) return -5;
 
-    /* parse response header: status line + header/body split */
-    int got_header = 0, code = 0, header_end = -1;
-    int content_len = -1;
-    int body_start = -1;
-    /* first line: HTTP/1.x CODE */
-    for (int i = 0; i < tcp.rcv_buf_len - 2; i++) {
-        if (tcp.rcv_buf[i] == '\r' && tcp.rcv_buf[i+1] == '\n') {
-            if (i >= 9 && tcp.rcv_buf[0]=='H' && tcp.rcv_buf[4]=='/' &&
-                (tcp.rcv_buf[5]=='1')) {
-                code = (tcp.rcv_buf[9]-'0')*100 +
-                       (tcp.rcv_buf[10]-'0')*10 + (tcp.rcv_buf[11]-'0');
-                got_header = 1;
-            }
-            break;
-        }
+    /* status line: "HTTP/1.x CODE ..." */
+    int code = 0;
+    if (tcp.rcv_buf_len >= 12 && tcp.rcv_buf[0] == 'H' && tcp.rcv_buf[4] == '/') {
+        code = (tcp.rcv_buf[9]-'0')*100 + (tcp.rcv_buf[10]-'0')*10 + (tcp.rcv_buf[11]-'0');
     }
-    /* scan headers for \r\n\r\n and Content-Length */
+    if (status_out) *status_out = code;
+    if (code >= 300 && code < 400) {
+        const uint8_t *v; int vlen;
+        if (http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Location", &v, &vlen) && loc) {
+            int k = 0;
+            while (k < vlen && k < locmax - 1) { loc[k] = v[k]; k++; }
+            loc[k] = 0;
+        }
+        return -4;                               /* redirect: caller re-hops */
+    }
+    if (code < 200 || code >= 400) return -4;    /* 4xx/5xx/malformed */
+
+    /* body start */
+    int body_start = -1;
     for (int i = 0; i < tcp.rcv_buf_len - 3; i++) {
         if (tcp.rcv_buf[i]=='\r' && tcp.rcv_buf[i+1]=='\n' &&
-            tcp.rcv_buf[i+2]=='\r' && tcp.rcv_buf[i+3]=='\n') {
-            header_end = i + 3;                          /* position of blank line */
-            body_start = i + 4;
-            break;
-        }
+            tcp.rcv_buf[i+2]=='\r' && tcp.rcv_buf[i+3]=='\n') { body_start = i + 4; break; }
     }
-    /* Content-Length: scan */
-    {
-        const char cl[] = "Content-Length:";
-        for (int i = 0; i < tcp.rcv_buf_len - 15; i++) {
-            int ok = 1;
-            for (int k = 0; k < 15; k++)
-                if ((char)tcp.rcv_buf[i+k] != cl[k]) { ok = 0; break; }
-            if (ok) {
-                int j = i + 15;
-                while (j < tcp.rcv_buf_len && (tcp.rcv_buf[j]==' '||tcp.rcv_buf[j]=='\t')) j++;
-                int v = 0;
-                while (j < tcp.rcv_buf_len && tcp.rcv_buf[j] >= '0' && tcp.rcv_buf[j] <= '9') {
-                    v = v * 10 + (tcp.rcv_buf[j] - '0'); j++;
-                }
-                content_len = v;
-                break;
-            }
-        }
-    }
-    if (!got_header || code < 200 || code >= 300) return -4;
-    if (body_start < 0) body_start = header_end >= 0 ? header_end + 1 : 0;
+    if (body_start < 0) return 0;                /* headers only (204/304) */
+
+    const uint8_t *v; int vlen;
+    int chunked = 0;
+    if (http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Transfer-Encoding", &v, &vlen))
+        chunked = (vlen >= 7 && hl_lower(v[0]) == 'c');   /* "chunked" */
 
     int avail = tcp.rcv_buf_len - body_start;
-    if (avail < 0) avail = 0;
-    if (content_len >= 0 && avail > content_len) avail = content_len;
+    if (chunked) {
+        int n = http_dechunk(tcp.rcv_buf + body_start, avail, out, max);
+        return n;
+    }
+    if (http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Content-Length", &v, &vlen)) {
+        int cl = 0;
+        for (int k = 0; k < vlen && v[k] >= '0' && v[k] <= '9'; k++) cl = cl * 10 + (v[k] - '0');
+        if (cl < avail) avail = cl;
+    }
     if (avail > max) avail = max;
+    if (avail < 0) avail = 0;
     for (int i = 0; i < avail; i++) out[i] = tcp.rcv_buf[body_start + i];
-    return avail;                                /* exact byte count, no NUL */
+    return avail;
+}
+
+/* v2.70/v2.73: shared HTTP GET core with redirect following.  Returns the
+ * exact body length, or a negative error code:
+ *   -1 bad NIC/args  -2 DNS  -3 connect  -4 HTTP status >=400  -5 no reply
+ *   -7 https (TLS unsupported)  -8 redirect loop */
+static int http_fetch(const char *url, uint8_t *out, int max) {
+    if (!net_ready || !url || !out || max <= 0) return -1;
+    net_dhcp_ensure();
+
+    char cur[256];
+    hl_copy(cur, sizeof(cur), url);
+    if (cur[0] == 0) return -1;
+    s_http_status = 0;
+    s_http_location[0] = 0;
+
+    for (int hop = 0; hop <= 4; hop++) {
+        uint8_t loc[192];
+        loc[0] = 0;
+        int st = 0;
+        int r = http_fetch_once(cur, out, max, &st, loc, sizeof(loc));
+        s_http_status = st;
+        if (r >= 0) return r;
+        if (r == -4 && st >= 300 && st < 400 && loc[0]) {
+            hl_copy(s_http_location, sizeof(s_http_location), (const char *)loc);
+            int mr = http_make_next(cur, (const char *)loc, cur, sizeof(cur));
+            if (mr == 0) continue;
+            return mr;                            /* -7 https target */
+        }
+        return r;
+    }
+    return -8;
 }
 
 /* v2.70: text HTTP GET for `curl`.  NUL-terminates the body. */
