@@ -263,7 +263,8 @@ P1b 目标：把 CDE 从 text 后端 ASCII 窗口升级为 gfx24 真彩图形桌
    内核写入另一个槽 → 程序读到 NULL → `pollkey` 处 page fault
    （`cr2=0xf4` = API 槽 61×4）。`gfx24.c` 是老代码仍带强定义，别照抄。
 
-### 10.3 阻塞 bug：gfx 模式下 ring3 的 task_sleep_ticks() 不返回
+### 10.3 曾经的"阻塞 bug"：gfx 模式下 ring3 的 task_sleep_ticks() 不返回
+（**已证伪，见 §10.5；本节保留调查过程存档**）
 
 排除了原型逻辑问题后，做了一个干净对照：把已证明 text 模式下键盘
 3/3 PASS 的 `keyprobe.c` 改成先 `display_mode(3)` 切 gfx24——同样的代码
@@ -283,10 +284,47 @@ P1b 目标：把 CDE 从 text 后端 ASCII 窗口升级为 gfx24 真彩图形桌
 > 尝试过但**无效**：忙轮询版（去掉 delay）反而画不出画面，怀疑高频
 > syscall 触发了另一处问题。不要在这条路上继续。
 
-### 10.4 交付状态与下一步
+> **结论已推翻（v2.74）**：上面的怀疑是错的。串口实证表明 sleep/wake、
+> idle 调度、pollkey 和按键全部正常；"卡死"其实是探针在 gfx 模式读 TEXT
+> buffer 的观察误判。忙轮询版画不出是另一回事（高频 syscall 的时序问题），
+> 与 scheduler 无关。详见 §10.5。
+
+### 10.4 交付状态
 
 - 已交付：`gfxtext.c`/`gfxdesk.c` 原型 + 两个正式探针；渲染能力已证实。
-- XFAIL（非 FAIL）：`gfxdesk_probe.py` 标注键盘退出因上述内核 bug 暂不可用。
-- **下一步（需专项调查）**：在 `sched_timer_tick()` ring3 唤醒路径加诊断，
-  确认 gfx 模式下 `task_tick_wake()` 是否把 sleeper 置 READY、idle 是否
-  真正调度它。这是浏览器/多媒体查看器等交互应用的前提，建议单独立项。
+
+### 10.5 v2.74 结案：§10.3 的"内核 bug"是误判（阻塞项已解除）
+
+用 COM1 串口 breadcrumb（`tests/gfxsleep_diag.py`，内核诊断已回退）对 gfx
+模式下 ring3 CE 的调度/输入链路做了实证，**推翻 §10.3 的结论**：
+
+- **sleep/wake 完全正常**：日志中 `[sleep]`/`[woke]`/`[idle->]` 循环 200+
+  次，每次 `task_sleep_ticks()` 都在 2 tick 后被 IRQ0 的 `task_tick_wake()`
+  置 READY，idle 的 `pick_ready()` 立即把任务切回 CPU。`task.c` 的调度器
+  无任何问题。
+- **键盘完全正常**：CE 每帧照常调用 mouse_x/y(66/67)、mouse_buttons(68)、
+  pollkey(64)、delay(17)（nr 0x42/43/44/40/11）；按下 `q` 时日志记录
+  `[key tid=1 k=0x71]`，`pollkey()` 正确收到键值。
+- **退出完全正常**：CE 收到 q 后调 `display_mode()`(49) 并 `sys_exit`(13)，
+  shell(tid=0) 随即恢复。全程无 fault/panic。
+
+**误判根因**：旧 `gfxdesk.c` 退出时调 `display_mode(2)`（切到 VBE，非 TEXT——
+切 TEXT 需用户按 Y 同意），于是 "exited to text shell" 这行写进了 VBE 后端；
+`gfxdesk_probe.py` 用 `screen_text()` 读 TEXT buffer 自然读不到，被标成
+XFAIL。当年 keyprobe "加 display_mode(3) 就 0/3" 同理——切 gfx 后 TEXT
+探针读不到输出，并非真收不到键。
+
+**修复（v2.74，纯原型/探针层，内核零改动）**：
+
+1. `gfxdesk.c` 退出改 `display_mode(0)`（请求 TEXT），内核弹出 consent
+   提示后按 Y，退出标记落入 TEXT buffer；顶部错误注释已更正。
+2. `gfxdesk_probe.py` 改为 `q` 后补发 `y`（同意切 TEXT），用真实标记断言
+   退出。结果 **5/5 PASS**（含此前 XFAIL 的 `q exits to text shell`）。
+
+**回归全绿**：gfxdesk 5/5、keyprobe 3/3、desktop CDE 10/10、gfxtext PPM
+生成成功。浏览器/多媒体查看器等 gfx 交互应用的**前提已具备**，无内核阻塞。
+
+**遗留注意**：
+- 离屏 buffer 仍受 CE bss 256 KiB 限制（≤216 KiB 可用），见 §10.2。
+- CE 不能静默切回 TEXT（consent 是强制的），退出类交互需按用户确认流程设计。
+- QEMU 实机务必用独立端口 + 跑前清理残留进程，否则会误判。

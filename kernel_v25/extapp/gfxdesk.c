@@ -10,13 +10,14 @@
  *
  * Controls: mouse click icon/title to focus; [Start] menu; q/Esc to exit.
  *
- * KNOWN LIMITATION (v2.73, under investigation): after a ring3 CE calls
- * display_mode(3) to enter gfx24, its first task_sleep_ticks() (used by
- * api->delay AND by getch) never returns -- the loop renders once then
- * freezes, so keyboard/mouse events are never consumed.  Rendering is
- * verified pixel-exact (gfxdesk_probe: 4/4); the stall is in the kernel's
- * sched_timer_tick() ring3 wake/preempt path, NOT in this app.  See
- * docs/CDE-模块化设计.md §v2.73 gfx investigation.
+ * v2.74: the earlier "kernel gfx-mode sleep/keypress stall" was disproved
+ * by COM1 scheduler breadcrumbs (tests/gfxsleep_diag.py).  The CE loop,
+ * its api->delay()/task_sleep_ticks() wakeups, pollkey() and the 'q' key
+ * all work correctly in gfx24.  The old XFAIL came from the PROBE: on
+ * exit this app switches to VBE (mode 2, not TEXT -- switching to TEXT
+ * requires user consent), so its "exited" line lands in the VBE backend
+ * and a text-buffer read cannot see it.  gfxdesk_probe now verifies exit
+ * via a gfx pixel marker.  See docs/CDE-模块化设计.md §10.5.
  */
 #include "ce_abi.h"
 #include "ce_app.h"
@@ -225,7 +226,11 @@ int ce_main(int argc, char **argv) {
         if (api->delay) api->delay(30);
     }
 
-    api->display_mode(2);       /* back to text; caller confirms with Y if needed */
+    /* Request TEXT on exit.  The kernel prompts for consent (press Y);
+     * once granted this marker lands in the TEXT buffer where the shell
+     * and text-buffer probes can see it.  Until then the screen stays in
+     * gfx.  (Switching to TEXT silently is deliberately not allowed.) */
+    api->display_mode(0);       /* CON_MODE_TEXT -- consent prompt, press Y */
     api->write("gfxdesk: exited to text shell\n");
     return 0;
 }

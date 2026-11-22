@@ -71,16 +71,16 @@ try:
         title = px(shot, 80, 70)
         check("window title bar drawn", near(title, (31, 58, 95), 30), "title=%s" % (title,))
 
-    # KNOWN LIMITATION (v2.73): a ring3 CE that called display_mode(3)
-    # stalls on its first task_sleep_ticks(), so q/Esc never reach the loop.
-    # This is a kernel sched_timer_tick() issue, not a desktop bug.  Record
-    # it as XFAIL rather than FAIL so the probe reports rendering health.
-    sendkey(s, "q", 1.5)
+    # v2.74: the old "kernel gfx-mode sleep stall" was disproved via COM1
+    # breadcrumbs (gfxsleep_diag.py) -- pollkey/delay/'q' all work in gfx.
+    # On q the CE requests TEXT mode; the kernel asks for consent (press Y),
+    # then the exit marker lands in the text buffer.  Verify the full round
+    # trip: q -> consent -> text shell prompt + exit marker.
+    sendkey(s, "q", 0.8)
+    sendkey(s, "y", 1.5)          # consent to leave gfx for TEXT
     t = screen_text(s)
-    if "exited to text shell" in t:
-        print("PASS  q exits to text shell")
-    else:
-        print("XFAIL q exits (kernel gfx-mode task_sleep_ticks stall, see docs)")
+    check("q exits to text shell", "exited to text shell" in t,
+          "marker=%s" % ("exited to text shell" in t))
 
     print("RESULT: %d passed, %d failed" % (passed, failed))
     sys.exit(0 if failed == 0 else 1)
