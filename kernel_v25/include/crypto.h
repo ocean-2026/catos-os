@@ -24,6 +24,8 @@
 
 /* ---- SHA-256 / HMAC-SHA256 ---- */
 void sha256(uint8_t out[32], const void *in, uint32_t n);
+void sha256_2(uint8_t out[32], const uint8_t *a, uint32_t la,
+              const uint8_t *b, uint32_t lb);   /* SHA-256(a || b), no copy */
 void hmac_sha256(uint8_t out[32], const uint8_t *key, uint32_t klen,
                  const uint8_t *m1, uint32_t l1,
                  const uint8_t *m2, uint32_t l2);

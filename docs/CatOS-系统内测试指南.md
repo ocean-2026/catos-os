@@ -186,6 +186,11 @@
 | `cowsay [-f tux] MSG` | ASCII 牛/Tux 说话 | 图形正常 |
 | `sl` | 蒸汽火车驶过 | 动画不挂死 |
 | `rain` | 全屏数字雨（tui-preview） | 有绿色雨幕，任意键立即退出，退出后背景/前景恢复 | 
+| 中文标点（v2.77） | IME 下标点 | F2 后敲 `. , ? !`，得到 `。 ， ？ ！` 各两格，无 `??` | 
+| IME 候选框（v2.77） | 候选框不随滚动 | F2 输 `ni` 出候选框，连按 PgUp/PgDn 两页，框仍钉在底部 | 
+| `rm -r` + `fsck`（v2.77） | 递归删除一致性 | 3 层树 + 文件删除后 `fsck` 报 FAT mirror OK / directory tree OK | 
+| `pkg install`（v2.77） | 签名强校验 | `pkg install bc` 成功；旧摘要包被 `SIGNATURE VERIFICATION FAILED` 拒绝 | 
+| `shutdown`（v2.77） | ACPI 关机 | VMware 真机：`shutdown` 应直接断电，不再回退重启（云端无法验证） | 
 | `help`（v2.76） | 长输出按键跳过 | 输出超过一屏后按任意键，立即停止剩余输出并回提示符，按下的键保留在输入行 | 
 | `help > /tmp/h.txt`（v2.76） | 重定向不被跳过 | 重定向时按键不截断文件，`wc -l /tmp/h.txt` 为完整行数（简体中文 220 行） | 
 | 滚动历史（v2.76） | 1 万行回溯 | 连跑 3 次 `help` 后 PgUp 多页仍可看到最早输出；PgDn 回到底部画面与滚动前一致 | 

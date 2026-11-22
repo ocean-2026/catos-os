@@ -9,6 +9,8 @@
 static uint32_t rsdp_phys;
 static uint32_t fadt_phys;
 static uint32_t pm1a_cnt, pm1b_cnt;
+static uint16_t smi_cmd;        /* FADT SMI_CMD port   */
+static uint8_t  acpi_enable_v;  /* value meaning "enable ACPI" */
 static int      have_acpi;
 static const char *last_method = "none";
 
@@ -134,6 +136,13 @@ static int acpi_probe(void) {
     if (len < 0x50) return 0;                 /* need PM1a/PM1b CNT fields */
     pm1a_cnt = *(const uint32_t *)(f + 0x48);
     pm1b_cnt = *(const uint32_t *)(f + 0x4C);
+    /* v2.76: FADT SMI_CMD (0x30) + ACPI_ENABLE (0x34).  ACPI 2.0 firmware
+     * boots in LEGACY mode (PM1_CNT.SCI_EN clear) and IGNORES PM1_CNT
+     * writes until the OS asks for ACPI mode; that is why a VMware guest
+     * "shutdown" fell through to the reboot fallback while QEMU (which
+     * ships ACPI already enabled) worked. */
+    smi_cmd = (uint16_t)(*(const uint16_t *)(f + 0x30));
+    if (len > 0x34) acpi_enable_v = f[0x34];
     /* GAS structures: only a pure I/O-space block is usable with outw */
     if (!pm1a_cnt || pm1a_cnt > 0xFFFF) return 0;
 
@@ -150,18 +159,40 @@ static void io_delay(void) {
     for (int i = 0; i < 2000; i++) outb(0x80, 0);
 }
 
+/* Ask the firmware for ACPI mode; returns 1 when SCI_EN is set. */
+static int acpi_enable_mode(void) {
+    uint16_t pm = (uint16_t)(pm1a_cnt);
+    uint16_t v = inw(pm);
+    if (v & 0x0001) return 1;                  /* SCI_EN already set */
+    if (smi_cmd && smi_cmd != 0xFFFF && acpi_enable_v) {
+        outb(smi_cmd, acpi_enable_v);
+        for (int i = 0; i < 100000; i++) {
+            if (inw(pm) & 0x0001) return 1;
+            io_delay();
+        }
+    }
+    return 0;
+}
+
 int power_shutdown(void) {
     if (!acpi_probe()) return -1;
 
+    acpi_enable_mode();
     int typa = s5_slp_typa();
-    /* try the firmware's own value first, then the standardized sweep */
-    for (int attempt = 0; attempt < 9; attempt++) {
-        int t = (attempt == 0) ? typa : (attempt - 1);
+    /* v2.76: write ONE value -- the firmware's \_S5 SLP_TYP -- instead of
+     * sweeping 0..7.  Writing SLP_EN with an unrelated SLP_TYP is not a
+     * harmless no-op on every chipset: some decode a wrong type as a
+     * platform reset, which is exactly the "shutdown restarts the machine"
+     * report.  Only if the correct value provably does nothing do we try
+     * the standardized 5, then 7 (a few boards use 7). */
+    int tries[3] = { typa, 5, 7 };
+    for (int i = 0; i < 3; i++) {
+        int t = tries[i];
+        if (i > 0 && t == tries[0]) continue;
         uint16_t v = (uint16_t)(((t & 7) << 10) | (1u << 13));   /* SLP_EN */
         outw((uint16_t)pm1a_cnt, v);
         if (pm1b_cnt && pm1b_cnt <= 0xFFFF) outw((uint16_t)pm1b_cnt, v);
-        io_delay();
-        io_delay();
+        for (int k = 0; k < 64; k++) io_delay();               /* >= 30 us */
     }
     last_method = "acpi-pm1";
     return 0;

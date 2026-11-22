@@ -103,6 +103,9 @@ static int sel_at(int x, int y);
 #define SB2_ROWS 2
 static con_cell_t saved2[SB2_ROWS][CON_MAX_COLS];
 static int        saved2_valid;
+/* v2.76: IME bar text + whether it currently owns the bottom two rows. */
+static char bar_s1[CON_MAX_COLS + 2], bar_s2[CON_MAX_COLS + 2];
+static int  bar_active;
 
 /* v2.25 dirty-CELL tracker (the CatOS dirty rectangle: our unit IS the
  * cell).  painted[] remembers the last PIXELS actually on screen for a
@@ -398,6 +401,8 @@ static void render_flush(void) {
 /* ONE row at a time.  Because a hanzi is 2x1 (not 2x2), a scroll can
  * never cut a glyph in half -- no even-row invariant is needed. */
 static void scroll_one(void) {
+    int bar_was = bar_active;
+    if (bar_was) con_status_bar_off();      /* restore the cells the bar stole */
     /* Archive the row we are about to discard BEFORE shifting the grid. */
     if (sb_view == 0) {
         for (int x = 0; x < cols && x < CON_MAX_COLS; x++) {
@@ -439,6 +444,7 @@ static void scroll_one(void) {
          * "scroll flash".  repaint_all() overwrites cell by cell. */
         repaint_all();
     }
+    if (bar_was) con_status_bar_reapply();   /* pin the IME bar to the new bottom */
 }
 
 /* Overwriting either half of a hanzi must erase BOTH halves. */
@@ -1083,6 +1089,32 @@ void con_status_bar_at(int row, const char *s) {
     sync_cursor(1);
 }
 
+/* v2.76: the IME bar is painted INTO the bottom two cell rows (their old
+ * content is stashed and restored by con_status_bar_off).  Any grid move --
+ * one output line, a wheel/PgUp viewport jump, a resize -- shifts those rows
+ * up, so the candidate bar used to travel with the text ("滚动时候选框跟着
+ * 滚").  con_status_bar_reapply() puts it back at the new bottom. */
+/* v2.76: `bar_active` means "the IME bar has text to re-pin", NOT "it is
+ * currently painted"; con_status_bar_off() clears the painted state but must
+ * keep the text, otherwise the reapply that follows a scroll has nothing to
+ * draw and the bar simply disappears.  Turning the IME off goes through
+ * con_status_bar_forget(), which drops the text as well. */
+void con_status_bar_forget(void) {
+    bar_active = 0;
+    con_status_bar_off();
+}
+
+void con_status_bar_reapply(void) {
+    if (!bar_active) return;
+    char s1[CON_MAX_COLS + 2], s2[CON_MAX_COLS + 2];
+    int i;
+    for (i = 0; bar_s1[i] && i < CON_MAX_COLS; i++) s1[i] = bar_s1[i];
+    s1[i] = 0;
+    for (i = 0; bar_s2[i] && i < CON_MAX_COLS; i++) s2[i] = bar_s2[i];
+    s2[i] = 0;
+    con_status_bar2(s1, s2);
+}
+
 /* v2.58: fixed two-row IME area.  `sep` paints the separator row (rows-2)
  * -- an empty string fills the whole row with '-' (U+2500 has no glyph in
  * the built-in font; scheme A of ime-plan 3.1.2).  `cand` paints the
@@ -1096,6 +1128,15 @@ static void invalidate_row(int y) {
 void con_status_bar2(const char *sep, const char *cand) {
     if (!be || rows < 2) return;
     con_status_bar_off();                 /* release a legacy single bar */
+    {
+        int i = 0;
+        for (const char *q = sep; q && *q && i < CON_MAX_COLS; q++) bar_s1[i++] = *q;
+        bar_s1[i] = 0;
+        i = 0;
+        for (const char *q = cand; q && *q && i < CON_MAX_COLS; q++) bar_s2[i++] = *q;
+        bar_s2[i] = 0;
+        bar_active = 1;
+    }
     int r1 = rows - 2, r2 = rows - 1;
     if (!saved2_valid) {
         for (int x = 0; x < cols; x++) {
@@ -1228,9 +1269,12 @@ int con_scrollback(int delta) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) sb_live[y][x] = cells[y][x];
 
+    int bar_was = bar_active;
+    if (bar_was) con_status_bar_off();      /* the bar rows are viewport rows */
     sb_view = want;
     for (int y = 0; y < rows; y++) sb_fill_row(y, sb_view);
     for (int y = 0; y < rows; y++) sb_paint_row(y);
+    if (bar_was) con_status_bar_reapply();
     if (sb_view == 0) con_reset_cursor();   /* cursor stays at bottom */
     else sync_cursor(1);
     return sb_view;

@@ -81,7 +81,7 @@ static void ime_clear(void) { py_len = 0; py[0] = 0; page = 0; sel = 0; }
 static void ime_show(void) {
     char cand[BAR_MAX];
     int n = 0;
-    if (!active) { con_status_bar_off(); return; }
+    if (!active) { con_status_bar_forget(); return; }
     int cols = con_cols();
 
     if (py_len == 0) {
@@ -182,22 +182,52 @@ static int ime_commit_selected(char out[IME_OUT_MAX]) {
 
 /* ASCII punctuation -> GB2312 full-width form while the IME is active. */
 static int ime_punct(int key, char out[IME_OUT_MAX]) {
-    static const struct { int key; unsigned char b[2]; } P[] = {
-        {',', {0xA3,0xAC}}, {'.', {0xA1,0xA3}}, {'!', {0xA3,0xA1}},
-        {'?', {0xA3,0xBF}}, {':', {0xA3,0xBA}}, {';', {0xA3,0xBB}},
-        {'`', {0xA1,0xA2}}, {'\'',{0xA1,0xAE}}, {'"', {0xA1,0xB0}},
-        {'(', {0xA3,0xA8}}, {')', {0xA3,0xA9}}, {'<', {0xA1,0xB6}},
-        {'>', {0xA1,0xB7}}, {'[', {0xA1,0xBE}}, {']', {0xA1,0xBF}},
-        {'{', {0xA1,0xB0}}, {'}', {0xA1,0xB1}}, {'/', {0xA3,0xAF}},
-        {'\\',{0xA3,0xDC}}, {'|', {0xA1,0xAB}}, {'@', {0xA3,0xC0}},
-        {'#', {0xA3,0xA3}}, {'$', {0xA3,0xA4}}, {'%', {0xA3,0xA5}},
-        {'^', {0xA1,0xAD}}, {'&', {0xA3,0xA6}}, {'*', {0xA3,0xAA}},
-        {'-', {0xA3,0xAD}}, {'_', {0xA1,0xAB}}, {'+', {0xA3,0xAB}},
-        {'=', {0xA3,0xBD}}, {'~', {0xA1,0xAB}},
+    /* v2.76: emit UTF-8, not raw GB2312 bytes.  The IME used to hand the
+     * line editor two raw GB2312 bytes (e.g. 0xA1 0xA3 for '。'); the console
+     * takes UTF-8 codepoints, so each byte fell into the "no glyph" branch and
+     * painted '?'.  Result: a full-width Chinese period showed up as TWO
+     * question marks in two cells.  The table below is generated from the
+     * same GB2312 pairs, converted to their UTF-8 forms at build-edit time. */
+    static const struct { int key; const char *u; } P[] = {
+        {',', "\xEF\xBC\x8C"},
+        {'.', "\xE3\x80\x82"},
+        {'!', "\xEF\xBC\x81"},
+        {'?', "\xEF\xBC\x9F"},
+        {':', "\xEF\xBC\x9A"},
+        {';', "\xEF\xBC\x9B"},
+        {'`', "\xE3\x80\x81"},
+        {'"', "\xE2\x80\x9C"},
+        {'(', "\xEF\xBC\x88"},
+        {')', "\xEF\xBC\x89"},
+        {'<', "\xE3\x80\x8A"},
+        {'>', "\xE3\x80\x8B"},
+        {'[', "\xE3\x80\x90"},
+        {']', "\xE3\x80\x91"},
+        {'{', "\xE2\x80\x9C"},
+        {'}', "\xE2\x80\x9D"},
+        {'/', "\xEF\xBC\x8F"},
+        {'|', "\xEF\xBD\x9E"},
+        {'@', "\xEF\xBC\xA0"},
+        {'#', "\xEF\xBC\x83"},
+        {'$', "\xEF\xBF\xA5"},
+        {'%', "\xEF\xBC\x85"},
+        {'^', "\xE2\x80\xA6"},
+        {'&', "\xEF\xBC\x86"},
+        {'*', "\xEF\xBC\x8A"},
+        {'-', "\xEF\xBC\x8D"},
+        {'_', "\xEF\xBD\x9E"},
+        {'+', "\xEF\xBC\x8B"},
+        {'=', "\xEF\xBC\x9D"},
+        {'~', "\xEF\xBD\x9E"},
     };
     for (unsigned i = 0; i < sizeof(P)/sizeof(P[0]); i++)
         if (P[i].key == key) {
-            out[0] = (char)P[i].b[0]; out[1] = (char)P[i].b[1]; out[2] = 0;
+            {
+                const char *u = P[i].u;
+                int n = 0;
+                while (u[n] && n < IME_OUT_MAX - 1) { out[n] = u[n]; n++; }
+                out[n] = 0;
+            }
             ime_clear(); ime_show();
             return IME_COMMIT;
         }

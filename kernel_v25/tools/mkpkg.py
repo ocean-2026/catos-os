@@ -24,6 +24,7 @@ The same header constants are mirrored in kernel_v25/src/shell.c
 (PKG_HDR_*); keep the two in sync.
 """
 import argparse
+import hashlib
 import os
 import struct
 import sys
@@ -38,11 +39,10 @@ SIG_SIZE = 64
 E = 65537
 
 
-def fnv1a64(data):
-    h = 1469598103934665603
-    for b in data:
-        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-    return h
+def digest56(data):
+    """v2.76: SHA-256 truncated to the 56 bits that fit under the 512-bit
+    modulus.  Must match pkg_hash() in shell.c."""
+    return int.from_bytes(hashlib.sha256(data).digest()[:7], "big")
 
 
 def load_key(path):
@@ -98,11 +98,12 @@ def main():
                           args.desc, len(payload))
     assert len(header) == HEADER_SIZE - SIG_SIZE
 
-    # v2.68: real key-based signature.  The 64-bit FNV digest of
-    # header|payload is encoded as 0x01<<56 | digest and signed with
-    # the RSA private key.  The kernel embeds only the public modulus.
+    # v2.68/v2.76: key-based signature.  SHA-256(header|payload) truncated to
+    # 56 bits is encoded as 0x01<<56 | digest and signed with the RSA private
+    # key; the kernel embeds only the public modulus and re-derives the
+    # digest in pkg_hash().  Keep the two in sync or every install fails.
     n, d = load_key(args.key)
-    digest = fnv1a64(header + payload)
+    digest = digest56(header + payload)
     m = (1 << 56) | digest
     if m >= n:
         print("ERROR: message representative >= modulus", file=sys.stderr)

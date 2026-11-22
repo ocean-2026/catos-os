@@ -24,7 +24,8 @@
 #include "clip.h"       /* v2.57 kernel clipboard */
 #include "mouse.h"      /* v2.57 PS/2 mouse state diagnostics */
 #include "keys.h"       /* centralized key-binding legend (keys command)  */
-#include "pager.h"      /* v2.59 generic console pager                    */
+#include "pager.h"
+#include "crypto.h"   /* v2.76: SHA-256 for the .catpkg digest */      /* v2.59 generic console pager                    */
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
 #include "power.h"      /* v2.67 ACPI power-off (no APM INT 15h)            */
@@ -4416,27 +4417,48 @@ static int copy_rec(const char *src, const char *dst, int depth) {
 
 static int rm_rec(const char *path, int depth);
 
-struct rm_ud { const char *base; int depth; };
-static void rm_cb(int is_dir, const char *name, uint32_t size, void *ud) {
-    (void)size;
-    struct rm_ud *u = (struct rm_ud *)ud;
-    if (!strcmp_(name, ".") || !strcmp_(name, "..")) return;
-    char full[FS_PATH_MAX];
-    rec_join(full, sizeof(full), u->base, name);
-    if (is_dir) rm_rec(full, u->depth + 1);
-    else {
-        if (fs_perm_check(full, g_uid, g_gid, PERM_WRITE) == 0) {
-            if (fs_delete(full) == 0) acl_unset(full);
-        }
-    }
-}
+/* v2.76 (#155): rm -r used to recurse straight out of the fs_foreach
+ * callback, i.e. it deleted entries of the very directory it was walking.
+ * FAT dirent slots are reused as soon as they are freed, so a child
+ * recursion could hand the parent's iterator a recycled slot -- entries
+ * survived, or a name got deleted twice.  The walk is now two-phase: take a
+ * NAME SNAPSHOT of the directory first (fs_enum_entries, which fills a fixed
+ * array), then act on the snapshot, re-scanning once the batch is done.
+ * Deleting therefore never happens while a directory stream is open. */
+#define RM_SNAP_BATCH   32
+static char rm_snap[FSREC_DEPTH_MAX + 1][RM_SNAP_BATCH][FS_NAME_MAX];
 
 static int rm_rec(const char *path, int depth) {
     if (depth > FSREC_DEPTH_MAX) return -5;
     if (!fs_is_dir(path)) return fs_delete(path) == 0 ? 0 : -1;
     if (fs_perm_check(path, g_uid, g_gid, PERM_WRITE) != 0) return -13;
-    struct rm_ud u = { path, depth };
-    fs_foreach(path, rm_cb, &u);
+
+    int rounds = 0;
+    while (rounds++ < 64) {
+        int n = fs_enum_entries(path, rm_snap[depth], RM_SNAP_BATCH);
+        if (n <= 0) break;
+        if (n > RM_SNAP_BATCH) n = RM_SNAP_BATCH;
+        int acted = 0;
+        for (int i = 0; i < n; i++) {
+            char nm[FS_NAME_MAX];
+            int j = 0;
+            while (rm_snap[depth][i][j] && j < FS_NAME_MAX - 1) { nm[j] = rm_snap[depth][i][j]; j++; }
+            nm[j] = 0;
+            int isdir = 0;
+            if (j > 0 && nm[j - 1] == '/') { nm[j - 1] = 0; isdir = 1; }
+            if (!nm[0] || !strcmp_(nm, ".") || !strcmp_(nm, "..")) continue;
+            char full[FS_PATH_MAX];
+            rec_join(full, sizeof(full), path, nm);
+            acted = 1;
+            if (isdir) {
+                int r = rm_rec(full, depth + 1);
+                if (r == -13) return -13;
+            } else if (fs_perm_check(full, g_uid, g_gid, PERM_WRITE) == 0) {
+                if (fs_delete(full) == 0) acl_unset(full);
+            }
+        }
+        if (!acted) break;              /* only "." / ".." left */
+    }
     int r = fs_rmdir_force(path);
     if (r == 0) acl_unset(path);
     return r;
@@ -4842,11 +4864,18 @@ static void bn_pow65537(const bn_t *sig, const bn_t *n, bn_t *out) {
     }
     bn_copy(&res, out);
 }
+/* v2.76 (E1): the digest was a hand-rolled FNV-1a64 -- a non-cryptographic
+ * hash, so a forged package only needed a 64-bit collision.  It is now
+ * SHA-256 over (header || payload) truncated to the 56 bits that fit under
+ * the 512-bit RSA modulus; tools/mkpkg.py signs exactly the same value.
+ * Note the ceiling: RSA-512 + 56-bit digest is tamper-EVIDENT against
+ * accidental or casual forgery, not a strong signature scheme. */
 static uint64_t pkg_hash(const uint8_t *hdr, uint32_t hn,
                          const uint8_t *payload, uint32_t pn) {
-    uint64_t h = 1469598103934665603ULL;
-    for (uint32_t i = 0; i < hn; i++) { h ^= hdr[i]; h *= 1099511628211ULL; }
-    for (uint32_t i = 0; i < pn; i++) { h ^= payload[i]; h *= 1099511628211ULL; }
+    uint8_t d[32];
+    sha256_2(d, hdr, hn, payload, pn);
+    uint64_t h = 0;
+    for (int i = 0; i < 7; i++) h = (h << 8) | d[i];   /* top 56 bits */
     return h;
 }
 static int pkg_verify(const uint8_t *buf, uint32_t plen) {
@@ -4951,12 +4980,51 @@ static void pkg_install_payload(int rd) {
     }
     char cmd[16];
     pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
+    /* v2.76 (E1) UnknownBinary gate: the installed name comes straight out of
+     * the package header and used to be pasted into "/bin/<cmd>.ce" unchecked,
+     * so a package could ship ../../etc/passwd as its "command".  Only a plain
+     * identifier is accepted now. */
+    {
+        int n = 0;
+        for (const char *q = cmd; *q; q++) n++;
+        if (n < 1 || n > 15) {
+            vga_write(trs("pkg: bad command name (length)\n", "pkg：命令名非法（长度）\n")); return;
+        }
+        for (const char *q = cmd; *q; q++) {
+            char ch = *q;
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) {
+                vga_write(trs("pkg: bad command name (only [A-Za-z0-9_-])\n",
+                              "pkg：命令名非法（只允许 [A-Za-z0-9_-]）\n")); return;
+            }
+        }
+    }
     uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
                     ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
                     ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
                     ((uint32_t)(unsigned char)pkg_payload[139] << 24);
     if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
         vga_write(trs("pkg: corrupt package (length mismatch)\n", "pkg：包损坏（长度不匹配）\n")); return;
+    }
+    /* v2.76 (E1) UnknownBinary gate: a signed package still has to carry a
+     * well-formed CE01 image, otherwise "signature ok" would bless arbitrary
+     * bytes into /bin.  Header layout mirrors include/ce_abi.h. */
+    {
+        const unsigned char *pl = (const unsigned char *)pkg_payload + PKG_HDR_SIZE;
+        /* ce_header_t is 20 bytes: magic[4], entry, bss_size, api_offset,
+         * image_size -- image_size lives at offset 16, not 12. */
+        uint32_t img = (uint32_t)pl[16] | ((uint32_t)pl[17] << 8) |
+                       ((uint32_t)pl[18] << 16) | ((uint32_t)pl[19] << 24);
+        uint32_t entry = (uint32_t)pl[4] | ((uint32_t)pl[5] << 8) |
+                         ((uint32_t)pl[6] << 16) | ((uint32_t)pl[7] << 24);
+        if (pl[0] != 'C' || pl[1] != 'E' || pl[2] != '0' || pl[3] != '1') {
+            vga_write(trs("pkg: payload is not a CE01 image -- refused\n",
+                          "pkg：载荷不是 CE01 可执行镜像——已拒绝\n")); return;
+        }
+        if (img == 0 || img != plen - 20 || entry >= img) {
+            vga_write(trs("pkg: corrupt CE image header -- refused\n",
+                          "pkg：CE 镜像头损坏——已拒绝\n")); return;
+        }
     }
     if (pkg_verify((const uint8_t *)pkg_payload, plen) != 0) {
         vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n", "pkg：签名校验失败——拒绝安装\n"));
@@ -7398,7 +7466,7 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
     "echo \"      |  \\_/ / ____ \\| |           \"\n"
     "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                             CatOS v2.76                            \"\n"
+    "echo \"                             CatOS v2.77                            \"\n"
     "echo \"\"\n";
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see
