@@ -15,7 +15,6 @@
 #include "../include/tls.h"
 #include "../include/tls_aes.h"
 #include "../include/crypto.h"
-#include "../include/serial_log.h"
 #include "third_party/uecc/uECC.h"
 
 /* ---- transport hooks provided by netstack.c ---- */
@@ -225,8 +224,6 @@ static int hs_read(uint8_t *msg_type, const uint8_t **body, int *blen) {
         if (recv_record(&type, &p, &len) != 0) return -1;
         if (type == 21) return -2;                 /* alert */
         if (type == 20) continue;                  /* CCS, plaintext */
-        ser_write("hs_recv type="); ser_hex("x", (uint32_t)type);
-        ser_write(" len="); ser_hex("x", (uint32_t)len); ser_write("\n");
         if (type != 22) return -1;
         if (len < 4) return -1;
         *msg_type = p[0];
@@ -250,14 +247,12 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     tlen = 0; cseq = 0; sseq = 0;
 
     /* ---- TCP connect ---- */
-    if (net_tcp_connect(peer, port) != 0) { ser_write("tls: connect fail\n"); return -3; }
-    ser_write("tls: connected\n");
+    if (net_tcp_connect(peer, port) != 0) return -3;
 
     /* ---- our ECDHE keypair ---- */
     uint8_t our_pub[64], our_priv[32];
     uECC_Curve curve = uECC_secp256r1();
-    if (!uECC_make_key(our_pub, our_priv, curve)) { ser_write("tls: make_key fail\n"); return -6; }
-    ser_write("tls: key\n");
+    if (!uECC_make_key(our_pub, our_priv, curve)) return -6;
 
     /* ---- ClientHello ---- */
     /* version || random || sid(0) || suites(0xC027) || compression(null)
@@ -289,49 +284,39 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     ch[cn++] = 0x03; ch[cn++] = 0x03;         /* ecdsa_secp256r1_sha256 */
     ch[cn++] = 0x08; ch[cn++] = 0x04;         /* rsa_pss_rsae_sha256 */
     if (hs_send(1, ch, cn) != 0) return -6;
-    ser_write("tls: ch sent\n");
 
     /* ---- ServerHello ---- */
     uint8_t mtype; const uint8_t *body; int blen;
-    if (hs_read(&mtype, &body, &blen) != 0) { ser_write("tls: read SH fail\n"); return -6; }
-    if (mtype != 2 || blen < 34) { ser_write("tls: SH type/len bad\n"); return -6; }
+    if (hs_read(&mtype, &body, &blen) != 0) return -6;
+    if (mtype != 2 || blen < 34) return -6;
     if (body[0] != 0x03 || body[1] != 0x03) return -6;
     uint8_t srandom[32]; memcpy(srandom, body + 2, 32);
-    ser_write("tls: sh ok\n");
     /* skip session id, cipher, compression */
 
     /* ---- Certificate: skip ---- */
-    if (hs_read(&mtype, &body, &blen) != 0) { ser_write("tls: read Cert fail\n"); return -6; }
+    if (hs_read(&mtype, &body, &blen) != 0) return -6;
     if (mtype != 11) return -6;
-    ser_write("tls: cert ok\n");
 
     /* ---- ServerKeyExchange: parse curve + peer pub, skip signature ---- */
-    if (hs_read(&mtype, &body, &blen) != 0) { ser_write("tls: read SKE fail\n"); return -6; }
-    if (mtype != 12) { ser_write("tls: SKE type bad\n"); return -6; }
-    ser_write("ske b="); ser_hex("x", body[0]); ser_hex("x", body[1]);
-    ser_hex("x", body[2]); ser_hex("x", body[3]); ser_write("\n");
+    if (hs_read(&mtype, &body, &blen) != 0) return -6;
+    if (mtype != 12) return -6;
     if (blen < 4) return -6;
-    if (body[0] != 3) { ser_write("tls: SKE curve_type bad\n"); return -6; }
+    if (body[0] != 3) return -6;
     uint16_t curve_id = ((uint16_t)body[1] << 8) | body[2];
-    if (curve_id != 23) { ser_write("tls: SKE curve bad\n"); return -6; }
+    if (curve_id != 23) return -6;
     uint8_t peer_pub[64];
     int plen_pub = body[3];
     /* ECDHE point: 1-byte 0x04 (uncompressed) + 64-byte X||Y = 65 bytes. */
-    if (plen_pub != 65 || body[4] != 0x04 || blen < 5 + 64) {
-        ser_write("tls: SKE pub len bad\n"); return -6;
-    }
+    if (plen_pub != 65 || body[4] != 0x04 || blen < 5 + 64) return -6;
     memcpy(peer_pub, body + 5, 64);
-    ser_write("tls: ske ok\n");
 
     /* ---- ServerHelloDone ---- */
-    if (hs_read(&mtype, &body, &blen) != 0) { ser_write("tls: read SHD fail\n"); return -6; }
-    if (mtype != 14) { ser_write("tls: SHD type bad\n"); return -6; }
-    ser_write("tls: shd\n");
+    if (hs_read(&mtype, &body, &blen) != 0) return -6;
+    if (mtype != 14) return -6;
 
     /* ---- ECDH shared secret ---- */
     uint8_t pre_master[32];
-    if (!uECC_shared_secret(peer_pub, our_priv, pre_master, curve)) { ser_write("tls: shared secret fail\n"); return -6; }
-    ser_write("tls: shared\n");
+    if (!uECC_shared_secret(peer_pub, our_priv, pre_master, curve)) return -6;
 
     /* ---- master secret + key block ---- */
     uint8_t master[48];
@@ -346,20 +331,17 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     memcpy(c_mac, kb + 0, 32);  memcpy(s_mac, kb + 32, 32);
     memcpy(c_key, kb + 64, 16); memcpy(s_key, kb + 80, 16);
     memcpy(c_iv, kb + 96, 16);  memcpy(s_iv, kb + 112, 16);
-    ser_write("tls: keys derived\n");
 
     /* ---- ClientKeyExchange: 1-byte 0x04 prefix + 64-byte X||Y = 65 bytes. */
     uint8_t cke[66];
     cke[0] = 65; cke[1] = 0x04; memcpy(cke + 2, our_pub, 64);
     if (hs_send(16, cke, 66) != 0) return -6;
-    ser_write("tls: cke sent\n");
 
     /* ---- ChangeCipherSpec ---- */
     {
         uint8_t ccs[1] = { 1 };
         if (send_record(20, ccs, 1) != 0) return -6;
     }
-    ser_write("tls: ccs sent\n");
 
     /* ---- client Finished ---- */
     uint8_t tmphash[32];
@@ -377,7 +359,6 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
      * includes our own client Finished message (RFC 5246 7.4.9). */
     uint8_t srvhash[32];
     sha256(srvhash, transcript, tlen);
-    ser_write("tls: cli fin sent\n");
 
     /* ---- server CCS then encrypted server Finished ---- */
     for (;;) {
@@ -387,8 +368,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         if (type != 22) return -6;
         /* encrypted handshake record: decrypt then parse Finished */
         uint8_t inner[16384]; int ilen;
-        if (app_recv(p, len, 22, inner, &ilen) != 0) { ser_write("tls: srv fin decrypt fail\n"); return -6; }
-        ser_write("tls: srv fin decrypted\n");
+        if (app_recv(p, len, 22, inner, &ilen) != 0) return -6;
         if (ilen < 4 || inner[0] != 20) return -6;
         int vlen = ((int)inner[1] << 16) | ((int)inner[2] << 8) | inner[3];
         if (vlen != 12 || ilen < 16) return -6;
@@ -396,8 +376,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         tls_prf(srv_verify, 12, master, 48, "server finished", srvhash, 32);
         uint8_t diff = 0;
         for (int i = 0; i < 12; i++) diff |= (uint8_t)(srv_verify[i] ^ inner[4 + i]);
-        if (diff != 0) { ser_write("tls: srv fin verify fail\n"); return -6; }
-        ser_write("tls: srv fin ok\n");
+        if (diff != 0) return -6;
         break;
     }
 

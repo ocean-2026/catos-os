@@ -9,7 +9,6 @@
 #include "net.h"
 #include "task.h"
 #include "../include/tls.h"
-#include "../include/serial_log.h"
 extern volatile uint32_t timer_ticks;
 
 /* ---- configuration (defaults: QEMU user-net) ----
@@ -290,8 +289,6 @@ int net_tcp_connect(const uint8_t *peer, uint16_t port) {
         task_maybe_yield();
         if (tcp.err) break;
     }
-    ser_write("tcp_connect: state="); ser_hex("x", (uint32_t)tcp.state);
-    ser_write(" err="); ser_hex("x", (uint32_t)tcp.err); ser_write("\n");
     return tcp.state == TCP_ESTABLISHED ? 0 : -3;
 }
 
@@ -352,9 +349,6 @@ static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
     if (!tcp.active || dport != tcp.local_port) return;
 
     if (tcp.state == TCP_SYN_SENT) {
-        ser_write("rxSYN flags="); ser_hex("x", (uint32_t)flags);
-        ser_write(" sp="); ser_hex("x", (uint32_t)rd16(t + 0));
-        ser_write(" dp="); ser_hex("x", (uint32_t)dport); ser_write("\n");
         if ((flags & 0x12) == 0x12) {                  /* SYN+ACK */
             tcp.rcv_next = seq + 1;
             tcp.seq = ack;
