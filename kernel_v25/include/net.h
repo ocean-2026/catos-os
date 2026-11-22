@@ -47,6 +47,17 @@ int  net_http_get(const char *url, char *buf, int max);
 int  net_http_last_status(void);              /* v2.73: last HTTP status code */
 const char *net_http_last_location(void);     /* v2.73: last 3xx Location       */
 int  net_http_download(const char *url, uint8_t *buf, int max);
+/* v2.78 D10: streaming download.  The sink is called with each body slice
+ * as it arrives (0 = keep going, non-zero = abort).  Returns the total body
+ * bytes, or a negative code: -9 chunk framing, -10 sink rejected,
+ * -11 truncated/timeout, -12 peer reset (plus the shared net_http_get codes). */
+typedef int (*net_stream_sink_t)(void *ud, const uint8_t *p, int len);
+int  net_http_download_stream(const char *url, long range_from,
+                              net_stream_sink_t sink, void *ud,
+                              int *status_out, long *total_out);
+/*   v2.78 D10: range_from > 0 requests "Range: bytes=<n>-" and the sink is
+ *   called with the remaining body only.  -13 = the connection went idle
+ *   with bytes outstanding (caller should resume from *total_out). */
 /*   v2.70: binary-safe HTTP GET for .catpkg downloads.  Returns the exact
  *   body byte count (>=0) without NUL-terminating (packages contain zero
  *   bytes), or the same negative error codes as net_http_get. */

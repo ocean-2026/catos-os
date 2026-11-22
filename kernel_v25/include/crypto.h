@@ -26,6 +26,18 @@
 void sha256(uint8_t out[32], const void *in, uint32_t n);
 void sha256_2(uint8_t out[32], const uint8_t *a, uint32_t la,
               const uint8_t *b, uint32_t lb);   /* SHA-256(a || b), no copy */
+
+/* v2.78: streaming SHA-256 for digests over data too large to hold in RAM
+ * (streamed .catpkg downloads).  Opaque context, caller allocates. */
+typedef struct {
+    uint32_t h[8];
+    uint8_t  blk[64];
+    uint32_t n;
+    uint64_t total;
+} sha256_stream_t;
+void sha256_stream_init(sha256_stream_t *c);
+void sha256_stream_update(sha256_stream_t *c, const uint8_t *p, uint32_t len);
+void sha256_stream_final(sha256_stream_t *c, uint8_t out[32]);
 void hmac_sha256(uint8_t out[32], const uint8_t *key, uint32_t klen,
                  const uint8_t *m1, uint32_t l1,
                  const uint8_t *m2, uint32_t l2);

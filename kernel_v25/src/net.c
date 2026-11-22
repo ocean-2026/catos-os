@@ -680,13 +680,17 @@ void net_poll(void) {
                                             which drains pending RX into our ring */
     uint8_t f[NET_BUF_SZ];
     int n = net_recv(f, sizeof(f));
-    while (n > 0) {
+    /* v2.78 (D10): drain at most 4 frames per poll.  Slirp can deliver a
+     * whole burst into the ring, and dispatching it all in one net_poll()
+     * overran the 20 KiB TCP receive buffer before a stream consumer ever
+     * got a chance to drain it.  Returning quickly keeps the receive path
+     * paced against the consumer (this also bounds IRQ-free polling cost). */
+    for (int burst = 0; n > 0 && burst < 4; burst++, n = net_recv(f, sizeof(f))) {
         if (!pnet_layout) {
             com1_str("[net] RX len="); com1_num(n); com1_str(" hdr:");
             for (int b = 0; b < 18 && b < n; b++) { com1_hex(f[b]); com1_str(" "); }
             com1_str("\n");
         }
         net_rx_dispatch(f, (uint32_t)n);   /* defined in netstack.c */
-        n = net_recv(f, sizeof(f));
     }
 }

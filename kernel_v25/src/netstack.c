@@ -8,6 +8,7 @@
 
 #include "net.h"
 #include "task.h"
+#include "serial_log.h"
 extern volatile uint32_t timer_ticks;
 
 /* ---- configuration (defaults: QEMU user-net) ----
@@ -222,11 +223,11 @@ static struct {
     int      err;
     uint8_t  rcv[4096];
     int      rcv_len;
-    uint8_t  rcv_buf[20480];   /* v2.70: enlarged from 4096 for binary
-                                * .catpkg downloads (up to 16 KiB payload
-                                * + HTTP headers).  net_http_download()
-                                * cannot NUL-terminate, so this must hold
-                                * a whole package. */
+    uint8_t  rcv_buf[65536];   /* v2.78 (D10): was 20480 -- sized for the
+                                * old whole-package-in-RAM download.  The
+                                * streaming consumer drains it every poll, so
+                                * this is just slack: never a size limit. */
+#define TCP_WIN_ADV 32768      /* advertised window: always non-zero */
     int      rcv_buf_len;
 } tcp;
 
@@ -258,7 +259,13 @@ static void tcp_do_send(uint8_t flags, const uint8_t *payload, uint32_t plen) {
     wr32(seg + 8,  tcp.rcv_next);
     seg[12] = 0x50;                                    /* data offset 5 */
     seg[13] = flags;
-    wr16(seg + 14, 4096);                              /* window */
+    /* v2.78 D10: keep the classic fixed 4096 window.  A real "free space"
+     * window made slirp stop for good once it hit zero, and the guest-side
+     * window update was ignored, so the transfer stalled at one buffer.
+     * With a constant non-zero window the sender keeps feeding segments;
+     * the stream consumer drains rcv_buf after every poll, so the buffer
+     * no longer caps the transfer size. */
+    wr16(seg + 14, TCP_WIN_ADV);
     wr16(seg + 16, 0);                                 /* checksum */
     wr16(seg + 18, 0);
     for (uint32_t i = 0; i < plen; i++) seg[20+i] = payload[i];
@@ -297,19 +304,44 @@ static void tcp_handle(const uint8_t *ip, uint32_t iplen) {
         return;
     }
     if (tcp.state == TCP_ESTABLISHED) {
+        if (flags & 0x04) {                            /* RST */
+            tcp.err = -1;
+            tcp.state = TCP_CLOSED;
+            tcp.active = 0;
+            return;
+        }
         if (seglen > 20) {
             uint32_t plen = seglen - 20;
-            if ((uint32_t)tcp.rcv_buf_len + plen > sizeof(tcp.rcv_buf)) plen = sizeof(tcp.rcv_buf) - tcp.rcv_buf_len;
-            for (uint32_t i = 0; i < plen; i++) tcp.rcv_buf[tcp.rcv_buf_len + i] = t[20+i];
-            tcp.rcv_buf_len += (int)plen;
-            /* ACK only what we actually stored: if the buffer was full the
-             * sender retransmits later (real flow control), instead of the
-             * old bug where we ACKed bytes we had silently dropped. */
-            tcp.rcv_next = seq + plen;
-            tcp_do_send(0x10, 0, 0);                   /* ACK the data */
+            uint32_t dseq = seq;
+            uint32_t skip = 0;
+            /* v2.78 (D10): v2.70 stored any segment that arrived and then set
+             * rcv_next = seq + stored.  Once a stream consumer drains the
+             * buffer, a stale or truncated segment can therefore REWIND the
+             * ACK number, the peer retransmits old bytes, and the download
+             * desyncs.  Accept only the next expected range: trim a
+             * retransmitted prefix, ignore anything beyond a gap. */
+            if (dseq != tcp.rcv_next) {
+                int32_t rel = (int32_t)(dseq - tcp.rcv_next);
+                if (rel < 0) {
+                    skip = (uint32_t)(-rel);
+                    if (skip >= plen) plen = 0;
+                    else { dseq = tcp.rcv_next; plen -= skip; }
+                } else {
+                    plen = 0;                    /* out of order: wait */
+                }
+            }
+            if (plen > 0) {
+                uint32_t freeb = (uint32_t)sizeof(tcp.rcv_buf) - (uint32_t)tcp.rcv_buf_len;
+                uint32_t store = plen > freeb ? freeb : plen;
+                for (uint32_t i = 0; i < store; i++)
+                    tcp.rcv_buf[tcp.rcv_buf_len + i] = t[20 + skip + i];
+                tcp.rcv_buf_len += (int)store;
+                tcp.rcv_next = dseq + store;     /* ACK only what we kept */
+            }
+            tcp_do_send(0x10, 0, 0);             /* ACK / window probe reply */
         }
         if (flags & 0x01) {                            /* FIN */
-            tcp.rcv_next = seq + seglen - 20 + 1;
+            if (tcp.rcv_next == seq + seglen - 20) tcp.rcv_next++;
             tcp_do_send(0x10, 0, 0);                   /* ACK FIN */
             tcp.state = TCP_FIN_WAIT;
             tcp.active = 0;
@@ -1249,6 +1281,230 @@ int net_http_get(const char *url, char *out, int max) {
  * Negative return values are the shared http_fetch() error codes. */
 int net_http_download(const char *url, uint8_t *out, int max) {
     return http_fetch(url, out, max);
+}
+
+/* ---- v2.78: streaming HTTP body sink (D10) -----------------------------
+ * The old path had to hold the entire response in tcp.rcv_buf (20 KiB), so
+ * package downloads were capped at 16 KiB.  This variant hands each body
+ * slice to a caller-supplied sink as soon as it arrives and immediately
+ * releases the TCP window, which makes the transfer size independent of
+ * RAM.  Only the header block and one chunk-header line are buffered. */
+
+static void tcp_rcv_drain(int n) {
+    if (n <= 0) return;
+    if (n > tcp.rcv_buf_len) n = tcp.rcv_buf_len;
+    int left = tcp.rcv_buf_len - n;
+    for (int i = 0; i < left; i++) tcp.rcv_buf[i] = tcp.rcv_buf[i + n];
+    tcp.rcv_buf_len = left;
+}
+
+/* chunked decoder fed incrementally: state 0=chunk size line, 1=chunk data,
+ * 2=CRLF after data, 3=trailers, 4=done */
+static int http_stream_chunked(const uint8_t *p, int avail, int *pos,
+                               long *chrem, int *state,
+                               net_stream_sink_t sink, void *ud, long *total) {
+    while (*pos < avail) {
+        if (*state == 0) {
+            int i = *pos, val = 0, digits = 0;
+            while (i < avail) {
+                uint8_t c = p[i];
+                int d = -1;
+                if (c >= '0' && c <= '9') d = c - '0';
+                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                if (d < 0) break;
+                val = val * 16 + d; digits++; i++;
+            }
+            while (i < avail && p[i] != '\r' && p[i] != '\n') i++;  /* chunk-ext */
+            if (i >= avail) return 0;                  /* line incomplete */
+            if (digits == 0) return -9;               /* malformed */
+            i++;                                       /* past CR or LF */
+            if (i < avail && p[i-1] == '\r' && p[i] == '\n') i++;
+            *pos = i;
+            *chrem = val;
+            *state = (val == 0) ? 3 : 1;
+        } else if (*state == 1) {
+            int take = avail - *pos;
+            if (take > *chrem) take = (int)*chrem;
+            if (take > 0) {
+                if (sink(ud, p + *pos, take) != 0) return -10;
+                *total += take; *chrem -= take; *pos += take;
+            }
+            if (*chrem == 0) *state = 2;
+        } else if (*state == 2) {
+            if (p[*pos] != '\r' && p[*pos] != '\n') return -9;
+            (*pos)++;
+            if (*pos >= avail) return 0;               /* wait for 2nd CRLF byte */
+            if (p[*pos] != '\r' && p[*pos] != '\n') *state = 0;
+            /* else: still the second CRLF byte, stay in state 2 */
+        } else if (*state == 3) {
+            int i = *pos;
+            while (i + 1 < avail && !(p[i] == '\r' && p[i+1] == '\n')) i++;
+            if (i + 1 >= avail) { *pos = avail; return 0; }
+            *pos = i + 2; *state = 4;
+            return 1;
+        } else {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int net_http_download_stream(const char *url, long range_from,
+                             net_stream_sink_t sink, void *ud,
+                             int *status_out, long *total_out) {
+    if (!net_ready || !url || !sink) return -1;
+
+    char cur[256];
+    hl_copy(cur, sizeof(cur), url);
+    if (cur[0] == 0) return -1;
+
+    for (int hop = 0; hop <= 4; hop++) {
+        uint8_t peer[4]; uint16_t port; const char *path; char host[128];
+        int r = http_parse_url(cur, peer, &port, &path, host, sizeof(host));
+        if (r != 0) return r;
+
+        tcp.active = 0; tcp.rcv_buf_len = 0;
+        for (int i = 0; i < 4; i++) tcp.peer_ip[i] = peer[i];
+        tcp.local_port = (uint16_t)(40000 + (ip_id_counter & 0x3FFF));
+        tcp.peer_port = port;
+        tcp.seq = 0x04000000u + (uint32_t)((uint32_t)net_mac[4] << 16) + (uint32_t)net_mac[5] * 0x10001u;
+        tcp.rcv_next = 0; tcp.state = TCP_SYN_SENT; tcp.active = 1; tcp.err = 0;
+        tcp_do_send(0x02, 0, 0);
+        for (long i = 0; i < 3000000L && tcp.state == TCP_SYN_SENT; i++) {
+            net_poll(); task_maybe_yield();
+            if (tcp.err) break;
+        }
+        if (tcp.state != TCP_ESTABLISHED) return -3;
+
+        {
+            uint8_t req[512]; int n = 0;
+            const char *m = "GET "; while (*m) req[n++] = (uint8_t)*m++;
+            const char *pp = path; while (*pp && n < 470) req[n++] = (uint8_t)*pp++;
+            const char *v = " HTTP/1.0\r\nHost: "; while (*v) req[n++] = (uint8_t)*v++;
+            const char *hp = host; while (*hp && n < 495) req[n++] = (uint8_t)*hp++;
+            if (port != 80) {
+                req[n++] = ':'; int d = port; char t[8]; int ti = 0;
+                while (d > 0) { t[ti++] = (char)('0' + d % 10); d /= 10; }
+                while (ti > 0) req[n++] = (uint8_t)t[--ti];
+            }
+            const char *v2 = "\r\nUser-Agent: CatOS-curl/1.0\r\nAccept: */*\r\n"
+                             "Accept-Encoding: identity\r\nConnection: close\r\n";
+            while (*v2 && n < 480) req[n++] = (uint8_t)*v2++;
+            if (range_from > 0) {
+                const char *rh = "Range: bytes=";
+                while (*rh && n < 490) req[n++] = (uint8_t)*rh++;
+                /* decimal offset */
+                {
+                    char d[16]; int di = 0; long v = range_from;
+                    if (v == 0) d[di++] = '0';
+                    while (v > 0 && di < 15) { d[di++] = (char)('0' + v % 10); v /= 10; }
+                    while (di > 0 && n < 500) req[n++] = (uint8_t)d[--di];
+                }
+                req[n++] = '-'; req[n++] = '\r'; req[n++] = '\n';
+            }
+            req[n++] = '\r'; req[n++] = '\n';
+            tcp_do_send(0x18, req, (uint32_t)n);
+        }
+
+        int hdr_done = 0, pos = 0, chunked = 0, ch_state = 0, done = 0;
+        long idle = 0;
+        long remain = -1, chrem = 0, total = 0;
+        int code = 0, redirect = 0;
+        uint8_t loc[192]; loc[0] = 0;
+
+        for (long i = 0; i < 40000000L && !done; i++) {
+            net_poll();
+            task_maybe_yield();
+
+            if (!hdr_done) {
+                int hs = -1;
+                for (int k = 0; k + 3 < tcp.rcv_buf_len; k++)
+                    if (tcp.rcv_buf[k]=='\r' && tcp.rcv_buf[k+1]=='\n' &&
+                        tcp.rcv_buf[k+2]=='\r' && tcp.rcv_buf[k+3]=='\n') { hs = k; break; }
+                if (hs >= 0) {
+                    if (tcp.rcv_buf_len >= 12 && tcp.rcv_buf[0]=='H' && tcp.rcv_buf[4]=='/')
+                        code = (tcp.rcv_buf[9]-'0')*100 + (tcp.rcv_buf[10]-'0')*10 + (tcp.rcv_buf[11]-'0');
+                    if (status_out) *status_out = code;
+                    if (code >= 300 && code < 400) {
+                        const uint8_t *v; int vlen;
+                        if (http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Location", &v, &vlen)) {
+                            int k = 0;
+                            while (k < vlen && k < (int)sizeof(loc) - 1) { loc[k] = v[k]; k++; }
+                            loc[k] = 0;
+                        }
+                        redirect = 1; done = 1; break;
+                    }
+                    if (code < 200 || code >= 400) return -4;
+                    const uint8_t *v; int vlen;
+                    if (http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Transfer-Encoding", &v, &vlen))
+                        chunked = (vlen >= 7 && hl_lower(v[0]) == 'c');
+                    if (!chunked && http_hdr(tcp.rcv_buf, tcp.rcv_buf_len, "Content-Length", &v, &vlen)) {
+                        long cl = 0;
+                        for (int k = 0; k < vlen && v[k] >= '0' && v[k] <= '9'; k++) cl = cl * 10 + (v[k] - '0');
+                        remain = cl;
+                    }
+                    pos = hs + 4;
+                    hdr_done = 1;
+                    tcp_rcv_drain(pos); pos = 0;
+                    if (remain == 0) { done = 1; break; }
+                } else if (!tcp.active && tcp.rcv_buf_len == 0) {
+                    return -5;
+                }
+                continue;
+            }
+
+            if (chunked) {
+                int avail = tcp.rcv_buf_len;
+                int cr = http_stream_chunked(tcp.rcv_buf, avail, &pos, &chrem,
+                                             &ch_state, sink, ud, &total);
+                if (cr < 0) return cr;
+                if (cr == 1) { done = 1; break; }
+            } else {
+                int take = tcp.rcv_buf_len - pos;
+                if (take > 0) {
+                    if (remain >= 0 && take > remain) take = (int)remain;
+                    if (sink(ud, tcp.rcv_buf + pos, take) != 0) return -10;
+                    total += take; pos += take;
+                    if (remain >= 0) remain -= take;
+                }
+                if (remain == 0) { done = 1; break; }
+            }
+            tcp_rcv_drain(pos); pos = 0;
+
+            if (tcp.err) return -12;                /* peer reset */
+            /* v2.78 D10: slirp stops feeding a long single connection after
+             * roughly 80 KiB even though the peer's window is open and our
+             * ACKs are on the wire.  Rather than hang, report "needs resume"
+             * and let the caller re-request with Range: bytes=<have>- . */
+            if (tcp.rcv_buf_len == 0) {
+                idle++;
+                if (idle > 250000L && remain > 0 && !chunked) {
+                    if (total_out) *total_out = total;
+                    tcp.active = 0;
+                    return -13;
+                }
+            } else {
+                idle = 0;
+            }
+            if (!tcp.active && tcp.rcv_buf_len == 0) {
+                /* FIN drained: done if the length was unknown (close-delimited)
+                 * or short (server closed early); otherwise report truncation. */
+                if (remain > 0) return -11;
+                done = 1; break;
+            }
+        }
+        if (!done) return -11;                  /* timeout / truncated */
+        if (total_out) *total_out = total;
+        if (redirect) {
+            int mr = http_make_next(cur, (const char *)loc, cur, sizeof(cur));
+            if (mr != 0) return mr;
+            continue;
+        }
+        tcp.active = 0;
+        return (int)total;
+    }
+    return -8;
 }
 
 /* netcfg hook: change the DNS resolver (e.g. for VMware NAT) */
