@@ -4658,7 +4658,8 @@ static void cmd_mv(char *arg) {
 #define PKG_DIR        "/pkg"
 #define PKG_INDEX      "/pkg/PKGS.TXT"
 #define PKG_HDR_SIZE   204
-#define PKG_BUF_MAX    16384
+#define PKG_DL_TMP     "/pkg/.pkgdl.tmp"
+#define PKG_IDX_TMP    "/pkg/.idx.tmp"
 
 typedef struct {
     char name[16];
@@ -4667,8 +4668,7 @@ typedef struct {
     char file[16];
 } pkg_rec_t;
 
-static char pkg_idx_buf[2048];
-static char pkg_payload[PKG_BUF_MAX];
+static char pkg_idx_buf[4096];
 
 static void pk_pad_copy(char *dst, int cap, const char *src, int width) {
     int i = 0;
@@ -4870,22 +4870,14 @@ static void bn_pow65537(const bn_t *sig, const bn_t *n, bn_t *out) {
  * the 512-bit RSA modulus; tools/mkpkg.py signs exactly the same value.
  * Note the ceiling: RSA-512 + 56-bit digest is tamper-EVIDENT against
  * accidental or casual forgery, not a strong signature scheme. */
-static uint64_t pkg_hash(const uint8_t *hdr, uint32_t hn,
-                         const uint8_t *payload, uint32_t pn) {
-    uint8_t d[32];
-    sha256_2(d, hdr, hn, payload, pn);
-    uint64_t h = 0;
-    for (int i = 0; i < 7; i++) h = (h << 8) | d[i];   /* top 56 bits */
-    return h;
-}
-static int pkg_verify(const uint8_t *buf, uint32_t plen) {
+static uint8_t pkg_sig_be[64];      /* signature bytes of the package in hand */
+static int pkg_check_sig(uint64_t h) {
     bn_t n, sig, calc, want;
     uint8_t wantbe[64];
     bn_from_be(PKG_PUB_N, &n);
-    bn_from_be(buf + 140, &sig);
+    bn_from_be(pkg_sig_be, &sig);
     bn_pow65537(&sig, &n, &calc);
-    uint64_t h = pkg_hash(buf, 140, buf + PKG_HDR_SIZE, plen);
-    uint64_t m = (1ULL << 56) | h;
+    uint64_t m = (1ULL << 56) | (h & ((1ULL << 56) - 1));
     for (int i = 0; i < 64; i++) wantbe[i] = 0;
     for (int i = 0; i < 8; i++) wantbe[56 + i] = (uint8_t)(m >> (56 - 8 * i));
     bn_from_be(wantbe, &want);
@@ -4900,9 +4892,9 @@ static int pkg_verify(const uint8_t *buf, uint32_t plen) {
  *                       payload into /bin/<cmd>.ce.  A remote package is
  *                       never trusted until its RSA-512 signature checks.
  *
- * The transport is binary-safe net_http_download(); the existing
- * net_http_get() is text-only (NUL-terminated, truncates at 0 bytes) and
- * cannot carry a .catpkg. */
+ * v2.78 (D10): the download goes through net_http_download_stream(), which
+ * hands each body slice to the file sink as it arrives; neither the TCP
+ * window nor a RAM buffer caps package size. */
 #define PKG_REPO_KEY "HKLM\\Software\\CatOS\\Net\\PkgRepo"
 
 static const char *pkg_repo_get(void) {
@@ -4947,6 +4939,17 @@ static void pkg_url_join(char *out, int cap, const char *base, const char *file)
     out[n] = 0;
 }
 
+/* Generic streamed-download sink: append each body slice to a scratch file.
+ * off==0 on the first slice (truncate/create), afterwards append. */
+typedef struct { const char *path; uint32_t off; } pkg_file_sink_t;
+static int pkg_file_sink_cb(void *ud, const uint8_t *p, int len) {
+    pkg_file_sink_t *s = (pkg_file_sink_t *)ud;
+    if (fs_write_raw_mode(s->path, (const char *)p, (uint32_t)len, s->off ? 1 : 0) != 0)
+        return -1;
+    s->off += (uint32_t)len;
+    return 0;
+}
+
 static void cmd_pkg_update(void) {
     const char *base = pkg_repo_get();
     if (!base) {
@@ -4956,34 +4959,88 @@ static void cmd_pkg_update(void) {
     char url[FS_PATH_MAX];
     pkg_url_join(url, sizeof(url), base, "PKGS.TXT");
     vga_write("pkg: fetching "); vga_write(url); vga_write(" ...\n");
-    int n = net_http_download(url, (uint8_t *)pkg_payload, PKG_BUF_MAX - 1);
-    if (n < 0) {
+    /* v2.78 (D10): stream the index to a scratch file, then promote it.
+     * The sink's first slice truncates/creates the file (off==0, mode 0). */
+    pkg_file_sink_t sk; sk.path = PKG_IDX_TMP; sk.off = 0;
+    int st = 0; long total = 0;
+    int n = net_http_download_stream(url, 0, pkg_file_sink_cb, &sk, &st, &total);
+    if (n < 0 || sk.off == 0) {
+        fs_delete(PKG_IDX_TMP);
         vga_write(trs("pkg: download failed (code ", "pkg：下载失败（错误码 "));
         print_int(n); vga_write(")\n"); return;
     }
-    if (n == 0) { vga_write(trs("pkg: empty index\n", "pkg：索引为空\n")); return; }
-    pkg_payload[n] = 0;
-    if (fs_write_text(PKG_INDEX, pkg_payload, (uint32_t)n) != 0) {
+    int rd = fs_read_text(PKG_IDX_TMP, pkg_idx_buf, (int)sizeof(pkg_idx_buf) - 1);
+    fs_delete(PKG_IDX_TMP);
+    if (rd <= 0) { vga_write(trs("pkg: empty index\n", "pkg：索引为空\n")); return; }
+    pkg_idx_buf[rd] = 0;
+    if (fs_write_text(PKG_INDEX, pkg_idx_buf, (uint32_t)rd) != 0) {
         vga_write(trs("pkg: failed to write local index\n", "pkg：写入本地索引失败\n")); return;
     }
-    vga_write("pkg: index updated ("); print_int(n); vga_write(" bytes)\n");
+    vga_write("pkg: index updated ("); print_int(rd); vga_write(" bytes)\n");
 }
 
-/* Install a signed .catpkg image already loaded in pkg_payload (size rd).
- * Shared by local install and remote fetch so verification cannot diverge. */
-static void pkg_install_payload(int rd) {
-    if (rd < PKG_HDR_SIZE ||
-        pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
-        pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
-        pkg_payload[4] != '0' || pkg_payload[5] != '2') {
+/* ---- v2.78 (D10): install straight from a file -------------------------
+ * The v2.70 path read the whole package into a 16 KiB static buffer, so the
+ * download (tcp.rcv_buf) and the install both capped packages at 16 KiB.
+ * Everything below walks the file in 4 KiB slices instead: the SHA-256 is
+ * streamed over (header || payload), the signature is read from offset 140,
+ * and the CE01 payload is copied chunk by chunk into /bin.  The only size
+ * limit left is free disk space. */
+#define PKG_IO_CHUNK 4096
+
+static int pkg_file_digest(const char *path, uint32_t plen, uint64_t *out) {
+    uint8_t b[PKG_IO_CHUNK];
+    sha256_stream_t c;
+    sha256_stream_init(&c);
+    if (fs_read_at(path, (char *)b, 0, 140) != 140) return -1;
+    sha256_stream_update(&c, b, 140);
+    uint32_t off = 0;
+    while (off < plen) {
+        uint32_t want = plen - off;
+        if (want > PKG_IO_CHUNK) want = PKG_IO_CHUNK;
+        int got = fs_read_at(path, (char *)b, (int)(PKG_HDR_SIZE + off), (int)want);
+        if (got <= 0) return -1;
+        sha256_stream_update(&c, b, (uint32_t)got);
+        off += (uint32_t)got;
+    }
+    uint8_t d[32];
+    sha256_stream_final(&c, d);
+    uint64_t h = 0;
+    for (int i = 0; i < 7; i++) h = (h << 8) | d[i];
+    *out = h;
+    return 0;
+}
+
+static int pkg_copy_payload(const char *src, const char *dst, uint32_t plen) {
+    uint8_t b[PKG_IO_CHUNK];
+    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -1;   /* truncate/create */
+    uint32_t off = 0;
+    while (off < plen) {
+        uint32_t want = plen - off;
+        if (want > PKG_IO_CHUNK) want = PKG_IO_CHUNK;
+        int got = fs_read_at(src, (char *)b, (int)(PKG_HDR_SIZE + off), (int)want);
+        if (got <= 0) return -1;
+        if (fs_write_raw_mode(dst, (const char *)b, (uint32_t)got, 1) != 0) return -1;
+        off += (uint32_t)got;
+    }
+    return 0;
+}
+
+static void pkg_install_file(const char *path) {
+    uint8_t hdr[PKG_HDR_SIZE];
+    uint32_t clus = 0, sz = 0;
+    if (fs_resolve_file(path, &clus, &sz) != 0 || sz < PKG_HDR_SIZE) {
+        vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n", "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
+    }
+    if (fs_read_at(path, (char *)hdr, 0, PKG_HDR_SIZE) != PKG_HDR_SIZE) {
+        vga_write(trs("pkg: read error\n", "pkg：读取错误\n")); return;
+    }
+    if (hdr[0] != 'C' || hdr[1] != 'P' || hdr[2] != 'K' || hdr[3] != 'G' ||
+        hdr[4] != '0' || hdr[5] != '2') {
         vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n", "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
     }
     char cmd[16];
-    pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
-    /* v2.76 (E1) UnknownBinary gate: the installed name comes straight out of
-     * the package header and used to be pasted into "/bin/<cmd>.ce" unchecked,
-     * so a package could ship ../../etc/passwd as its "command".  Only a plain
-     * identifier is accepted now. */
+    pk_pad_copy(cmd, sizeof(cmd), hdr + 40, 15);
     {
         int n = 0;
         for (const char *q = cmd; *q; q++) n++;
@@ -4999,20 +5056,18 @@ static void pkg_install_payload(int rd) {
             }
         }
     }
-    uint32_t plen = (uint32_t)(unsigned char)pkg_payload[136] |
-                    ((uint32_t)(unsigned char)pkg_payload[137] << 8) |
-                    ((uint32_t)(unsigned char)pkg_payload[138] << 16) |
-                    ((uint32_t)(unsigned char)pkg_payload[139] << 24);
-    if (plen == 0 || PKG_HDR_SIZE + plen != (uint32_t)rd) {
+    uint32_t plen = (uint32_t)(unsigned char)hdr[136] |
+                    ((uint32_t)(unsigned char)hdr[137] << 8) |
+                    ((uint32_t)(unsigned char)hdr[138] << 16) |
+                    ((uint32_t)(unsigned char)hdr[139] << 24);
+    if (plen == 0 || PKG_HDR_SIZE + plen != sz) {
         vga_write(trs("pkg: corrupt package (length mismatch)\n", "pkg：包损坏（长度不匹配）\n")); return;
     }
-    /* v2.76 (E1) UnknownBinary gate: a signed package still has to carry a
-     * well-formed CE01 image, otherwise "signature ok" would bless arbitrary
-     * bytes into /bin.  Header layout mirrors include/ce_abi.h. */
     {
-        const unsigned char *pl = (const unsigned char *)pkg_payload + PKG_HDR_SIZE;
-        /* ce_header_t is 20 bytes: magic[4], entry, bss_size, api_offset,
-         * image_size -- image_size lives at offset 16, not 12. */
+        unsigned char pl[20];
+        if (fs_read_at(path, (char *)pl, PKG_HDR_SIZE, 20) != 20) {
+            vga_write(trs("pkg: read error\n", "pkg：读取错误\n")); return;
+        }
         uint32_t img = (uint32_t)pl[16] | ((uint32_t)pl[17] << 8) |
                        ((uint32_t)pl[18] << 16) | ((uint32_t)pl[19] << 24);
         uint32_t entry = (uint32_t)pl[4] | ((uint32_t)pl[5] << 8) |
@@ -5026,7 +5081,12 @@ static void pkg_install_payload(int rd) {
                           "pkg：CE 镜像头损坏——已拒绝\n")); return;
         }
     }
-    if (pkg_verify((const uint8_t *)pkg_payload, plen) != 0) {
+    for (int i = 0; i < 64; i++) pkg_sig_be[i] = hdr[140 + i];
+    uint64_t h = 0;
+    if (pkg_file_digest(path, plen, &h) != 0) {
+        vga_write(trs("pkg: read error (digest)\n", "pkg：读取错误（摘要）\n")); return;
+    }
+    if (pkg_check_sig(h) != 0) {
         vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n", "pkg：签名校验失败——拒绝安装\n"));
         return;
     }
@@ -5038,7 +5098,7 @@ static void pkg_install_payload(int rd) {
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
         vga_write(trs("pkg: permission denied writing to /bin\n", "pkg：权限不足 writing to /bin\n")); return;
     }
-    if (fs_write_raw_mode(dst, pkg_payload + PKG_HDR_SIZE, plen, 0) != 0) {
+    if (pkg_copy_payload(path, dst, plen) != 0) {
         vga_write(trs("pkg: install failed (disk full?)\n", "pkg: install 失败 (disk full?)\n")); return;
     }
     acl_set(dst, g_uid, g_gid, 0755);
@@ -5078,14 +5138,31 @@ static void cmd_pkg_fetch(const char *arg) {
         pkg_url_join(url, sizeof(url), base, recs[i].file);
     }
     vga_write("pkg: downloading "); vga_write(url); vga_write(" ...\n");
-    int rd = net_http_download(url, (uint8_t *)pkg_payload, PKG_BUF_MAX);
-    if (rd < 0) {
+    /* v2.78 (D10): stream the body to a scratch file and consume it slice
+     * by slice -- no download-size cap, no whole-package buffer. */
+    /* Persistent scratch: the sink's first slice truncates/creates it
+     * (off==0, mode 0); the stale copy from a previous fetch is overwritten.
+     * We deliberately do not delete/recreate the entry between fetches. */
+    const char *tmp = PKG_DL_TMP;
+    pkg_file_sink_t sk; sk.path = tmp; sk.off = 0;
+    int st = 0; long total = 0; long off = 0; int rd = 0;
+    /* A single TCP connection goes idle after ~80 KiB under QEMU slirp, so
+     * continue with HTTP ranges: every hop appends the next slice of the
+     * same file.  A server that ignores Range (200 instead of 206) makes us
+     * restart once; chunked replies cannot be resumed. */
+    for (int hop = 0; hop < 400; hop++) {
+        st = 0; total = 0;
+        rd = net_http_download_stream(url, off, pkg_file_sink_cb, &sk, &st, &total);
+        if (st == 200 && off > 0) { fs_write_raw_mode(tmp, "", 0, 0); sk.off = 0; off = 0; continue; }
+        if (rd == -13) { off = sk.off; continue; }
+        break;
+    }
+    if (rd < 0 || sk.off == 0) {
         vga_write(trs("pkg: download failed (code ", "pkg：下载失败（错误码 "));
         print_int(rd); vga_write(")\n"); return;
     }
-    if (rd == 0) { vga_write(trs("pkg: empty response\n", "pkg：响应为空\n")); return; }
-    vga_write("pkg: got "); print_int(rd); vga_write(" bytes, verifying ...\n");
-    pkg_install_payload(rd);   /* magic + length + RSA-512 signature + write */
+    vga_write("pkg: got "); print_int((int)sk.off); vga_write(trs(" bytes, verifying ...\n", " 字节，校验中 ...\n"));
+    pkg_install_file(tmp);
 }
 
 static void cmd_pkg_install(const char *name) {
@@ -5106,11 +5183,7 @@ static void cmd_pkg_install(const char *name) {
     if (fs_resolve_file(cpath, &clus, &sz) != 0) {
         vga_write(trs("pkg: payload missing: ", "pkg: 缺少数据文件: ")); vga_write(cpath); vga_write("\n"); return;
     }
-    if (sz > PKG_BUF_MAX) { vga_write(trs("pkg: package too large\n", "pkg: package 过大\n")); return; }
-    int rd = fs_read_at(cpath, pkg_payload, 0, (int)sz);
-    if (rd <= 0) { vga_write(trs("pkg: read error\n", "pkg: 读取 错误\n")); return; }
-
-    pkg_install_payload(rd);   /* v2.70: shared with remote fetch, same verifier */
+    pkg_install_file(cpath);   /* v2.78: shared with remote fetch, streams the file */
 }
 
 static void cmd_pkg_remove(const char *name) {

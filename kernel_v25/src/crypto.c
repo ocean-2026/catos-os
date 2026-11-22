@@ -107,14 +107,11 @@ void sha256(uint8_t out[32], const void *in, uint32_t n) {
  * could only hash one buffer, which is why package digests were a hand-rolled
  * FNV-1a64 instead of a real hash.  The same context is what a TLS PRF and
  * the streaming download digest need. */
-typedef struct {
-    uint32_t h[8];
-    uint8_t  blk[64];
-    uint32_t n;
-    uint64_t total;
-} sha256_ctx_t;
+void sha256_stream_init(sha256_stream_t *c);
+void sha256_stream_update(sha256_stream_t *c, const uint8_t *p, uint32_t len);
+void sha256_stream_final(sha256_stream_t *c, uint8_t out[32]);
 
-static void sha256_ctx_init(sha256_ctx_t *c) {
+static void sha256_ctx_init(sha256_stream_t *c) {
     static const uint32_t iv[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
@@ -122,7 +119,7 @@ static void sha256_ctx_init(sha256_ctx_t *c) {
     c->n = 0; c->total = 0;
 }
 
-static void sha256_ctx_update(sha256_ctx_t *c, const uint8_t *p, uint32_t len) {
+void sha256_stream_update(sha256_stream_t *c, const uint8_t *p, uint32_t len) {
     c->total += len;
     while (len) {
         if (c->n == 0 && len >= 64) { sha256_block(c->h, p); p += 64; len -= 64; continue; }
@@ -131,7 +128,7 @@ static void sha256_ctx_update(sha256_ctx_t *c, const uint8_t *p, uint32_t len) {
     }
 }
 
-static void sha256_ctx_final(sha256_ctx_t *c, uint8_t out[32]) {
+void sha256_stream_final(sha256_stream_t *c, uint8_t out[32]) {
     uint64_t bits = c->total * 8;
     uint32_t j = c->n;
     c->blk[j++] = 0x80;
@@ -145,13 +142,15 @@ static void sha256_ctx_final(sha256_ctx_t *c, uint8_t out[32]) {
     }
 }
 
+void sha256_stream_init(sha256_stream_t *c) { sha256_ctx_init(c); }
+
 void sha256_2(uint8_t out[32], const uint8_t *a, uint32_t la,
               const uint8_t *b, uint32_t lb) {
-    sha256_ctx_t c;
-    sha256_ctx_init(&c);
-    if (la) sha256_ctx_update(&c, a, la);
-    if (lb) sha256_ctx_update(&c, b, lb);
-    sha256_ctx_final(&c, out);
+    sha256_stream_t c;
+    sha256_stream_init(&c);
+    if (la) sha256_stream_update(&c, a, la);
+    if (lb) sha256_stream_update(&c, b, lb);
+    sha256_stream_final(&c, out);
 }
 
 void hmac_sha256(uint8_t out[32], const uint8_t *key, uint32_t klen,
