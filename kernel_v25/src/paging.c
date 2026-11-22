@@ -149,6 +149,28 @@ void paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb) {
     /* the low frames (0..kernel) are outside the managed range; nothing
      * else to reserve. */
 
+    /* #D10: keep kernel-side allocations (VMA nodes, page directories /
+     * tables, per-task scratch frames) out of the physical slice that
+     * matches the user arena virtual range [USER_IMAGE_BASE, USER_EXT_END).
+     *
+     * Frames are handed out by physical address and the kernel dereferences
+     * them as identity-mapped virtual pointers.  Under a ring3 task's CR3
+     * the 0x2000000..0x2800000 range translates through the task's private
+     * page tables (PDE 8/9), not the kdir identity map.  A kernel object
+     * living at a physical address inside that range would alias whatever
+     * the task has mapped at the same virtual offset -- e.g. a VMA node read
+     * back as the task's image bytes, corrupting validate_uaddr().  The
+     * task's own image/stack/heap frames may still use physical addresses
+     * outside this slice; they are reached purely through their PT entries,
+     * so physical == virtual is not required there. */
+    {
+        uint32_t ua_lo = USER_IMAGE_BASE;
+        uint32_t ua_hi = USER_EXT_END;
+        for (uint32_t pa = ua_lo; pa < ua_hi; pa += 4096) {
+            if (pa >= frames_base && pa < mem_top) mark_frame(pa, 1);
+        }
+    }
+
     cpu_paging_enable((uint32_t)kdir);
 }
 
