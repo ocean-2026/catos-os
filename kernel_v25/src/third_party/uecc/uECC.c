@@ -863,7 +863,7 @@ static void XYcZ_addC(uECC_word_t * X1,
 static void select_ptr(uECC_word_t condition, uECC_word_t *val0, uECC_word_t *val1, uECC_word_t **out0, uECC_word_t **out1) {
     uintptr_t mask = -(intptr_t)condition;
 #if defined(__GNUC__)
-    asm volatile("" : "+g"(mask));
+    __asm__ volatile("" : "+g"(mask));
 #endif
     *out0 = (uECC_word_t *)(((uintptr_t)val0 & mask) | ((uintptr_t)val1 & ~mask));
     *out1 = (uECC_word_t *)(((uintptr_t)val1 & mask) | ((uintptr_t)val0 & ~mask));
