@@ -44,7 +44,10 @@ static const char *const k_names[PAL_COUNT] = {
 
 /* The v2.37 modern terminal theme, now only a fallback. */
 static const uint32_t k_defaults[PAL_COUNT] = {
-    0x0C0C0C, 0xDCDCDC, 0x7EE787, 0x60A5FA, 0x7EE787,
+    /* v2.72: the canvas MUST match render.c's built-in theme canvas
+     * (g_dark_tokens[0], #0A0E14).  Two different "backgrounds" was the
+     * root cause of the half-painted-frame artifact. */
+    0x0A0E14, 0xDCDCDC, 0x7EE787, 0x60A5FA, 0x7EE787,
     0xFFFFFF, 0xDCDCDC, 0xF85149, 0xE3B341, 0x56D364,
     0x39C5CF, 0x8B949E, 0xD299DD, 0x264F78, 0x161B22, 0x8B949E,
     0x0A1A3A, 0xDCE6F2, 0xFFFFFF, 0x8FB8FF, 0xFFD866
@@ -53,7 +56,7 @@ static const uint32_t k_defaults[PAL_COUNT] = {
 /* Statically initialised to the defaults: a panic before pal_init() must
  * still paint a readable crash screen (black-on-black is not acceptable). */
 static uint32_t g_rgb[PAL_COUNT] = {
-    0x0C0C0C, 0xDCDCDC, 0x7EE787, 0x60A5FA, 0x7EE787,
+    0x0A0E14, 0xDCDCDC, 0x7EE787, 0x60A5FA, 0x7EE787,
     0xFFFFFF, 0xDCDCDC, 0xF85149, 0xE3B341, 0x56D364,
     0x39C5CF, 0x8B949E, 0xD299DD, 0x264F78, 0x161B22, 0x8B949E,
     0x0A1A3A, 0xDCE6F2, 0xFFFFFF, 0x8FB8FF, 0xFFD866

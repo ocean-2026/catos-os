@@ -370,7 +370,7 @@ static void seed_defaults(void) {
     hive_set_dw("HKLM\\Environment\\HistoryMax", 128);
 
     /* terminal colour roles -- the v2.37 modern theme, now data */
-    hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\Colors\\Background",  "#0C0C0C");
+    hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\Colors\\Background",  "#0A0E14");
     hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\Colors\\Foreground",  "#DCDCDC");
     hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\Colors\\PromptUser",  "#7EE787");
     hive_set_sz("HKLM\\Software\\CatOS\\Terminal\\Colors\\PromptPath",  "#60A5FA");

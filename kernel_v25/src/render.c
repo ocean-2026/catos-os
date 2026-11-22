@@ -732,10 +732,28 @@ void con_set_style(uint8_t fi, uint8_t bi, uint8_t at) {
     s_fg_rgb = clut[fi]; s_bg_rgb = clut[bi];
 }
 void con_set_style_rgb(uint32_t fg, uint32_t bg, uint8_t at) {
+    uint32_t old_bg = s_bg_rgb;
     s_fg_rgb = fg & 0x00FFFFFFu; s_bg_rgb = bg & 0x00FFFFFFu;
     s_fg_idx = render_quantize(s_fg_rgb);
     s_bg_idx = render_quantize(s_bg_rgb);
     s_attrs = at;
+    /* v2.72 root-cause fix: cells snapshot their colours when they are
+     * written (cell_blank/cell_set copy s_bg_rgb into c->bg).  Two
+     * independent "background" sources existed -- the built-in theme canvas
+     * (con_apply_theme's clut[0], #0A0E14) and the hive colour role
+     * (Terminal\Colors\Background, #0C0C0C) applied later by the boot code.
+     * Cells stamped under the first kept #0A0E14 while the frame was cleared
+     * with the second, so only text-covered cells looked "themed" and the
+     * rest kept the old canvas -- the user-visible artifact was exactly
+     * "the background colour does not cover the whole screen".
+     * Re-stamp every cell that still carries the previous default background,
+     * so both agree again; callers repaint the frame afterwards. Cells with an
+     * explicitly different background (panels, inverse video) are untouched. */
+    if (old_bg != s_bg_rgb) {
+        for (int y = 0; y < CON_MAX_ROWS; y++)
+            for (int x = 0; x < CON_MAX_COLS; x++)
+                if (cells[y][x].bg == old_bg) cells[y][x].bg = s_bg_rgb;
+    }
 }
 void con_set_fg(uint8_t fi)     { s_fg_idx = fi; s_fg_rgb = clut[fi]; }
 void con_set_fg_rgb(uint32_t c) { s_fg_rgb = c & 0x00FFFFFFu;

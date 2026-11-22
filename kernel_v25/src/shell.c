@@ -630,6 +630,10 @@ static void cmd_theme(const char *arg) {
         return;
     }
     con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+    /* v2.72: con_set_style_rgb() re-stamps the cells' snapshot background;
+     * the frame itself must be cleared with the new colour in the same
+     * breath, otherwise the old canvas survives wherever no text is drawn. */
+    con_repaint_frame();
     /* v2.67: the i18n entry is a TEMPLATE ("theme set to %s"); printing
      * it raw leaked the %s into the terminal. */
     vga_write("theme: applied '"); vga_write(name);
