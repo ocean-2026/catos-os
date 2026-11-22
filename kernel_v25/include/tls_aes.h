@@ -13,7 +13,7 @@
  */
 
 typedef struct {
-    uint8_t rk[176];      /* 11 round keys, AES-128 */
+    uint8_t _ctx[200];    /* opaque: wraps tiny-AES struct AES_ctx */
 } tls_aes128_t;
 
 void tls_aes128_key(tls_aes128_t *c, const uint8_t key[16]);
