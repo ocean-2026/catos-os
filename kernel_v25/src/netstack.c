@@ -8,7 +8,7 @@
 
 #include "net.h"
 #include "task.h"
-#include "serial_log.h"
+#include "../include/tls.h"
 extern volatile uint32_t timer_ticks;
 
 /* ---- configuration (defaults: QEMU user-net) ----
@@ -271,6 +271,66 @@ static void tcp_do_send(uint8_t flags, const uint8_t *payload, uint32_t plen) {
     for (uint32_t i = 0; i < plen; i++) seg[20+i] = payload[i];
     wr16(seg + 16, tcp_checksum(net_our_ip, tcp.peer_ip, seg, 20 + plen));
     ip_send(tcp.peer_ip, 6, seg, 20 + plen);
+    tcp.seq += plen;        /* advance our send sequence by payload */
+}
+
+/* ---- D2 TLS transport hooks (consumed by src/tls.c) ---- */
+
+int net_tcp_connect(const uint8_t *peer, uint16_t port) {
+    tcp.active = 0;
+    tcp.rcv_buf_len = 0;
+    for (int i = 0; i < 4; i++) tcp.peer_ip[i] = peer[i];
+    tcp.local_port = (uint16_t)(40000 + (ip_id_counter & 0x3FFF));
+    tcp.peer_port  = port;
+    tcp.seq  = 0x04000000u + (uint32_t)((uint32_t)net_mac[4] << 16)
+              + (uint32_t)net_mac[5] * 0x10001u;
+    tcp.rcv_next = 0;
+    tcp.state = TCP_SYN_SENT;
+    tcp.active = 1;
+    tcp.err = 0;
+    tcp_do_send(0x02, 0, 0);                    /* SYN */
+
+    for (long i = 0; i < 3000000L && tcp.state == TCP_SYN_SENT; i++) {
+        net_poll();
+        task_maybe_yield();
+        if (tcp.err) break;
+    }
+    return tcp.state == TCP_ESTABLISHED ? 0 : -3;
+}
+
+int net_tcp_send(const uint8_t *data, int len) {
+    tcp_do_send(0x18, data, (uint32_t)len);     /* PSH|ACK */
+    return len;
+}
+
+int net_tcp_recv(uint8_t *buf, int max, long ticks) {
+    int n = 0;
+    while (tcp.rcv_buf_len > 0 && n < max) {
+        int take = tcp.rcv_buf_len;
+        if (take > max - n) take = max - n;
+        memcpy(buf + n, tcp.rcv_buf, take);
+        int rem = tcp.rcv_buf_len - take;
+        for (int i = 0; i < rem; i++) tcp.rcv_buf[i] = tcp.rcv_buf[take + i];
+        tcp.rcv_buf_len = rem;
+        n += take;
+    }
+    if (n > 0) return n;
+    for (long i = 0; i < ticks; i++) {
+        net_poll();
+        task_maybe_yield();
+        if (tcp.rcv_buf_len > 0 || !tcp.active) break;
+    }
+    while (tcp.rcv_buf_len > 0 && n < max) {
+        int take = tcp.rcv_buf_len;
+        if (take > max - n) take = max - n;
+        memcpy(buf + n, tcp.rcv_buf, take);
+        int rem = tcp.rcv_buf_len - take;
+        for (int i = 0; i < rem; i++) tcp.rcv_buf[i] = tcp.rcv_buf[take + i];
+        tcp.rcv_buf_len = rem;
+        n += take;
+    }
+    if (!tcp.active && n == 0) return -1;
+    return n;
 }
 
 static void tcp_server_handle(const uint8_t *ip, const uint8_t *t,
@@ -1059,11 +1119,14 @@ static int http_dechunk(const uint8_t *b, int len, uint8_t *out, int max) {
  * 0 ok, -1 bad URL, -2 DNS failure, -7 https (TLS is not implemented -- say
  * so instead of pretending a connect failed). */
 static int http_parse_url(const char *in, uint8_t ip[4], uint16_t *port,
-                          const char **path, char *host, int hostmax) {
+                          const char **path, char *host, int hostmax,
+                          int *is_https) {
     while (*in == ' ') in++;
-    if (hl_ci_starts(in, "https://")) return -7;
-    if (hl_ci_starts(in, "http://")) in += 7;
-    *port = 80;
+    int https = hl_ci_starts(in, "https://");
+    if (https) in += 8;
+    else if (hl_ci_starts(in, "http://")) in += 7;
+    *port = https ? 443 : 80;
+    if (is_https) *is_https = https;
     int hi = 0;
     while (*in && *in != ':' && *in != '/' && *in != '?' && hi < hostmax - 1)
         host[hi++] = *in++;
@@ -1136,8 +1199,15 @@ static int http_fetch_once(const char *url, uint8_t *out, int max,
     uint16_t port;
     const char *path;
     char host[128];
-    int r = http_parse_url(url, peer, &port, &path, host, sizeof(host));
-    if (r != 0) return r;                       /* -2 DNS, -7 https */
+    int is_https = 0;
+    int r = http_parse_url(url, peer, &port, &path, host, sizeof(host), &is_https);
+    if (r != 0) return r;                       /* -2 DNS */
+
+    /* D2 HTTPS: hand the whole exchange to the TLS client.  The plaintext
+     * HTTP receive/body-extraction loop below is untouched. */
+    if (is_https) {
+        return tls_https_get(peer, port, host, path, out, max);
+    }
 
     tcp.active = 0;
     tcp.rcv_buf_len = 0;
