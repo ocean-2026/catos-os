@@ -38,8 +38,19 @@ static int cols, rows, cur_x, cur_y;
  * archived here.  sb_head is the next write slot, so sb[sb_head-1] is the
  * most recently archived row.  sb_live keeps a verbatim copy of the live
  * grid while the user is looking at history. */
-#define CON_SB_ROWS 96
-static con_cell_t sb[CON_SB_ROWS][CON_MAX_COLS];
+#define CON_SB_ROWS 10000     /* v2.76: 10k lines of history, as asked */
+/* v2.76: the archive stores a COMPACT cell (8 bytes: codepoint, the two CLUT
+ * indices, attrs, flags).  A full con_cell_t is 20 bytes, and the bss is
+ * zero-filled into the flat kernel image, so 10k x 100 full cells would have
+ * added 20 MiB to every boot image.  fg/bg RGB are re-resolved from the
+ * indices with render_clut() when a row is brought back into view; the only
+ * visible effect is that a history row keeps the palette-quantised colour of
+ * a custom RGB style instead of the exact RGB. */
+typedef struct {
+    uint32_t cp;
+    uint8_t  fg_idx, bg_idx, attrs, flags;
+} sb_cell_t;
+static sb_cell_t sb[CON_SB_ROWS][CON_MAX_COLS];
 static int sb_head, sb_count, sb_view;
 static con_cell_t sb_live[CON_MAX_ROWS][CON_MAX_COLS];
 
@@ -389,8 +400,13 @@ static void render_flush(void) {
 static void scroll_one(void) {
     /* Archive the row we are about to discard BEFORE shifting the grid. */
     if (sb_view == 0) {
-        for (int x = 0; x < cols && x < CON_MAX_COLS; x++)
-            sb[sb_head][x] = cells[0][x];
+        for (int x = 0; x < cols && x < CON_MAX_COLS; x++) {
+            sb[sb_head][x].cp      = cells[0][x].cp;
+            sb[sb_head][x].fg_idx  = cells[0][x].fg_idx;
+            sb[sb_head][x].bg_idx  = cells[0][x].bg_idx;
+            sb[sb_head][x].attrs   = cells[0][x].attrs;
+            sb[sb_head][x].flags   = cells[0][x].flags;
+        }
         sb_head = (sb_head + 1) % CON_SB_ROWS;
         if (sb_count < CON_SB_ROWS) sb_count++;
     }
@@ -1158,7 +1174,17 @@ static void sb_repaint(void) {
 /* Copy archive row j (0 = newest archived) into cell row y. */
 static void sb_row_to_cell(int y, int j) {
     int k = (sb_head - 1 - j + CON_SB_ROWS * 2) % CON_SB_ROWS;
-    for (int x = 0; x < cols; x++) cells[y][x] = sb[k][x];
+    for (int x = 0; x < cols && x < CON_MAX_COLS; x++) {
+        con_cell_t *c = &cells[y][x];
+        c->cp     = sb[k][x].cp;
+        c->fg_idx = sb[k][x].fg_idx;
+        c->bg_idx = sb[k][x].bg_idx;
+        c->attrs  = sb[k][x].attrs;
+        c->flags  = sb[k][x].flags;
+        c->fg     = render_clut(c->fg_idx);
+        c->bg     = render_clut(c->bg_idx);
+        c->gslot  = CELL_GSLOT_NONE;
+    }
 }
 
 /* Copy live snapshot row ly into cell row y. */
@@ -1178,43 +1204,20 @@ static void sb_fill_row(int y, int v) {
     for (int x = 0; x < cols; x++) painted_valid[y][x] = 0;
 }
 
-/* Move one grid row src -> dst.  The destination's dirty tracker is
- * invalidated so paint() actually redraws the moved-in content onto the
- * framebuffer (copying the tracker would make paint skip a row whose
- * pixels on screen are still the old destination row). */
-static void sb_move_row(int dst, int src) {
-    for (int x = 0; x < cols; x++) {
-        cells[dst][x]         = cells[src][x];
-        painted_valid[dst][x] = 0;
-    }
-}
-
 static void sb_paint_row(int y) {
     for (int x = 0; x < cols; x++) paint(x, y);
 }
 
-/* One row older: every visible line moves DOWN one row; the new top row is
- * the next older archived line; the old bottom row leaves the window. */
-static int sb_step_older(void) {
-    if (sb_view >= sb_count) return 0;
-    for (int y = rows - 1; y >= 1; y--) sb_move_row(y, y - 1);
-    sb_view++;
-    sb_fill_row(0, sb_view);
-    for (int y = 0; y < rows; y++) sb_paint_row(y);
-    return 1;
-}
-
-/* One row newer: every visible line moves UP one row; the new bottom row is
- * sourced from the sequence; the old top row leaves the window. */
-static int sb_step_newer(void) {
-    if (sb_view <= 0) return 0;
-    for (int y = 0; y < rows - 1; y++) sb_move_row(y, y + 1);
-    sb_view--;
-    sb_fill_row(rows - 1, sb_view);
-    for (int y = 0; y < rows; y++) sb_paint_row(y);
-    return 1;
-}
-
+/* v2.76: BULK viewport move.  The old code walked the view one row at a
+ * time (sb_step_older/sb_step_newer), and EVERY step shifted the whole cell
+ * grid and repainted all rows with the dirty trackers cleared.  A single
+ * PgUp is rows-1 = 35 steps and one wheel notch is up to 24, so one key
+ * press cost 24..35 full-screen repaints -- the "wheel scrolling is very
+ * laggy" symptom.  The viewport is now rebuilt in one pass: set sb_view,
+ * refill every grid row from the archive/live sequence, repaint once.  The
+ * result on screen is identical, the cost is O(rows*cols) per EVENT instead
+ * of per ROW, and the transformation stays exactly invertible (returning to
+ * sb_view == 0 reproduces the live grid byte for byte). */
 int con_scrollback(int delta) {
     int want = sb_view + delta;
     if (want < 0) want = 0;
@@ -1225,15 +1228,9 @@ int con_scrollback(int delta) {
         for (int y = 0; y < rows; y++)
             for (int x = 0; x < cols; x++) sb_live[y][x] = cells[y][x];
 
-    /* v2.66: no bulk-repaint shortcut on the way back down.  Stepping one
-     * row at a time reproduces the live grid exactly (the step transform is
-     * reversible), so PgDn now scrolls line-by-line just like PgUp does
-     * going up, instead of snapping to the bottom in one frame. */
-    int dir = want > sb_view ? 1 : -1;
-    while (sb_view != want) {
-        if (dir > 0) { if (!sb_step_older()) break; }
-        else         { if (!sb_step_newer()) break; }
-    }
+    sb_view = want;
+    for (int y = 0; y < rows; y++) sb_fill_row(y, sb_view);
+    for (int y = 0; y < rows; y++) sb_paint_row(y);
     if (sb_view == 0) con_reset_cursor();   /* cursor stays at bottom */
     else sync_cursor(1);
     return sb_view;

@@ -154,7 +154,7 @@ static int redir_arm(char *out_redir, int append, char *pipe_to) {
 
     char ab[FS_PATH_MAX];
     if (redir_abspath(out_redir, ab, sizeof(ab)) != 0) {
-        vga_write(trs("run: bad redirect path\n", "run: 错误的 redirect path\n"));
+        vga_write(trs("run: bad redirect path\n", "run: 重定向路径错误\n"));
         return 0;
     }
     /* #167 parity: ring0 pre-write must check the target with the session
@@ -169,6 +169,7 @@ static int redir_arm(char *out_redir, int append, char *pipe_to) {
         g_redir_path[i] = ab[i];
     g_redir_path[i] = 0;
     g_redir_active = 1;
+    pager_suppress_abort(1);   /* v2.76: a redirected listing must not truncate */
     vga_set_tee(redir_tee_char);
     /* v2.59: a builtin whose stdout goes to a file must never park on a
      * More bar -- there is no terminal to answer it, and the bar text would
@@ -193,6 +194,7 @@ static void redir_flush(void) {
     g_redir_len = 0; g_redir_buf[0] = 0;
     g_redir_path[0] = 0;
     vga_set_tee(0);
+    pager_suppress_abort(0);
 }
 
 static void itoa(int v, char *out, int width) {
@@ -519,7 +521,7 @@ static void cmd_sndtest(const char *arg) {
         if (m) ms = m;
     }
     if (!snd_info(SND_INFO_READY)) {
-        vga_write("snd: no SB16 - SNDTEST SKIP\n");
+        vga_write(trs("snd: no SB16 - SNDTEST SKIP\n", "snd: 没有 SB16 —— SNDTEST 跳过\n"));
         return;
     }
     int before = snd_info(SND_INFO_IRQS);
@@ -552,7 +554,7 @@ static void cmd_sndtest(const char *arg) {
     if (completed && !snd_info(SND_INFO_PLAYING))
         vga_write("SNDTEST PASS\n");
     else
-        vga_write("SNDTEST FAIL (no DMA completion IRQ)\n");
+        vga_write(trs("SNDTEST FAIL (no DMA completion IRQ)\n", "SNDTEST 失败（没有 DMA 完成中断）\n"));
 }
 
 /* ---------- display front-end commands ---------------------------------
@@ -567,10 +569,14 @@ static int style_name_eq(const char *p, int n, const char *name) {
 
 static void cmd_style(const char *arg) {
     if (!*arg) {
-        vga_write("usage: style SPEC   SPEC = decimal mask, 'off', or names\n"
-                  "       bold dim italic underline inverse strike hidden\n"
-                  "       joined with '+' e.g. style bold+underline\n"
-                  "       style fg #RRGGBB|canvas   style bg surfaceRaised\n");
+        vga_write(trs("usage: style SPEC   SPEC = decimal mask, 'off', or names\n"
+                      "       bold dim italic underline inverse strike hidden\n"
+                      "       joined with '+' e.g. style bold+underline\n"
+                      "       style fg #RRGGBB|canvas   style bg surfaceRaised\n",
+                      "用法：style SPEC   SPEC = 十进制掩码、'off' 或名称\n"
+                      "       粗体 暗色 斜体 下划线 反显 删除线 隐藏\n"
+                      "       用 '+' 连接，例如 style bold+underline\n"
+                      "       style fg #RRGGBB|canvas   style bg surfaceRaised\n"));
         return;
     }
     const char *p = arg;
@@ -582,7 +588,7 @@ static void cmd_style(const char *arg) {
             con_set_fg_rgb(rgb);
             vga_write("fg set to 0x"); print_hex(rgb); vga_write("\n");
         } else {
-            vga_write(trs("style: bad colour spec (see 'help')\n", "style: 错误的 colour spec (see 'help')\n"));
+            vga_write(trs("style: bad colour spec (see 'help')\n", "style: 颜色规格错误（见 help）\n"));
         }
         return;
     }
@@ -592,7 +598,7 @@ static void cmd_style(const char *arg) {
             con_set_bg_rgb(rgb);
             vga_write("bg set to 0x"); print_hex(rgb); vga_write("\n");
         } else {
-            vga_write(trs("style: bad colour spec (see 'help')\n", "style: 错误的 colour spec (see 'help')\n"));
+            vga_write(trs("style: bad colour spec (see 'help')\n", "style: 颜色规格错误（见 help）\n"));
         }
         return;
     }
@@ -615,7 +621,7 @@ static void cmd_style(const char *arg) {
             else if (style_name_eq(s, n, "strike"))   a |= CON_ATTR_STRIKE;
             else if (style_name_eq(s, n, "hidden"))   a |= CON_ATTR_HIDDEN;
             else {
-                vga_write(trs("style: unknown token (see 'help')\n", "style: 未知 token (see 'help')\n"));
+                vga_write(trs("style: unknown token (see 'help')\n", "style: 未知标记（见 help）\n"));
                 return;
             }
         }
@@ -644,16 +650,14 @@ static void cmd_colors(const char *arg) {
 
     if (!strncmp_(p, "save", 4)) {
         hive_save();
-        vga_write(trs("colors: hive saved -- these colours persist across reboot\n",
-                      "colors: hive 已保存——这些颜色重启后仍然生效\n"));
+        vga_write(trs("colors: hive saved -- these colours persist across reboot\n", "colors: hive 已保存——这些颜色重启后仍然生效\n"));
         return;
     }
     if (!strncmp_(p, "reset", 5)) {
         pal_reset();
         con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
         con_repaint_frame();
-        vga_write(trs("colors: built-in defaults restored and applied\n",
-                      "colors: 已恢复内置默认并应用到当前画面\n"));
+        vga_write(trs("colors: built-in defaults restored and applied\n", "colors: 已恢复内置默认并应用到当前画面\n"));
         return;
     }
     if (!strncmp_(p, "set", 3)) {
@@ -670,13 +674,11 @@ static void cmd_colors(const char *arg) {
         for (int i = 0; i < PAL_COUNT; i++)
             if (!strcmp_(role_name, pal_name(i))) { role = i; break; }
         if (role < 0 || !spec[0]) {
-            vga_write(trs("usage: colors set <role> <#RRGGBB>   (roles: colors ls)\n",
-                          "用法：colors set <角色> <#RRGGBB>（角色名见 colors ls）\n"));
+            vga_write(trs("usage: colors set <role> <#RRGGBB>   (roles: colors ls)\n", "用法：colors set <角色> <#RRGGBB>（角色名见 colors ls）\n"));
             return;
         }
         if (pal_set(role, spec) != 0) {
-            vga_write(trs("colors set: invalid colour (want #RRGGBB or a name)\n",
-                          "colors set: 颜色无效（需要 #RRGGBB 或颜色名）\n"));
+            vga_write(trs("colors set: invalid colour (want #RRGGBB or a name)\n", "colors set: 颜色无效（需要 #RRGGBB 或颜色名）\n"));
             return;
         }
         con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
@@ -690,13 +692,11 @@ static void cmd_colors(const char *arg) {
     int fb = pal_reload();
     con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     con_repaint_frame();
-    vga_write(trs("colors: reloaded from the hive and applied\n",
-                  "colors: 已从 hive 重新读取并应用\n"));
+    vga_write(trs("colors: reloaded from the hive and applied\n", "colors: 已从 hive 重新读取并应用\n"));
     if (fb) {
         vga_write(trs("colors: ", "colors: "));
         print_int(fb);
-        vga_write(trs(" role(s) fell back to defaults (key missing or malformed)\n",
-                      " 个角色回退到默认值（键缺失或格式错）\n"));
+        vga_write(trs(" role(s) fell back to defaults (key missing or malformed)\n", " 个角色回退到默认值（键缺失或格式错）\n"));
     }
     for (int i = 0; i < PAL_COUNT; i++) {
         vga_write("  "); vga_write(pal_name(i));
@@ -730,7 +730,7 @@ static void cmd_theme(const char *arg) {
     int crash = 0;
     if (!strncmp_(p, "--crash", 7)) crash = 1;
     if (pal_apply_scheme(name, crash) != 0) {
-        vga_write(trs("theme: unknown scheme '", "theme: 未知 scheme '")); vga_write(name);
+        vga_write(trs("theme: unknown scheme '", "theme: 未知配色方案 '")); vga_write(name);
         vga_write("' (dark|light|solarized|mono)\n");
         return;
     }
@@ -780,7 +780,7 @@ static void cmd_palette(const char *arg) {
     while (*p >= '0' && *p <= '9') { idx = idx * 10 + (*p - '0'); p++; }
     skip_sp(&p);
     uint32_t rgb = parse_hex(&p);
-    if (idx < 0 || idx > 255) { vga_write("palette: index must be 0..255\n"); return; }
+    if (idx < 0 || idx > 255) { vga_write(trs("palette: index must be 0..255\n", "palette: 索引必须在 0..255 之间\n")); return; }
     con_set_palette((uint8_t)idx, rgb);
     vga_write("palette["); print_int(idx);
     vga_write("] = "); print_hex(rgb); vga_write("\n");
@@ -817,7 +817,7 @@ static void cmd_gfx(char *arg) {
         for (int i = 0; i < (int)(sizeof(modes)/sizeof(modes[0])); i++) {
             int r = con_request_mode(modes[i], CON_ORIGIN_CONSOLE);
             if (r == CON_ENODEV) continue;
-            if (r != 0) { vga_write(trs("gfx: switch failed\n", "gfx: switch 失败\n")); return; }
+            if (r != 0) { vga_write(trs("gfx: switch failed\n", "gfx: 切换失败\n")); return; }
             con_clear();                           /* fresh canvas, no demo pixels */
             if (modes[i] == CON_MODE_GFX) {
                 con_set_style(CON_WHITE, CON_BLUE, CON_ATTR_BOLD);
@@ -857,7 +857,7 @@ static void cmd_gfx(char *arg) {
             }
             return;
         }
-        vga_write("gfx: no suitable backend found\n");
+        vga_write(trs("gfx: no suitable backend found\n", "gfx: 找不到可用的图形后端\n"));
         return;
     }
     /* subcommand dispatch: fall through to legacy handlers with "gfx" prefix */
@@ -886,7 +886,7 @@ static void cmd_gfx(char *arg) {
                 vga_write("gfx: "); vga_write(tr(L_GFX_NONE));
                 vga_write("\n");
             } else if (r != 0) {
-                vga_write(trs("gfx: switch failed\n", "gfx: switch 失败\n"));
+                vga_write(trs("gfx: switch failed\n", "gfx: 切换失败\n"));
             } else {
                 con_clear();
                 /* v2.62: persist the chosen boot display mode to the registry */
@@ -894,7 +894,7 @@ static void cmd_gfx(char *arg) {
                 vga_write(tr(L_DISPLAY_MODE)); vga_write("\n");
             }
         } else {
-            vga_write(trs("gfx: unknown subcommand '", "gfx: 未知 subcommand '")); vga_write(arg);
+            vga_write(trs("gfx: unknown subcommand '", "gfx: 未知子命令 '")); vga_write(arg);
             vga_write("'\nusage: gfx [svgainfo|size|rgb|palette|display|"
                       "gfx|vbe|gfx24]\n");
         }
@@ -903,9 +903,9 @@ static void cmd_gfx(char *arg) {
 
 static void cmd_text(void) {
     int r = con_request_mode(CON_MODE_TEXT, CON_ORIGIN_CONSOLE);
-    if (r == CON_EACCES)      vga_write("text: denied - mode unchanged\n");
+    if (r == CON_EACCES)      vga_write(trs("text: denied - mode unchanged\n", "text: 已拒绝——模式未变\n"));
     else if (r == CON_ENODEV) vga_write("text: backend unavailable\n");
-    else if (r != 0)          vga_write(trs("text: switch failed\n", "text: switch 失败\n"));
+    else if (r != 0)          vga_write(trs("text: switch failed\n", "text: 切换失败\n"));
     else {
         /* #57: leaving graphics mode restores the 16-colour VGA DAC and
          * palette (be_text::enter does that), but the old graphics-era
@@ -974,7 +974,7 @@ static void cmd_display(void) {
  * black screen: `id` must be 0x9000000x, `active` 1 after vbe/gfx24. */
 static void cmd_svgainfo(void) {
     if (!svga_probe()) {
-        vga_write("svgainfo: no VMware SVGA II device (15AD:0405) on the PCI bus\n");
+        vga_write(trs("svgainfo: no VMware SVGA II device (15AD:0405) on the PCI bus\n", "svgainfo: PCI 总线上没有 VMware SVGA II 设备（15AD:0405）\n"));
         vga_write("          QEMU std VGA uses Bochs dispi instead; use 'vdiag'\n");
         return;
     }
@@ -1010,24 +1010,15 @@ static void cmd_about(void) {
         "#   # #   #   #   #   #     #\n"
         " ###  #   #   #    ###  ####\n"));
     con_set_fg_rgb(pal_rgb(PAL_FG));
-    vga_write(trs("  A tiny Unix-like OS on GRUB Multiboot\n",
-                  "  基于 GRUB Multiboot 的微型类 Unix 操作系统\n"));
-    vga_write(trs("  Architecture : i386 (32-bit x86)\n",
-                  "  体系结构     : i386（32 位 x86）\n"));
-    vga_write(trs("  Bootloader   : GRUB 2 (ISO9660 / El Torito)\n",
-                  "  引导程序     : GRUB 2（ISO9660 / El Torito）\n"));
-    vga_write(trs("  Kernel       : interrupts + paging + tasks\n",
-                  "  内核         : 中断 + 分页 + 任务\n"));
-    vga_write(trs("                 ring3 CE apps via int 0x80, uid perms\n",
-                  "                 ring3 CE 程序经 int 0x80，按 UID 鉴权\n"));
-    vga_write(trs("  Display      : front-end + text/gfx back-ends ('display')\n",
-                  "  显示         : 前端 + 文本/图形后端（display）\n"));
-    vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n",
-                  "  输入         : PS/2 键盘（中断驱动）\n"));
-    vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n",
-                  "  文件系统     : IDE 上的 FAT32（持久化）\n"));
-    vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n",
-                  "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
+    vga_write(trs("  A tiny Unix-like OS on GRUB Multiboot\n", "  基于 GRUB Multiboot 的微型类 Unix 操作系统\n"));
+    vga_write(trs("  Architecture : i386 (32-bit x86)\n", "  体系结构     : i386（32 位 x86）\n"));
+    vga_write(trs("  Bootloader   : GRUB 2 (ISO9660 / El Torito)\n", "  引导程序     : GRUB 2（ISO9660 / El Torito）\n"));
+    vga_write(trs("  Kernel       : interrupts + paging + tasks\n", "  内核         : 中断 + 分页 + 任务\n"));
+    vga_write(trs("                 ring3 CE apps via int 0x80, uid perms\n", "                 ring3 CE 程序经 int 0x80，按 UID 鉴权\n"));
+    vga_write(trs("  Display      : front-end + text/gfx back-ends ('display')\n", "  显示         : 前端 + 文本/图形后端（display）\n"));
+    vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n", "  输入         : PS/2 键盘（中断驱动）\n"));
+    vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n", "  文件系统     : IDE 上的 FAT32（持久化）\n"));
+    vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n", "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
 }
 
 
@@ -1140,8 +1131,7 @@ static void cmd_sndregs(void) {
 }
 
 static void cmd_uname(void) {
-    vga_write(trs("CatOS i386 0.3 (grub-multiboot, 5-pillar kernel)\n",
-                  "CatOS i386 0.3（GRUB Multiboot，五大支柱内核）\n"));
+    vga_write(trs("CatOS i386 0.3 (grub-multiboot, 5-pillar kernel)\n", "CatOS i386 0.3（GRUB Multiboot，五大支柱内核）\n"));
 }
 
 static void cmd_date(void) {
@@ -1600,7 +1590,7 @@ static void cmd_clip(char *arg) {
         vga_write("clip: cleared\n");
         return;
     }
-    if (*p) { vga_write(trs("clip: unknown argument\n", "clip: 未知 argument\n")); return; }
+    if (*p) { vga_write(trs("clip: unknown argument\n", "clip: 未知参数\n")); return; }
     if (clip_empty()) { vga_write("clip: (empty)\n"); return; }
     vga_write(clip_get());
     vga_putc('\n');
@@ -1815,10 +1805,10 @@ static void cmd_mkdir_p(const char *arg, int parents) {
     if (!parents) {
         int r = fs_mkdir(arg);
         if (r == FS_OK)            return;
-        if (r == FS_ERR_NOENT)      vga_write(trs("mkdir: parent directory not found\n", "mkdir: parent directory 未找到\n"));
-        else if (r == FS_ERR_NOTDIR) vga_write(trs("mkdir: parent is not a directory\n", "mkdir: parent is 不是目录\n"));
-        else if (r == FS_ERR_EXIST) vga_write("mkdir: file or directory already exists\n");
-        else if (r == FS_ERR_INVAL) vga_write(trs("mkdir: invalid name\n", "mkdir: 无效 name\n"));
+        if (r == FS_ERR_NOENT)      vga_write(trs("mkdir: parent directory not found\n", "mkdir: 父目录不存在\n"));
+        else if (r == FS_ERR_NOTDIR) vga_write(trs("mkdir: parent is not a directory\n", "mkdir: 父目录不是目录\n"));
+        else if (r == FS_ERR_EXIST) vga_write(trs("mkdir: file or directory already exists\n", "mkdir: 文件或目录已存在\n"));
+        else if (r == FS_ERR_INVAL) vga_write(trs("mkdir: invalid name\n", "mkdir: 名称无效\n"));
         else if (r == FS_ERR_FULL)  vga_write("mkdir: disk full (FAT32)\n");
         return;
     }
@@ -1839,7 +1829,7 @@ static void cmd_mkdir_p(const char *arg, int parents) {
             else {
                 int r = fs_mkdir(cur);
                 if (r != FS_OK && r != FS_ERR_EXIST) {
-                    vga_write(trs("mkdir: cannot create '", "mkdir: 无法create '"));
+                    vga_write(trs("mkdir: cannot create '", "mkdir: 无法创建 '"));
                     vga_write(cur);
                     vga_write("' (");
                     print_int(r);
@@ -1870,9 +1860,9 @@ static void cmd_touch(const char *arg) {
     }
     int r = fs_touch(arg);
     if (r == FS_OK)            return;
-    if (r == FS_ERR_NOENT)      vga_write(trs("touch: parent directory not found\n", "touch: parent directory 未找到\n"));
+    if (r == FS_ERR_NOENT)      vga_write(trs("touch: parent directory not found\n", "touch: 父目录不存在\n"));
     else if (r == FS_ERR_NOTDIR) vga_write("touch: is a directory\n");
-    else if (r == FS_ERR_INVAL) vga_write(trs("touch: invalid name\n", "touch: 无效 name\n"));
+    else if (r == FS_ERR_INVAL) vga_write(trs("touch: invalid name\n", "touch: 名称无效\n"));
     else if (r == FS_ERR_FULL)  vga_write("touch: disk full (FAT32)\n");
 }
 
@@ -2322,7 +2312,7 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid) {
     int tid = task_spawn_ce(path, argc, argv, uid);
     if (tid < 0) {
-        vga_write(trs("run: cannot load '", "run: 无法load '"));
+        vga_write(trs("run: cannot load '", "run: 无法加载 '"));
         vga_write(path);
         vga_write("' (");
         print_int(tid);
@@ -2387,7 +2377,7 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
                               int out_pipe, int in_pipe) {
     int tid = task_spawn_ce(path, argc, argv, uid);
     if (tid < 0) {
-        vga_write(trs("run: cannot load '", "run: 无法load '"));
+        vga_write(trs("run: cannot load '", "run: 无法加载 '"));
         vga_write(path);
         vga_write("' (err ");
         print_int(tid);
@@ -2398,7 +2388,7 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
     if (out_file && out_file[0]) {
         char ab[FS_PATH_MAX];
         if (redir_abspath(out_file, ab, sizeof(ab)) != 0) {
-            vga_write(trs("run: bad redirect path\n", "run: 错误的 redirect path\n"));
+            vga_write(trs("run: bad redirect path\n", "run: 重定向路径错误\n"));
             task_kill(tid, UID_ROOT);
             return;
         }
@@ -2514,7 +2504,7 @@ static void cmd_run(char *arg, int uid) {
                     if (cr == 0) {
                         vga_write("converted to "); vga_write(dst); vga_write("\n");
                     } else {
-                        vga_write(trs("convert failed: ", "convert 失败: ")); vga_write(cerr); vga_write("\n");
+                        vga_write(trs("convert failed: ", "转换失败: ")); vga_write(cerr); vga_write("\n");
                     }
                     return;
                 }
@@ -2535,7 +2525,7 @@ static void cmd_run(char *arg, int uid) {
         argv2[0] = file2;
         argc2 += split_words(sp, argv2 + 1, 15);
         int h = kpipe_create();
-        if (h < 0) { vga_write("run: no pipe slots\n"); return; }
+        if (h < 0) { vga_write(trs("run: no pipe slots\n", "run: 没有空闲管道\n")); return; }
         vga_clear();
         spawn_ce_redirect(file, argc, argv, 0, uid, 0, 0, h, -1);
         spawn_ce_redirect(file2, argc2, argv2, 1, uid, 0, 0, -1, h);
@@ -2582,7 +2572,7 @@ static void cmd_netcfg(char *arg) {
             for (int i = 0; i < 4; i++) { print_int(d[i]); if (i < 3) vga_write("."); }
             vga_write("\n");
         } else {
-            vga_write("netcfg: no DHCP reply (QEMU static defaults kept)\n");
+            vga_write(trs("netcfg: no DHCP reply (QEMU static defaults kept)\n", "netcfg: 未收到 DHCP 应答（保留 QEMU 静态默认值）\n"));
         }
         return;
     }
@@ -2607,7 +2597,7 @@ static void cmd_netcfg(char *arg) {
     for (char *q = arg; *q && n < 4; q++)
         if (*q == ' ') { *q = 0; while (q[1] == ' ') q++; w[n++] = q + 1; }
     if (n < 2 || !ip4_parse_(w[0], ip) || !ip4_parse_(w[1], gw)) {
-        vga_write(trs("netcfg: bad arguments\n", "netcfg: 错误的 arguments\n"));
+        vga_write(trs("netcfg: bad arguments\n", "netcfg: 参数错误\n"));
         return;
     }
     for (int i = 0; i < 4; i++) net_our_ip[i] = ip[i];
@@ -2811,7 +2801,7 @@ static task_t *job_lookup(char *arg, const char *who) {
         return 0;
     }
     if (t->parent != task_current()) {
-        vga_write(who); vga_write(": not your job\n");
+        vga_write(who); vga_write(trs(": not your job\n", "：不属于你的任务\n"));
         return 0;
     }
     if (t->state == T_ZOMBIE) {
@@ -2839,7 +2829,7 @@ static void cmd_bg(char *arg) {
     task_t *t = job_lookup(arg, "bg");
     if (!t) return;
     if (t->state != T_STOPPED) {
-        vga_write("bg: job is not stopped\n");
+        vga_write(trs("bg: job is not stopped\n", "bg: 任务未停止\n"));
         return;
     }
     task_signal(t->tid, SIGCONT);
@@ -2874,7 +2864,7 @@ static void cmd_daemon(char *arg) {
         return;
     }
     if (run_from_path(argv[0], argv, argc, 1, g_uid) != 0) {
-        vga_write(trs("daemon: unknown command: ", "daemon: 未知 command: ")); vga_write(argv[0]); vga_write("\n");
+        vga_write(trs("daemon: unknown command: ", "daemon: 未知命令: ")); vga_write(argv[0]); vga_write("\n");
         return;
     }
     task_t *t = task_by_tid(g_last_bg_tid);
@@ -3053,10 +3043,8 @@ static void net_why_down(void) {
 static void cmd_curl(const char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
-        vga_write(trs("usage: curl [http://]HOST[:port][/path]\n",
-                      "用法：curl [http://]HOST[:port][/path]\n"));
-        vga_write(trs("  the scheme is optional; only plain http is supported\n",
-                      "  协议头可省略；仅支持明文 http\n"));
+        vga_write(trs("usage: curl [http://]HOST[:port][/path]\n", "用法：curl [http://]HOST[:port][/路径]\n"));
+        vga_write(trs("  the scheme is optional; only plain http is supported\n", "  协议头可省略；仅支持明文 http\n"));
         vga_write("e.g.   curl example.com/      curl 10.0.2.2:8080/API.txt\n");
         return;
     }
@@ -3079,8 +3067,7 @@ static void cmd_curl(const char *arg) {
             vga_write(lo);
             vga_write("\n");
             if (n == -7)
-                vga_write(trs("curl: that hop is https -- TLS is not implemented, use an http-only host\n",
-                              "curl: 该跳转是 https —— 未实现 TLS，请改用仅 http 的站点\n"));
+                vga_write(trs("curl: that hop is https -- TLS is not implemented, use an http-only host\n", "curl: 该跳转是 https —— 未实现 TLS，请改用仅 http 的站点\n"));
         }
         return;
     }
@@ -3176,7 +3163,7 @@ static void cmd_sshd(char *arg) {
             vga_write("[daemon tid "); print_int(tid);
             vga_write("] sshd (waits for the NIC, then :22)\n");
         } else {
-            vga_write("sshd: no free task slot\n");
+            vga_write(trs("sshd: no free task slot\n", "sshd: 没有空闲任务槽\n"));
         }
         return;
     }
@@ -3223,7 +3210,7 @@ static void cmd_dns(const char *arg) {
     if (!net_up()) { vga_write(trs("dns: network not ready", "dns: 网络未就绪")); net_why_down(); return; }
     uint8_t ip[4];
     if (net_dns_lookup(arg, ip) != 0) {
-        vga_write("dns: could not resolve '");
+        vga_write(trs("dns: could not resolve '", "dns: 无法解析 '"));
         vga_write(arg);
         vga_write("'\n");
         return;
@@ -3313,7 +3300,7 @@ static void cmd_format(void) {    vga_write(tr(L_FORMAT_CONFIRM));
     kb_readline(ans, sizeof(ans));
     if (ans[0] == 'y' || ans[0] == 'Y') {
         if (fs_format() != 0) {
-            vga_write("format: no IDE disk attached\n");
+            vga_write(trs("format: no IDE disk attached\n", "format: 没有连接 IDE 磁盘\n"));
             return;
         }
         vga_write(tr(L_FORMAT_DONE));
@@ -3536,8 +3523,7 @@ static void ed_del_line(void) {
 
 static void cmd_edit(const char *arg) {
     if (!*arg) {
-        vga_write(trs("usage: edit [-c|--cat] [+N|-N] FILE\n",
-                      "用法：edit [-c|--cat] [+N|-N] 文件\n"));
+        vga_write(trs("usage: edit [-c|--cat] [+N|-N] FILE\n", "用法：edit [-c|--cat] [+N|-N] 文件\n"));
         return;
     }
     /* v2.68: cat/head/tail merged into edit.  -c prints the whole file,
@@ -3585,7 +3571,7 @@ static void cmd_edit(const char *arg) {
     uint32_t cl = 0, sz = 0;
     int existed = fs_resolve_file(arg, &cl, &sz) == 0;
     if (existed && sz >= FS_DATA_MAX) {
-        vga_write(trs("edit: file too large for the editor;", "edit: file 过大 for the editor;"));
+        vga_write(trs("edit: file too large for the editor;", "edit: 文件 过大 for the editor;"));
         vga_write(trs(" refusing (a save would truncate it)\n", " 拒绝 (a save would truncate it)\n"));
         return;
     }
@@ -3605,7 +3591,7 @@ static void cmd_edit(const char *arg) {
     fs_entry_t *f = fs_create_file(arg);
     if (!f) {
         con_set_fg_rgb(pal_rgb(PAL_ERROR));
-        vga_write(trs("edit: cannot create/open file\n", "edit: 无法create/open file\n"));
+        vga_write(trs("edit: cannot create/open file\n", "edit: 无法create/打开 文件\n"));
         con_set_fg_rgb(pal_rgb(PAL_FG));
         return;
     }
@@ -3806,7 +3792,7 @@ static void cmd_crashlog(char *arg) {
     while (*arg == ' ') arg++;
     const panic_record_t *r = panic_record_get();
     if (!r || r->magic != PANIC_RECORD_MAGIC) {
-        vga_write("crashlog: no crash record\n");
+        vga_write(trs("crashlog: no crash record\n", "crashlog: 没有崩溃记录\n"));
         return;
     }
     int full = !strcmp_(arg, "--full") || !strcmp_(arg, "-f");
@@ -3958,9 +3944,9 @@ static void cmd_caps_legend(void) {
     vga_write(trs("  0x0004 fsadmin  format / fsck\n", "  0x0004 fsadmin  格式化 / 文件系统检查\n"));
     vga_write(trs("  0x0008 audio    SB16 PCM playback\n", "  0x0008 audio    SB16 PCM 播放\n"));
     vga_write(trs("  0x0010 useradm  useradd/userdel/passwd/chcaps/su\n", "  0x0010 useradm  用户管理命令\n"));
-    vga_write(trs("  0x0020 device   raw device + low-level hw info\n", "  0x0020 device   原始设备 + 底层硬件信息\n"));
+    vga_write(trs("  0x0020 device   raw device + low-level hw info\n", "  0x0020 设备   原始设备 + 底层硬件信息\n"));
     vga_write(trs("  0x0040 sys      reserved\n", "  0x0040 sys      保留\n"));
-    vga_write(trs("  fine-grained (v2.25c splits of fsadmin/device):\n", "  细粒度（从 fsadmin/device 拆分）：\n"));
+    vga_write(trs("  fine-grained (v2.25c splits of fsadmin/device):\n", "  细粒度（从 fsadmin/设备 拆分）：\n"));
     vga_write("  0x0080 format   0x0100 fsck    0x0200 rawio\n");
     vga_write("  0x0400 hwinfo   0x0800 reboot  0x1000 diag\n");
     vga_write("session: uid="); print_int(g_uid);
@@ -4021,7 +4007,7 @@ static void cmd_groupadd(char *arg) {
         return;
     }
     if (words > argc)
-        vga_write(trs("groupadd: too many arguments; trailing members ignored\n", "groupadd: 过多 arguments; trailing members ignored\n"));
+        vga_write(trs("groupadd: too many arguments; trailing members ignored\n", "groupadd: 过多 参数; trailing members ignored\n"));
     int nmem = argc - 1;
     if (nmem > GROUP_MEMBERS) {
         vga_write("groupadd: only "); print_int(GROUP_MEMBERS);
@@ -4148,7 +4134,7 @@ static void cmd_useradd(char *arg) {
                 caps |= W[i].bit;
                 vga_write("     -> granted\n");
             } else {
-                vga_write("     -> denied\n");
+                vga_write(trs("     -> denied\n", "     -> 已拒绝\n"));
             }
         }
         vga_write("       caps=0x"); print_hex(caps); vga_write("\n");
@@ -4166,7 +4152,7 @@ static void cmd_useradd(char *arg) {
     for (const char *q = name; *q && o < 47; q++) home[o++] = *q;
     home[o] = 0;
     int r = user_add(name, uid, gid, home, "/bin/shell.ce", caps);
-    if (r == -5) { vga_write("useradd: name or uid already exists\n"); return; }
+    if (r == -5) { vga_write(trs("useradd: name or uid already exists\n", "useradd: 用户名或 uid 已存在\n")); return; }
     if (r != 0)  { vga_write(trs("useradd: failed (table full?)\n", "useradd: 失败 (table full?)\n")); return; }
     if (user_save() != 0) vga_write(trs("useradd: WARNING: could not persist /etc/passwd\n", "useradd: 警告： could not persist /etc/passwd\n"));
     else vga_write("user added (persisted to /etc/passwd)\n");
@@ -4340,7 +4326,7 @@ static void cmd_cat(const char *arg) {
         uint32_t want = s - off;
         if (want > sizeof(buf) - 1) want = sizeof(buf) - 1;
         int r = fs_read_at(arg, buf, (int)off, (int)want);
-        if (r <= 0) { vga_write(trs("cat: read error\n", "cat: read 错误\n")); pager_end(); return; }
+        if (r <= 0) { vga_write(trs("cat: read error\n", "cat: 读取 错误\n")); pager_end(); return; }
         buf[r] = 0;
         if (!pager_dump_text(buf, (uint32_t)r)) { done = 0; break; }
         off += (uint32_t)r;
@@ -4470,8 +4456,7 @@ static void cmd_rm(const char *arg) {
     }
     (void)force;
     if (!*arg) {
-        vga_write(trs("usage: rm [-d|-r] [-f] FILE|DIR\n",
-                      "用法：rm [-d|-r] [-f] 文件或目录\n"));
+        vga_write(trs("usage: rm [-d|-r] [-f] FILE|DIR\n", "用法：rm [-d|-r] [-f] 文件或目录\n"));
         return;
     }
     if (dironly) {
@@ -4488,8 +4473,8 @@ static void cmd_rm(const char *arg) {
         int rd = fs_rmdir(arg);
         if (rd == 0) { acl_unset(arg); return; }
         if (!force) {
-            if (rd == -3) vga_write(trs("rm: directory not empty\n", "rm: directory 非空\n"));
-            else vga_write(trs("rm: directory remove failed\n", "rm: directory remove 失败\n"));
+            if (rd == -3) vga_write(trs("rm: directory not empty\n", "rm: 目录 非空\n"));
+            else vga_write(trs("rm: directory remove failed\n", "rm: 目录 remove 失败\n"));
         }
         return;
     }
@@ -4501,8 +4486,8 @@ static void cmd_rm(const char *arg) {
         int r = rm_rec(arg, 0);
         if (r == 0) return;
         if (r == -13) vga_write(trs("rm: permission denied\n", "rm: 权限不足\n"));
-        else if (r == -5) vga_write("rm: nesting too deep\n");
-        else vga_write(trs("rm: directory remove failed (entries left behind?)\n", "rm: directory remove 失败 (entries left behind?)\n"));
+        else if (r == -5) vga_write(trs("rm: nesting too deep\n", "rm: 嵌套层数过深\n"));
+        else vga_write(trs("rm: directory remove failed (entries left behind?)\n", "rm: 目录 remove 失败 (entries left behind?)\n"));
         return;
     }
     if (fs_perm_check(arg, g_uid, g_gid, PERM_WRITE) != 0) {
@@ -4529,7 +4514,7 @@ static void cmd_rmdir(const char *arg) {
     }
     int r = fs_rmdir(arg);
     if (r == 0) { acl_unset(arg); return; }
-    if (r == -3)      vga_write(trs("rmdir: directory not empty\n", "rmdir: directory 非空\n"));
+    if (r == -3)      vga_write(trs("rmdir: directory not empty\n", "rmdir: 目录 非空\n"));
     else if (r == -2) vga_write(trs("rmdir: not a directory or root\n", "rmdir: 不是目录 or root\n"));
     else              vga_write(trs("rmdir: no such directory\n", "rmdir: 找不到目录\n"));
 }
@@ -4584,8 +4569,8 @@ static void cmd_cp(char *arg) {
         int r = copy_rec(src, dstn, 0);
         if (r == 0) return;
         if (r == -13) vga_write(trs("cp: permission denied\n", "cp: 权限不足\n"));
-        else if (r == -2) vga_write(trs("cp: cannot create target directory\n", "cp: 无法create target directory\n"));
-        else if (r == -5) vga_write("cp: nesting too deep\n");
+        else if (r == -2) vga_write(trs("cp: cannot create target directory\n", "cp: 无法create target 目录\n"));
+        else if (r == -5) vga_write(trs("cp: nesting too deep\n", "cp: 嵌套层数过深\n"));
         else              vga_write(trs("cp: copy failed mid-way\n", "cp: copy 失败 mid-way\n"));
         return;
     }
@@ -4616,7 +4601,7 @@ static void cmd_mv(char *arg) {
             return;
         }
         if (fs_delete(src) != 0) {
-            vga_write("mv: copied but could not delete source\n");
+            vga_write(trs("mv: copied but could not delete source\n", "mv: 已复制，但无法删除源文件\n"));
             return;
         }
         acl_unset(src);
@@ -4730,7 +4715,7 @@ static void pkg_pad(const char *s, int width) {
 static void cmd_pkg_list(void) {
     pkg_rec_t recs[16];
     int n = pkg_load_index(recs, 16);
-    if (n == 0) { vga_write("pkg: no package repository (/pkg/PKGS.TXT missing)\n"); return; }
+    if (n == 0) { vga_write(trs("pkg: no package repository (/pkg/PKGS.TXT missing)\n", "pkg: 没有软件源（缺少 /pkg/PKGS.TXT）\n")); return; }
     vga_write("Package repository (/pkg/):\n");
     for (int i = 0; i < n; i++) {
         int installed = pkg_installed(&recs[i]);
@@ -4902,8 +4887,7 @@ static void cmd_pkg_repo(const char *arg) {
         const char *v = pkg_repo_get();
         if (!v) {
             vga_write(trs("pkg: no remote repo set\n", "pkg：未设置远程仓库\n"));
-            vga_write(trs("usage: pkg repo http://IP[:port]/dir\n",
-                          "用法：pkg repo http://IP[:port]/dir\n"));
+            vga_write(trs("usage: pkg repo http://IP[:port]/dir\n", "用法：pkg repo http://IP[:port]/dir\n"));
             return;
         }
         vga_write("pkg: remote repo = "); vga_write(v); vga_write("\n");
@@ -4912,8 +4896,7 @@ static void cmd_pkg_repo(const char *arg) {
     /* reject non-http URLs early */
     if (arg[0] != 'h' || arg[1] != 't' || arg[2] != 't' || arg[3] != 'p' ||
         arg[4] != ':' || arg[5] != '/' || arg[6] != '/') {
-        vga_write(trs("pkg: repo URL must start with http://\n",
-                      "pkg：仓库 URL 必须以 http:// 开头\n"));
+        vga_write(trs("pkg: repo URL must start with http://\n", "pkg：仓库 URL 必须以 http:// 开头\n"));
         return;
     }
     if (hive_set_sz(PKG_REPO_KEY, arg) == 0) {
@@ -4938,8 +4921,7 @@ static void pkg_url_join(char *out, int cap, const char *base, const char *file)
 static void cmd_pkg_update(void) {
     const char *base = pkg_repo_get();
     if (!base) {
-        vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n",
-                      "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
+        vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n", "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
     }
     if (!net_up()) { vga_write(trs("pkg: network not ready\n", "pkg：网络未就绪\n")); net_why_down(); return; }
     char url[FS_PATH_MAX];
@@ -4965,8 +4947,7 @@ static void pkg_install_payload(int rd) {
         pkg_payload[0] != 'C' || pkg_payload[1] != 'P' ||
         pkg_payload[2] != 'K' || pkg_payload[3] != 'G' ||
         pkg_payload[4] != '0' || pkg_payload[5] != '2') {
-        vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n",
-                      "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
+        vga_write(trs("pkg: bad package magic (not a signed .catpkg)\n", "pkg：包魔数错误（不是已签名的 .catpkg）\n")); return;
     }
     char cmd[16];
     pk_pad_copy(cmd, sizeof(cmd), pkg_payload + 40, 15);
@@ -4978,8 +4959,7 @@ static void pkg_install_payload(int rd) {
         vga_write(trs("pkg: corrupt package (length mismatch)\n", "pkg：包损坏（长度不匹配）\n")); return;
     }
     if (pkg_verify((const uint8_t *)pkg_payload, plen) != 0) {
-        vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n",
-                      "pkg：签名校验失败——拒绝安装\n"));
+        vga_write(trs("pkg: SIGNATURE VERIFICATION FAILED - install refused\n", "pkg：签名校验失败——拒绝安装\n"));
         return;
     }
     char dst[FS_PATH_MAX];
@@ -5003,8 +4983,7 @@ static void pkg_install_payload(int rd) {
 static void cmd_pkg_fetch(const char *arg) {
     while (*arg == ' ') arg++;
     if (!*arg) {
-        vga_write(trs("usage: pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n",
-                      "用法：pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n")); return;
+        vga_write(trs("usage: pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n", "用法：pkg fetch NAME | pkg fetch http://IP[:port]/file.catpkg\n")); return;
     }
     if (!net_up()) { vga_write(trs("pkg: network not ready\n", "pkg：网络未就绪\n")); net_why_down(); return; }
     if (!fs_fs_ready()) { vga_write(trs("pkg: no FAT32 volume\n", "pkg：没有 FAT32 卷\n")); return; }
@@ -5019,8 +4998,7 @@ static void cmd_pkg_fetch(const char *arg) {
         /* by name: look up the filename in the (possibly just updated) index */
         const char *base = pkg_repo_get();
         if (!base) {
-            vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n",
-                          "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
+            vga_write(trs("pkg: no remote repo set (use 'pkg repo URL')\n", "pkg：未设置远程仓库（用 'pkg repo URL'）\n")); return;
         }
         pkg_rec_t recs[16];
         int nr = pkg_load_index(recs, 16);
@@ -5058,11 +5036,11 @@ static void cmd_pkg_install(const char *name) {
 
     uint32_t clus = 0, sz = 0;
     if (fs_resolve_file(cpath, &clus, &sz) != 0) {
-        vga_write("pkg: payload missing: "); vga_write(cpath); vga_write("\n"); return;
+        vga_write(trs("pkg: payload missing: ", "pkg: 缺少数据文件: ")); vga_write(cpath); vga_write("\n"); return;
     }
     if (sz > PKG_BUF_MAX) { vga_write(trs("pkg: package too large\n", "pkg: package 过大\n")); return; }
     int rd = fs_read_at(cpath, pkg_payload, 0, (int)sz);
-    if (rd <= 0) { vga_write(trs("pkg: read error\n", "pkg: read 错误\n")); return; }
+    if (rd <= 0) { vga_write(trs("pkg: read error\n", "pkg: 读取 错误\n")); return; }
 
     pkg_install_payload(rd);   /* v2.70: shared with remote fetch, same verifier */
 }
@@ -5079,7 +5057,7 @@ static void cmd_pkg_remove(const char *name) {
     uint32_t clus = 0, sz = 0;
     if (fs_resolve_file(dst, &clus, &sz) != 0) {
         vga_write("pkg: "); vga_write(recs[i].name);
-        vga_write(" is not installed\n"); return;
+        vga_write(trs(" is not installed\n", " 未安装\n")); return;
     }
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) {
         vga_write(trs("pkg: permission denied\n", "pkg: 权限不足\n")); return;
@@ -5149,7 +5127,7 @@ static void cmd_head(char *arg) {
     if (!*path) { vga_write(trs("usage: head [-n N] FILE\n", "用法：head [-n N] FILE\n")); return; }
     int rd = tool_read_whole(path);
     if (rd == -1) { vga_write(trs("head: no such file\n", "head: 找不到文件\n")); return; }
-    if (rd == -2) { vga_write(trs("head: file too large\n", "head: file 过大\n")); return; }
+    if (rd == -2) { vga_write(trs("head: file too large\n", "head: 文件 过大\n")); return; }
 
     int lines = 0, cut = 0;
     for (int i = 0; i < rd; i++) {
@@ -5170,7 +5148,7 @@ static void cmd_tail(char *arg) {
     if (!*path) { vga_write(trs("usage: tail [-n N] FILE\n", "用法：tail [-n N] FILE\n")); return; }
     int rd = tool_read_whole(path);
     if (rd == -1) { vga_write(trs("tail: no such file\n", "tail: 找不到文件\n")); return; }
-    if (rd == -2) { vga_write(trs("tail: file too large\n", "tail: file 过大\n")); return; }
+    if (rd == -2) { vga_write(trs("tail: file too large\n", "tail: 文件 过大\n")); return; }
 
     int lines = 0, start = rd;
     for (int i = rd - 1; i >= 0; i--) {
@@ -5203,7 +5181,7 @@ static void cmd_wc(char *arg) {
 
     int rd = tool_read_whole(arg);
     if (rd == -1) { vga_write(trs("wc: no such file\n", "wc: 找不到文件\n")); return; }
-    if (rd == -2) { vga_write(trs("wc: file too large\n", "wc: file 过大\n")); return; }
+    if (rd == -2) { vga_write(trs("wc: file too large\n", "wc: 文件 过大\n")); return; }
 
     int lines = 0, words = 0, in_word = 0;
     for (int i = 0; i < rd; i++) {
@@ -5630,7 +5608,7 @@ static void cmd_ls(char *arg) {
     struct fs_raw_ent ents[32];   /* keep small: kernel stack is limited */
     int n = ls_collect(dir, ents, 32);
     if (n < 0) {
-        vga_write(trs("ls: cannot read directory (run 'format' first)\n", "ls: 无法read directory (run 'format' first)\n"));
+        vga_write(trs("ls: cannot read directory (run 'format' first)\n", "ls: 无法read 目录 (run 'format' first)\n"));
         return;
     }
     int cols = 0;
@@ -6001,7 +5979,7 @@ static void cmd_unset(char *arg) {
     int i = 0;
     for (; arg[i] && i < ENV_KEY_MAX - 1; i++) key[i] = arg[i];
     key[i] = 0;
-    if (env_set_(key, "") != 1) { vga_write("unset: no such variable\n"); return; }
+    if (env_set_(key, "") != 1) { vga_write(trs("unset: no such variable\n", "unset: 没有这个变量\n")); return; }
     vga_write("unset: ");
     vga_write(key);
     vga_write("\n");
@@ -6468,9 +6446,9 @@ static void cmd_alias(char *arg) {
     }
     *eq = 0;
     char *name = arg, *value = eq + 1;
-    if (!*name || !*value) { vga_write(trs("usage: alias name=value\n", "用法：alias name=value\n")); return; }
+    if (!*name || !*value) { vga_write(trs("usage: alias name=value\n", "用法：alias 名称=value\n")); return; }
     int l = 0; while (name[l]) l++;
-    if (l >= 16) { vga_write("alias: name too long\n"); return; }
+    if (l >= 16) { vga_write(trs("alias: name too long\n", "alias: 名称太长\n")); return; }
     int i = alias_lookup(name);
     if (i < 0) {
         if (al_count >= ALIAS_MAX) { vga_write("alias: table full\n"); return; }
@@ -6486,7 +6464,7 @@ static void cmd_alias(char *arg) {
 }
 
 static void cmd_unalias(char *arg) {
-    if (!*arg) { vga_write(trs("usage: unalias name\n", "用法：unalias name\n")); return; }
+    if (!*arg) { vga_write(trs("usage: unalias name\n", "用法：unalias 名称\n")); return; }
     int i = alias_lookup(arg);
     if (i < 0) { vga_write(trs("unalias: not found: ", "unalias: 未找到: ")); vga_write(arg); vga_write("\n"); return; }
     for (int j = i; j < al_count - 1; j++) {
@@ -6507,36 +6485,36 @@ static void cmd_mount(char *arg) {
     if (!*arg) { fs_mount_list(); return; }
     char *argv[4];
     int argc = split_words(arg, argv, 3);
-    if (argc < 2) { vga_write(trs("usage: mount <1..4|hd0pN> <empty-dir>\n", "用法：mount <1..4|hd0pN> <empty-dir>\n")); return; }
+    if (argc < 2) { vga_write(trs("usage: mount <1..4|hd0pN> <empty-dir>\n", "用法：挂载 <1..4|hd0pN> <empty-dir>\n")); return; }
     int rc = fs_mount(argv[0], argv[1]);
     switch (rc) {
     case FS_OK:
         vga_write("mount: "); vga_write(argv[1]); vga_write(" mounted\n");
         break;
-    case FS_ERR_NOENT:  vga_write(trs("mount: target directory not found\n", "mount: target directory 未找到\n")); break;
-    case FS_ERR_NOTDIR: vga_write(trs("mount: target is not a directory\n", "mount: target is 不是目录\n")); break;
-    case FS_ERR_INVAL:  vga_write(trs("mount: bad spec (partition 1..4 or hd0pN)\n", "mount: 错误的 spec (partition 1..4 or hd0pN)\n")); break;
+    case FS_ERR_NOENT:  vga_write(trs("mount: target directory not found\n", "挂载: target 目录 未找到\n")); break;
+    case FS_ERR_NOTDIR: vga_write(trs("mount: target is not a directory\n", "挂载: target is 不是目录\n")); break;
+    case FS_ERR_INVAL:  vga_write(trs("mount: bad spec (partition 1..4 or hd0pN)\n", "挂载: 错误的 规格 (partition 1..4 or hd0pN)\n")); break;
     case FS_ERR_EXIST:  vga_write("mount: directory is already a mount point\n"); break;
     case -10: vga_write("mount: unsupported partition (extended or non-FAT32)\n"); break;
-    case -11: vga_write("mount: no free mount slot\n"); break;
-    case -12: vga_write(trs("mount: failed to probe a FAT32 volume there\n", "mount: 失败 to probe a FAT32 volume there\n")); break;
-    case -13: vga_write(trs("mount: target directory is not empty\n", "mount: target directory is 非空\n")); break;
+    case -11: vga_write(trs("mount: no free mount slot\n", "mount: 没有空闲挂载位\n")); break;
+    case -12: vga_write(trs("mount: failed to probe a FAT32 volume there\n", "挂载: 失败 to probe a FAT32 volume there\n")); break;
+    case -13: vga_write(trs("mount: target directory is not empty\n", "挂载: target 目录 is 非空\n")); break;
     case -15: vga_write("mount: partition already mounted elsewhere\n"); break;
-    default:  vga_write(trs("mount: failed\n", "mount: 失败\n")); break;
+    default:  vga_write(trs("mount: failed\n", "挂载: 失败\n")); break;
     }
 }
 
 /* P2: umount <directory> -- detach the partition bound there. */
 static void cmd_umount(char *arg) {
-    if (!*arg) { vga_write(trs("usage: umount <directory>\n", "用法：umount <directory>\n")); return; }
+    if (!*arg) { vga_write(trs("usage: umount <directory>\n", "用法：umount <目录>\n")); return; }
     char *argv[4];
     int argc = split_words(arg, argv, 1);
-    if (argc < 1) { vga_write(trs("usage: umount <directory>\n", "用法：umount <directory>\n")); return; }
+    if (argc < 1) { vga_write(trs("usage: umount <directory>\n", "用法：umount <目录>\n")); return; }
     int rc = fs_umount(argv[0]);
     switch (rc) {
     case FS_OK:         vga_write("umount: detached\n"); break;
-    case FS_ERR_NOENT:  vga_write("umount: not a mount point\n"); break;
-    case FS_ERR_INVAL:  vga_write(trs("umount: bad argument\n", "umount: 错误的 argument\n")); break;
+    case FS_ERR_NOENT:  vga_write(trs("umount: not a mount point\n", "umount: 不是挂载点\n")); break;
+    case FS_ERR_INVAL:  vga_write(trs("umount: bad argument\n", "umount: 错误的 参数\n")); break;
     case -14:           vga_write("umount: busy (current directory is inside)\n"); break;
     default:            vga_write(trs("umount: failed\n", "umount: 失败\n")); break;
     }
@@ -7069,6 +7047,7 @@ static void shell_exec(char *cmd, char *arg) {
     /* v2.73: from here to the single exit below, everything printed is
      * command output -- indent every new output line by two spaces. */
     con_set_out_indent(1);
+    pager_reset();                       /* v2.76: fresh flood-abort state per command */
         if (!strcmp_(cmd, "help"))            cmd_help();
         else if (!strcmp_(cmd, "keys") ||
                  !strcmp_(cmd, "shortcuts")) cmd_keys();
@@ -7207,7 +7186,7 @@ static void shell_exec(char *cmd, char *arg) {
             if (!*scmd) { vga_write(trs("usage: sudo COMMAND [args...]\n", "用法：sudo COMMAND [args...]\n")); }
             else if (!strcmp_(scmd, "run"))   cmd_run(sarg, UID_ROOT);
             else if (!strcmp_(scmd, "sudo")) {
-                vga_write("sudo: no nested sudo\n");
+                vga_write(trs("sudo: no nested sudo\n", "sudo: 不支持嵌套 sudo\n"));
             } else {
                 /* v2.68: re-enter the builtin dispatcher as root, so
                  * `sudo ls` / `sudo top` work like Linux. */
@@ -7347,7 +7326,7 @@ static void shell_exec(char *cmd, char *arg) {
                 }
                 if (!p[0]) {
                     con_set_fg_rgb(pal_rgb(PAL_ERROR));
-                    vga_write(trs("catos: unknown command: ", "catos: 未知 command: ")); vga_write(cmd); vga_write("\n");
+                    vga_write(trs("catos: unknown command: ", "catos: 未知 命令: ")); vga_write(cmd); vga_write("\n");
                     con_set_fg_rgb(pal_rgb(PAL_FG));
                     g_last_rc = 127;             /* POSIX: command not found */
                 } else if (pipe_to && *pipe_to) {
@@ -7360,7 +7339,7 @@ static void shell_exec(char *cmd, char *arg) {
                     argv2[0] = file2;
                     argc2 += split_words(sp, argv2 + 1, 15);
                     int h = kpipe_create();
-                    if (h < 0) { vga_write("run: no pipe slots\n"); }
+                    if (h < 0) { vga_write(trs("run: no pipe slots\n", "run: 没有空闲管道\n")); }
                     else {
                         vga_clear();
                         spawn_ce_redirect(p, argc, argv, 0, g_uid, 0, 0, h, -1);
@@ -7373,7 +7352,7 @@ static void shell_exec(char *cmd, char *arg) {
                 }
             } else if (run_from_path(cmd, argv, argc, bg, g_uid) != 0) {
                 con_set_fg_rgb(pal_rgb(PAL_ERROR));
-                vga_write(trs("catos: unknown command: ", "catos: 未知 command: "));
+                vga_write(trs("catos: unknown command: ", "catos: 未知 命令: "));
                 vga_write(cmd); vga_write("\n");
                 con_set_fg_rgb(pal_rgb(PAL_FG));
                 g_last_rc = 127;             /* POSIX: command not found */
@@ -7381,7 +7360,7 @@ static void shell_exec(char *cmd, char *arg) {
                 const char *sug = suggest_cmd(cmd);
                 if (sug) {
                     con_set_fg_rgb(pal_rgb(PAL_WARNING));
-                    vga_write("catos: did you mean: ");
+                    vga_write(trs("catos: did you mean: ", "catos: 你指的是: "));
                     con_set_fg_rgb(pal_rgb(PAL_PROMPT_PATH));
                     vga_write(sug);
                     con_set_fg_rgb(pal_rgb(PAL_WARNING));
@@ -7393,6 +7372,8 @@ static void shell_exec(char *cmd, char *arg) {
             }
         }
     /* v2.59: flush the builtin stdout tee to the redirect target, if armed. */
+    if (pager_aborted())
+        vga_write(trs("  (output skipped -- rest not shown, the keystroke you typed is kept)\n", "  （输出已跳过：剩余内容未显示，键入的按键已保留）\n"));
     redir_flush();
     con_set_out_indent(0);               /* v2.73: prompt stays flush left */
     con_unsuppress_cursor();             /* v2.62: caret returns for next prompt */
@@ -7417,7 +7398,7 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
     "echo \"      |  \\_/ / ____ \\| |           \"\n"
     "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                             CatOS v2.75                            \"\n"
+    "echo \"                             CatOS v2.76                            \"\n"
     "echo \"\"\n";
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see

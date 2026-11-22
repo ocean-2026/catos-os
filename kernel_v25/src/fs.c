@@ -3,6 +3,7 @@
 #include "fat.h"
 #include "part.h"
 #include "vga.h"
+#include "lang.h"   /* v2.76: fs diagnostics are bilingual */
 #include "hw.h"
 #include "pager.h"      /* v2.59 generic console pager */
 static void fs_dbg2(const char *tag, uint32_t v) {
@@ -546,7 +547,7 @@ static void ls_print_one(const struct ls_ent *e, const char *parent,
 
 void fs_list(const char *path) {
     if (!fs_ready) {
-        vga_write("catos: no FAT32 volume. Run 'format' first.\n");
+        vga_write(trs("catos: no FAT32 volume. Run 'format' first.\n", "catos: 没有 FAT32 卷，请先运行 format。\n"));
         return;
     }
     int longfmt = 0, raw = 0;
@@ -564,12 +565,12 @@ void fs_list(const char *path) {
     path = p;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) {
-        vga_write("catos: path too long\n"); return;
+        vga_write(trs("catos: path too long\n", "catos: 路径太长\n")); return;
     }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
-    if (!clus) { vga_write("catos: dir: no such directory\n"); return; }
-    if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write("catos: dir: not a directory\n"); return; }
+    if (!clus) { vga_write(trs("catos: dir: no such directory\n", "catos: dir: 目录不存在\n")); return; }
+    if (!(e.attr & FAT_ATTR_DIR) && !longfmt) { vga_write(trs("catos: dir: not a directory\n", "catos: dir: 不是目录\n")); return; }
 
     if (longfmt && !(e.attr & FAT_ATTR_DIR)) {
         /* v2.34: ls -l <file> -- show just that entry */
@@ -579,7 +580,7 @@ void fs_list(const char *path) {
         scpy(one.name, nm); one.attr = e.attr; one.size = e.size;
         one.cluster = 0; one.slot = 0; one.first = 0; one.insane = 0;
         pager_begin(1);
-        vga_write("perms      size     name\n");
+        vga_write(trs("perms      size     name\n", "权限       大小     名称\n"));
         ls_print_one(&one, abs, 1, 0);
         pager_end();
         return;
@@ -600,7 +601,7 @@ void fs_list(const char *path) {
         vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
         if (!raw && hidden > 0) {
             print_int(hidden);
-            vga_write(" hidden invalid entries (use ls --raw to show)\n");
+            vga_write(trs(" hidden invalid entries (use ls --raw to show)\n", " 个隐藏的无效项（用 ls --raw 查看）\n"));
         }
     }
     pager_end();
@@ -1127,7 +1128,7 @@ static void df_put_k(uint32_t k) {
 }
 
 void fs_mount_list(void) {
-    vga_write("Filesystem  Mounted on\n");
+    vga_write(trs("Filesystem  Mounted on\n", "文件系统    挂载在\n"));
     vga_write("hd0");
     for (int p = 3; p < 12; p++) vga_putc(' ');
     vga_write("/\n");
@@ -1169,8 +1170,8 @@ static void df_row(const char *dev, const char *mnt, int vol) {
 }
 
 void fs_df(void) {
-    if (!fs_ready) { vga_write("df: no FAT32 volume\n"); return; }
-    vga_write("Filesystem   total    used    free   use%  Mounted on\n");
+    if (!fs_ready) { vga_write(trs("df: no FAT32 volume\n", "df: 没有 FAT32 卷\n")); return; }
+    vga_write(trs("Filesystem   total    used    free   use%  Mounted on\n", "文件系统      总量     已用     可用   使用率  挂载在\n"));
     df_row("hd0", "/", 0);
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!g_mnt[i].used) continue;

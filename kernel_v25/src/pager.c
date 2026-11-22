@@ -20,18 +20,43 @@
 #include "pager.h"
 #include "vga.h"
 #include "render.h"
+#include "keyboard.h"
+
+/* v2.76: "type anything to skip the flood".  v2.63 made every pager call a
+ * pass-through, so a long listing (help/tree/cat) scrolled for as long as it
+ * took to paint, and keystrokes sat in the scancode queue until the last line
+ * was out.  Now pager_line() watches for a pending key ONCE the output has
+ * passed a full screen, marks the stream aborted and returns; every caller
+ * already bails out on pager_quit(), so the remaining lines are never printed
+ * and the buffered keystroke reaches the line editor unchanged. */
+static int p_lines, p_armed, p_aborted, p_noabort;
 
 void pager_set_noninteractive(int on) { (void)on; }
-int  pager_quit(void)                 { return 0; }
+void pager_reset(void) { p_lines = 1; p_armed = 0; p_aborted = 0; }
+void pager_suppress_abort(int on) { p_noabort = on; if (on) p_aborted = 0; }
+int  pager_quit(void)  { return p_aborted; }
+int  pager_aborted(void) { return p_aborted; }
 
 int pager_begin(int interactive) {
     (void)interactive;
+    pager_reset();
     return 0;                       /* never engaged: always plain stream */
 }
 
 int pager_line(const char *line) {
+    if (p_aborted) return 0;
+    if (!p_armed) {
+        int rows = con_rows();
+        if (rows < 4) rows = 24;
+        if (p_lines >= rows) p_armed = 1;    /* one full screen has gone by */
+    }
+    if (!p_noabort && p_armed && kb_key_pending()) {              /* any key: stop the flood */
+        p_aborted = 1;
+        return 0;
+    }
     if (line) vga_write(line);
     vga_write("\n");
+    p_lines++;
     return 1;
 }
 

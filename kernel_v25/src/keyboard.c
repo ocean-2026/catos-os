@@ -92,6 +92,21 @@ static int scq_pop(void) {
 /* non-blocking: 1 when at least one scancode is pending (for `top`) */
 int kb_peek(void) { return scq_tail != scq_head; }
 
+/* v2.76: is a real KEY PRESS waiting?  kb_peek() also counts key-release
+ * bytes and the 0xE0/0xE1 escape prefixes that the decoder leaves in the ring,
+ * so a caller that merely asks "did the user type something" aborts on the
+ * break code of the Enter that started the command.  Looking for a make code
+ * (bit7 clear, not an escape byte) ignores both. */
+int kb_key_pending(void) {
+    uint32_t i = scq_tail;
+    while (i != scq_head) {
+        uint8_t sc = scq[i];
+        if (sc != 0xE0 && sc != 0xE1 && (sc & 0x80) == 0) return 1;
+        i = (i + 1) % SCQ_SZ;
+    }
+    return 0;
+}
+
 /* v2.26: USB keyboard path -- HID reports are translated to scancode
  * set 1 by usb_uhci.c and pushed through the SAME queue as PS/2, so the
  * whole decoder stack (shift/caps/ctrl, IME, scrollback) works unchanged. */

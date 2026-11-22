@@ -37,6 +37,10 @@ void pager_end(void);
  * background / script).  The shell sets this around the matching dispatch
  * path; the pager consults it when `interactive` is not explicitly passed. */
 void pager_set_noninteractive(int on);
+/* v2.76: flood abort -- any pending key after one screen stops the listing */
+void pager_reset(void);
+void pager_suppress_abort(int on);   /* v2.76: never abort while redirecting */
+int  pager_aborted(void);
 
 /* Current block was quit with 'q' (1) or not (0). */
 int  pager_quit(void);

@@ -17,6 +17,7 @@
 
 #include "posix.h"
 #include "vga.h"
+#include "lang.h"   /* v2.76: cli diagnostics are bilingual */
 #include "fs.h"
 
 /* ---- tiny kernel-safe helpers ----------------------------------------- */
@@ -147,21 +148,21 @@ int cli_fail(const char *cmd, const char *what, const char *why) {
 
 int cli_usage(const char *cmd, const char *detail) {
     say(cmd); say(": "); say(detail); say("\n");
-    say("Try '"); say(cmd); say(" --help' for more information.\n");
+    say(trs("Try '", "试试 ")); say(cmd); say(trs(" --help' for more information.\n", " --help’ 以获取更多信息\n"));
     return CLI_USAGE;
 }
 
 static int bad_long(const char *cmd, const char *what) {
-    say(cmd); say(": unrecognized option '"); say(what); say("'\n");
-    say("Try '"); say(cmd); say(" --help' for more information.\n");
+    say(cmd); say(trs(": unrecognized option '", ": 无法识别的选项 '")); say(what); say("'\n");
+    say(trs("Try '", "试试 ")); say(cmd); say(trs(" --help' for more information.\n", " --help’ 以获取更多信息\n"));
     return CLI_USAGE;
 }
 
 static int bad_short(const char *cmd, char c) {
-    say(cmd); say(": invalid option -- '");
+    say(cmd); say(trs(": invalid option -- '", ": 无效选项 -- '"));
     { char b[2]; b[0] = c; b[1] = 0; say(b); }
     say("'\n");
-    say("Try '"); say(cmd); say(" --help' for more information.\n");
+    say(trs("Try '", "试试 ")); say(cmd); say(trs(" --help' for more information.\n", " --help’ 以获取更多信息\n"));
     return CLI_USAGE;
 }
 
@@ -169,18 +170,18 @@ static int bad_short(const char *cmd, char c) {
 void cli_help(const char *cmd) {
     const spec_t *s = find_spec(cmd);
     if (!s) return;
-    say("Usage: "); say(s->syn); say("\n\n");
-    say("  -h, --help     show this help and exit\n");
+    say(trs("Usage: ", "用法：")); say(s->syn); say("\n\n");
+    say(trs("  -h, --help     show this help and exit\n", "  -h, --help     显示本帮助并退出\n"));
     if (s->opts && s->opts[0]) {
-        say("Short options: ");
+        say(trs("Short options: ", "短选项："));
         for (const char *o = s->opts; *o; o++) {
-            if (*o == ':') { say(" ARG"); continue; }
+            if (*o == ':') { say(trs(" ARG", " 参数")); continue; }
             say("-"); { char b[2]; b[0] = *o; b[1] = 0; say(b); } say(" ");
         }
         say("\n");
     }
-    if (s->longs && s->longs[0]) { say("Long options: "); say(s->longs); say("\n"); }
-    say("Exit status: 0 success, 1 runtime failure, 2 usage error, 13 permission denied.\n");
+    if (s->longs && s->longs[0]) { say(trs("Long options: ", "长选项：")); say(s->longs); say("\n"); }
+    say(trs("Exit status: 0 success, 1 runtime failure, 2 usage error, 13 permission denied.\n", "退出码：0 成功、1 运行失败、2 用法错误、13 权限不足。\n"));
 }
 
 /* ---- tokenizer --------------------------------------------------------- */
@@ -296,32 +297,32 @@ int cli_validate(const char *cmd, const char *arg) {
 
     if (np < s->minpos) {
         if (s->minpos == 2 && np == 1) {
-            say(cmd); say(": missing destination file operand after '");
-            say(pos[0]); say("'\n");
-            say("Try '"); say(cmd); say(" --help' for more information.\n");
+            say(cmd); say(trs(": missing destination file operand after '", ": 在 '"));
+            say(pos[0]); say(trs("'\n", "' 之后缺少目标文件操作数\n"));
+            say(trs("Try '", "试试 '")); say(cmd); say(trs(" --help' for more information.\n", " --help' 以获取更多信息\n"));
             return CLI_USAGE;
         }
-        return cli_usage(cmd, "missing operand");
+        return cli_usage(cmd, trs("missing operand", "缺少操作数"));
     }
     if (s->maxpos >= 0 && np > s->maxpos) {
-        say(cmd); say(": extra operand '"); say(pos[s->maxpos]); say("'\n");
-        say("Try '"); say(cmd); say(" --help' for more information.\n");
+        say(cmd); say(trs(": extra operand '", ": 多余的操作数 '")); say(pos[s->maxpos]); say("'\n");
+        say(trs("Try '", "试试 '")); say(cmd); say(trs(" --help' for more information.\n", " --help' 以获取更多信息\n"));
         return CLI_USAGE;
     }
 
     /* existence checks: report the POSIX strerror wording, not "no such file" */
     if (np >= 1 && (s->checks & DIR1)) {
         if (!fs_is_dir(pos[0]))
-            return cli_fail(cmd, pos[0], "No such directory");
+            return cli_fail(cmd, pos[0], "目录不存在");
     } else if (np >= 1 && (s->checks & EXIST1)) {
         uint32_t c, sz;
         if (fs_resolve_file(pos[0], &c, &sz) != 0 && !fs_is_dir(pos[0]))
-            return cli_fail(cmd, pos[0], "No such file or directory");
+            return cli_fail(cmd, pos[0], "文件或目录不存在");
     }
     if (np >= 2 && (s->checks & EXIST2)) {
         uint32_t c, sz;
         if (fs_resolve_file(pos[1], &c, &sz) != 0 && !fs_is_dir(pos[1]))
-            return cli_fail(cmd, pos[1], "No such file or directory");
+            return cli_fail(cmd, pos[1], "文件或目录不存在");
     }
     return 0;
 }
