@@ -94,8 +94,13 @@ def main():
         sendkey(s, "q", 0.8)
         sendkey(s, "ret", 1.0)
         t = screen_text(s)
-        check("desktop exits to shell", "exited to text shell" in t or
-              "root@catos" in t)
+        # v2.73: "root@catos" in t was a FALSE POSITIVE -- the desktop is
+        # drawn with gotoxy() onto the text buffer, so the old prompt from
+        # before `desktop` stayed in the screen snapshot and matched even
+        # when the CE loop was still running.  Only accept the explicit
+        # marker printed by desktop.c on its exit path.
+        check("desktop exits to shell", "exited to text shell" in t,
+              t[-120:].replace("\n", " "))
 
         # 5) remove -> detachable
         clear()

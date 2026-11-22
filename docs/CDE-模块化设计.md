@@ -176,3 +176,56 @@ CatOS 同理，追加每个槽必须同时改：
   文件管理器/编辑器，切到 gfx 后端。
 - 环境注：本 QEMU 无 PS/2 鼠标（`mouse` 命令 pk 恒 0），鼠标事件注入类
   验证需在带鼠标的 VMware/真机完成；ABI 接线已由 CE==内核状态断言证明。
+
+---
+
+## 9. v2.73 地基修复：ring0 sshd 阻塞 CE 键盘事件（2026-11-22）
+
+### 9.1 症状与定位
+
+v2.72 上 `pkg install desktop` → `desktop` 能装能渲染，但 `q`/`Esc`/`Ctrl+C`
+全部无效，**进桌面后只能重启**。v2.69 探针声称的 "10/10 PASS" 是**假阳性**：
+它用 `"root@catos" in screen_text()` 判断"已退出"，而桌面用 `gotoxy` 画在
+text buffer 上，旧提示符残留直接命中断言。
+
+定位手段（可复用）：写最小 CE 探针 `extapp/keyprobe.c`（阻塞 `getch()` +
+非阻塞 `pollkey()` 打印返回值），用 `inject_any.py` 注入测试盘，跨版本二分。
+结论：**v2.68.3 及以前正常，v2.72 收不到任何键**——是内核回归，不是
+desktop.c 应用 bug，也不是 QEMU 环境。
+
+> 二分过程踩坑：批量连跑多个 QEMU 实例时残留进程导致端口/焦点干扰，
+> 出现"v2.69/v2.71 也坏"的假象。每次测试前必须 `taskkill qemu-system-i386`
+> 并用独立 monitor 端口，否则结论不可信。
+
+### 9.2 根因
+
+v2.72 新增 `/etc/autoexec/sshd.sh` 自启动 ring0 daemon（`task_spawn_r0`）。
+该 daemon 常态停在 `!net_up()` 分支，用 `task_maybe_yield()`（cooperative
+busy-yield）让出 CPU。当 ring3 CE 任务阻塞在 `SYS_GETCH` 内时，`g_in_syscall`
+全局计数器停在 1，令 `task_maybe_yield()` 直接 return——sshd 于是不再让出，
+独占 CPU，键盘 IRQ 唤醒的等待任务永远得不到调度，CE 的 `pollkey`/`getch`
+收不到键。ring0 shell 走 timer 睡眠路径不受影响，所以命令仍能输入。
+
+### 9.3 修复
+
+`kernel_v25/src/ssh.c` 的 `sshd_daemon_main()`：无网卡等待分支改用
+`task_sleep_ticks(1)`（进 `T_SLEEPING`，由 timer IRQ 唤醒 + idle park 路径），
+不再依赖 cooperative yield。改动一行，保留 sshd 自启动功能。
+
+> 尝试过但**无效**的方案：改 `task_maybe_yield()` 让 ring0 忽略
+> `g_in_syscall`——单独改这处键盘仍不通，因为 cooperative 切换本身
+> 无法恢复等待任务。已回退，不要重试。
+
+### 9.4 验证
+
+- `keyprobe.c`：`getch=979`('a')、`pollkey=111311`('q')、正常 `exit(0)`。
+- CDE 桌面：`desktop` → `q` 退出回 shell → `pkg remove` → 命令消失，全通过。
+- `ssh_v272_probe.py`：4/5 PASS；唯一 FAIL（host key 重连严格检查）在原版
+  v2.72 ISO 上同样 FAIL，属宿主 ssh 客户端环境问题，与修复无关。
+
+### 9.5 遗留隐患（本次未改）
+
+`net_tcp_saccept()`（netstack.c）内有 3000000 次 `task_maybe_yield()` 忙循环，
+有网卡时 daemon 会走这里，理论上有同类键盘饥饿风险。该方法被前台交互
+`sshd` 共用，直接改会破坏其 ESC/超时语义，故本次不动。带网卡的 VMware
+上若复现"进桌面后键盘失灵"，优先查此处。

@@ -513,7 +513,7 @@ static void ssh_host_key_load(void) {
 void sshd_daemon_main(void) {
     int listening = 0;
     for (;;) {
-        if (!net_up()) { task_maybe_yield(); continue; }
+        if (!net_up()) { task_sleep_ticks(1); continue; }
         if (!listening) {
             net_dhcp_ensure();
             net_tcp_listen(22);
