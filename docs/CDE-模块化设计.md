@@ -229,3 +229,64 @@ busy-yield）让出 CPU。当 ring3 CE 任务阻塞在 `SYS_GETCH` 内时，`g_i
 有网卡时 daemon 会走这里，理论上有同类键盘饥饿风险。该方法被前台交互
 `sshd` 共用，直接改会破坏其 ESC/超时语义，故本次不动。带网卡的 VMware
 上若复现"进桌面后键盘失灵"，优先查此处。
+
+---
+
+## 10. v2.73 gfx24 真图形后端调查（进行中）
+
+### 10.1 目标与现状
+
+P1b 目标：把 CDE 从 text 后端 ASCII 窗口升级为 gfx24 真彩图形桌面。
+现有 `desktop.c` 仍是 text 后端（`gotoxy`+`write`），P1b 的 `gfx_text`/
+`buf_*` ABI 槽未追加。**更正上轮结论**：远端那批 v2.72 提交里的
+"canvas colour"只是主题配色单一数据源（`colors` 命令 + hive），
+与"画布应用"无关，P1b 并未被别人完成。
+
+### 10.2 关键发现：CE 侧渲染完全可行（零 ABI 改动）
+
+内核 gfx24 后端已有 `render_font_glyph` 字体渲染循环，只是没暴露给 CE。
+验证了一条**零内核改动**的路子：CE 把真 IBM VGA 8x16 字体
+（`font_ascii.inc`）编进镜像，在离屏 RGB24 buffer 上逐像素画字，
+用**现有** `gfx_blit`（槽 63）一次投屏。
+
+- 原型：`kernel_v25/extapp/gfxtext.c` + `tests/gfxtext_probe.py`。
+- 结果：`gfxtext.ce` 实机画出 5 行彩色文字，字形锐利清晰、无残缺错位
+  （`tests/dumps/gfxtext_zoom.png` 目视确认）。**证明 P1b 渲染不需要新 ABI**。
+- 完整桌面原型：`kernel_v25/extapp/gfxdesk.c` + `tests/gfxdesk_probe.py`，
+  画 800x600 背景、任务栏、三个窗口、图标，`gfxdesk_probe.py` 像素断言 4/4 PASS。
+
+**两个构建坑（务必记住）**：
+1. CE 的 bss 上限 256 KiB（`ce.h:CE_MAX_BSS`）。离屏 buffer 必须 ≤ 216 KiB；
+   384x192x3=216 KiB 可用，448x224x3=301 KiB 会被 mkce.py 拒绝。
+2. **CE 源文件里绝不能重定义 `__ce_api`**。`ce_app.c` 已提供 weak 定义；
+   再加一个强定义会让 `build_ce.sh` 的 nm 正则选中错的 `.ce_api` 单元格，
+   内核写入另一个槽 → 程序读到 NULL → `pollkey` 处 page fault
+   （`cr2=0xf4` = API 槽 61×4）。`gfx24.c` 是老代码仍带强定义，别照抄。
+
+### 10.3 阻塞 bug：gfx 模式下 ring3 的 task_sleep_ticks() 不返回
+
+排除了原型逻辑问题后，做了一个干净对照：把已证明 text 模式下键盘
+3/3 PASS 的 `keyprobe.c` 改成先 `display_mode(3)` 切 gfx24——同样的代码
+立刻 0/3（getch/pollkey 全收不到键）。**这是内核级 bug，不是桌面应用问题。**
+
+二分定位链路：
+- 切 gfx 后 CE 能画画面（gfx_rect/blit 成功）→ 切换本身和 API 表正常。
+- 但 `q` 之后 CE 无任何响应；把循环心跳绑到任务栏颜色后确认：
+  任务栏停在初始 compose 的蓝色，第一次循环迭代的 `api->delay(30)`
+  之后的绿色重绘**从不执行**。
+- `api->delay` → `task_sleep_ticks()` → `task_block(T_SLEEPING)`，靠
+  IRQ0 的 `sched_timer_tick()` → `task_tick_wake()` 唤醒。
+- 定位到 `kernel_v25/src/task.c:sched_timer_tick()` 的 ring3 抢占分支：
+  中断 ring3 任务时走主动 `pick` 切换；空闲时（`c->ring0`）只置
+  `need_resched`。怀疑 idle park 路径在 gfx 模式下没把唤醒的 sleeper 切回 CPU。
+
+> 尝试过但**无效**：忙轮询版（去掉 delay）反而画不出画面，怀疑高频
+> syscall 触发了另一处问题。不要在这条路上继续。
+
+### 10.4 交付状态与下一步
+
+- 已交付：`gfxtext.c`/`gfxdesk.c` 原型 + 两个正式探针；渲染能力已证实。
+- XFAIL（非 FAIL）：`gfxdesk_probe.py` 标注键盘退出因上述内核 bug 暂不可用。
+- **下一步（需专项调查）**：在 `sched_timer_tick()` ring3 唤醒路径加诊断，
+  确认 gfx 模式下 `task_tick_wake()` 是否把 sleeper 置 READY、idle 是否
+  真正调度它。这是浏览器/多媒体查看器等交互应用的前提，建议单独立项。
