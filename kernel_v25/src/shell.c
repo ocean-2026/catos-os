@@ -602,6 +602,87 @@ static void cmd_style(const char *arg) {
     vga_write("\n");
 }
 
+/* v2.72: `colors` -- the missing runtime half of the registry palette.
+ * `reg set HKLM\Software\CatOS\Terminal\Colors\Background "#101418"` used
+ * to take effect only after a reboot, and even then the boot code re-applied
+ * the named scheme and clobbered it.  This command re-reads the roles from
+ * the hive and pushes them onto the live frame in one step.
+ *
+ *   colors                      reload + apply (no restart needed)
+ *   colors save                 persist the hive to disk
+ *   colors reset                restore the built-in defaults and apply
+ *   colors set <role> <#rgb>    write one role, apply immediately
+ *   colors ls                   list the console roles
+ */
+static void cmd_colors(const char *arg) {
+    const char *p = arg;
+    while (*p == ' ') p++;
+
+    if (!strncmp_(p, "save", 4)) {
+        hive_save();
+        vga_write(trs("colors: hive saved -- these colours persist across reboot\n",
+                      "colors: hive 已保存——这些颜色重启后仍然生效\n"));
+        return;
+    }
+    if (!strncmp_(p, "reset", 5)) {
+        pal_reset();
+        con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+        con_repaint_frame();
+        vga_write(trs("colors: built-in defaults restored and applied\n",
+                      "colors: 已恢复内置默认并应用到当前画面\n"));
+        return;
+    }
+    if (!strncmp_(p, "set", 3)) {
+        p += 3;
+        while (*p == ' ') p++;
+        char role_name[20]; int n = 0;
+        while (*p && *p != ' ' && n < 19) role_name[n++] = *p++;
+        role_name[n] = 0;
+        while (*p == ' ') p++;
+        char spec[16]; int m = 0;
+        while (*p && *p != ' ' && m < 15) spec[m++] = *p++;
+        spec[m] = 0;
+        int role = -1;
+        for (int i = 0; i < PAL_COUNT; i++)
+            if (!strcmp_(role_name, pal_name(i))) { role = i; break; }
+        if (role < 0 || !spec[0]) {
+            vga_write(trs("usage: colors set <role> <#RRGGBB>   (roles: colors ls)\n",
+                          "用法：colors set <角色> <#RRGGBB>（角色名见 colors ls）\n"));
+            return;
+        }
+        if (pal_set(role, spec) != 0) {
+            vga_write(trs("colors set: invalid colour (want #RRGGBB or a name)\n",
+                          "colors set: 颜色无效（需要 #RRGGBB 或颜色名）\n"));
+            return;
+        }
+        con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+        con_repaint_frame();
+        vga_write(trs("colors: ", "colors: ")); vga_write(role_name);
+        vga_write(" = "); vga_write(pal_hex(role));
+        vga_write(hive_dirty() ? "  (run `colors save` to persist)\n" : "  (saved)\n");
+        return;
+    }
+
+    int fb = pal_reload();
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+    con_repaint_frame();
+    vga_write(trs("colors: reloaded from the hive and applied\n",
+                  "colors: 已从 hive 重新读取并应用\n"));
+    if (fb) {
+        vga_write(trs("colors: ", "colors: "));
+        print_int(fb);
+        vga_write(trs(" role(s) fell back to defaults (key missing or malformed)\n",
+                      " 个角色回退到默认值（键缺失或格式错）\n"));
+    }
+    for (int i = 0; i < PAL_COUNT; i++) {
+        vga_write("  "); vga_write(pal_name(i));
+        for (int k = (int)slen_(pal_name(i)); k < 14; k++) vga_write(" ");
+        vga_write(pal_hex(i));
+        if (i == PAL_BG) vga_write(trs("   <- canvas", "   <- 画布底色"));
+        vga_write("\n");
+    }
+}
+
 /* v2.67: theme = a named colour scheme written into the hive.  Every role
  * the shell paints (prompt, command, argument, error, warning, hint, and
  * the crash screen) is a registry value now; no colour is compiled in. */
@@ -1431,6 +1512,7 @@ static const char *BUILTIN_NAMES[] = {
     "pkg", "wc", "tree",       /* NIGHT-P4 */
     "theme",                                  /* v2.61: dark / light token palette switch */
     "hive", "reg",                            /* v2.67: binary tree registry */
+    "colors",                                 /* v2.72: live palette from hive */
     0
 };
 /* tiny Levenshtein for short command words */
@@ -6313,7 +6395,7 @@ static const char *sh_cmds[] = {
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
     "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes","shutdown","theme","hive","reg",  /* v2.67 */
+    "users","vdiag","whoami","yes","shutdown","theme","hive","reg","colors",  /* v2.72 */
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -6500,12 +6582,13 @@ void shell_run(void) {
      * background colour while the cells used the new one -- on screen that
      * is a lighter/darker rectangle around the text (the "font boxes" and
      * the leftover region the user reported on VMware). */
-    {
-        const char *th = pal_scheme_name();
-        if (th && *th && th[0] != 'c')      /* "custom" keeps the stored roles */
-            pal_apply_scheme(th, 0);
-        con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
-    }
+    /* v2.72: the hive is the single source of truth for colours, and the
+     * Theme value is only a label now.  Re-applying the named scheme here
+     * used to overwrite every role the user had just written with
+     * `reg set` / `colors set`, so those edits were silently useless on the
+     * next boot.  `theme <name>` is still how the whole table gets rewritten
+     * on purpose. */
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     boot_apply_videomode();   /* v2.56: boot display mode via reg, default gfx24 */
     bsod_init();              /* v2.59: cache panic action config */
     ce_init();
@@ -6834,6 +6917,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "display"))    cmd_display();
         else if (!strcmp_(cmd, "size"))       cmd_size(arg);
         else if (!strcmp_(cmd, "theme"))      cmd_theme(arg);  /* v2.61 */
+        else if (!strcmp_(cmd, "colors"))     cmd_colors(arg); /* v2.72 */
         else if (!strcmp_(cmd, "hive") ||
                  !strcmp_(cmd, "reg"))        cmd_reg(arg);    /* v2.67 */
         else if (!strcmp_(cmd, "audit"))      cmd_audit(arg);  /* v2.67 */

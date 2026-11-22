@@ -57,6 +57,9 @@ int  pal_init(void);
 
 /* Re-read the hive after a registry edit; returns fallback count. */
 int  pal_reload(void);
+/* v2.72: re-seed every role with the built-in defaults and persist them.
+ * Backs `colors reset`; the hive stays the single source of truth. */
+int  pal_reset(void);
 
 /* Resolved colour of a role: 0x00RRGGBB. */
 uint32_t pal_rgb(int role);

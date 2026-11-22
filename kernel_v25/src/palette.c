@@ -130,6 +130,17 @@ int pal_init(void) {
 
 int pal_reload(void) { return pal_init(); }
 
+int pal_reset(void) {
+    for (int i = 0; i < PAL_COUNT; i++) {
+        g_rgb[i] = k_defaults[i];
+        rgb_to_hex(g_rgb[i], g_hex[i]);
+        hive_set_sz(k_console_paths[i], g_hex[i]);
+        program_slot(i);
+    }
+    con_set_style_rgb(g_rgb[PAL_FG], g_rgb[PAL_BG], 0);
+    return 0;
+}
+
 uint32_t pal_rgb(int role) {
     if (role < 0 || role >= PAL_COUNT) return 0xFFFFFF;
     return g_rgb[role];
