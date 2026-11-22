@@ -185,6 +185,8 @@
 |---|---|---|
 | `cowsay [-f tux] MSG` | ASCII 牛/Tux 说话 | 图形正常 |
 | `sl` | 蒸汽火车驶过 | 动画不挂死 |
+| `rain` | 全屏数字雨（tui-preview） | 有绿色雨幕，任意键立即退出，退出后背景/前景恢复 | 
+| `train` | ASCII 蒸汽火车横穿（tui-preview） | 两趟后自动结束，任意键可提前退出，无残影 |
 | `fortune` | 随机箴言 | 有输出 |
 | `cal [YEAR]` | 月历/年历 | 日期正确 |
 | `yes [TEXT]` | 重复输出直到 Ctrl+C | Ctrl+C 可中断 |

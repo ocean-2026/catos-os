@@ -1,6 +1,6 @@
 # help 中文汉化待办
 
-> 状态：**待办**（尚未修改任何代码）
+> 状态：**已完成**（2026-11-22，v2.75 落地：63 条 help + 1 条 keys 全部进表）
 > 建立日期：2026-11-22
 > 依据：`kernel_v25/src/shell.c:cmd_help()`（第 278–411 行）与
 > `kernel_v25/src/lang.c:help_zh[]`（第 114–220 行）逐条比对。
@@ -194,3 +194,15 @@
 - `kernel_v25/src/lang.c` — `help_zh[]` / `trhelp()` / `g_lang`
 - `kernel_v25/src/keys_table.c` — `keys` 命令的数据源
 - `kernel_v25/include/lang.h` — `LANG_EN` / `LANG_ZH` / `lang_name()`
+
+
+---
+
+## 6. 落地记录（v2.75）
+
+- `lang.c:help_zh[]` 追加 64 条（62 描述 + 1 标题 + 1 keys 描述），原文与 `shell.c`
+  逐字对齐（脚本复算 `missing=0`）。
+- `shell.c:281` 标题改为 `pager_line(trhelp("CatOS v0.3 (five-pillar kernel) - commands:"))`。
+- 附带布局修复 `help_row()`：中文描述按"命令一行 / 描述缩进一行"排版 —— 原先固定 26 列
+  描述栏 + 双宽字形会导致整句折行并压到下一行命令上。
+- 验证：`lang zh` → `help` 截图逐组核对；`lang en` → `help` 输出与改动前一致。

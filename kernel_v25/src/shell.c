@@ -244,9 +244,31 @@ static multiboot_info_t *mbi;
 /* v2.59: paged help rows.  Each helper feeds the one line through the
  * shared pager; once the user quits ('q') the rest is dropped and the
  * helpers become no-ops until cmd_help() calls pager_end(). */
+/* v2.75: CJK descriptions are two cells per glyph and do not fit the fixed
+ * 26-column description field, so a Chinese row would wrap mid-sentence and
+ * visually collide with the next row.  Put the command on its own line and
+ * the description on an indented line instead -- clean in both directions. */
+static int has_cjk(const char *s) {
+    for (; *s; s++) if ((unsigned char)*s >= 0x80) return 1;
+    return 0;
+}
+
 static void help_row(const char *cmd, const char *desc) {
     if (pager_quit()) return;
     desc = trhelp(desc);                  /* v2.62: localise description */
+    if (has_cjk(desc)) {
+        char l1[96], l2[192];
+        int a = 0, b = 0;
+        l1[a++] = ' '; l1[a++] = ' ';
+        for (const char *p = cmd; *p && a < (int)sizeof(l1) - 1; p++) l1[a++] = *p;
+        l1[a] = 0;
+        for (int i = 0; i < 6 && b < (int)sizeof(l2) - 1; i++) l2[b++] = ' ';
+        for (const char *p = desc; *p && b < (int)sizeof(l2) - 1; p++) l2[b++] = *p;
+        l2[b] = 0;
+        pager_line(l1);
+        pager_line(l2);
+        return;
+    }
     char line[160];
     line[0] = 0;
     /* command field is 24 chars wide, description starts in column 26 */
@@ -278,7 +300,7 @@ static void help_note(const char *s)  { if (pager_quit()) return; s = trhelp(s);
 static void cmd_help(void) {
     con_suppress_cursor(1);                       /* v2.60: batch paint, no flicker */
     pager_begin(1);
-    pager_line("CatOS v0.3 (five-pillar kernel) - commands:");
+    pager_line(trhelp("CatOS v0.3 (five-pillar kernel) - commands:"));  /* v2.75: 经翻译表 */
     help_row("help",        "show this message");
     help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
@@ -301,6 +323,8 @@ static void cmd_help(void) {
     help_head("fun (NIGHT-P3 Linux-style easter eggs)");
     help_row("cowsay [-f tux] MSG", "ASCII cow (or Tux) says MSG");
     help_row("sl",          "steam train drives by (CHOO CHOO)");
+    help_row("rain",        "digital rain over the whole screen (any key quits)");
+    help_row("train",       "ASCII steam train rolls across the console (any key quits)");
     help_row("fortune",     "print a random fortune");
     help_row("cal [YEAR]",  "month calendar, or full year with YEAR");
     help_row("yes [TEXT]",  "repeat TEXT until Ctrl+C");
@@ -1237,6 +1261,134 @@ static const char *SL_SMOKE[] = {
     0
 };
 
+/* ---------- v2.75: CLI animations (ported from deliverables/tui-preview) */
+/* 10-row ASCII steam train from tui-preview/ascii小火车.txt.  Drawn as a
+ * clipped horizontal window so it works on both 80-col text mode and the
+ * 100-col gfx grid. */
+static const char *TRAIN_ART[] = {
+"      ====        ________                ___________",
+"  _D _|  |_______/        \__I_I_____===__|_________|",
+"   |(_)---  |   H\________/ |   |        =|___ ___|      _________________",
+"   /     |  |   H  |  |     |   |         ||_| |_||     _|                \_____A",
+"  |      |  |   H  |__--------------------| [___] |   =|                        |",
+"  | ________|___H__/__|_____/[][]~\_______|       |   -|                        |",
+"  |/ |   |-----------I_____I [][] []  D   |=======|____|________________________|_",
+"__/ =| o |=-~~\  /~~\  /~~\  /~~\ ____Y___________|__|__________________________|_",
+" |/-=|___|=    ||    ||    ||    ||_____/~\___/          |___ |  ___ |  ___ |",
+"  \_/      \__/  \__/  \__/  \__/      \_/               \___|  \___|  \___|",
+0
+};
+static const char SPACES100[] =
+"                                                                                                    ";
+
+static int anim_anykey(void) { return kb_getkey_timed(0) >= 0; }
+
+static void anim_end(void) {
+    con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
+    con_clear();
+    con_unsuppress_cursor();
+}
+
+/* `train`: the tui-preview choo-choo, two passes, any key quits. */
+static void cmd_train(void) {
+    int cols = con_cols(), rows = con_rows();
+    if (cols < 40 || rows < 14) { vga_write(trs("train: console too small\n", "train: 控制台太小\n")); return; }
+    con_suppress_cursor(1);
+    con_clear();
+    int wmax = 0;
+    for (int r = 0; TRAIN_ART[r]; r++) {
+        int n = slen_(TRAIN_ART[r]);
+        if (n > wmax) wmax = n;
+    }
+    int y0 = (rows - 12) / 2;
+    if (y0 < 2) y0 = 2;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int off = cols; off > -wmax - 2; off -= 3) {
+            if (anim_anykey()) { anim_end(); return; }
+            /* wipe the band with the canvas colour, then draw the window */
+            con_set_style_rgb(pal_rgb(PAL_BG), pal_rgb(PAL_BG), 0);
+            for (int r = 0; r < 11; r++)
+                con_write_at(0, (uint8_t)(y0 + r), SPACES100);
+            for (int r = 0; TRAIN_ART[r]; r++) {
+                const char *s = TRAIN_ART[r];
+                int len = slen_(s);
+                /* v2.66 lessons: smoke/loco in accent, rest in info */
+                con_set_fg_rgb(r < 2 ? pal_rgb(PAL_WARNING) : pal_rgb(PAL_ACCENT));
+                for (int i = 0; i < len; i++) {
+                    int x = off + i;
+                    if (x < 0 || x >= cols) continue;
+                    con_putc_at((uint8_t)x, (uint8_t)(y0 + r), s[i]);
+                }
+            }
+            if (pass == 0 && off > cols / 2)
+                con_set_fg_rgb(pal_rgb(PAL_SUCCESS));
+            if (pass == 0 && off > cols / 2)
+                con_write_at((uint8_t)2, (uint8_t)(y0 + 11), "  * CHOO CHOO *");
+            task_sleep_ticks(4);          /* ~40 ms / frame */
+        }
+    }
+    anim_end();
+}
+
+/* `rain`: full-screen digital rain (tui-preview/字符雨.bat), any key quits. */
+#define RAIN_MAX_COLS 128
+static uint32_t rain_seed = 0x2545F491u;
+static uint32_t rain_rnd(void) {
+    rain_seed = rain_seed * 1103515245u + 12345u;
+    return (rain_seed >> 16) & 0x7FFF;
+}
+static const char rain_chars[] = "0123456789ABCDEF@#$%&*+-<>";
+
+static void cmd_rain(void) {
+    int cols = con_cols(), rows = con_rows();
+    if (cols < 20 || rows < 10) { vga_write(trs("rain: console too small\n", "rain: 控制台太小\n")); return; }
+    if (cols > RAIN_MAX_COLS) cols = RAIN_MAX_COLS;
+    static int16_t head[RAIN_MAX_COLS];
+    static int16_t trail[RAIN_MAX_COLS];
+    static int16_t speed[RAIN_MAX_COLS];
+    static int16_t acc[RAIN_MAX_COLS];
+    for (int x = 0; x < cols; x++) {
+        head[x] = (int16_t)(rain_rnd() % rows);
+        trail[x] = (int16_t)(6 + rain_rnd() % 16);
+        speed[x] = (int16_t)(1 + rain_rnd() % 3);
+        acc[x] = 0;
+    }
+    con_suppress_cursor(1);
+    con_set_style_rgb(pal_rgb(PAL_BG), pal_rgb(PAL_BG), 0);
+    con_clear();
+    while (!anim_anykey()) {
+        for (int x = 0; x < cols; x++) {
+            acc[x] += speed[x];
+            if (acc[x] < 4) continue;
+            acc[x] -= 4;
+            int old = head[x];
+            head[x]++;
+            if (old >= 0 && old < rows) {
+                con_set_fg_rgb(0x33CC44);            /* trail: mid green */
+                con_putc_at((uint8_t)x, (uint8_t)old,
+                            rain_chars[rain_rnd() % (sizeof(rain_chars) - 1)]);
+            }
+            if (head[x] >= 0 && head[x] < rows) {
+                con_set_fg_rgb(0xEAFFF2);            /* head: near-white */
+                con_putc_at((uint8_t)x, (uint8_t)head[x],
+                            rain_chars[rain_rnd() % (sizeof(rain_chars) - 1)]);
+            }
+            int tail = head[x] - trail[x];
+            if (tail >= 0 && tail < rows) {
+                con_set_style_rgb(pal_rgb(PAL_BG), pal_rgb(PAL_BG), 0);
+                con_putc_at((uint8_t)x, (uint8_t)tail, ' ');
+            }
+            if (tail > rows) {                        /* column finished: respawn */
+                head[x] = (int16_t)-(rain_rnd() % 15);
+                trail[x] = (int16_t)(6 + rain_rnd() % 16);
+                speed[x] = (int16_t)(1 + rain_rnd() % 3);
+            }
+        }
+        task_sleep_ticks(2);                          /* ~20 ms / frame */
+    }
+    anim_end();
+}
+
 static void cmd_sl(void) {
     for (int f = 0; f < 16; f++) {
         vga_clear();
@@ -1512,7 +1664,7 @@ static const char *BUILTIN_NAMES[] = {
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag", "sshd",
     "faultinfo", "crashlog", "fsck", "color",
     "bsod", "blue", "panicmode",
-    "cowsay", "sl", "fortune", "cal", "yes",   /* NIGHT-P3 */
+    "cowsay", "sl", "rain", "train", "fortune", "cal", "yes",   /* NIGHT-P3 */
     "pkg", "wc", "tree",       /* NIGHT-P4 */
     "theme",                                  /* v2.61: dark / light token palette switch */
     "hive", "reg",                            /* v2.67: binary tree registry */
@@ -6417,7 +6569,7 @@ static const char *sh_cmds[] = {
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
-    "setenv","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
+    "setenv","rain","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vdiag","whoami","yes","shutdown","theme","hive","reg","colors",  /* v2.72 */
 };
@@ -6985,6 +7137,8 @@ static void shell_exec(char *cmd, char *arg) {
         /* NIGHT-P3: Linux-style easter eggs */
         else if (!strcmp_(cmd, "cowsay"))    cmd_cowsay(arg);
         else if (!strcmp_(cmd, "sl"))         cmd_sl();
+        else if (!strcmp_(cmd, "rain"))       cmd_rain();
+        else if (!strcmp_(cmd, "train"))      cmd_train();
         else if (!strcmp_(cmd, "fortune"))    cmd_fortune();
         else if (!strcmp_(cmd, "cal"))        cmd_cal(arg);
         else if (!strcmp_(cmd, "yes"))        cmd_yes(arg);
@@ -7263,7 +7417,7 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
     "echo \"      |  \\_/ / ____ \\| |           \"\n"
     "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                             CatOS v2.72                            \"\n"
+    "echo \"                             CatOS v2.75                            \"\n"
     "echo \"\"\n";
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see
