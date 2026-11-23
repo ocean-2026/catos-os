@@ -39,26 +39,24 @@ void tls_prf(uint8_t *out, int outlen,
              const uint8_t *secret, int slen,
              const char *label,
              const uint8_t *seed, int seedlen) {
-    uint8_t A[160], block[32], ls[160], tmp[32];
+    uint8_t ls[200];
+    uint8_t A[32], blk[32], t[32];
     int ll = 0, i;
-    int first = 1;
 
-    for (i = 0; label[ll]; i++) { ls[ll] = (uint8_t)label[ll]; ll++; }
-    for (i = 0; i < seedlen && ll < 160; i++) ls[ll++] = seed[i];
+    for (i = 0; label[i] && ll < 190; i++) ls[ll++] = (uint8_t)label[i];
+    for (i = 0; i < seedlen && ll < 200; i++) ls[ll++] = seed[i];
 
-    /* A(0) = label || seed: the full P_hash seed (RFC 5246 section 5).
-     * The label is part of the seed fed into the A-chain, not only into
-     * the output block. */
-    for (i = 0; i < ll; i++) A[i] = ls[i];
-
+    /* A(1) = HMAC(secret, label || seed) */
+    hmac_sha256(A, secret, slen, ls, ll, 0, 0);
     while (outlen > 0) {
-        /* A(i) = HMAC(secret, A(i-1)); block = HMAC(secret, A(i)||label||seed) */
-        hmac_sha256(tmp, secret, slen, A, first ? ll : 32, 0, 0);
-        first = 0;
-        for (i = 0; i < 32; i++) A[i] = tmp[i];
-        hmac_sha256(block, secret, slen, A, 32, ls, ll);
-        int take = outlen < 32 ? outlen : 32;
-        for (i = 0; i < take; i++) out[i] = block[i];
+        int take;
+        /* P_i = HMAC(secret, A(i) || label || seed) */
+        hmac_sha256(blk, secret, slen, A, 32, ls, ll);
+        take = outlen < 32 ? outlen : 32;
+        for (i = 0; i < take; i++) out[i] = blk[i];
         out += take; outlen -= take;
+        /* A(i+1) = HMAC(secret, A(i)) */
+        hmac_sha256(t, secret, slen, A, 32, 0, 0);
+        for (i = 0; i < 32; i++) A[i] = t[i];
     }
 }

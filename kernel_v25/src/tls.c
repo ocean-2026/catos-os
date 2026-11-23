@@ -30,6 +30,7 @@ static int uecc_rng(uint8_t *dest, unsigned size) {
 
 #define TLS_VERSION_0303 0x0303
 #define CS_ECDHE_RSA_AES128_CBC_SHA256 0xC027
+#define CS_ECDHE_RSA_AES128_GCM_SHA256 0xC02F   /* v2.78: modern-site suite */
 
 /* ------------------------------------------------------------------ */
 /* raw reader buffering                                                */
@@ -112,6 +113,87 @@ static uint64_t cseq, sseq;
  * the 16 KiB blocks off the kernel stack). */
 static uint8_t g_enc_in[16384], g_enc_out[16384];
 
+/* ---- v2.78: AES-128-GCM record protection (0xC02F) --------------------
+ * Added so `curl https://` can talk to sites that only offer AEAD suites
+ * (baidu/qq/mozilla...).  GHASH uses the bitwise GF(2^128) multiply; the
+ * AES-128 block primitive reuses tiny-AES's CBC path with a zero IV, which
+ * is exactly one ECB block encrypt. */
+static int gcm_on;
+static uint8_t c_salt[4], s_salt[4];
+
+static void gf_mul128(uint8_t Y[16], const uint8_t H[16]) {
+    uint8_t X[16], Z[16], V[16];
+    memcpy(X, Y, 16);
+    for (int i = 0; i < 16; i++) Z[i] = 0;
+    memcpy(V, H, 16);
+    for (int i = 0; i < 128; i++) {
+        if (X[i >> 3] & (uint8_t)(0x80 >> (i & 7))) {
+            for (int k = 0; k < 16; k++) Z[k] ^= V[k];
+        }
+        int lsb = V[15] & 1;
+        for (int j = 15; j > 0; j--) V[j] = (uint8_t)((V[j] >> 1) | (V[j - 1] << 7));
+        V[0] >>= 1;
+        if (lsb) V[0] ^= 0xE1;
+    }
+    memcpy(Y, Z, 16);
+}
+
+static void aes_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]) {
+    tls_aes128_t c;
+    uint8_t iv[16];
+    for (int i = 0; i < 16; i++) iv[i] = 0;
+    tls_aes128_key(&c, key);
+    tls_aes128_cbc_enc(&c, iv, in, out, 1);
+}
+
+static void ghash_blocks(uint8_t Y[16], const uint8_t H[16], const uint8_t *p, int len) {
+    uint8_t blk[16];
+    for (int off = 0; off < len; off += 16) {
+        int n = len - off; if (n > 16) n = 16;
+        for (int i = 0; i < 16; i++) blk[i] = 0;
+        memcpy(blk, p + off, (uint32_t)n);
+        for (int i = 0; i < 16; i++) Y[i] ^= blk[i];
+        gf_mul128(Y, H);
+    }
+}
+
+/* tag = GHASH(H, aad || data) ^ AES(K, J0), with the standard length trailer. */
+static void gcm_tag(const uint8_t key[16], const uint8_t nonce[12],
+                    const uint8_t *aad, int alen, const uint8_t *data, int dlen,
+                    uint8_t tag[16]) {
+    uint8_t H[16], J0[16], zero[16], ej[16], Y[16], L[16];
+    for (int i = 0; i < 16; i++) zero[i] = 0;
+    aes_block(key, zero, H);
+    memcpy(J0, nonce, 12); J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
+    for (int i = 0; i < 16; i++) Y[i] = 0;
+    ghash_blocks(Y, H, aad, alen);
+    ghash_blocks(Y, H, data, dlen);
+    for (int i = 0; i < 16; i++) L[i] = 0;
+    uint64_t a = (uint64_t)alen * 8, c = (uint64_t)dlen * 8;
+    for (int i = 0; i < 8; i++) {
+        L[i] = (uint8_t)(a >> (56 - 8 * i));
+        L[8 + i] = (uint8_t)(c >> (56 - 8 * i));
+    }
+    for (int i = 0; i < 16; i++) Y[i] ^= L[i];
+    gf_mul128(Y, H);
+    aes_block(key, J0, ej);
+    for (int i = 0; i < 16; i++) tag[i] = (uint8_t)(Y[i] ^ ej[i]);
+}
+
+static void gcm_ctr(const uint8_t key[16], const uint8_t nonce[12],
+                    const uint8_t *in, int len, uint8_t *out) {
+    uint8_t ctr[16], ks[16];
+    for (int off = 0; off < len; off += 16) {
+        int n = len - off; if (n > 16) n = 16;
+        memcpy(ctr, nonce, 12);
+        uint32_t c = 2 + (uint32_t)(off / 16);   /* GCM CTR starts at inc32(J0) */
+        ctr[12] = (uint8_t)(c >> 24); ctr[13] = (uint8_t)(c >> 16);
+        ctr[14] = (uint8_t)(c >> 8);  ctr[15] = (uint8_t)c;
+        aes_block(key, ctr, ks);
+        for (int i = 0; i < n; i++) out[off + i] = (uint8_t)(in[off + i] ^ ks[i]);
+    }
+}
+
 /* MAC-then-encrypt one outbound record.  rec_type is the record content type
  * (22 handshake, 23 application_data).  Sends record via the transport. */
 static int protect_record(int rec_type, const uint8_t *plain, int plen) {
@@ -123,6 +205,27 @@ static int protect_record(int rec_type, const uint8_t *plain, int plen) {
     mac_hdr[9] = 0x03; mac_hdr[10] = 0x03;
     uint16_t l16 = (uint16_t)plen;
     mac_hdr[11] = (uint8_t)(l16 >> 8); mac_hdr[12] = (uint8_t)l16;
+
+    if (gcm_on) {
+        /* RFC 5288: explicit 8-byte nonce goes in the clear, tag appended. */
+        static uint8_t gcm_ct[16384];
+        uint8_t nonce[12], tag[16];
+        memcpy(nonce, c_salt, 4);
+        memcpy(nonce + 4, seqbe, 8);
+        gcm_ctr(c_key, nonce, plain, plen, gcm_ct);
+        gcm_tag(c_key, nonce, mac_hdr, 13, gcm_ct, plen, tag);
+        int rn = 0;
+        g_recbuf[rn++] = (uint8_t)rec_type;
+        g_recbuf[rn++] = 0x03; g_recbuf[rn++] = 0x03;
+        uint16_t rl = (uint16_t)(8 + plen + 16);
+        g_recbuf[rn++] = (uint8_t)(rl >> 8); g_recbuf[rn++] = (uint8_t)rl;
+        memcpy(g_recbuf + rn, seqbe, 8); rn += 8;
+        memcpy(g_recbuf + rn, gcm_ct, plen); rn += plen;
+        memcpy(g_recbuf + rn, tag, 16); rn += 16;
+        if (net_tcp_send(g_recbuf, rn) < 0) return -1;
+        cseq++;
+        return 0;
+    }
 
     hmac_sha256(mac, c_mac, 32, mac_hdr, 13, plain, plen);
 
@@ -161,11 +264,30 @@ static int app_send(const uint8_t *plain, int plen) {
 
 static int app_recv(const uint8_t *payload, int plen, int rec_type,
                     uint8_t *out, int *outlen) {
+    if (gcm_on) {
+        if (plen < 8 + 16) return -1;
+        int ct_len = plen - 8 - 16;
+        uint8_t nonce[12], aad[13], seqbe[8], calc[16], diff = 0;
+        memcpy(nonce, s_salt, 4);
+        memcpy(nonce + 4, payload, 8);
+        for (int i = 0; i < 8; i++) seqbe[i] = (uint8_t)(sseq >> (56 - 8 * i));
+        memcpy(aad, seqbe, 8);
+        aad[8] = (uint8_t)rec_type; aad[9] = 0x03; aad[10] = 0x03;
+        aad[11] = (uint8_t)(ct_len >> 8); aad[12] = (uint8_t)ct_len;
+        gcm_tag(s_key, nonce, aad, 13, payload + 8, ct_len, calc);
+        for (int i = 0; i < 16; i++) diff |= (uint8_t)(calc[i] ^ payload[8 + ct_len + i]);
+        if (diff != 0) return -1;
+        gcm_ctr(s_key, nonce, payload + 8, ct_len, out);
+        *outlen = ct_len;
+        sseq++;
+        return 0;
+    }
     if (plen < 17) return -1;
     int ct_len = plen - 16;
     if (ct_len % 16 != 0) return -1;
 
-    uint8_t dec[16384];
+    static uint8_t cbc_dec[16384];
+    uint8_t *dec = cbc_dec;
     tls_aes128_key(&de_cbc, s_key);
     tls_aes128_cbc_dec(&de_cbc, payload, payload + 16, dec, ct_len / 16);
 
@@ -245,7 +367,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     if (!peer || !host || !path || !out || max <= 0) return -1;
 
     uECC_set_rng(uecc_rng);
-    tlen = 0; cseq = 0; sseq = 0;
+    tlen = 0; cseq = 0; sseq = 0; gcm_on = 0;
 
     /* ---- TCP connect ---- */
     if (net_tcp_connect(peer, port) != 0) return -3;
@@ -260,30 +382,47 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
      * || extensions: supported_groups(secp256r1).  The groups extension is
      * required: without it OpenSSL 3.0 aborts the ECDHE handshake with a
      * handshake_failure alert. */
-    uint8_t ch[64];
+    uint8_t ch[256];
     int cn = 0;
     ch[cn++] = 0x03; ch[cn++] = 0x03;
     uint8_t crandom[32]; crypto_random(crandom, 32);
     memcpy(ch + cn, crandom, 32); cn += 32;
     ch[cn++] = 0;                              /* session id len */
-    ch[cn++] = 0x00; ch[cn++] = 0x02;         /* cipher suite list len */
-    ch[cn++] = 0xC0; ch[cn++] = 0x27;         /* 0xC027 */
+    /* v2.78: prefer AEAD 0xC02F, fall back to the original CBC suite. */
+    ch[cn++] = 0x00; ch[cn++] = 0x04;
+    ch[cn++] = 0xC0; ch[cn++] = 0x2F;
+    ch[cn++] = 0xC0; ch[cn++] = 0x27;
     ch[cn++] = 0x01; ch[cn++] = 0x00;         /* compression: null */
-    /* extensions: supported_groups(secp256r1) + signature_algorithms.
-     * Both are required by OpenSSL 3.0: without supported_groups the ECDHE
-     * group is unknown; without signature_algorithms the handshake aborts
-     * with handshake_failure. */
-    ch[cn++] = 0x00; ch[cn++] = 0x14;         /* extensions block len (20) */
-    ch[cn++] = 0x00; ch[cn++] = 0x0A;         /* ext: supported_groups */
-    ch[cn++] = 0x00; ch[cn++] = 0x04;         /* ext data len */
-    ch[cn++] = 0x00; ch[cn++] = 0x02;         /* group list len */
-    ch[cn++] = 0x00; ch[cn++] = 0x17;         /* secp256r1 (23) */
-    ch[cn++] = 0x00; ch[cn++] = 0x0D;         /* ext: signature_algorithms */
-    ch[cn++] = 0x00; ch[cn++] = 0x08;         /* ext data len */
-    ch[cn++] = 0x00; ch[cn++] = 0x06;         /* alg list len */
+    int ext_len_pos = cn; ch[cn++] = 0x00; ch[cn++] = 0x00;
+    /* supported_groups(secp256r1) + signature_algorithms (OpenSSL 3.0
+     * aborts without either) */
+    ch[cn++] = 0x00; ch[cn++] = 0x0A;
+    ch[cn++] = 0x00; ch[cn++] = 0x04;
+    ch[cn++] = 0x00; ch[cn++] = 0x02;
+    ch[cn++] = 0x00; ch[cn++] = 0x17;
+    ch[cn++] = 0x00; ch[cn++] = 0x0D;
+    ch[cn++] = 0x00; ch[cn++] = 0x08;
+    ch[cn++] = 0x00; ch[cn++] = 0x06;
     ch[cn++] = 0x04; ch[cn++] = 0x01;         /* rsa_pkcs1_sha256 */
     ch[cn++] = 0x03; ch[cn++] = 0x03;         /* ecdsa_secp256r1_sha256 */
     ch[cn++] = 0x08; ch[cn++] = 0x04;         /* rsa_pss_rsae_sha256 */
+    /* SNI: virtual-host sites (and most CDNs) reject a ClientHello without
+     * it, which is why https://baidu.com failed before this. */
+    {
+        int hl = 0;
+        while (host[hl] && hl < 96) hl++;
+        ch[cn++] = 0x00; ch[cn++] = 0x00;                 /* ext: server_name */
+        ch[cn++] = 0x00; ch[cn++] = (uint8_t)(5 + hl);     /* ext data len */
+        ch[cn++] = 0x00; ch[cn++] = (uint8_t)(3 + hl);     /* list len */
+        ch[cn++] = 0x00;                                  /* host_name */
+        ch[cn++] = 0x00; ch[cn++] = (uint8_t)hl;
+        for (int i = 0; i < hl; i++) ch[cn++] = (uint8_t)host[i];
+    }
+    {
+        int extlen = cn - ext_len_pos - 2;
+        ch[ext_len_pos] = (uint8_t)(extlen >> 8);
+        ch[ext_len_pos + 1] = (uint8_t)extlen;
+    }
     if (hs_send(1, ch, cn) != 0) return -6;
 
     /* ---- ServerHello ---- */
@@ -292,7 +431,15 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     if (mtype != 2 || blen < 34) return -6;
     if (body[0] != 0x03 || body[1] != 0x03) return -6;
     uint8_t srandom[32]; memcpy(srandom, body + 2, 32);
-    /* skip session id, cipher, compression */
+    {
+        int sid_len = body[34];
+        int off = 35 + sid_len;
+        if (off + 1 >= blen) return -6;
+        uint16_t suite = ((uint16_t)body[off] << 8) | body[off + 1];
+        if (suite == CS_ECDHE_RSA_AES128_GCM_SHA256) gcm_on = 1;
+        else if (suite == CS_ECDHE_RSA_AES128_CBC_SHA256) gcm_on = 0;
+        else return -6;                        /* no shared suite */
+    }
 
     /* ---- Certificate: skip ---- */
     if (hs_read(&mtype, &body, &blen) != 0) return -6;
@@ -328,10 +475,17 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     uint8_t kb[128];
     uint8_t rand64b[64];
     memcpy(rand64b, srandom, 32); memcpy(rand64b + 32, crandom, 32);
-    tls_prf(kb, 128, master, 48, "key expansion", rand64b, 64);
-    memcpy(c_mac, kb + 0, 32);  memcpy(s_mac, kb + 32, 32);
-    memcpy(c_key, kb + 64, 16); memcpy(s_key, kb + 80, 16);
-    memcpy(c_iv, kb + 96, 16);  memcpy(s_iv, kb + 112, 16);
+    if (gcm_on) {
+        /* AEAD: 16-byte key + 4-byte implicit IV per direction, no MAC keys. */
+        tls_prf(kb, 40, master, 48, "key expansion", rand64b, 64);
+        memcpy(c_key, kb + 0, 16);  memcpy(s_key, kb + 16, 16);
+        memcpy(c_salt, kb + 32, 4); memcpy(s_salt, kb + 36, 4);
+    } else {
+        tls_prf(kb, 128, master, 48, "key expansion", rand64b, 64);
+        memcpy(c_mac, kb + 0, 32);  memcpy(s_mac, kb + 32, 32);
+        memcpy(c_key, kb + 64, 16); memcpy(s_key, kb + 80, 16);
+        memcpy(c_iv, kb + 96, 16);  memcpy(s_iv, kb + 112, 16);
+    }
 
     /* ---- ClientKeyExchange: 1-byte 0x04 prefix + 64-byte X||Y = 65 bytes. */
     uint8_t cke[66];
@@ -368,7 +522,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         if (type == 20) continue;              /* server CCS */
         if (type != 22) return -6;
         /* encrypted handshake record: decrypt then parse Finished */
-        uint8_t inner[16384]; int ilen;
+        static uint8_t inner[16384]; int ilen;
         if (app_recv(p, len, 22, inner, &ilen) != 0) return -6;
         if (ilen < 4 || inner[0] != 20) return -6;
         int vlen = ((int)inner[1] << 16) | ((int)inner[2] << 8) | inner[3];
@@ -393,14 +547,21 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     if (app_send(req, rn) != 0) return -6;
 
     /* ---- collect decrypted application data ---- */
-    uint8_t resp[20480];
+    static uint8_t resp[20480];
     int resp_len = 0;
     for (int k = 0; k < 60; k++) {
         uint8_t type; const uint8_t *p; int len;
         if (recv_record(&type, &p, &len) != 0) break;
-        if (type == 21) return -6;
+        if (type == 21) break;                 /* alert: end of stream */
+        if (type == 22) {                      /* encrypted handshake (ticket etc):
+                                                  consume the seq number quietly */
+            uint8_t junk[16384]; int jlen;
+            if (app_recv(p, len, 22, junk, &jlen) != 0) break;
+            continue;
+        }
         if (type != 23) continue;
-        uint8_t frag[16384]; int flen;
+        static uint8_t frag[16384]; int flen;
+
         if (app_recv(p, len, 23, frag, &flen) != 0) return -6;
         if (resp_len + flen > (int)sizeof(resp)) break;
         memcpy(resp + resp_len, frag, flen);
