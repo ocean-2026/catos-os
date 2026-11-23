@@ -276,6 +276,8 @@ static void bench_pipe(void) {
 
     uint32_t sleeps0 = kpipe_sleeps();
     uint32_t ticks0 = timer_ticks;
+    uint64_t wait0 = kpipe_wait_cycles();
+    uint64_t copy0 = kpipe_copy_cycles();
     uint64_t t0 = perf_now();
 
     int tid = task_spawn_r0(heavy_writer, "bench-pipe-w", 1);
@@ -308,6 +310,8 @@ static void bench_pipe(void) {
     perf_kv("bad", bad);
     perf_kv("sleeps", kpipe_sleeps() - sleeps0);
     perf_kv("ticks", ticks1 - ticks0);
+    perf_kv64("wt", kpipe_wait_cycles() - wait0);
+    perf_kv64("cp", kpipe_copy_cycles() - copy0);
     perf_kv("mhz", perf_mhz());
     perf_end();
 }

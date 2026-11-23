@@ -29,6 +29,7 @@
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
+#include "perf.h"    /* perf_now(): TSC split timing for the pipe bench          */
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -1045,6 +1046,8 @@ typedef struct {
     uint16_t head, tail, len;
     uint8_t  open_w, open_r;
     uint8_t  used;
+    task_t  *wait_r;      /* reader blocked waiting for data   */
+    task_t  *wait_w;      /* writer blocked waiting for space  */
 } pipe_t;
 static pipe_t pipes[PIPE_MAX];
 
@@ -1055,20 +1058,24 @@ static pipe_t *pipe_by_handle(int h) {
     return pipes[idx].used ? &pipes[idx] : 0;
 }
 
+static void pipe_wake_reader(pipe_t *pp);
+static void pipe_wake_writer(pipe_t *pp);
+
 static void pipe_task_cleanup(task_t *t) {
     if (t->out_pipe >= 0) {
         pipe_t *p = pipe_by_handle(t->out_pipe);
-        if (p) p->open_w = 0;
+        if (p) { p->open_w = 0; pipe_wake_reader(p); }
         t->out_pipe = -1;
     }
     if (t->in_pipe >= 0) {
         pipe_t *p = pipe_by_handle(t->in_pipe);
-        if (p) p->open_r = 0;
+        if (p) { p->open_r = 0; pipe_wake_writer(p); }
         t->in_pipe = -1;
     }
     for (int i = 0; i < PIPE_MAX; i++)
         if (pipes[i].used && !pipes[i].open_w && !pipes[i].open_r) {
             pipes[i].used = 0; pipes[i].len = 0;
+            pipes[i].wait_r = 0; pipes[i].wait_w = 0;
         }
 }
 
@@ -1094,10 +1101,60 @@ void kpipe_assign_in(int tid, int h) {
     if (t) t->in_pipe = h;
 }
 
-/* Ring0 pipe block counter: every task_sleep_ticks() wait inside the FIFO
- * helpers increments it so the bench can report the sleep/wake share. */
+/* Ring0 pipe block counters: every blocking wait inside the FIFO helpers
+ * increments g_pipe_sleeps so the bench can report the sleep/wake share.
+ * g_pipe_wait_cycles accumulates TSC cycles spent blocked (wakeup latency
+ * included); g_pipe_copy_cycles accumulates cycles spent in the FIFO byte
+ * copy loops.  Both are zeroed nowhere; the bench snapshots deltas. */
 static uint32_t g_pipe_sleeps;
+static uint64_t g_pipe_wait_cycles;
+static uint64_t g_pipe_copy_cycles;
 uint32_t kpipe_sleeps(void) { return g_pipe_sleeps; }
+uint64_t kpipe_wait_cycles(void) { return g_pipe_wait_cycles; }
+uint64_t kpipe_copy_cycles(void) { return g_pipe_copy_cycles; }
+
+/* perf(pipe) block/wake primitives.  A blocked side parks on the peer's
+ * condition: the writer waits for free space, the reader waits for data.
+ * The peer signals after it appends bytes / drains bytes / closes its end.
+ *
+ * Scheduling: task_block() puts the caller in T_WAIT_PIPE and runs the
+ * normal round-robin pick_ready() -- other READY tasks keep being
+ * scheduled, the blocked task is not holding any lock and does not spin.
+ * Wakeup only flips the waiter back to T_READY; the peer keeps its own
+ * run until it blocks/yields/exits, so there is no direct handoff and no
+ * deadlock (a writer blocks only when full, a reader only when empty, so
+ * the two can never wait on each other simultaneously). */
+static void pipe_wake_reader(pipe_t *pp) {
+    task_t *w = pp->wait_r;
+    if (!w) return;
+    pp->wait_r = 0;
+    if (w->state == T_WAIT_PIPE) w->state = T_READY;
+}
+
+static void pipe_wake_writer(pipe_t *pp) {
+    task_t *w = pp->wait_w;
+    if (!w) return;
+    pp->wait_w = 0;
+    if (w->state == T_WAIT_PIPE) w->state = T_READY;
+}
+
+static void pipe_wait_writer(pipe_t *pp) {
+    g_pipe_sleeps++;
+    uint64_t t0 = perf_now();
+    pp->wait_w = cur_task;
+    task_block(T_WAIT_PIPE);
+    g_pipe_wait_cycles += perf_now() - t0;
+    pp->wait_w = 0;
+}
+
+static void pipe_wait_reader(pipe_t *pp) {
+    g_pipe_sleeps++;
+    uint64_t t0 = perf_now();
+    pp->wait_r = cur_task;
+    task_block(T_WAIT_PIPE);
+    g_pipe_wait_cycles += perf_now() - t0;
+    pp->wait_r = 0;
+}
 
 int kpipe_write(int h, const void *data, int len) {
     pipe_t *pp = pipe_by_handle(h);
@@ -1107,14 +1164,17 @@ int kpipe_write(int h, const void *data, int len) {
     while (wrote < len) {
         if (!pp->open_r) return -1;                 /* reader gone */
         int free = PIPE_BUF - 1 - pp->len;
-        if (free <= 0) { g_pipe_sleeps++; task_sleep_ticks(1); continue; }
+        if (free <= 0) { pipe_wait_writer(pp); continue; }
         int n = len - wrote; if (n > free) n = free;
+        uint64_t c0 = perf_now();
         for (int k = 0; k < n; k++) {
             pp->buf[pp->tail] = ud[wrote + k];
             pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
         }
+        g_pipe_copy_cycles += perf_now() - c0;
         pp->len = (uint16_t)(pp->len + n);
         wrote += n;
+        pipe_wake_reader(pp);
     }
     return 0;
 }
@@ -1127,23 +1187,32 @@ int kpipe_read(int h, void *buf, int max) {
     while (got < max) {
         while (pp->len == 0) {
             if (!pp->open_w) return got;            /* writer closed = EOF */
-            g_pipe_sleeps++; task_sleep_ticks(1);
+            pipe_wait_reader(pp);
         }
-        ub[got++] = pp->buf[pp->head];
-        pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
-        pp->len = (uint16_t)(pp->len - 1);
+        uint64_t c0 = perf_now();
+        while (got < max && pp->len > 0) {
+            ub[got++] = pp->buf[pp->head];
+            pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
+            pp->len = (uint16_t)(pp->len - 1);
+        }
+        g_pipe_copy_cycles += perf_now() - c0;
+        pipe_wake_writer(pp);
     }
     return got;
 }
 
 void kpipe_close_write(int h) {
     pipe_t *pp = pipe_by_handle(h);
-    if (pp) pp->open_w = 0;
+    if (!pp) return;
+    pp->open_w = 0;
+    pipe_wake_reader(pp);          /* EOF: unblock a reader waiting for data */
 }
 
 void kpipe_close_read(int h) {
     pipe_t *pp = pipe_by_handle(h);
-    if (pp) pp->open_r = 0;
+    if (!pp) return;
+    pp->open_r = 0;
+    pipe_wake_writer(pp);          /* reader gone: unblock a full-pipe writer */
 }
 
 /* ---- the syscall dispatcher ---------------------------------------------- */
@@ -1273,7 +1342,7 @@ void isr_syscall(int_frame_t *f) {
                 while (wrote < i) {
                     if (!pp->open_r) { err = -1; break; }
                     int free = PIPE_BUF - 1 - pp->len;
-                    if (free <= 0) { task_sleep_ticks(1); continue; }
+                    if (free <= 0) { pipe_wait_writer(pp); continue; }
                     int n = i - wrote; if (n > free) n = free;
                     for (int k = 0; k < n; k++) {
                         pp->buf[pp->tail] = b[wrote + k];
@@ -1281,6 +1350,7 @@ void isr_syscall(int_frame_t *f) {
                     }
                     pp->len = (uint16_t)(pp->len + n);
                     wrote += n;
+                    pipe_wake_reader(pp);
                 }
                 if (err) break;
             } else if (t->out_file[0]) {
@@ -1331,12 +1401,13 @@ void isr_syscall(int_frame_t *f) {
             for (;;) {
                 while (pp->len == 0) {
                     if (!pp->open_w) break;          /* writer closed = EOF */
-                    task_sleep_ticks(1);
+                    pipe_wait_reader(pp);
                 }
                 if (pp->len == 0) break;
                 char c = pp->buf[pp->head];
                 pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
                 pp->len = (uint16_t)(pp->len - 1);
+                pipe_wake_writer(pp);
                 b[bi++] = c;
                 if (c == '\n' || bi >= max - 1) break;
             }
@@ -1764,7 +1835,7 @@ void isr_syscall(int_frame_t *f) {
         while (wrote < len) {
             if (!pp->open_r) { perr = -1; break; }       /* reader gone */
             int free = PIPE_BUF - 1 - pp->len;
-            if (free <= 0) { task_sleep_ticks(1); continue; }
+            if (free <= 0) { pipe_wait_writer(pp); continue; }
             int n = len - wrote; if (n > free) n = free;
             for (int k = 0; k < n; k++) {
                 pp->buf[pp->tail] = ud[wrote + k];
@@ -1772,6 +1843,7 @@ void isr_syscall(int_frame_t *f) {
             }
             pp->len = (uint16_t)(pp->len + n);
             wrote += n;
+            pipe_wake_reader(pp);
         }
         ret = perr ? (uint32_t)perr : 0;
         break;
@@ -1788,12 +1860,13 @@ void isr_syscall(int_frame_t *f) {
         for (;;) {
             while (pp->len == 0) {
                 if (!pp->open_w) goto pipe_rd_done;    /* writer closed = EOF */
-                task_sleep_ticks(1);
+                pipe_wait_reader(pp);
             }
             if (got >= max) break;
             prb[got++] = pp->buf[pp->head];
             pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
             pp->len = (uint16_t)(pp->len - 1);
+            pipe_wake_writer(pp);
             if (pp->len == 0) break;    /* drained what we have: return now */
         }
     pipe_rd_done:
@@ -1810,7 +1883,12 @@ void isr_syscall(int_frame_t *f) {
         if (t->out_pipe == (int)a1) { pp->open_w = 0; t->out_pipe = -1; }
         else if (t->in_pipe == (int)a1) { pp->open_r = 0; t->in_pipe = -1; }
         else { pp->open_w = 0; pp->open_r = 0; }
-        if (!pp->open_w && !pp->open_r) { pp->used = 0; pp->len = 0; }
+        pipe_wake_reader(pp);
+        pipe_wake_writer(pp);
+        if (!pp->open_w && !pp->open_r) {
+            pp->used = 0; pp->len = 0;
+            pp->wait_r = 0; pp->wait_w = 0;
+        }
         ret = 0;
         break;
     }
