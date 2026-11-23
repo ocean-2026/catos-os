@@ -12,13 +12,14 @@
 | M1 | 布局：COLUMN/ROW/STACK、padding/gap/对齐、diff 提交、脏位 | 探针通过，待 M4 全量回归 | `gui idem` 20/20 match=1、`GUI:idempotent=OK`；`gui dirty` measured=3/total=7、affected_subtree=3、untouched=3、result=1；`gui leak` leaked=0 |
 | M2 | damage 合成、拖拽/resize、命中、焦点、层/z | 探针通过，待 M4 全量回归 | `gui drag` 两块互不干扰 b_same=1、measured=2/subtree=2、damage_rects=1、damage_area=9600（2.0% 屏）；`gui hit` 同层 z 高者命中；`gui rate` frames=33、double_commit=0；零异常 |
 | M3 | 任务栏、开始菜单、Presence | 探针通过，待 M4 全量回归 | `gui menu` open=1、items=1、overlay=5、launched=2、result=1；`gui presence` base=11、added=12、leaving=1、live_after=11、leaked=0、result=1；`gui leak` 1000 次开关 live=0/tree=1/leaked=0；时钟秒级自刷只打自身脏位 |
-| M4 | 令牌主题、`gui_reset` 重建、demo 块树、全量回归 | 完成，三门禁全绿 | `gui theme` 三套令牌 bg/fg/accent 互异、result=1；`gui reset` nodes=15、hash 前后一致、orphan=0、match=1；light/hc 分组像素断言 6/6 PASS；vprobe 10/10、F11 9/9、E3 2/2（见 §3 R10） |
+| M4 | 令牌主题、`gui_reset` 重建、demo 块树、全量回归 | 完成，三门禁全绿；R11 加固轮收尾 | `gui theme` 三套令牌 bg/fg/accent 互异、result=1；`gui reset` nodes=15、hash 前后一致、orphan=0、match=1；light/hc 分组像素断言 6/6 PASS；vprobe 10/10、F11 9/9、E3 2/2；17 串口探针全 PASS；静态槽守卫自检 result=1（见 §3 R11） |
 | 旧 desktop 退役 | `build/pkg.list` 摘掉 desktop 包，源文件保留作学习参考 | 已完成 | pkg.list 摘包；desktop.c 加 LEGACY 注释；gfxdesk.c 仍不打包 |
 
 ## 2. 推进日志（追加，倒序在最上面）
 
 | 时间 | 轮次 | 做了什么 | 提交 | 探针结果 | 下一步 |
 |---|---|---|---|---|---|
+| 2026-11-24 06:50 | R11 | 根治尝试：`build.sh` 正常链接顺序把 `user.o`/`task.o` 前置（`boot.o cpu.o` 最前不动），关键表 `acl_tab/users/tasks/pipes/cur_task` 全部回到 `0x2000000` 以下，护栏 `--strict` 退出 0；护栏 CLI 口径修正为 `--strict` 只判关键表 RISK、`--strict-warn` 才判其余静态。审计 4 项：D2 `wins`→`menu_ids` 改名 + lint C1 收紧 `\bwin\w*`；D1 抽出 `gui_idle_step()` 生产路径 3-tick 节流（同 tick 重复提交仍去重）；D7 `gui_blit24` 接 `clip_rect()` 父链裁剪 + `gfx24_blit_stride`；D3 diff unseen 节点改 detach+mark_leaving 两阶段销毁；D8 补 v2 surface 空桩声明。B' 兜底加固：`task_map_page()` 拒绝把 `<frames_base` 内核静态帧装成用户 PTE，打 `[link][RISK]`；`paging_static_slot_guard_selftest()` 启动自检 | 67ad3ea / 95aacc9 / cc7b8b1 / fc327e3 / a87bf76 | E3 2/2（80.2s）、vprobe 10/10（157.0s）、F11 9/9（161.9s）；17 串口探针全 PASS；像素 dark/light/hc 6/6 + menu 2/2；洁净度 2338/256000（0.91%）PASS；守卫 `rejected=1 intact=1 result=1`；idle 生产 25 帧/100 tick、double_commit=0；diff `live_leaving=2 live_after=1 leaked=0`；lint 0/39/14 GREEN | REPORT §3/§4/§5/§8/§9 回填；push `feat/gui-blocks`；残留 D7 超框像素断言、探针后端统一、拖拽残影像素断言（§9.3） |
 | 2026-11-24 05:10 | R10 | E3 conc 回退闭环：独立复现锁定根因为 `acl_tab/users` 随 GUI 镜像增长跨进 PDE 8/9 用户窗口，任务私有 PT 未映射该内核静态帧，syscall 在调用者 CR3 下 ring0 #PF（CR2=0x02001050=基址+206×0xac+0xa8）。采用 B' 方案：`task_space_create()` 把窗口内 `<frames_base` 的内核静态帧补成 supervisor-only PTE（不动上下文/地址布局/CE ABI）；摘 `gui/*.o` 对照 ISO 双 PASS 定性为布局非逻辑缺陷；新增 `tools/check_link_layout.py` 链接后布局护栏（关键表落窗口打 RISK，`--strict` 供 CI）；像素四组接入全量回归并自动映射 shot 子命令；六张 std 验收图按当前 ISO 重拍 | 94680d6 / b7ae5ce | E3 2/2（badptr+conc PASS）、vprobe 10/10、F11 9/9、15 探针全 PASS、dark/light/hc 6/6 + menu 2/2、洁净度 0.91% PASS | REPORT.md §5/§8 回填；push `feat/gui-blocks` |
 | 2026-11-24 04:20 | R9 | 主题 live 重着色改为语义角色三级回落（块显式色 → 父链 → 活动令牌角色），`spec_panel` 按 ROLE_BG/PANEL/BAR/FG/ACCENT 取角色不固化 RGB，`gui_theme_set` 换令牌后整树标脏重解析；菜单浮层修复：容器锚点置 `moved` 避免根 STACK 重排到 (64,64)，高度改 auto 聚合条目，条目标签改静态标签池修栈缓冲悬空；断言库补 light/hc/menu 分组（region_count 计数菜单底色/前景 ≥100px）；新增 `tests/gui_console_clean.py` 进出洁净度回归并挂入全量脚本 | 6e32624 / 2916717 | dark 6/6、light 6/6、hc 6/6、menu 2/2 像素 PASS；15 条串口探针全 PASS；控制台洁净度 0.91% 差异 PASS；lint GREEN；vprobe 10/10、F11 9/9；**E3 conc 故障未过**（§3） | 排查 E3 conc spawn/acl_lookup 页错误；REPORT.md 归档；push |
 | 2026-11-24 04:10 | R8 | 修复 WORK/CONTENT 层像素不上屏：第二遍损伤合成由"脏节点 + 命中 damage 的干净节点都重绘"改为只重绘脏节点（`snap`），消除全屏背景命中 damage 后整屏重填、擦掉干净前景的问题；新增 `tests/gui_pixel_assert.py`（P6 PPM 逐点采样：ne_bg / ne_color / color / pair_diff 四类断言）与 `tests/gui_pixel_regress.py`（`-vga std` 起机抓帧 + 跑默认三条断言）；`shot.sh`/回归截图统一 std | 6e32624 | std 桌面像素回归 6/6 PASS；15 条串口探针全 PASS；lint GREEN（0 violation / 36 advisory / 13 review） | 补拍其余 5 张验收图；全量门禁 vprobe/E3/F11；REPORT.md、sha256、push |
@@ -35,6 +36,7 @@
 
 | 时间 | 问题 | 处理 | 结论 |
 |---|---|---|---|
+| 2026-11-24 06:50 | **B' 守卫首轮误杀合法 CE 映射（已修正）**：初版守卫在 `task_map_page()` 拒绝“覆盖任一 supervisor 镜像槽”，但 B' 设计本就允许合法堆/镜像帧按槽覆盖镜像；CE 镜像落在镜像槽被拒导致 E3 badptr/conc 双双超时。改精确口径：只拒绝**新物理帧 `<frames_base`**（把内核静态帧装进用户 PTE），按槽覆盖合法堆帧（`pa>=frames_base`）放行；自检改为请求静态帧映射并断言拒绝 + PTE intact | 首轮 E3 2/2 FAIL（178s 双超时）；改口径后 E3 2/2、vprobe 10/10、F11 9/9 回归绿；自检 `rejected=1 intact=1 result=1`。取舍：未选 A 抬高用户基址（动 ABI、半径大），未选 C 压 GUI 静态（治标靠体积运气） |
 | 2026-11-24 05:10 | **E3 conc 回退（已修复闭环）**：根因——GUI 镜像增长把 `acl_tab`（feat `0x01ff8540..0x02003140`）、`users` 挤进 PDE 8/9 用户窗口 `[0x2000000,0x2800000)`；任务目录把 PDE 8/9 换成私有 4KiB PT，syscall 在调用者 CR3 遍历未 present 的内核静态帧 → ring0 #PF，CR2=0x02001050（=0x01ff8540+206×0xac+0xa8，与反汇编 `mov 0xa8(%esi),%edx` 吻合）。`USER_IMAGE_BASE` 是编译期常量不漂移，漂移的是 .bss 布局 | 选 B'：`paging.c` `mirror_kernel_static_in_arena()` 在 `task_space_create()` 对两窗口内物理帧 `<frames_base` 的内核静态帧装 supervisor-only PTE（P|RW 无 US），用户映射按需覆盖槽位；不切 CR3、不改地址/ABI。护栏 `tools/check_link_layout.py` 链接后 nm 审计窗口内关键表/静态。摘 gui 对象对照 ISO 双 PASS 定性布局问题 | **E3 2/2 PASS**（badptr+conc）；vprobe 10/10、F11 9/9 回归绿。残留：`acl_tab/users` 仍静态在窗口内，靠 B' 镜像兜底；根治需收缩 `.text/.bss` 把关键表拉回 `0x2000000` 以下后启用护栏 `--strict`。PTE 级运行时转储未补（BSOD 后未导 M map/P dump） |
 | 2026-11-23 23:00 | diff 提交幂等探针首轮外全部 match=0：新建块走空闲链分配 id，忽略描述里的显式 id；二次 commit 按 spec id 匹配失败，旧节点被判 unseen 回收、新节点另建 | 块表新增 `btable_alloc_at(kind,id)`，插入前先把目标槽从空闲链脱链；槽位占用才退回空闲链分配 | rebuild 与增量 commit 得到同一棵块树，20 组随机描述哈希一致 |
 | 2026-11-23 23:05 | 改叶子 req_w 后第二次布局不重排：`layout_dirty` 只在节点自带脏位时向下走，根脏位已清，脏后代被整棵跳过 | `layout_dirty` 改为先递归子节点、任一后代脏即标脏，再 layout_node 并清位 | 脏子树冒泡正确；未受影响兄弟子树不参与重排 |
@@ -50,6 +52,8 @@
 
 | 2026-11-24 04:15 | 进度正常未停滞：M0–M3 完成且已提交（M3=4f39fb8、M4 修复 6e32624/2916717、收口 7e81168），工作树干净，REPORT.md 已出（04:11）；当时唯一门禁缺口 E3 conc FAIL（acl_lookup+0x5D、CR2=0x02001050，基线 ISO 2/2 PASS）；另有一个 geom3 探针 qemu 残留进程（pid 28395, monitor 4602）；§3 行时间顺序错乱（04:10/04:25 排在 02:15 之前） | 本线程只读，不改代码不提交 | （历史记录）E3 缺口已由 R10 闭环，见 §3 05:10 行；残留 qemu 进程已随后续探针结束清理 |
 
+| 2026-11-24 06:15 | 进度正常且进入加固轮：M0–M4 全部完成（E3 conc 已闭环，三门禁 vprobe 10/10、E3 2/2、F11 9/9 全绿），最新提交 cc7b8b1（D2 改名/D1 生产三 tick 节流/D3 两阶段销毁），此前 95aacc9 裁剪、67ad3ea 链接布局、9bfa10f 报告收口；工作树有 paging.h/paging.c 两个未提交改动，06:11–06:12 像素与洁净度证据持续产出 | 本线程只读，不改代码不提交 | 继续加固修复并跑回归，随后更新 REPORT.md/§1 终态并 push feat/gui-blocks |
+
 ## 4. 性能打点基线（每次合成/布局跑完填）
 
 | 指标 | 值 | 条件 |
@@ -58,15 +62,16 @@
 | 拖拽帧（damage ≤25% 屏） | 中位数 0.89 ms（样本 0.96 / 0.89 / 0.86 ms）；damage 9600 px ≈ 2.0% 屏，≤4ms PASS | 同上，`gui drag` 单块 120×80 移动 |
 | 布局节点数（单块拖拽） | 2（子树 2 + 根） | `stat_layout_nodes`，`gui drag` |
 
-### 门禁基线（2026-11-24 05:10，本分支 ISO，B' 修复后）
+### 门禁基线（2026-11-24 06:50，本分支 ISO，R11 加固后）
 
 | 门禁 | 结果 | 耗时 | 条件/备注 |
 |---|---|---|---|
-| vprobe（Issue #78 跨页系统调用） | 10/10 PASS | 154.4s | `run_vprobe.py`，端口 4461，std/vmware 无关；日志 `logs/gate-vprobe-r10.log` |
-| E3（任务系统调用 staging buffer） | **2/2 PASS**：badptr + conc | 80.1s | `run_e3.py`，端口 4462；修复前 conc 3/3 FAIL（CR2=0x02001050），根因/修复见 §3 R10 与 REPORT.md §5.1；日志 `logs/gate-e3-r10.log` |
-| F11（$C$ 摘要/权限/掩码） | 9/9 PASS | 161.9s | `run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘 |
+| vprobe（Issue #78 跨页系统调用） | 10/10 PASS | 157.0s | `run_vprobe.py`，端口 4461，std/vmware 无关；日志 `logs/gate-vprobe-r12.log` |
+| E3（任务系统调用 staging buffer） | **2/2 PASS**：badptr + conc | 80.2s | `run_e3.py`，端口 4462；根因/修复见 §3 R10/R11 与 REPORT.md §5.1；日志 `logs/gate-e3-r12.log` |
+| F11（$C$ 摘要/权限/掩码） | 9/9 PASS | 161.9s | `run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘；日志 `logs/gate-f11-r12.log` |
 | 控制台洁净度 | PASS（差异 0.91%，2338/256000 px） | — | `gui_console_clean.py`，进/出各抓 640×400 文本帧逐点比对，阈值 5% |
-| 本地串口探针 | 15/15 PASS | — | idem/leak/geom/bounds/dirty/drag/hit/rate/home/menu/presence/theme/reset/gesture/resize |
+| 本地串口探针 | 17/17 PASS | — | idem/leak/geom/bounds/dirty/drag/hit/rate/idle/home/menu/presence/theme/reset/gesture/resize/diff |
 | 像素分组断言 | dark 6/6、light 6/6、hc 6/6、menu 2/2 | — | `-vga std`，`gui_pixel_regress.py`（组→shot 子命令自动映射） |
+| 静态槽守卫自检 | PASS：`rejected=1 intact=1 result=1` | 启动期 | `paging_static_slot_guard_selftest()`，REPORT §5.2 |
 
-ISO 指纹：`kernel_v25/catos.iso` 11,954,176 B，sha256 `a688f098284eeaf289b3559fe28efae2569080b7716d25cb09f4bef1df50fcdc`。
+ISO 指纹：`kernel_v25/catos.iso` 11,956,224 B，`kernel.bin` 1,228,936 B，`_bss_end=0x020af0a0`，sha256 `f9bf3a276aba062cbe744138415daba00e6873d17b3664ee2fee594d59c8aa69`。

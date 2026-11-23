@@ -37,7 +37,9 @@
 | dirty | `measured=3 total=7 affected_subtree=3 untouched=3 result=1` | PASS |
 | drag | `ax=110 ay=100 bx=200 by=100 measured=2 subtree=2 damage_rects=1 damage_area=9600 b_same=1 result=1` | PASS |
 | hit | 同层 z 高块命中，`result=1` | PASS |
-| rate | `frames=33 double_commit=0 ticks=99 result=1` | PASS |
+| rate | `frames=33 double_commit=0 ticks=99 result=1`（探针自造节拍，仅验证去重） | PASS |
+| idle | **生产空闲路径**：`frames=25 double_commit=0 ticks=100 result=1`（3-tick 节流下 100 tick 提交 25 帧，≤33 帧/秒口径，零重复提交） | PASS |
+| diff | 两阶段销毁：`base=2 leaving=1 live_leaving=2 live_after=1 leaked=0 result=1`（删掉的块先入 leaving 帧，下一帧才回收，live 回落） | PASS |
 | home | `frame first=1 us=1783 rects=1 area=480000 frame_us=1783 result=1` | PASS |
 | menu | `open=0 items=1 overlay=5 launched=2 result=1`（探针结束前已关菜单） | PASS |
 | presence | `base=14 added=15 leaving=1 live_after=14 leaked=0 result=1` | PASS |
@@ -46,7 +48,7 @@
 | gesture | `clicked=1 drag_moved=1 taskbar_hit=2 result=1` | PASS |
 | resize | `grew=1 sibling_same=1 leaf_inside=1 result=1` | PASS |
 
-本地串口探针合计 **15/15 PASS**，零内核异常。
+本地串口探针合计 **17/17 PASS**（原 15 + `idle` 生产节流、`diff` 两阶段销毁），零内核异常。
 
 ## 4. 像素断言（`tests/gui_pixel_assert.py`，P6 PPM 逐点采样）
 
@@ -61,16 +63,19 @@
 
 控制台洁净度（`tests/gui_console_clean.py`）：`gui` 进入前 / Esc 退出后各抓 640×400 文本帧逐点比对，差异 2338/256000 px（0.91%，阈值 5%），**PASS**。
 
+> D7 裁剪链路：`gui_blit24` 已与 `gui_fill_rect` 同口径接入 `clip_rect()` 父链求交（commit `95aacc9`，后端 `gfx24_blit_stride` 按裁剪后原点与原始行步进偏移）。现有四组帧未触发超父框位图；“块内放超出父框的位图、框外保持背景色”的独立像素用例列为 §9 残留项，本轮未补确定性超框帧。
+
 ## 5. 门禁结果（全绿）
 
 | 门禁 | 结果 | 耗时 | 备注 |
 |---|---|---|---|
-| vprobe（Issue #78 跨页系统调用） | **10/10 PASS** | 154.4s | `gates/run_vprobe.py`，端口 4461；日志 `logs/gate-vprobe-r10.log` |
-| E3（任务系统调用 staging buffer） | **2/2 PASS**（badptr + conc） | 80.1s | `gates/run_e3.py`，端口 4462；修复前 conc 3/3 FAIL，见 §5.1；日志 `logs/gate-e3-r10.log` |
-| F11（$C$ 摘要/权限/掩码） | **9/9 PASS** | 161.9s | `gates/run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘；日志 `logs/gate-f11-r10.log` |
-| 本地串口探针 | **15/15 PASS** | — | 见 §3 |
+| vprobe（Issue #78 跨页系统调用） | **10/10 PASS** | 157.0s | `gates/run_vprobe.py`，端口 4461；日志 `logs/gate-vprobe-r12.log` |
+| E3（任务系统调用 staging buffer） | **2/2 PASS**（badptr + conc） | 80.2s | `gates/run_e3.py`，端口 4462；修复前 conc 3/3 FAIL，见 §5.1；日志 `logs/gate-e3-r12.log` |
+| F11（$C$ 摘要/权限/掩码） | **9/9 PASS** | 161.9s | `gates/run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘；日志 `logs/gate-f11-r12.log` |
+| 本地串口探针 | **17/17 PASS** | — | 见 §3 |
 | 像素断言 | dark 6/6、light 6/6、hc 6/6、menu 2/2 | — | 见 §4 |
-| 控制台洁净度 | **PASS**（差异 0.91%，阈值 5%） | — | 见 §4 |
+| 控制台洁净度 | **PASS**（差异 0.91%，2338/256000 px，阈值 5%） | — | 见 §4 |
+| 静态槽守卫自检 | **PASS**：`[guard] static-slot guard rejected=1 intact=1 result=1` | 启动期 | `paging_static_slot_guard_selftest()`，见 §5.2 |
 
 ### 5.1 E3 conc 回退：根因、取证与修复
 
@@ -107,9 +112,43 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 
 **对照实验定性（一锤定音）**：临时把 `gui/*.o` 从链接摘掉（`gui` 命令壳以空桩保留）重链对照 ISO，E3 badptr/conc 双 PASS、无页错误 → 确认回退是 GUI 引入的镜像布局问题，而非 spawn/acl/分页代码逻辑缺陷。对照产物未入树。
 
-**修复后门禁**：E3 `PASS badptr` / `PASS conc`（`steps=2 ok=2 fail=0`）；vprobe 10/10、F11 9/9、15 探针、四组像素、洁净度全部绿（见上表）。
+**修复后门禁**：E3 `PASS badptr` / `PASS conc`（`steps=2 ok=2 fail=0`）；vprobe 10/10、F11 9/9、17 串口探针、四组像素、洁净度全部绿（见 §5 表，R12 实测）。
 
 **未取得的运行时 PTE 证据（如实标注）**：本轮未在 BSOD 后驱动 HMP `M map` / `P dump` 导出 PDE/PT 内容；“任务私有 PT 中 `0x2001000` 页不存在”这一点与 ERR 码、地址算式、反汇编、页表代码路径一致，但 PTE 级转储留待后续取证增强（BSOD 后自动导出 / panic_record 落盘）。
+
+### 5.1.1 链接顺序根治（R11，治本路线成本最低一条）
+
+按 `build.sh` 正常链接顺序（保持 `boot.o cpu.o` 在最前，入口不动），把 `user.o`、`task.o` 紧随其后前置，其余对象顺序不变。重链后护栏 `tools/check_link_layout.py --strict` 退出 0，syscall 路径关键表全部回到 `0x2000000` 用户窗口以下：
+
+| 关键表 | 地址（重链后） | 窗口 `[0x02000000, 0x02800000)` |
+|---|---|---|
+| `_acl_tab` | `0x01136440` | 界下 |
+| `_users` | `0x01141060` | 界下 |
+| `_pipes` | `0x011abe00` | 界下 |
+| `_cur_task` | `0x012555e4` | 界下 |
+| `_tasks` | `0x01255600` | 界下 |
+
+`_bss_end / _load_end = 0x020af0a0`；仍有大量**非 syscall 路径**静态（GUI 节点池、日志缓冲、音频/PCI 小标量等）落在窗口内，由 B' supervisor 镜像兜底，护栏对它们只打 `[link][warn]`；`--strict` 只对关键表落窗口判失败，`--strict-warn` 才对其余静态判失败。对照实验与结论见 §9.1。
+
+### 5.2 B' 兜底安全性加固（拒绝把内核静态帧装成用户 PTE）
+
+**隐患**：B' 在任务私有 PT 里为窗口内 `<frames_base` 的内核静态帧装了 supervisor-only PTE。若将来用户镜像/heap 恰好映射到同一 VA 槽，覆盖该 PTE 时若把**同一内核静态物理帧**带 US 位装成用户项，会把内核静态帧暴露给 ring3 写（安全洞）。
+
+**实现**：`task_map_page()` 在写 PTE 前检查新物理帧：`new_pa < frames_base`（属内核 image/.bss 片，分配器从不外发）即拒绝本次映射，返回 `-1`，并打醒目日志：
+
+```
+[link][RISK] refuse user map onto kernel static frame va=02000000 frame=020af000 pid=00000000
+```
+
+**口径说明（避免误杀合法路径）**：用一块新分配的用户堆/镜像帧（`pa >= frames_base`）**按槽覆盖** B' 镜像 PTE 是 B' 设计允许的行为——内核静态帧在 `kdir` 下仍常驻，任务只是丢掉自己那份私有镜像；守卫**不**拒绝这种覆盖，只拦截“把内核静态物理帧装进用户 PTE”这一条真正的暴露路径。
+
+**自检探针**：`paging_static_slot_guard_selftest()` 建一个临时任务空间，向 arena 槽请求一张恒等静态帧（`<frames_base`）的用户映射，断言 `rc=-1` 且槽 PTE 原样未改；启动期输出：
+
+```
+[guard] static-slot guard rejected=1 intact=1 result=1
+```
+
+`kernel.c` 在 `tasks_init()` 后、`intr_enable()` 前调用。至此“用户映射静默覆盖内核静态 supervisor 槽”在写入路径上已不可能：要么合法堆帧按槽覆盖（镜像保留在 kdir），要么静态帧被拒绝并留痕。
 
 ## 6. 帧耗时基线（条件：QEMU `-cpu qemu32 -m 256 -smp 1`，800×600）
 
@@ -117,7 +156,8 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 |---|---|---|
 | 首帧全量合成 | 1.783 ms（`home` 探针 area=480000px，≤8ms PASS）；历史中位数 1.88ms（2.19/1.87/1.88） | `gui home` 全量建树后首帧 |
 | 拖拽帧（damage ≤25% 屏） | 0.877 ms；damage 9600px ≈ 2.0% 屏（≤4ms PASS） | `gui drag` 单块 120×80 移动 |
-| 节流帧 | `GUI:frame n=31 us=9`；同 tick 重复提交由合成层去重 | `gui rate` 33 帧 |
+| 节流帧（探针节拍） | `GUI:frame n=31 us=9`；同 tick 重复提交由合成层去重 | `gui rate` 33 帧 |
+| **生产空闲节流** | 100 tick 提交 **25 帧**，`double_commit=0`（≈25fps，满足“每 3 tick 一帧 ≈33fps”规格；上限口径 ≤33 帧/秒） | `gui idle` 走同一条生产 `gui_idle_step()` 路径 |
 | 布局节点数（单块拖拽） | 2（子树 2 + 根） | `stat_layout_nodes` |
 
 ## 7. 验收截图（`artifacts/gui-blocks/`，均 `-vga std`）
@@ -134,14 +174,35 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 ## 8. 交付物指纹
 
 - ISO：`kernel_v25/catos.iso`
-- 尺寸：11,954,176 字节（约 11.40 MiB）；`build/kernel.bin` 1,228,756 字节，`_bss_end = 0x020ae75c`
-- sha256：`a688f098284eeaf289b3559fe28efae2569080b7716d25cb09f4bef1df50fcdc`
+- 尺寸：11,956,224 字节（约 11.40 MiB）；`build/kernel.bin` 1,228,936 字节，`_bss_end = 0x020af0a0`
+- sha256：`f9bf3a276aba062cbe744138415daba00e6873d17b3664ee2fee594d59c8aa69`
 
 ## 9. 剩余项与风险
 
-1. **布局残留（B' 兜底，非阻塞）**：`acl_tab`/`users` 仍静态落在用户窗口内（护栏 `[link][RISK]` 列出）。B' supervisor 镜像保证其在调用者 CR3 下可达；根治方向是后续收缩 `.text/.bss`（块池/按需分配、crashlog 符号表精简）把关键表拉回 `0x2000000` 以下，届时启用护栏 `--strict`。当前基线镜像本身也有大量非 syscall 静态位于窗口内，故未把“窗口内有静态”设为硬失败。
-2. 探针子命令（home/geom 等）提前 return 分支未请求 `CON_MODE_VBE24`，探针帧后端 `lfb=NULL`；串口判定不依赖图形后端，本轮未改。
-3. snap-only 重绘下，拖拽旧位置的背景补齐语义未做损伤条带内回填；drag 探针只校验几何未校验像素残影。
-4. lint：0 violation / 36 advisory / 14 review（不阻断）；C5 advisory 未清：`demo.c` 拆分与五个分项测试脚本。
-5. 主题探针目前为链路级（标脏/结果位）；像素级覆盖由 `gui_pixel_assert.py` 的 light/hc 分组在客人机上完成。
-6. PTE 级取证未补（见 §5.1 末）：BSOD 后未自动导出 PDE/PT；如需闭环“私有 PT 该页 present 与否”的运行时实证，待加 BSOD 转储导出。
+### 9.1 本轮审计偏离处置（D 项）
+
+| 项 | 内容 | 状态 | 证据 / 提交 |
+|---|---|---|---|
+| D2 | `wins` 复数命名违反“无窗口概念”硬约束；`chrome.c` 局部数组改名 `menu_ids`；lint C1 规则 `\bwin\b` 收紧为 `\bwin\w*`（re.I），复跑 0 violation | **已修** | `cc7b8b1`；lint GREEN |
+| D1 | 生产空闲循环原每 tick 调 `gui_frame()`，3-tick 节拍只活在探针里。抽出 `gui_idle_step()`：pump_input→clock_refresh→`timer_ticks - s_idle_frame_tick < 3` 跳过，否则提交帧；同 tick 重复调用仍只算一次提交 | **已修** | `cc7b8b1`；生产实测 `idle frames=25 double_commit=0 ticks=100` |
+| D7 | `gui_blit24` 原只做屏幕边界裁剪，绕过 `clip_rect()` 父链。改为先与裁剪栈求交，同 `gui_fill_rect` 口径；后端加 `gfx24_blit_stride` | **代码已修，像素用例残留** | `95aacc9`；超父框位图框外保底色的独立像素断言未补（见 §9.3-1） |
+| D3 | diff 消失节点原直接回收，与 `b_remove` 两阶段口径不一致。unseen 节点改 `tree_detach` + `mark_leaving`，交 `gui_presence_sweep` 计数回收 | **已修** | `cc7b8b1`；`diff base=2 leaving=1 live_leaving=2 live_after=1 leaked=0` |
+| D8 | `include/gui/gui.h` 补 §7 v2 槽位空桩声明 `gui_surface_attach/gui_surface_dirty`（只声明不实现） | **已修** | `a87bf76` |
+| D5 | demo 树拆到 `src/gui/demo.c`（规格 §11 文件清单） | 残留（有余力再做） | — |
+| D6 | 补齐 `tests/gui_{layout,paint,idempotent,drag,leak}.py` 五个分项脚本，或在报告把现有 `gui_probe.py` 明确映射成分项 | 残留 | 现 17 子命令即分项探针，未拆独立脚本 |
+
+### 9.2 布局根治与 B' 兜底
+
+- **链接顺序根治（已落地）**：`user.o`/`task.o` 前置后，`acl_tab/users/tasks/pipes/cur_task` 全部回到 `0x2000000` 以下（§5.1.1）；护栏 `--strict` 对关键表落窗口判失败，已纳入回归口径。非 syscall 路径静态仍有部分落在窗口内，由 B' supervisor 镜像兜底，护栏只打 `[link][warn]`，不阻断。
+- **B' 覆盖加固（已落地）**：用户映射到内核静态物理帧（`<frames_base`）被拒绝并留 `[link][RISK]` 日志，自检 `result=1`（§5.2）。镜像槽被合法堆帧按槽覆盖是设计允许路径，未拒绝。
+- 未采用 A（抬高 `USER_IMAGE_BASE`）：需同步 CE loader/PDE/脚本/文档，动用户 ABI，半径最大；未采用 C（压 GUI 静态占用）：实测关键表在 .bss 内偏移由 `.text/.reloc` 总量决定，压缩 bss 数组拉不回边界，属治标靠体积运气。
+
+### 9.3 残留项（非阻塞，如实记录）
+
+1. **D7 超框位图像素断言**：缺一块“超出父裁剪框的位图”确定性测试帧，框外保底色的像素级覆盖未固化；当前裁剪正确性由代码路径（与 fill_rect 共用 `clip_rect`）+ 现有四组帧审查支撑。
+2. **探针后端统一（11a）**：探针子命令提前 return 分支未请求 `CON_MODE_VBE24`，探针帧后端 `lfb=NULL`；串口判定不依赖图形后端。需统一走“进桌面→dump→退出”同一条后端路径，影响后续像素类断言可信度，本轮未改（17 条探针后端切换开放面大，避免动绿基线）。
+3. **拖拽残影像素断言（11b）**：snap-only 重绘下拖拽旧位置的背景补齐语义未做损伤条带内回填；`drag` 探针只校验几何（`b_same=1`），未断言离开位置旧区域回到桌面底/父背景。
+4. 主题探针目前为链路级（标脏/结果位）；像素级覆盖由 `gui_pixel_assert.py` 的 light/hc 分组在客人机上完成。
+5. PTE 级取证未补（见 §5.1 末）：BSOD 后未自动导出 PDE/PT；如需闭环“私有 PT 该页 present 与否”的运行时实证，待加 BSOD 转储导出。
+
+**lint 复跑**：0 violation / 39 advisory / 14 review，Result GREEN。代码侧无 window 语义命名；剩余 advisory 均为规格/进度文档里的“窗口”措辞（内存窗口 / 规格引述），不阻断。
