@@ -111,3 +111,7 @@ deliverables/font-backup-pre-merge-*/
 # ---- v2.71 (2026-11-21): sshd debug dumps / host selftest binaries ----
 tests/dumps/
 kernel_v25/build/*.exe
+
+# ---- block GUI evidence: screenshots/PPM never committed; serial logs may ----
+artifacts/gui-blocks/*.png
+artifacts/gui-blocks/*.ppm

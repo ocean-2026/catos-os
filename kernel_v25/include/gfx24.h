@@ -56,6 +56,14 @@ void     gfx24_rect(int x, int y, int w, int h, uint32_t rgb);
  * wrapper copies it into a kernel buffer before calling this. */
 void     gfx24_blit(const uint8_t *src, int x, int y, int w, int h);
 
+/* Kernel-side surface accessors for the block GUI painter.  The LFB stays
+ * supervisor-only; these expose the live mapped pointer and layout metrics
+ * so the GUI layer pushes pixels through the same channel as gfx24_rect. */
+volatile uint8_t *gfx24_lfb_ptr(void);
+uint32_t gfx24_pitch(void);
+uint8_t  gfx24_stride(void);
+void     gfx24_putpx(int x, int y, uint32_t rgb);
+
 /* Fixed diagnostic picture used by the shell `gfx24` command and by
  * tests/gfx24_regress.py.  Colour blocks + a 256-step gradient prove that
  * all three 8-bit channels really reach VRAM at 24bpp. */

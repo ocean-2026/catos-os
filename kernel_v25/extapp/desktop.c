@@ -1,3 +1,12 @@
+/*
+ * LEGACY REFERENCE ONLY, NOT SHIPPED.
+ *
+ * This file is retained in place as a learning reference for the old
+ * user-space CE desktop prototype. It is deliberately NOT listed in
+ * build/apps.list or build/pkg.list and is no longer packaged into the
+ * CatOS image. The current block-based declarative desktop lives in the
+ * kernel-side gui/ subsystem; do not revive this CE app in shipped builds.
+ */
 #include "ce_app.h"
 
 /*

@@ -12,4 +12,5 @@
 bc|1.0|tiny integer calculator (A op B)|bc.catpkg|bc
 stats|1.0|lines/words/bytes text statistics|stats.catpkg|stats
 rps|1.0|rock-paper-scissors one round vs cpu|rps.catpkg|rps
-desktop|1.0|detachable graphical desktop environment|desktop.catpkg|desktop
+# legacy reference only, not shipped: extapp/desktop.c 保留作学习参考，
+# 不再打包进镜像；块化桌面由 kernel_v25 内核态 gui/ 子系统承担。

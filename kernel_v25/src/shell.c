@@ -16,6 +16,7 @@
 #include "hw.h"
 #include "snd.h"        /* v2.11 SB16 info / self-test commands */
 #include "gfx24.h"      /* v2.12 24bpp truecolour drawing surface */
+#include "gui/gui.h"    /* 块化声明式 GUI 子系统（内核态） */
 #include "svga.h"       /* v2.20 VMware SVGA II framebuffer driver */
 #include "e1000.h"       /* v2.21 #55 e1000 NIC state for netdiag */
 #include "es1371.h"      /* v2.21 #56 ES1370/1371 audio state for sndinfo */
@@ -336,6 +337,7 @@ static void cmd_help(void) {
     help_row("yes [TEXT]",  "repeat TEXT until Ctrl+C");
 
     help_head("display (front-end / back-ends)");
+    help_row("gui [idem|leak]", "block declarative GUI desktop (Esc exits); idem/leak = serial probes");
     help_row("gfx [MODE|CMD]", "display mode switcher + diagnostics:"
              "\n     MODE = gfx | vbe | gfx24\n     CMD  = svgainfo | size"
              "\n          | rgb FG [BG] | palette IDX RRGGBB | display");
@@ -799,6 +801,12 @@ static void cmd_rgb(const char *arg) {
     con_set_style_rgb(fg, bg, con_get_attrs());
     vga_write("fg="); print_hex(fg);
     vga_write(" bg="); print_hex(bg); vga_write("\n");
+}
+
+/* 块化声明式 GUI：进入图形块桌面（Esc 干净退回文本控制台）。
+ * `gui idem` / `gui leak` 跑内核内自检探针，结果走串口 GUI: 行。 */
+static void cmd_gui(char *arg) {
+    gui_shell_cmd(arg);
 }
 
 /* v2.60: unified display-mode switcher + graphics diagnostics.
@@ -1673,7 +1681,7 @@ static void cmd_echo(char *arg) {
 static const char *BUILTIN_NAMES[] = {
     "help", "lang", "export", "setenv", "env", "unset", "alias", "df",
     "mount", "umount",
-    "unalias", "clear", "cls", "gfx",
+    "unalias", "clear", "cls", "gfx", "gui",
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
     "date", "mem", "reboot", "hang", "shutdown", "dir", "ls", "cd", "mkdir",
@@ -7285,6 +7293,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "clear") ||
                  !strcmp_(cmd, "cls"))      vga_clear();   /* NIGHT-P3: cls alias */
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx(arg);
+        else if (!strcmp_(cmd, "gui"))       cmd_gui(arg);
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);

@@ -376,6 +376,14 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
     }
 }
 
+volatile uint8_t *gfx24_lfb_ptr(void) { return lfb; }
+uint32_t gfx24_pitch(void)            { return g_pitch; }
+uint8_t  gfx24_stride(void)           { return g_stride; }
+void     gfx24_putpx(int x, int y, uint32_t rgb) {
+    if (!lfb || x < 0 || x >= GFX24_W || y < 0 || y >= GFX24_H) return;
+    put3(x, y, rgb);
+}
+
 /* Fixed picture.  Coordinates/colours are asserted byte-for-byte by
  * tests/gfx24_regress.py; changing anything here requires updating that
  * suite.  Everything is at y >= 120 so the shell's top-row prompt and
