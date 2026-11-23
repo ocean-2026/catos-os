@@ -12,6 +12,7 @@
  */
 
 #include "task.h"
+#include <stddef.h>
 #include "usb.h"
 #include "io.h"
 #include "vga.h"
@@ -85,6 +86,31 @@ static uint8_t task_kstacks[MAX_TASKS - 1][8192] __attribute__((aligned(16)));
 typedef struct { char name[24]; uint32_t size; uint8_t isdir; } ls_ent_t;
 #define LS_MAX 64
 static ls_ent_t ls_buf[MAX_TASKS][LS_MAX];
+
+/* ---- E3: per-task syscall staging buffers ------------------------------
+ *
+ * A syscall that can block mid-call (task_block / task_sleep_ticks) switches
+ * to another task while still holding its kernel snapshot.  A function-level
+ * static buffer is then shared across tasks: the second task's snapshot
+ * clobbers the first one's bytes (real corruption, not a theoretical risk).
+ * These slots are indexed by tid, mirroring ls_buf[].  Only paths that can
+ * reach a blocking point get a private buffer; non-blocking string/network
+ * helpers keep their existing static buffers (rationale in the E3 report).
+ */
+#define E3_WR_CHUNK   257
+#define E3_RL_MAX     256
+#define E3_FR_MAX     16384
+#define E3_FW_CHUNK   4096
+#define E3_PIPE_SLOT  4096
+#define E3_UR_MAX     2048
+static char e3_wr_buf[MAX_TASKS][E3_WR_CHUNK];   /* SYS_WRITE snapshot      */
+static char e3_rl_buf[MAX_TASKS][E3_RL_MAX];    /* SYS_READLINE snapshot   */
+static char e3_fr_buf[MAX_TASKS][E3_FR_MAX];     /* SYS_FILE_READ snapshot  */
+static char e3_fw_buf[MAX_TASKS][E3_FW_CHUNK];  /* SYS_FILE_WRITE snapshot */
+static char e3_pw_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_WRITE snapshot */
+static char e3_pr_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_READ snapshot  */
+static char e3_ur_buf[MAX_TASKS][E3_UR_MAX];    /* SYS_NET_UDP_RECV payload*/
+static char e3_ur_ip[MAX_TASKS][24];            /* SYS_NET_UDP_RECV ip     */
 
 static void idle_main(void);
 
@@ -777,22 +803,37 @@ static void build_vsyscall_page(uint8_t *page) {
  *     kernel happens to have mapped (the CE image is identity-mapped, the
  *     user stack is not).
  *
- * So: validate and read ONE byte at a time, and translate through the
- * task's page table instead of touching the user address directly.
+ * So: validate through the VMA/page tables and copy in chunks instead of
+ * touching the user address directly from ring0.
+ */
+/* Copy a NUL-terminated string out of user space into a kernel buffer.
+ *
+ * E3: the copy goes through copy_from_user(), which validates the VMA range
+ * and walks the task's own page tables; ring0 never dereferences the user
+ * pointer directly.  Chunks stay inside one page so a string sitting at the
+ * end of its VMA is not forced to demand a page the caller never mapped.
+ * Semantics preserved: at most max-1 bytes, NUL-terminated; a validation
+ * failure returns -1 and NUL-terminates the partial copy.
  */
 static int u2k_str(char *dst, const char *us, int max) {
     task_t *t = cur_task;
     if (!dst || !us || max < 1) return -1;
     uint32_t u = (uint32_t)us;
-    for (int i = 0; i < max - 1; i++) {
-        uint32_t a = u + i;
-        /* validate_uaddr() checks the VMA and maps the page on demand */
-        if (validate_uaddr(t, a, 1) != 0) { dst[i] = 0; return -1; }
-        uint32_t pa = task_virt_to_phys(&t->space, a & ~0xFFFu);
-        if (!pa) { dst[i] = 0; return -1; }
-        char ch = *(char *)(pa + (a & 0xFFF));
-        dst[i] = ch;
-        if (!ch) return 0;
+    int i = 0;
+    while (i < max - 1) {
+        uint32_t a = u + (uint32_t)i;
+        uint32_t page_rem = 4096u - (a & 0xFFFu);
+        int want = (max - 1) - i;
+        uint32_t n = page_rem > (uint32_t)want ? (uint32_t)want : page_rem;
+        char tmp[256];
+        if (n > sizeof(tmp)) n = sizeof(tmp);
+        if (copy_from_user(t, tmp, (const void *)a, n) != 0) { dst[i] = 0; return -1; }
+        uint32_t k = 0;
+        while (k < n) {
+            dst[i] = tmp[k];
+            if (!tmp[k]) return 0;
+            i++; k++;
+        }
     }
     dst[max - 1] = 0;
     return 0;
@@ -955,13 +996,28 @@ static void *sys_alloc(task_t *t, uint32_t size) {
     return 0;
 }
 
+/* Write a 4-byte heap-header field at user VA `va+off` through the task's
+ * own page tables (physical alias); ring0 must not store through the raw
+ * user virtual address directly. */
+static void heap_hdr_put32(task_t *t, uint32_t va, uint32_t off, uint32_t v) {
+    uint32_t pa = task_virt_to_phys(&t->space, va & ~0xFFFu);
+    if (!pa) return;
+    *(uint32_t *)(pa + (va & 0xFFFu) + off) = v;
+}
+
 static void sys_free(task_t *t, void *p) {
-    if (!vma_contains(t->vm, (uint32_t)p)) return;
     uint32_t a = (uint32_t)p;
+    if (!vma_contains(t->vm, a)) return;
     if (a < USER_HEAP_BASE + sizeof(heap_hdr_t)) return;
-    heap_hdr_t *h = (heap_hdr_t *)(a - sizeof(heap_hdr_t));
-    h->next = heap_free_root[t->tid];
-    heap_free_root[t->tid] = (uint32_t)h;
+    uint32_t h = a - sizeof(heap_hdr_t);
+    /* E3: validate the header span through the VMA/page tables before any
+     * access.  A stale or guessed pointer into an unbacked heap page must
+     * not take an unrecoverable ring0 #PF; the freelist link is `next`
+     * (offset 4 of heap_hdr_t), written via the physical alias. */
+    if (validate_uaddr(t, h, sizeof(heap_hdr_t)) != 0) return;
+    heap_hdr_put32(t, h, (uint32_t)offsetof(heap_hdr_t, next),
+                   heap_free_root[t->tid]);
+    heap_free_root[t->tid] = h;
 }
 
 /* ---- ls snapshot ---------------------------------------------------------- */
@@ -1126,8 +1182,10 @@ void isr_syscall(int_frame_t *f) {
          * chunks (64 KiB total cap).  #86: each chunk now goes through
          * copy_from_user(); no user pointer is dereferenced in ring0.
          * Keep the UTF-8 decoder alive between non-final chunks so a
-         * hanzi split across a chunk boundary still renders correctly. */
-        static char b[257];
+         * hanzi split across a chunk boundary still renders correctly.
+         * E3: the staging buffer is per-task; the pipe-full path sleeps
+         * and switches tasks, so a shared static would be clobbered. */
+        char *b = e3_wr_buf[t->tid];
         const char *s = (const char *)a1;
         uint32_t total = 0;
         int done = 0, err = 0;
@@ -1206,7 +1264,7 @@ void isr_syscall(int_frame_t *f) {
         if (!t->bg_mode) vga_clear();
         ret = 0; break;
     case SYS_READLINE: {
-        static char b[256];
+        char *b = e3_rl_buf[t->tid];
         char *ub = (char *)a1; int max = (int)a2;
         if (max <= 0) { ret = (uint32_t)-3; break; }
         if (max > 255) max = 255;
@@ -1472,7 +1530,7 @@ void isr_syscall(int_frame_t *f) {
         /* blocking receive with ~2 s timeout; polls the NIC while waiting
          * (also fixes the old "udp: no reply" bug - the RX path never
          * polled the card) */
-        static char ipb[24]; static char b[2048];
+        char *ipb = e3_ur_ip[t->tid]; char *b = e3_ur_buf[t->tid];
         int max = (int)a4; if (max > 2048) max = 2048;
         /* Issue #78: the payload spans up to 2048 bytes; validate and
          * fault in that whole span before the kernel writes anything. */
@@ -1567,7 +1625,7 @@ void isr_syscall(int_frame_t *f) {
     /* ---- v2.5: big files (offset read / mode write / delete) ---- */
     case SYS_FILE_READ: {
         char p[FS_PATH_MAX];
-        static char fbuf[16384];
+        char *fbuf = e3_fr_buf[t->tid];
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
@@ -1596,7 +1654,7 @@ void isr_syscall(int_frame_t *f) {
          * buffer in chunks; mode 0 truncates on the first call, later
          * chunks append. */
         {
-            static char wbuf[4096];
+            char *wbuf = e3_fw_buf[t->tid];
             uint32_t off = 0;
             int r;
             if (size == 0) {
@@ -1643,10 +1701,9 @@ void isr_syscall(int_frame_t *f) {
         int len = (int)a3;
         if (!pp || len < 0 || len > PIPE_BUF) { ret = (uint32_t)-1; break; }
         if (len == 0) { ret = 0; break; }
-        /* Issue #86: the pipe loop can sleep to wait for free space, which
-         * switches tasks (and therefore CR3).  A raw user pointer would then
-         * be dereferenced in the wrong address space.  Snapshot it first. */
-        static char pwb[PIPE_BUF];
+        /* E3: snapshot buffer is per-task; the full-pipe loop sleeps and
+         * switches tasks, so a shared static would corrupt the writer's bytes. */
+        char *pwb = e3_pw_buf[t->tid];
         if (copy_from_user(t, pwb, (const void *)a2, (uint32_t)len) != 0) {
             ret = (uint32_t)-3; break;
         }
@@ -1672,7 +1729,7 @@ void isr_syscall(int_frame_t *f) {
         int max = (int)a3;
         if (!pp || max < 0 || max > PIPE_BUF) { ret = (uint32_t)-1; break; }
         char *ub = (char *)a2;
-        static char prb[PIPE_BUF];
+        char *prb = e3_pr_buf[t->tid];
         if (validate_uaddr(t, (uint32_t)ub, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (max == 0) { ret = 0; break; }
         int got = 0;
