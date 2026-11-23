@@ -186,5 +186,14 @@ int      task_page_fault(int_frame_t *f);
 int      kpipe_create(void);        /* handle >= 0, -1 if no slots */
 void     kpipe_assign_out(int tid, int h);
 void     kpipe_assign_in(int tid, int h);
+/* Ring0 FIFO accessors mirroring the SYS_PIPE_WRITE / SYS_PIPE_READ paths
+ * (same static pipes, same blocking semantics): no user-pointer copy or
+ * validation.  Used by the heavy bench scenarios; do not call from ISR. */
+int      kpipe_write(int h, const void *data, int len);
+int      kpipe_read(int h, void *buf, int max);
+void     kpipe_close_write(int h);
+void     kpipe_close_read(int h);
+/* Number of task_sleep_ticks() blockings across the pipe helpers since boot. */
+uint32_t kpipe_sleeps(void);
 
 #endif

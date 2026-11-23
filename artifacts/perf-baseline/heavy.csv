@@ -1,0 +1,5 @@
+metric,n,cycles,mhz,us,bytes,MB_per_s,frames,fps,count,per_call_us,cycles_glyph,cycles_flush,cycles_wait,cycles_xfer,cycles_setup,cycles_exit,sleeps,ticks,bad
+gfx.frame,3,132861716,2337,56851.398,,,6,105.54,,,79202474,53869972,,,,,,,
+pipe.tput,3,440444524,2337,188465.778,65536,0.35,,,,,,,,,,,33,17,0
+disk.seq,3,662696918,2337,283567.359,4194304,14.79,,,,,,,231025210,421903820,,,,,
+task.spawn,3,425834968,2337,182214.364,,,,,10,18221.436,,,,,59262762,363877852,,,
