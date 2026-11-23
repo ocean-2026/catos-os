@@ -214,6 +214,23 @@ void gui_frame(void) {
         ser_write("\n");
     }
     s_frames++;
+
+    gui_presence_sweep();
+}
+
+/* Presence 回收：标 leaving 的块存活一帧（leaving 帧计数），
+ * 下一帧末尾归还块表空闲链；计数到 2 才真正回收。 */
+void gui_presence_sweep(void) {
+    for (uint32_t id = 1; id <= btable_capacity(); id++) {
+        block *b = btable_get(id);
+        if (!b || !b->leaving) continue;
+        if (b->leaving >= 2) {
+            b->parent = b->first_child = b->next_sibling = 0;
+            btable_free(b);
+        } else {
+            b->leaving++;
+        }
+    }
 }
 
 void gui_reset(void) {

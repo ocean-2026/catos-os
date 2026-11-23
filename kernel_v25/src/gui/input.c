@@ -86,6 +86,11 @@ static void focus_set(block *b) {
 static void on_press(int x, int y) {
     block *b = hit_test(x, y);
     if (!b) return;
+    /* 菜单模态：点下层空白只关闭菜单，不下发命中。 */
+    if (gui_menu_is_open() && b->layer < LAYER_OVERLAY) {
+        gui_menu_close();
+        return;
+    }
     if (b->focusable) focus_set(b);
 
     int rx = b->x + b->w, ry = b->y + b->h;
@@ -136,7 +141,21 @@ void gui_pump_input(void) {
         }
     }
     int k = kb_getkey_timed(1);
-    if (k == 27) exit_requested = 1;   /* Esc 退回文本控制台 */
+    if (k == 27) {
+        if (gui_menu_is_open()) gui_menu_close();  /* Esc 先关菜单 */
+        else exit_requested = 1;                   /* Esc 退回文本控制台 */
+    }
+}
+
+void gui_focus_raise(block_id id) {
+    block *b = btable_get(id);
+    if (!b) return;
+    focus_set(b);
+    /* 同层兄弟末尾 = 最前绘制/命中；摘树后重新挂到父链末尾。 */
+    if (b->parent) {
+        tree_detach(b);
+        tree_attach(b->parent, b);
+    }
 }
 
 int gui_should_exit(void) { return exit_requested; }

@@ -107,11 +107,22 @@ void b_set_props(block_id id, const blk_spec *s) {
     apply_spec(b, s);
 }
 
+static void mark_leaving(block *b) {
+    if (!b) return;
+    b->leaving = 1;
+    b->dirty_layout = 0;
+    b->dirty_paint = 0;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        mark_leaving(c);
+}
+
 void b_remove(block_id id) {
     block *b = btable_get(id);
     if (!b) return;
-    /* 两阶段销毁：v1 先摘树归还块表；leaving 帧计数留给 M3。 */
-    tree_free_subtree(b);
+    /* 两阶段销毁：先摘出树并标 leaving，保留句柄一帧；
+     * 下一帧由 gui_presence_sweep 回收并归还块表空闲链。 */
+    tree_detach(b);
+    mark_leaving(b);
 }
 
 /* ---- diff 提交 --------------------------------------------------------- */

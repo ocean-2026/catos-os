@@ -25,6 +25,7 @@ uint32_t  tree_count_subtree(block *b);
 void      tree_reset(void);
 
 /* compose.c */
+void      gui_presence_sweep(void);
 void      stat_set_layout_nodes(uint32_t n);
 void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,
@@ -43,5 +44,11 @@ void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
 block_id  gui_hit_test(int x, int y);
+void      gui_focus_raise(block_id id);
+
+/* chrome.c 开始菜单状态 */
+void      gui_menu_open(void);
+void      gui_menu_close(void);
+int       gui_menu_is_open(void);
 
 #endif /* CATOS_GUI_INT_H */

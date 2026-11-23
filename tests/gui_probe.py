@@ -48,6 +48,8 @@ EXPECT = {
     "hit":   {"latest": {"result": "1"}, "flag": None},
     "rate":  {"latest": {"result": "1"}, "flag": None},
     "home":  {"latest": {"result": "1"}, "flag": None},
+    "menu":  {"latest": {"result": "1"}, "flag": None},
+    "presence": {"latest": {"result": "1"}, "flag": None},
 }
 
 
