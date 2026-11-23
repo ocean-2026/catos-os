@@ -23,6 +23,12 @@
 | `7e81168` | docs: M4 收口报告、门禁基线、控制台洁净度回归 |
 | `94680d6` | fix(paging) #D11: 任务私有 PT 镜像用户窗口内的内核静态帧（supervisor-only）；新增链接布局护栏 `tools/check_link_layout.py` |
 | `b7ae5ce` | test: 像素四组（dark/light/hc/menu）纳入全量回归，组→shot 子命令自动映射 |
+| `67ad3ea` | build: `user.o`/`task.o` 前置链接，syscall 关键表回到用户窗口以下；护栏 strict 口径修正 |
+| `95aacc9` | fix(D7): `gui_blit24` 接入 `clip_rect()` 父链裁剪 + `gfx24_blit_stride` |
+| `cc7b8b1` | fix: D2 `wins`→`menu_ids` 改名；D1 生产 3-tick 节流；D3 diff 两阶段销毁 |
+| `fc327e3` | fix(#D11): 拒绝把内核静态物理帧装成用户 PTE；静态槽守卫启动自检 |
+| `a87bf76` | chore(D8): `gui_surface_attach/dirty` v2 空桩声明入 `gui.h` |
+| `5151ff6` / `dfef1c3` | docs: R11 报告/进度回填，§5.3 rubric 自检表 |
 
 更早基线提交：`4f39fb8`（M3 任务栏/菜单/Presence）、`06972b4`（几何不变量 + lint 归零 + 首帧打点）、`b5e8467`（M2 damage 合成与交互）。
 
