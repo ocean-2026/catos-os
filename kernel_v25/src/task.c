@@ -29,6 +29,9 @@
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
+#ifdef CATOS_BENCH
+#include "perf.h"    /* light axis: in-dispatcher syscall segment counters */
+#endif
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -111,6 +114,18 @@ static char e3_pw_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_WRITE snapshot */
 static char e3_pr_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_READ snapshot  */
 static char e3_ur_buf[MAX_TASKS][E3_UR_MAX];    /* SYS_NET_UDP_RECV payload*/
 static char e3_ur_ip[MAX_TASKS][24];            /* SYS_NET_UDP_RECV ip     */
+
+#ifdef CATOS_BENCH
+/* Light-axis syscall kernel-segment probe.  Armed only by bench_light.c
+ * around the ring3 benchrt probe; production builds omit this entirely.
+ * Bucket map mirrors extapp/benchrt.c:
+ *   0 = SYS_GETTID (nr 34), 1 = SYS_WRITE (nr 0), 2 = SYS_FILE_READ (nr 39).
+ * perf_sc_kern[k] = summed rdtsc delta from dispatcher entry to return,
+ * i.e. the kernel handler segment only (trap/iret live outside this span). */
+int      perf_sc_collect = 0;
+uint64_t perf_sc_kern[3] = {0, 0, 0};
+uint32_t perf_sc_count[3] = {0, 0, 0};
+#endif
 
 static void idle_main(void);
 
@@ -1175,6 +1190,9 @@ void isr_syscall(int_frame_t *f) {
      * preempt frame captured below. */
     t->resume_frame = 0;
     g_in_syscall++;
+#ifdef CATOS_BENCH
+    uint64_t _sc_ent = perf_now();   /* light axis: dispatcher entry stamp */
+#endif
 
     switch (nr) {
     case SYS_WRITE: {
@@ -1972,6 +1990,21 @@ void isr_syscall(int_frame_t *f) {
     }
     default: ret = (uint32_t)-8; break;
     }
+
+#ifdef CATOS_BENCH
+    /* light axis: kernel handler segment, entry -> just before return.
+     * Only the three probed nr are bucketed; every other syscall is ignored. */
+    if (perf_sc_collect) {
+        int _k = -1;
+        if (nr == 34u) _k = 0;            /* SYS_GETTID  */
+        else if (nr == 0u) _k = 1;        /* SYS_WRITE   */
+        else if (nr == 39u) _k = 2;       /* SYS_FILE_READ */
+        if (_k >= 0) {
+            perf_sc_kern[_k] += perf_now() - _sc_ent;
+            perf_sc_count[_k]++;
+        }
+    }
+#endif
 
     f->eax = ret;
     g_in_syscall--;
