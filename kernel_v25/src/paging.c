@@ -200,6 +200,29 @@ void frame_stats(uint32_t *total, uint32_t *used) {
  * (types and constants live in paging.h)
  */
 
+/* #D11: mirror kernel static frames that physically sit inside a user arena
+ * back into the task's private PT as SUPERVISOR-ONLY entries.
+ *
+ * The kernel image/.bss is identity-mapped, so a static object whose
+ * physical frame falls in [lo, hi) has vaddr == pa.  Such frames are below
+ * frames_base: the allocator never hands them out (see the #D10 physical
+ * slice reservation in paging_init).  But under a ring3 task's CR3, PDE 8/9
+ * point at the private PT instead of the kdir PSE map, so a syscall running
+ * on the caller's CR3 that dereferenced a static table living in that slice
+ * (e.g. acl_tab) would walk an absent private PTE and #PF in ring0.
+ *
+ * Install a supervisor PTE (P|RW, no US bit) for every kernel frame in the
+ * slice; ring3 still cannot reach it.  When the task maps its own image /
+ * heap / stack page into the same slot, task_map_page() overwrites the entry
+ * with a user PTE, so the two mappings never collide. */
+static void mirror_kernel_static_in_arena(uint32_t *t, uint32_t lo, uint32_t hi) {
+    for (uint32_t va = lo; va < hi; va += 4096u) {
+        uint32_t pa = va;                    /* identity: kernel static frame */
+        if (pa < frames_base)
+            t[(va >> 12) & 0x3FFu] = (pa & ~0xFFFu) | 0x003u;
+    }
+}
+
 int  task_space_create(task_space_t *s) {
     s->dir = frame_alloc();
     if (!s->dir) return -1;
@@ -224,6 +247,10 @@ int  task_space_create(task_space_t *s) {
     for (int i = 0; i < 1024; i++) d[i] = kdir[i];
     d[PDE_USER]     = s->pt  | 0x007u;                   /* P RW US */
     d[PDE_USER_EXT] = s->pt2 | 0x007u;                   /* P RW US */
+    /* #D11: keep kernel static frames resident in the arena reachable to the
+     * kernel when this task's CR3 is active. */
+    mirror_kernel_static_in_arena(t,  USER_IMAGE_BASE, USER_ARENA_END);
+    mirror_kernel_static_in_arena(t2, USER_EXT_BASE,   USER_EXT_END);
     /* New directory, not loaded yet: mirror but do NOT flush TLB. */
     sync_lfb_pdes(d);
     return 0;

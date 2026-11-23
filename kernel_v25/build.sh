@@ -190,6 +190,16 @@ $OBJCOPY -O binary build/kernel.pe build/kernel.bin
 # carries ~4.6 MiB of zeros; correctness wins.
 echo "OK -> build/kernel.bin"
 
+# #D11 layout guardrail: flag kernel static tables that land inside the ring3
+# arena window [0x2000000, 0x2800000).  Local build is non-fatal (the B'
+# supervisor mirror in paging.c keeps them reachable on a caller CR3); CI /
+# regression runs the same checker with --strict and treats a risk as a
+# failure.
+if [ -n "$PY" ]; then
+    "$PY" tools/check_link_layout.py build/kernel.pe || \
+        echo "[link] layout checker reported risks (non-fatal local build)"
+fi
+
 build_iso() {
     echo "== building catos.iso =="
     # patch_work_iso.py appends kernel.bin to the proven bootable GRUB
