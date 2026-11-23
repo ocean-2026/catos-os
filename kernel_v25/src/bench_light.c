@@ -256,13 +256,169 @@ static void bench_fscheck(void) {
     }
 }
 
+/* ---- cache coherency gate: stale path dirent / cluster snapshot checks ----
+ * Every case writes through the public fs_* API, reads back twice (cold and
+ * cache-warm), and reports len/hash/rc on a `[perf] coh` line.  Scratch
+ * files live under /tmp so built-in apps are never touched. */
+static uint8_t coh_w[FS_DATA_MAX];
+static uint8_t coh_e[FS_DATA_MAX];
+
+static void coh_fill(uint8_t *b, int n, uint32_t seed) {
+    for (int i = 0; i < n; i++) b[i] = (uint8_t)(((uint32_t)i * 31u + seed) & 0xffu);
+}
+
+static int coh_read(const char *path, uint8_t *buf, int max, uint32_t *h) {
+    int n = fs_read_at(path, (char *)buf, 0, max);
+    *h = (n > 0) ? fnv1a(buf, n) : 0u;
+    return n;
+}
+
+static void coh_report(uint32_t id, int pass, int len, uint32_t hash,
+                       uint32_t h_exp, int rc) {
+    perf_begin("coh");
+    perf_kv("case", id);
+    perf_kv("pass", (uint32_t)(pass ? 1u : 0u));
+    perf_kv("len", (uint32_t)(len < 0 ? 0 : len));
+    perf_kv("hash", hash);
+    perf_kv("hash_exp", h_exp);
+    perf_kv("rc", (uint32_t)(rc < 0 ? 0 : rc));
+    perf_end();
+}
+
+static void bench_fscoh(void) {
+    uint32_t h, he;
+    int n, ok;
+
+    /* case 1: long -> short overwrite (shrink; cached size/cluster must move) */
+    {
+        const char *p = "/tmp/coha.txt";
+        coh_fill(coh_w, 100, 1u); he = fnv1a(coh_w, 100);
+        int rc1 = fs_write_text(p, (char *)coh_w, 100);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        int ok1 = rc1 == 0 && n == 100 && h == he;
+        coh_fill(coh_w, 20, 2u); he = fnv1a(coh_w, 20);
+        int rc2 = fs_write_text(p, (char *)coh_w, 20);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        ok = ok1 && rc2 == 0 && n == 20 && h == he;
+        coh_report(1, ok, n, h, he, n);
+    }
+
+    /* case 2: short -> long overwrite (grow) */
+    {
+        const char *p = "/tmp/cohb.txt";
+        coh_fill(coh_w, 20, 3u); he = fnv1a(coh_w, 20);
+        int rc1 = fs_write_text(p, (char *)coh_w, 20);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        int ok1 = rc1 == 0 && n == 20 && h == he;
+        coh_fill(coh_w, 100, 4u); he = fnv1a(coh_w, 100);
+        int rc2 = fs_write_text(p, (char *)coh_w, 100);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        ok = ok1 && rc2 == 0 && n == 100 && h == he;
+        coh_report(2, ok, n, h, he, n);
+    }
+
+    /* case 3: delete then recreate under the same name with new content */
+    {
+        const char *p = "/tmp/cohc.txt";
+        coh_fill(coh_w, 40, 5u);
+        int rc1 = fs_write_text(p, (char *)coh_w, 40);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);   /* warm the path cache */
+        int ok1 = rc1 == 0 && n == 40;
+        int rd = fs_delete(p);
+        coh_fill(coh_w, 60, 6u); he = fnv1a(coh_w, 60);
+        int rc2 = fs_write_text(p, (char *)coh_w, 60);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        ok = ok1 && rd == 0 && rc2 == 0 && n == 60 && h == he;
+        coh_report(3, ok, n, h, he, n);
+    }
+
+    /* case 4: raw_mode truncate 100B -> 20B (dirent size must shrink) */
+    {
+        const char *p = "/tmp/cohd.txt";
+        coh_fill(coh_w, 100, 7u); he = fnv1a(coh_w, 100);
+        int rc1 = fs_write_raw_mode(p, (char *)coh_w, 100, 0);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        int ok1 = rc1 == 0 && n == 100 && h == he;
+        coh_fill(coh_w, 20, 8u); he = fnv1a(coh_w, 20);
+        int rc2 = fs_write_raw_mode(p, (char *)coh_w, 20, 0);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        uint32_t cl = 0, sz = 0;
+        int rr = fs_resolve_file(p, &cl, &sz);
+        ok = ok1 && rc2 == 0 && n == 20 && h == he && rr == 0 && sz == 20;
+        coh_report(4, ok, n, h, he, n);
+    }
+
+    /* case 5: append 20B + 10B = 30B; content must be the concatenation */
+    {
+        const char *p = "/tmp/cohd.txt";   /* still 20B seed 8 from case 4 */
+        coh_fill(coh_w, 10, 9u);
+        int rc = fs_write_raw_mode(p, (char *)coh_w, 10, 1);
+        coh_fill(coh_e, 20, 8u);
+        coh_fill(coh_e + 20, 10, 9u); he = fnv1a(coh_e, 30);
+        n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+        ok = rc == 0 && n == 30 && h == he;
+        coh_report(5, ok, n, h, he, n);
+    }
+
+    /* case 6: cluster snapshot reuse.  Read X (warms the one-slot cluster
+     * snapshot), write+delete+recreate Y/Z so the allocator can hand back a
+     * reused cluster number; X must still read back its original bytes. */
+    {
+        const char *x = "/tmp/cohx.txt", *y = "/tmp/cohy.txt", *z = "/tmp/cohz.txt";
+        coh_fill(coh_w, 300, 11u);
+        int rcx = fs_write_text(x, (char *)coh_w, 300);
+        uint32_t hx = fnv1a(coh_w, 300);
+        int nx = coh_read(x, coh_e, FS_DATA_MAX, &h);   /* warm cc snapshot */
+        int okx = rcx == 0 && nx == 300 && h == hx;
+
+        coh_fill(coh_w, 300, 12u);
+        int rcy = fs_write_text(y, (char *)coh_w, 300);
+        int ny = coh_read(y, coh_w, FS_DATA_MAX, &h);
+        int oky = rcy == 0 && ny == 300;
+        int rdy = fs_delete(y);
+
+        coh_fill(coh_w, 300, 13u); uint32_t hz = fnv1a(coh_w, 300);
+        int rcz = fs_write_text(z, (char *)coh_w, 300);
+        int nz = coh_read(z, coh_w, FS_DATA_MAX, &h);
+        int okz = rcz == 0 && nz == 300 && h == hz;
+
+        nx = coh_read(x, coh_w, FS_DATA_MAX, &h);
+        ok = okx && oky && rdy == 0 && okz && nx == 300 && h == hx;
+        coh_report(6, ok, nx, h, hx, nx);
+    }
+}
+
+/* case 7: after a format the wiped volume must not serve cached dirent/data.
+ * Runs on a qrun private disk copy only; never against catos_disk.img. */
+static void bench_fsformat(void) {
+    const char *p = "/tmp/cohf.txt";
+    uint32_t h;
+    int ok;
+    coh_fill(coh_w, 50, 20u);
+    int rc1 = fs_write_text(p, (char *)coh_w, 50);
+    int n = coh_read(p, coh_w, FS_DATA_MAX, &h);
+    int warm = rc1 == 0 && n == 50;
+
+    if (fs_format() != 0) {
+        coh_report(7, 0, 0, 0, 0, -1);
+        return;
+    }
+    int n2 = fs_read_at(p, (char *)coh_w, 0, FS_DATA_MAX);
+    uint32_t cl = 0, sz = 0;
+    int rr = fs_resolve_file(p, &cl, &sz);
+    ok = warm && n2 <= 0 && rr != 0;
+    coh_report(7, ok, n2, 0, 0, n2);
+}
+
 /* ---- dispatcher ------------------------------------------------------- */
 int bench_light_cmd(const char *arg) {
     const char *a = arg ? arg : "";
     while (*a == ' ') a++;
 
-    /* Recognised subcommands: light (all), shell, syscall, login, fscheck. */
+    /* Recognised subcommands: light (all), shell, syscall, login, fscheck,
+     * fscoh (cache coherency gate), fsformat (format-wipe coherency). */
     int do_shell = 0, do_sys = 0, do_login = 0, do_fscheck = 0;
+    int do_coh = 0, do_fmt = 0;
     if (*a == 0 || a[0] == 'l') {
         do_shell = do_sys = do_login = 1;
     } else if (a[0] == 's' && a[1] == 'h') {
@@ -271,8 +427,12 @@ int bench_light_cmd(const char *arg) {
         do_sys = 1;
     } else if (a[0] == 'l' && a[1] == 'o') {
         do_login = 1;
-    } else if (a[0] == 'f') {
+    } else if (a[0] == 'f' && a[1] == 's' && a[2] == 'c' && a[3] == 'h') {
         do_fscheck = 1;
+    } else if (a[0] == 'f' && a[1] == 's' && a[2] == 'c' && a[3] == 'o') {
+        do_coh = 1;
+    } else if (a[0] == 'f' && a[1] == 's' && a[2] == 'f') {
+        do_fmt = 1;
     } else {
         return 0;
     }
@@ -281,5 +441,7 @@ int bench_light_cmd(const char *arg) {
     if (do_sys)   bench_syscall();
     if (do_login) bench_login();
     if (do_fscheck) bench_fscheck();
+    if (do_coh)   bench_fscoh();
+    if (do_fmt)   bench_fsformat();
     return 1;
 }

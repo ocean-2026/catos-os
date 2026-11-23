@@ -188,3 +188,75 @@ python3 tests/vprobe_regress.py
 4. **`ls /bin` 不归本轴**：−1.84% 为缓存侧附带波动，主体成本仍在渲染线；本轮未读渲染/字形/冲刷代码。
 5. 簇快照缓存的是单簇只读副本；所有写路径（含 `fat_write_file` 链式扩展、目录项改写、格式化、切卷）均已挂失效，但未覆盖未来新增的绕开 `fat_write_cluster` 的就地写路径——后续新增写入口时必须同步失效。
 6. 未测量 / 未改动：`write("x")` 渲染路径、登录口令校验、开机分段（见基线报告 §2.4、§3）。
+
+## 8. 缓存一致性专项验证（追加轮次）
+
+### 8.1 范围与方法
+
+`3d8b5f3` 的两条单槽缓存（fs.c 路径→dirent、fat.c 只读簇快照）靠写/删/格式化/挂载/卸载时失效保证一致性；`vprobe_regress` 只覆盖越界指针，不覆盖"写后读同路径"的陈旧命中。本轮在同一分支补一轮一致性门禁，**不改缓存优化目标，只做证据；未发现真 bug，缓存代码（fs.c/fat.c）相对 `3d8b5f3` 零改动**，新增仅为 bench 探针与两个测试脚本。
+
+- 探针 A（内核侧，`bench fscoh`）：经公开 `fs_*` API 写 / 读回，长度 + FNV-1a 32 位摘要与期望值比对，结果走 `[perf] coh case=<n> pass=<0|1> len=<n> hash=<..> hash_exp=<..> rc=<..>` 串口行；scratch 文件全部在 `/tmp`，不碰内置应用。
+- 探针 B（`bench fsformat`）：先写 `/tmp/cohf.txt` 并读回预热缓存，再 guest 内 `fs_format()` 清空私有卷，随后读同一路径，必须返回不存在 / 空。
+- 探针 C（`tests/fs_coh_mount.py`）：双分区 scratch 盘上跑 mount → 读 P2 → umount → 校验根卷空目录 → remount 复读，屏幕文本落盘。
+- 全部跑在 qrun 私有盘副本或驱动 `_stage_image` 私有副本上；参考盘 `catos_disk.img` 未挂可写。qrun 持有 `/home/user/work/catos-bench.lock`。
+
+证据落盘：
+
+- `/home/user/work/catos-bench-runs/fs-coh/`（探针 A，3 次跑）
+- `artifacts/perf-fs/fs-coh-format-serial.txt`（探针 B 串口）
+- `artifacts/perf-fs/fs-coh-mount-screen.txt`（探针 C 断言汇总）
+- `artifacts/perf-fs/fs-coh-mount-screen-raw.txt`（探针 C 每步原始屏幕文本）
+- `/home/user/work/catos-bench-runs/fs-coh-verify/`（改后回归：`bench light` + `bench fscheck`，3 次跑）
+
+### 8.2 结果总表
+
+| # | 场景（任务条目） | 操作序列 | 风险归属 | 证据 | 判定 |
+|---|---|---|---|---|---|
+| 1 | 写后读 · 变短 | `/tmp/coha.txt` 写 100 B(seed1) 读回 → 覆盖 20 B(seed2) 读回 | 新缓存风险：rcache 陈旧 size/cluster | fs-coh 日志 case=1，3/3 `pass=1`，len=20，hash `2c140fb1`=`hash_exp` | **PASS** |
+| 2 | 写后读 · 变长 | `/tmp/cohb.txt` 写 20 B(seed3) 读回 → 覆盖 100 B(seed4) 读回 | 新缓存风险：rcache 陈旧 size/cluster | case=2，3/3 `pass=1`，len=100，hash `823b3455` | **PASS** |
+| 3 | 删后重建 | 写 `/tmp/cohc.txt` 40 B(seed5) 读回预热 → `fs_delete` → 同名写 60 B(seed6) 读回 | 新缓存风险：删后 rcache 陈旧 cluster | case=3，3/3 `pass=1`，len=60，hash `28b25101` | **PASS** |
+| 4 | 截断（raw_mode 0） | `/tmp/cohd.txt` `write_raw_mode` 100 B(seed7) → 截断 20 B(seed8)；`fs_resolve_file` 复核 size=20 | 新缓存风险：目录项 size 收缩后陈旧 | case=4，3/3 `pass=1`，len=20，hash `22ab4ac5` | **PASS** |
+| 5 | 追加（raw_mode 1） | 承接 case 4 的 20 B，追加 10 B(seed9)，读回 30 B = 前 20 B seed8 + 后 10 B seed9 | 新缓存风险：追加后 size/链增长陈旧 | case=5，3/3 `pass=1`，len=30，hash `70439fb4` | **PASS** |
+| 6 | 簇快照复用 | 写 X 300 B(seed11) 并读中间偏移预热 cc 快照；写 Y 300 B(seed12) 读回；删 Y；写 Z 300 B(seed13)（分配器可复用 Y 的簇号）；再读 X 必须仍是原内容 | 新缓存风险：cc 单槽快照被同号簇污染 | case=6，3/3 `pass=1`，X len=300，hash `c9768299`=`hash_exp`；Z 摘要 `…` 单独比对通过 | **PASS** |
+| 7 | 格式化后读 | 写 `/tmp/cohf.txt` 50 B(seed20) 读回预热 → `fs_format()` → 再读：`fs_read_at` 返回 ≤0，`fs_resolve_file` 失败，不得返回旧目录项 | 新缓存风险：格式化后两条缓存整体存活 | `fs-coh-format-serial.txt`：`[perf] coh case=7 pass=1 len=0 rc=0`，无 fault/PANIC | **PASS** |
+| M | 卷切换 / 挂载卸载 | 预热根卷文件 → `mount 2 /docs` → 读 `/docs/note.txt`（P2 内容 `hello from partition 2`）→ `umount /docs` → `ls /docs` 空目录、再读不得见 P2 内容 → remount 复读 P2 | 新缓存风险：跨卷命中旧 dirent / 旧簇快照 | `fs-coh-mount-screen.txt`：8 项断言全 PASS（root 可读 / mount 成功 / note 可见 / 内容正确 / umount 分离 / 卸载后 note 消失 / 卸载后无陈旧 P2 内容 / remount 复读正确） | **PASS** |
+
+### 8.3 既有语义 vs 新缓存引入风险
+
+**本轮探针顺带 exercising 的既有 FS 语义（与缓存无关，改动前即如此）：**
+
+- `fs_write_text` 对已存在文件按新 size 整体覆盖（编辑器语义，短写截断长写增长）。
+- `fs_write_raw` 跳过已存在文件；`fs_write_raw_mode` mode 0 截断替换、mode 1 追加。
+- `fs_delete` 释放簇链并标记目录项删除；挂载表在 mount/umount 时变更，路径解析按挂载点穿透到对应卷。
+
+**本轮缓存新引入、被 §8.2 逐条证伪的风险：**
+
+1. 路径缓存命中后返回陈旧 cluster/size（覆盖变短/变长、删后重建、截断、追加、格式化后）——case 1/2/3/4/5/7。
+2. 簇快照被同号复用簇的新内容污染，读到别文件字节——case 6。
+3. 挂载到副卷后读到根卷陈旧目录项，或卸载后仍显示副卷内容——case M。
+4. 格式化清空卷后缓存槽位仍指向旧簇/旧目录项——case 7。
+
+失效点与 `3d8b5f3` §4.1/4.2 一致：写/删七个入口 + format/mount/umount + `fat_write_cluster`/`fat_activate`/`fat_mkfs`；本轮代码复核未发现遗漏的写入口（`fs_append_line`/`fs_delete_line` 只改内存编辑缓冲，落盘走 `fs_save`，已挂失效）。
+
+### 8.4 收益回归确认（新 ISO，探针加入后重测）
+
+新 ISO：`kernel_v25/catos.iso`，11,913,216 字节，sha256 前 8 位 `44a5185b`。`bench light` + `bench fscheck` 3 次跑（tag `fs-coh-verify`），与 §5 同口径：
+
+| 指标 | before（fs-before） | after（fs-after, `3d8b5f3`） | 复测（fs-coh-verify） |
+|---|---|---|---|
+| file_read RTT cycles/call | 1,872,726.9 | 40,919.4 | 38,069.9（16.29 µs） |
+| file_read 内核段 cycles/call | 1,869,139.7 | 38,761.9 | 35,428.1（15.16 µs） |
+| 相对 before 提速 | — | RTT 45.77× / 内核 48.22× | **RTT 49.19× / 内核 52.76×** |
+| `edit -c /etc/passwd` | 11.262 ms | 9.468 ms | 9.014 ms |
+| `ls /bin`（不归本轴） | 156.085 ms | 153.219 ms | 143.502 ms |
+| `bench fscheck` 四项 | — | 4/4 match=1 | 4/4 match=1，摘要 `507d3a57` / `bf97606e` / `17672f84` / `10d0b557` 不变 |
+| `tests/vprobe_regress.py` | — | 10/10 | **10/10 PASS**（含 `format` 步骤） |
+
+复测三次跑 RTT 为 45,016 / 32,789 / 38,070 cycles，内核段 42,791 / 30,702 / 35,428；双峰形态与 §7.2-3 一致，中位数方向稳定，缓存收益未丢。
+
+### 8.5 限制与如实标注
+
+1. **case 7 仅完成 1 次干净跑**：重复执行格式化探针时被环境的重启/格式化启发式拦截，未再循环重试；同构建的 `vprobe_regress.py` `format` 步骤（在私有 scratch 盘上）另证格式化路径可用，case 7 串口证据见 `fs-coh-format-serial.txt`。
+2. **case M 首跑出现 2 处断言误报**：并发宿主负载下命令时序偏早，且 25 行屏幕缓冲保留了挂载态历史文本，导致子串断言命中旧画面；清屏（`clear`）后复跑 8 项全绿，误报属驱动画面滚动问题，非缓存缺陷（卸载后实测 `edit -c /docs/note.txt` 返回 `cat: no such file`）。
+3. 探针 A/B 为 `CATOS_BENCH` 编译期代码，生产构建不编入；case 1–6 的 scratch 文件只存在于 qrun 私有副本，未写入参考盘。
+4. 单槽缓存的交替读无收益限制同 §7.2-2，不影响本轮一致性结论。

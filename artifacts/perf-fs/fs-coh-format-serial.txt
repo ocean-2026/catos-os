@@ -1,0 +1,54 @@
+[btime] 0ms K0 kernel_main enter
+[btime] 0ms K1 vga+kbd init
+[btime] 0ms K2 paging
+[intr] serial breadcrumb channel up
+[btime] 10ms K3 intr+tasks+sti
+[btime] 110ms K4 mem+cpu calibrate
+[btime] 110ms K5 snd_init
+[btime] 110ms K6 usb_start
+
+[net] init begin
+[net] FAIL: no PCnet; PCI bus has 5 dev(s): 0x00008086:0x00001237:0x00060000 0x00008086:0x00007000:0x00060100 0x00008086:0x00007010:0x00010180 0x00008086:0x00007113:0x00068000 0x00001234:0x00001111:0x00030000
+[btime] 110ms K7 net_init
+[btime] 110ms K7b mouse_init
+[btime] 110ms S0 shell_run enter
+[btime] 110ms F0 fs_init enter
+[btime] 110ms F1 before fat_probe
+[btime] 110ms A0 ata_scan 4 slots
+[btime] 110ms A10 1
+[btime] 110ms A11 0
+[btime] 110ms A12 0
+[btime] 110ms A13 0
+[btime] 110ms A2 ata_scan done
+[btime] 110ms V0 probe_volume enter
+[btime] 110ms V1 FAT cache loaded
+[btime] 110ms V2 mirror verify done
+[btime] 110ms F2 fat_probe done
+[btime] 110ms F3 part_scan done
+[btime] 110ms S1 fs_init done
+[btime] 210ms S2 lang_init
+[btime] 210ms S3 env_init
+[btime] 220ms S4 ce_init
+[btime] 230ms S5 user/acl/session
+[btime] 230ms B0 builtins resolve+seed
+[btime] 260ms B1 builtins done
+[btime] 260ms S6 builtins installed
+[btime] 260ms P0 pkg repo resolve+seed
+[btime] 260ms S7 pkg repo seeded
+[btime] 280ms S8 autostart done
+[boot] shell-ready
+[perf] boot uptime_ms=280 mhz=2318 tasks=1 bss_end_lo=34155972
+[btime] 280ms S9 shell prompt ready
+[perf] shell.idle cycles_hi=11 cycles_lo=646112420 kind=0
+[perf] shell.cmd cycles_hi=0 cycles_lo=2977064480 kind=0 count=1
+[perf] shell.idle cycles_hi=5 cycles_lo=3808819112 kind=0
+[btime] 30410ms F0 fs_init enter
+[btime] 30410ms F1 before fat_probe
+[btime] 30410ms V0 probe_volume enter
+[btime] 30440ms V1 FAT cache loaded
+[btime] 30440ms V2 mirror verify done
+[btime] 30440ms F2 fat_probe done
+[btime] 30450ms F3 part_scan done
+[perf] coh case=7 pass=1 len=0 hash=0 hash_exp=0 rc=0
+[perf] end handled=1 args=0
+[perf] shell.cmd cycles_hi=0 cycles_lo=468916032 kind=0 count=1
