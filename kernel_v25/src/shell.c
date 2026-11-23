@@ -7539,7 +7539,7 @@ static const char *const AUTOSTART_DEFAULT =
     "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
     "echo \"      |  \\_/ / ____ \\| |           \"\n"
     "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                             CatOS v2.77                            \"\n"
+    "echo \"                             CatOS v2.78                            \"\n"
     "echo \"\"\n";
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see
