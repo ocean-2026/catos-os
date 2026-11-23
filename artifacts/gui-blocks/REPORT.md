@@ -69,7 +69,7 @@
 
 | 门禁 | 结果 | 耗时 | 备注 |
 |---|---|---|---|
-| vprobe（Issue #78 跨页系统调用） | **10/10 PASS** | 157.0s | `gates/run_vprobe.py`，端口 4461；日志 `logs/gate-vprobe-r12.log` |
+| vprobe（Issue #78 跨页系统调用） | **10/10 PASS** | 156.9s | `gates/run_vprobe.py`，端口 4461；日志 `logs/gate-vprobe-r12.log` |
 | E3（任务系统调用 staging buffer） | **2/2 PASS**（badptr + conc） | 80.2s | `gates/run_e3.py`，端口 4462；修复前 conc 3/3 FAIL，见 §5.1；日志 `logs/gate-e3-r12.log` |
 | F11（$C$ 摘要/权限/掩码） | **9/9 PASS** | 161.9s | `gates/run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘；日志 `logs/gate-f11-r12.log` |
 | 本地串口探针 | **17/17 PASS** | — | 见 §3 |
@@ -149,6 +149,29 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 ```
 
 `kernel.c` 在 `tasks_init()` 后、`intr_enable()` 前调用。至此“用户映射静默覆盖内核静态 supervisor 槽”在写入路径上已不可能：要么合法堆帧按槽覆盖（镜像保留在 kdir），要么静态帧被拒绝并留痕。
+
+### 5.3 验收 rubric 逐条自检（最终 ISO `f9bf3a27`）
+
+| # | 验收项 | 实测数字 | 证据文件 / 来源 | 达成 |
+|---|---|---|---|---|
+| 1 | E3 2/2（badptr + conc） | 2/2 PASS，80.2s | `probes/logs/gate-e3-r12.log` | 达成 |
+| 2 | vprobe 10/10（跨页 syscall） | 10/10 PASS，156.9s | `probes/logs/gate-vprobe-r12.log` | 达成 |
+| 3 | F11 9/9（摘要/权限/掩码） | 9/9 PASS，161.9s | `probes/logs/gate-f11-r12.log` | 达成 |
+| 4 | 本地串口探针 | **17/17 PASS**（原 15 + `idle`/`diff`），零异常 | `artifacts/gui-blocks/<subcmd>-serial.log` | 达成 |
+| 5 | 像素断言 dark/light/hc/menu | 6/6、6/6、6/6、2/2 | `tests/gui_pixel_regress.py` 四组；PPM 落 `artifacts/gui-blocks/` | 达成 |
+| 6 | 控制台洁净度 | 2338/256000 px（0.91%，阈值 5%）PASS | `tests/gui_console_clean.py` | 达成 |
+| 7 | 链接顺序根治：关键表回到窗口以下 | `acl_tab 0x01136440`、`users 0x01141060`、`pipes 0x011abe00`、`cur_task 0x012555e4`、`tasks 0x01255600`，均 `<0x2000000`；`check_link_layout.py --strict` 退出 0 | `kernel_v25/tools/check_link_layout.py`；提交 `67ad3ea` | 达成 |
+| 8 | B' 兜底：拒绝用户映射覆盖内核静态槽 | `[link][RISK] refuse user map onto kernel static frame va=02000000 frame=020af000 pid=00000000`；自检 `rejected=1 intact=1 result=1` | `artifacts/gui-blocks/home-serial.log`；`paging.c`/`kernel.c`；提交 `fc327e3` | 达成（口径见 §5.2：只拒绝静态帧入用户 PTE，合法堆帧按槽覆盖放行） |
+| 9 | D2 无 window 语义命名；lint C1 收紧 `\bwin\w*` | lint **0 violation / 39 advisory / 14 review**，GREEN；代码侧无 `win*` 命名 | `probes/lint/gui-lint.py`；提交 `cc7b8b1` | 达成 |
+| 10 | D1 生产循环 3-tick 节流；实测 ≤33 帧/秒，零重复提交 | 生产 `idle frames=25 double_commit=0 ticks=100`（≈25fps） | `artifacts/gui-blocks/idle-serial.log`；提交 `cc7b8b1` | 达成 |
+| 11 | D7 blit 接入 GUI 裁剪栈 | 代码：`gui_blit24` 先 `clip_rect()` 父链求交 + `gfx24_blit_stride`；提交 `95aacc9` | `src/gui/paint.c`、`src/be_vbe24.c`、`include/gfx24.h` | **部分达成**：裁剪代码已修；“超父框位图框外保底色”独立像素用例未补，残留 §9.3-1 |
+| 12 | D3 diff 消失节点走 leaving 两阶段销毁 | `diff base=2 leaving=1 live_leaving=2 live_after=1 leaked=0 result=1`（先 leaving 帧，下一帧回收） | `artifacts/gui-blocks/diff-serial.log`；提交 `cc7b8b1` | 达成 |
+| 13 | 链接后布局护栏（关键表落窗口告警/失败） | `--strict` 关键表 RISK 判失败；`--strict-warn` 其余静态判失败；本次 strict 退出 0 | `kernel_v25/tools/check_link_layout.py`；提交 `67ad3ea` | 达成 |
+| 14 | D8 v2 槽位空桩声明 | `gui_surface_attach/gui_surface_dirty` 原型入 `include/gui/gui.h`，未实现 | 提交 `a87bf76` | 达成 |
+| 15 | REPORT §4/§5/§8 与进度表回填、ISO 指纹 | ISO 11,956,224 B，`kernel.bin` 1,228,936 B，`_bss_end=0x020af0a0`，sha256 `f9bf3a276aba062cbe744138415daba00e6873d17b3664ee2fee594d59c8aa69` | `artifacts/gui-blocks/REPORT.md` §8；`docs/块化GUI-进度.md` §4 | 达成 |
+| 16 | 推送 `feat/gui-blocks` | `9bfa10f..5151ff6`（6 提交） | 远端 `ocean-2026/catos-os` | 达成 |
+
+**未达成 / 残留（如实标注，见 §9.3）**：D7 超框位图像素断言；探针后端统一（11a，`lfb=NULL`）；拖拽旧位置残影像素断言（11b）；D5 demo 树拆 `src/gui/demo.c`；D6 五个分项测试脚本拆分；BSOD 后 PTE/PT 运行时转储。
 
 ## 6. 帧耗时基线（条件：QEMU `-cpu qemu32 -m 256 -smp 1`，800×600）
 
