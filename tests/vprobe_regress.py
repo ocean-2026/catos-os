@@ -15,14 +15,15 @@ usage:
   python tests/vprobe_regress.py [catos.iso] [--qemu PATH] [--only CASE]
 """
 import os
+import subprocess
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from qemu_driver import (boot as _qemu_boot, find_qemu,  # noqa: E402
-                         kill_qemu, screen_text, sendkey, type_text,
-                         wait_for_prompt)
+from qemu_driver import (boot as _qemu_boot, cmd, find_qemu,  # noqa: E402
+                         force_text, kill_qemu, screen_text, sendkey,
+                         type_text, wait_for_prompt)
 
 REPO = os.path.dirname(HERE)
 MONITOR_PORT = 4461                 # this driver's own port; never 4444
@@ -94,6 +95,9 @@ def main():
             fh.truncate(64 * 1024 * 1024)
 
     proc, s = _qemu_boot(qemu, iso, MONITOR_PORT, disk=disk)
+    # Boot default is gfx24, whose back-end does not mirror 0xB8000; switch
+    # back to the text console before the legacy screen-text probes run.
+    force_text(s)
     results = []
 
     def step(name, ok, note):
@@ -140,6 +144,21 @@ def main():
             step(case, ok, note)
             if crashed:
                 halted = True
+
+        # E3: keep an on-screen regression snapshot for the report.
+        try:
+            shot_dir = os.path.join(REPO, "artifacts", "e3-syscall")
+            os.makedirs(shot_dir, exist_ok=True)
+            ppm = os.path.join(shot_dir, "vprobe-regress.ppm")
+            png = os.path.join(shot_dir, "vprobe-regress.png")
+            if os.path.exists(ppm):
+                os.remove(ppm)
+            cmd(s, "screendump %s" % ppm.replace("\\", "/"), 1.0)
+            if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                subprocess.run(["convert", ppm, png], check=False)
+                os.remove(ppm)
+        except Exception:
+            pass
     finally:
         kill_qemu(proc)
 

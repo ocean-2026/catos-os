@@ -25,6 +25,8 @@ go
 cc
 sndtest
 vprobe
+e3probe
+sink_ce
 gfx24
 captest
 ocntools
