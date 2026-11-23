@@ -125,6 +125,10 @@ static char e3_ur_ip[MAX_TASKS][24];            /* SYS_NET_UDP_RECV ip     */
 int      perf_sc_collect = 0;
 uint64_t perf_sc_kern[3] = {0, 0, 0};
 uint32_t perf_sc_count[3] = {0, 0, 0};
+/* file_read syscall boundary segments: pre = u2k_str + validate_uaddr +
+ * perm check; copyout = copy_to_user back to the caller.  The middle
+ * fs_read_at body is split out in fs.c (perf_fs_resolve/chain/ide/mem). */
+uint64_t perf_fr_pre = 0, perf_fr_copyout = 0;
 #endif
 
 static void idle_main(void);
@@ -1644,6 +1648,9 @@ void isr_syscall(int_frame_t *f) {
     case SYS_FILE_READ: {
         char p[FS_PATH_MAX];
         char *fbuf = e3_fr_buf[t->tid];
+#ifdef CATOS_BENCH
+        uint64_t _fp0 = perf_now();
+#endif
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
@@ -1652,11 +1659,20 @@ void isr_syscall(int_frame_t *f) {
          * full span, then copy through the task's page tables. */
         if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+#ifdef CATOS_BENCH
+        perf_fr_pre += perf_now() - _fp0;
+#endif
         int n = fs_read_at(p, fbuf, off, max);
         if (n < 0) { ret = (uint32_t)-1; break; }
+#ifdef CATOS_BENCH
+        uint64_t _fc0 = perf_now();
+#endif
         if (n > 0 && copy_to_user(t, (char *)a2, fbuf, (uint32_t)n) != 0) {
             ret = (uint32_t)-3; break;
         }
+#ifdef CATOS_BENCH
+        perf_fr_copyout += perf_now() - _fc0;
+#endif
         ret = (uint32_t)n;
         break;
     }

@@ -39,6 +39,9 @@ extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
 extern int      perf_sc_collect;
 extern uint64_t perf_sc_kern[3];
 extern uint32_t perf_sc_count[3];
+extern uint64_t perf_fr_pre, perf_fr_copyout;
+extern uint64_t perf_fs_resolve, perf_fs_chain, perf_fs_ide, perf_fs_mem;
+extern uint32_t perf_fs_count;
 #endif
 
 /* ---- tunable sample counts ------------------------------------------- */
@@ -105,6 +108,9 @@ static void bench_syscall(void) {
 
 #ifdef CATOS_BENCH
     perf_sc_collect = 1;
+    perf_fr_pre = perf_fr_copyout = 0;
+    perf_fs_resolve = perf_fs_chain = perf_fs_ide = perf_fs_mem = 0;
+    perf_fs_count = 0;
 #endif
     int tid = task_spawn_ce(RT_APP, 0, (char **)0, UID_ROOT);
     if (tid >= 0) {
@@ -146,6 +152,23 @@ static void bench_syscall(void) {
         perf_kv("kind", (uint32_t)k);
         perf_kv("mhz", perf_mhz());
         perf_end();
+    }
+
+    /* file_read segment breakdown (seg: 0 pre, 1 resolve, 2 chain,
+     * 3 ide, 4 mem, 5 copyout), summed over the probe's file_read loop. */
+    {
+        const uint64_t *seg[6] = {
+            &perf_fr_pre, &perf_fs_resolve, &perf_fs_chain,
+            &perf_fs_ide, &perf_fs_mem, &perf_fr_copyout
+        };
+        for (int s = 0; s < 6; s++) {
+            perf_begin("fs.read");
+            perf_kv64("cycles", *seg[s]);
+            perf_kv("count", perf_fs_count);
+            perf_kv("seg", (uint32_t)s);
+            perf_kv("mhz", perf_mhz());
+            perf_end();
+        }
     }
 #endif
 }
@@ -197,13 +220,49 @@ static void bench_login(void) {
     perf_end();
 }
 
+/* ---- byte-exactness probe: content digest across offsets / lengths ---- */
+static uint32_t fnv1a(const uint8_t *p, int n) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+static void bench_fscheck(void) {
+    static uint8_t fbuf[24 * 1024];
+    struct { const char *path; int off; int max; uint32_t idx; } t[] = {
+        { "/etc/passwd",       0,     24 * 1024, 0 },
+        { "/bin/hello.ce",     0,     24 * 1024, 1 },
+        { "/bin/ocntools.ce",  0,     20480,      2 },  /* 20 KiB, crosses 16 KiB */
+        { "/bin/ocntools.ce",  16384, 4096,      3 },  /* tail slice 16K..20K   */
+    };
+    for (uint32_t k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+        int n1 = fs_read_at(t[k].path, (char *)fbuf, t[k].off, t[k].max);
+        uint32_t h1 = (n1 > 0) ? fnv1a(fbuf, n1) : 0;
+        /* second read: cluster/path cache now warm; bytes must match the
+         * first (cold disk) read byte-for-byte. */
+        int n2 = fs_read_at(t[k].path, (char *)fbuf, t[k].off, t[k].max);
+        uint32_t h2 = (n2 > 0) ? fnv1a(fbuf, n2) : 0;
+        uint32_t match = (n1 == n2 && h1 == h2) ? 1u : 0u;
+        perf_begin("fscheck");
+        perf_kv("idx", t[k].idx);
+        perf_kv("off", (uint32_t)t[k].off);
+        perf_kv("max", (uint32_t)t[k].max);
+        perf_kv("len", (uint32_t)(n1 < 0 ? 0 : n1));
+        perf_kv("hash", h2);
+        perf_kv("hash_cold", h1);
+        perf_kv("match", match);
+        perf_kv("rc", (uint32_t)n1);
+        perf_end();
+    }
+}
+
 /* ---- dispatcher ------------------------------------------------------- */
 int bench_light_cmd(const char *arg) {
     const char *a = arg ? arg : "";
     while (*a == ' ') a++;
 
-    /* Recognised subcommands: light (all), shell, syscall, login. */
-    int do_shell = 0, do_sys = 0, do_login = 0;
+    /* Recognised subcommands: light (all), shell, syscall, login, fscheck. */
+    int do_shell = 0, do_sys = 0, do_login = 0, do_fscheck = 0;
     if (*a == 0 || a[0] == 'l') {
         do_shell = do_sys = do_login = 1;
     } else if (a[0] == 's' && a[1] == 'h') {
@@ -212,6 +271,8 @@ int bench_light_cmd(const char *arg) {
         do_sys = 1;
     } else if (a[0] == 'l' && a[1] == 'o') {
         do_login = 1;
+    } else if (a[0] == 'f') {
+        do_fscheck = 1;
     } else {
         return 0;
     }
@@ -219,5 +280,6 @@ int bench_light_cmd(const char *arg) {
     if (do_shell) bench_shell();
     if (do_sys)   bench_syscall();
     if (do_login) bench_login();
+    if (do_fscheck) bench_fscheck();
     return 1;
 }
