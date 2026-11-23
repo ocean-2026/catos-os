@@ -1,0 +1,10 @@
+  root file readable pre-mount           PASS
+  mount 2 /docs succeeded                PASS
+  note.txt visible on mounted volume     PASS
+  mounted volume content, no stale root dirent PASS
+  umount /docs detached                  PASS
+  note.txt gone after umount             PASS
+  post-umount read misses stale P2 content PASS
+  remount after umount succeeds          PASS
+  remount reads P2 content again         PASS
+mount coherency: PASS

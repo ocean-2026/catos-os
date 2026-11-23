@@ -1,0 +1,33 @@
+$ edit -c /etc/passwd
+ text: back to 80x25 text mode (CJK via dynamic font slots) root@catos:/# root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# 
+
+$ edit -c /etc/passwd
+ text: back to 80x25 text mode (CJK via dynamic font slots) root@catos:/# root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# 
+
+$ mount 2 /docs
+ text: back to 80x25 text mode (CJK via dynamic font slots) root@catos:/# root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# 
+
+$ ls /docs
+root@catos:/# root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# ls /docs note.txt --- 1 entries root@catos:/# 
+
+$ edit -c /docs/note.txt
+ root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# ls /docs note.txt --- 1 entries root@catos:/# edit -c /docs/note.txt hello from partition 2 root@catos:/# 
+
+$ umount /docs
+root@catos:/# edit -c /etc/passwd root:0:0:/root:/bin/shell.ce:ffffffff: user:100:100:/home/user:/bin/shell.ce:2b: root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# ls /docs note.txt --- 1 entries root@catos:/# edit -c /docs/note.txt hello from partition 2 root@catos:/# umount /docs umount: detached root@catos:/# 
+
+$ ls /docs
+root@catos:/# ls /docs --- 0 entries root@catos:/# 
+
+$ edit -c /docs/note.txt
+root@catos:/# edit -c /docs/note.txt cat: no such file root@catos:/# 
+
+$ mount 2 /docs
+root@catos:/# edit -c /docs/note.txt cat: no such file root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# 
+
+$ edit -c /docs/note.txt
+root@catos:/# edit -c /docs/note.txt cat: no such file root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# edit -c /docs/note.txt hello from partition 2 root@catos:/# 
+
+$ umount /docs
+root@catos:/# edit -c /docs/note.txt cat: no such file root@catos:/# mount 2 /docs mount: /docs mounted root@catos:/# edit -c /docs/note.txt hello from partition 2 root@catos:/# umount /docs umount: detached root@catos:/# 
+

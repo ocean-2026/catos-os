@@ -6,6 +6,9 @@
 #include "lang.h"   /* v2.76: fs diagnostics are bilingual */
 #include "hw.h"
 #include "pager.h"      /* v2.59 generic console pager */
+#ifdef CATOS_BENCH
+#include "perf.h"       /* fs.read segment counters (light perf follow-up) */
+#endif
 static void fs_dbg2(const char *tag, uint32_t v) {
     (void)tag; (void)v;  /* v2.5 debug: no-op */
 }
@@ -18,6 +21,25 @@ static int      fs_ready = 0;
 static uint32_t g_cwd;                  /* FAT cluster of current dir */
 static char     cwd_path[FS_PATH_MAX];  /* absolute path, e.g. "/etc" */
 static fs_entry_t g_ent;                /* single open-file buffer */
+
+/* one-slot absolute-path -> dirent cache: repeated reads of the same file
+ * skip the parent-dir + leaf directory scan.  Stores cluster+size only;
+ * invalidated on every create/delete/rewrite below. */
+static char     rc_path[FS_PATH_MAX];
+static uint32_t rc_clus = 0, rc_size = 0;
+static int      rc_valid = 0;
+static void fs_rcache_invalidate(void) { rc_valid = 0; }
+
+#ifdef CATOS_BENCH
+/* fs.read segment counters, armed around the benchrt file_read probe only.
+ * resolve = path parse + FAT dirent lookup (incl. directory IDE reads);
+ * chain   = in-memory FAT chain skip walk; ide = cluster sector PIO reads;
+ * mem     = cluster staging buffer -> caller byte copy.  Production builds
+ * omit all of this. */
+uint64_t perf_fs_resolve = 0, perf_fs_chain = 0, perf_fs_ide = 0,
+         perf_fs_mem = 0;
+uint32_t perf_fs_count = 0;
+#endif
 
 /* P2: mount table.  Volume slot 0 is the implicit root volume (letter
  * 'A'); g_mnt[] holds the manually mounted extra partitions. */
@@ -223,6 +245,7 @@ int fs_fs_ready(void) { return fs_ready; }
 int fs_format(void) {
     if (fat_mkfs() != 0) return -1;        /* v2.32: no IDE disk */
     fs_init();
+    fs_rcache_invalidate();                /* wiped volume: no dirent survives */
     return 0;
 }
 
@@ -246,6 +269,7 @@ int fs_chdir(const char *path) {
 static int create_path(const char *path, uint8_t type) {
     if (!fs_ready) return FS_ERR_NOENT;
     if (!path || !*path) return FS_ERR_INVAL;
+    fs_rcache_invalidate();   /* new entry can appear in a parent dir */
 
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
@@ -749,6 +773,7 @@ void fs_clear_file(fs_entry_t *f) {
 
 int fs_save(fs_entry_t *f) {
     if (!fs_ready || !f) return -1;
+    fs_rcache_invalidate();   /* size/cluster may change on persist */
     if (fat_write_file(f->cluster, f->data, f->size) != 0) return -1;
     fat_update_entry(f->parent_cluster, f->name83, f->cluster, f->size);
     return 0;
@@ -760,6 +785,12 @@ int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     if (!fs_ready || !path || !*path) return -1;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+
+    if (rc_valid && scmp(abs, rc_path) == 0) {
+        if (cluster) *cluster = rc_clus;
+        if (size)    *size = rc_size;
+        return 0;
+    }
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
@@ -779,6 +810,7 @@ int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     fat_dirent_t e;
     if (fat_lookup_name(pclus, leaf, &e, 0) != 0) return -1;
     if (e.attr & FAT_ATTR_DIR) return -1;
+    scpy(rc_path, abs); rc_clus = e.cluster; rc_size = e.size; rc_valid = 1;
     if (cluster) *cluster = e.cluster;
     if (size)    *size = e.size;
     return 0;
@@ -818,6 +850,7 @@ int fs_read_text(const char *path, char *buf, int max) {
 int fs_write_text(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (size >= FS_DATA_MAX) return -1;          /* room for the NUL */
+    fs_rcache_invalidate();
     fs_entry_t *f = fs_create_file(path);
     if (!f) return -1;
     int i;
@@ -831,6 +864,7 @@ int fs_write_text(const char *path, const char *data, uint32_t size) {
  * file already exists.  Used to install built-in .ce apps and docs. */
 int fs_write_raw(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
+    fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
 
@@ -869,8 +903,15 @@ int fs_read_at(const char *path, char *buf, int offset, int max) {
      * cluster so files larger than any single buffer can be read in
      * chunks. */
     if (!fs_ready || !buf || max < 1) return -1;
+#ifdef CATOS_BENCH
+    uint64_t _t0 = perf_now();
+#endif
     uint32_t clus = 0, size = 0;
     if (fs_resolve_file(path, &clus, &size) != 0) return -1;
+#ifdef CATOS_BENCH
+    perf_fs_resolve += perf_now() - _t0;
+    uint64_t _tc = perf_now();
+#endif
     if (offset < 0) offset = 0;
     if ((uint32_t)offset >= size) return 0;
     uint32_t n = size - (uint32_t)offset;
@@ -883,19 +924,35 @@ int fs_read_at(const char *path, char *buf, int offset, int max) {
         if (nxt < 2 || nxt >= 0x0FFFFFF0) return -1;
         c = nxt;
     }
+#ifdef CATOS_BENCH
+    perf_fs_chain += perf_now() - _tc;
+#endif
     uint32_t within = (uint32_t)offset % csz;
     uint32_t got = 0;
     static uint8_t rbuf[FAT_CLUSTER_SZ_MAX];
     while (c >= 2 && c < 0x0FFFFFF0 && got < n) {
+#ifdef CATOS_BENCH
+        uint64_t _ta = perf_now();
+#endif
         if (fat_read_cluster(c, rbuf) != 0) return -1;
+#ifdef CATOS_BENCH
+        perf_fs_ide += perf_now() - _ta;
+        uint64_t _tb = perf_now();
+#endif
         uint32_t take = csz - within; if (take > n - got) take = n - got;
         for (uint32_t i = 0; i < take; i++) buf[got + i] = (char)rbuf[within + i];
+#ifdef CATOS_BENCH
+        perf_fs_mem += perf_now() - _tb;
+#endif
         got += take;
         within = 0;
         uint32_t nxt = fat_get(c);
         if (nxt == FAT_EOC || nxt < 2) break;
         c = nxt;
     }
+#ifdef CATOS_BENCH
+    perf_fs_count++;
+#endif
     return (int)got;
 }
 
@@ -905,6 +962,7 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
      * file is created when absent.  Returns 0 ok / negative error. */
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (mode != 0 && mode != 1) { fs_dbg2("[F1]",0); return -1; }
+    fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
 
@@ -969,6 +1027,7 @@ static void rmdir_cb(const char *name, uint8_t attr,
 
 static int fs_rmdir_impl(const char *path, int strict) {
     if (!fs_ready || !path || !*path) return -1;
+    fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
     const char *leaf = abs;
@@ -1010,6 +1069,7 @@ int fs_delete(const char *path) {
     /* remove a file: free its cluster chain and mark the directory entry
      * deleted.  Directories are not deletable through this API (v2.5). */
     if (!fs_ready || !path || !*path) return -1;
+    fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
 
@@ -1096,6 +1156,7 @@ int fs_mount(const char *spec, const char *dir) {
     scpy(g_mnt[mi].dev, dev);
 
     fat_activate(0);                             /* back to the root volume */
+    fs_rcache_invalidate();                      /* mount table changed: cached dirents may be shadowed */
     return FS_OK;
 }
 
@@ -1115,6 +1176,7 @@ int fs_umount(const char *dir) {
     if (fat_active_slot() == g_mnt[mi].vol) fat_activate(0);
     fat_release_slot(g_mnt[mi].vol);
     g_mnt[mi].used = 0;
+    fs_rcache_invalidate();                      /* mount table changed */
     return FS_OK;
 }
 

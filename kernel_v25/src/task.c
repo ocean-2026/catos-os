@@ -30,7 +30,7 @@
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
 #ifdef CATOS_BENCH
-#include "perf.h"    /* perf_now(): TSC split timing (bench builds only) */
+#include "perf.h"    /* perf_now(): bench-only rdtsc split timing */
 #endif
 
 extern void net_poll(void);
@@ -142,6 +142,20 @@ extern uint64_t g_sp_pt_free, g_sp_pt2_free, g_sp_tab_free;
 extern uint32_t g_sp_frames;
 extern uint64_t g_sp_scroll_cycles;
 extern uint32_t g_sp_scroll_calls, g_sp_scroll_bytes;
+
+/* Light-axis syscall kernel-segment probe.  Armed only by bench_light.c
+ * around the ring3 benchrt probe; production builds omit this entirely.
+ * Bucket map mirrors extapp/benchrt.c:
+ *   0 = SYS_GETTID (nr 34), 1 = SYS_WRITE (nr 0), 2 = SYS_FILE_READ (nr 39).
+ * perf_sc_kern[k] = summed rdtsc delta from dispatcher entry to return,
+ * i.e. the kernel handler segment only (trap/iret live outside this span). */
+int      perf_sc_collect = 0;
+uint64_t perf_sc_kern[3] = {0, 0, 0};
+uint32_t perf_sc_count[3] = {0, 0, 0};
+/* file_read syscall boundary segments: pre = u2k_str + validate_uaddr +
+ * perm check; copyout = copy_to_user back to the caller.  The middle
+ * fs_read_at body is split out in fs.c (perf_fs_resolve/chain/ide/mem). */
+uint64_t perf_fr_pre = 0, perf_fr_copyout = 0;
 #endif
 
 static void idle_main(void);
@@ -1409,7 +1423,8 @@ void isr_syscall(int_frame_t *f) {
     t->resume_frame = 0;
     g_in_syscall++;
 #ifdef CATOS_BENCH
-    uint64_t _s0 = perf_now();
+    uint64_t _s0 = perf_now();        /* spawn axis: per-syscall accounting  */
+    uint64_t _sc_ent = perf_now();    /* light axis: dispatcher entry stamp  */
 #endif
 
     switch (nr) {
@@ -1873,6 +1888,9 @@ void isr_syscall(int_frame_t *f) {
     case SYS_FILE_READ: {
         char p[FS_PATH_MAX];
         char *fbuf = e3_fr_buf[t->tid];
+#ifdef CATOS_BENCH
+        uint64_t _fp0 = perf_now();
+#endif
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
@@ -1881,11 +1899,20 @@ void isr_syscall(int_frame_t *f) {
          * full span, then copy through the task's page tables. */
         if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+#ifdef CATOS_BENCH
+        perf_fr_pre += perf_now() - _fp0;
+#endif
         int n = fs_read_at(p, fbuf, off, max);
         if (n < 0) { ret = (uint32_t)-1; break; }
+#ifdef CATOS_BENCH
+        uint64_t _fc0 = perf_now();
+#endif
         if (n > 0 && copy_to_user(t, (char *)a2, fbuf, (uint32_t)n) != 0) {
             ret = (uint32_t)-3; break;
         }
+#ifdef CATOS_BENCH
+        perf_fr_copyout += perf_now() - _fc0;
+#endif
         ret = (uint32_t)n;
         break;
     }
@@ -2228,6 +2255,21 @@ void isr_syscall(int_frame_t *f) {
     }
 #ifdef CATOS_BENCH
     if (!t->ring0 && nr < 64) g_sp.sys[nr] += perf_now() - _s0;
+#endif
+
+#ifdef CATOS_BENCH
+    /* light axis: kernel handler segment, entry -> just before return.
+     * Only the three probed nr are bucketed; every other syscall is ignored. */
+    if (perf_sc_collect) {
+        int _k = -1;
+        if (nr == 34u) _k = 0;            /* SYS_GETTID  */
+        else if (nr == 0u) _k = 1;        /* SYS_WRITE   */
+        else if (nr == 39u) _k = 2;       /* SYS_FILE_READ */
+        if (_k >= 0) {
+            perf_sc_kern[_k] += perf_now() - _sc_ent;
+            perf_sc_count[_k]++;
+        }
+    }
 #endif
 
     f->eax = ret;

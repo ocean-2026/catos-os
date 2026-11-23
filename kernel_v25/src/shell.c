@@ -6990,6 +6990,9 @@ void shell_run(void) {
     btime_mark("S9 shell prompt ready");
 
     while (1) {
+#ifdef CATOS_BENCH
+        uint64_t _bidle = perf_now();   /* light axis: prompt + readline segment */
+#endif
         prompt();
         int ret = kb_readline(input, sizeof(input));
         if (ret == 2 || ret == 3) {               /* ^C cancels / ^Z suspends */
@@ -7020,6 +7023,19 @@ void shell_run(void) {
         if (*arg) { *arg = 0; arg++; while (*arg == ' ') arg++; }
 
         if (!*cmd) continue;
+
+#ifdef CATOS_BENCH
+        /* light axis: classify the line, then emit the prompt+readline segment.
+         * kind mirrors bench_light.c: 1 echo, 2 ls, 3 edit, 0 other. */
+        uint32_t _bkind = 0;
+        if (!strcmp_(cmd, "echo")) _bkind = 1;
+        else if (!strcmp_(cmd, "ls")) _bkind = 2;
+        else if (!strcmp_(cmd, "edit")) _bkind = 3;
+        perf_begin("shell.idle");
+        perf_kv64("cycles", perf_now() - _bidle);
+        perf_kv("kind", _bkind);
+        perf_end();
+#endif
 
         /* v2.47: pending-guess one-shot confirm.  A bare y/Y (no trailing
          * args) replays the suggested command line; anything else consumes
@@ -7072,9 +7088,19 @@ void shell_run(void) {
             sec_fg_disarm();
             continue;
         }
+#ifdef CATOS_BENCH
+        uint64_t _bcmd = perf_now();   /* light axis: dispatch segment */
+#endif
         sec_fg_arm(cmd);
         shell_exec(cmd, arg);
         sec_fg_disarm();
+#ifdef CATOS_BENCH
+        perf_begin("shell.cmd");
+        perf_kv64("cycles", perf_now() - _bcmd);
+        perf_kv("kind", _bkind);
+        perf_kv("count", 1);
+        perf_end();
+#endif
     }
 }
 
