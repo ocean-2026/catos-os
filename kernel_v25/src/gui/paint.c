@@ -57,7 +57,12 @@ void gui_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
 
 void gui_blit24(const uint8_t *src, int x, int y, int w, int h) {
     if (!src || w <= 0 || h <= 0) return;
-    gfx24_blit(src, x, y, w, h);
+    int sw = w, sh = h, ox = x, oy = y;
+    if (!clip_rect(&x, &y, &w, &h)) return;
+    /* 裁剪后源指针按原始步进（sw 列）偏移到被保留的子矩形起点。 */
+    const uint8_t *s = src +
+        ((uint32_t)(y - oy) * (uint32_t)sw + (uint32_t)(x - ox)) * 3u;
+    gfx24_blit_stride(s, x, y, w, h, sw);
 }
 
 void gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale) {

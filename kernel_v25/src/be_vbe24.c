@@ -352,8 +352,9 @@ void gfx24_rect(int x, int y, int w, int h, uint32_t rgb) {
     fill(x, y, w, h, rgb);
 }
 
-void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
-    if (!lfb || !src || w <= 0 || h <= 0) return;
+void gfx24_blit_stride(const uint8_t *src, int x, int y, int w, int h,
+                       int src_stride) {
+    if (!lfb || !src || w <= 0 || h <= 0 || src_stride <= 0) return;
     for (int j = 0; j < h; j++) {
         int dy = y + j;
         if (dy < 0 || dy >= GFX24_H) continue;
@@ -361,7 +362,7 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
             int dx = x + i;
             if (dx < 0 || dx >= GFX24_W) continue;
             const uint8_t *s = src +
-                ((uint32_t)j * (uint32_t)w + (uint32_t)i) * 3u;
+                ((uint32_t)j * (uint32_t)src_stride + (uint32_t)i) * 3u;
             volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
                                       + (uint32_t)dx * g_stride;
             if (layout_packed4()) {
@@ -374,6 +375,10 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
             }
         }
     }
+}
+
+void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
+    gfx24_blit_stride(src, x, y, w, h, w);
 }
 
 volatile uint8_t *gfx24_lfb_ptr(void) { return lfb; }

@@ -55,6 +55,11 @@ void     gfx24_rect(int x, int y, int w, int h, uint32_t rgb);
 /* src: w*h*3 tightly packed RGB24 bytes (R,G,B order).  The syscall
  * wrapper copies it into a kernel buffer before calling this. */
 void     gfx24_blit(const uint8_t *src, int x, int y, int w, int h);
+/* Stride variant: src rows are `src_stride` pixels apart (RGB24, 3B/px),
+ * used after the GUI clip stack has trimmed a sub-rectangle out of a larger
+ * source bitmap. */
+void     gfx24_blit_stride(const uint8_t *src, int x, int y, int w, int h,
+                           int src_stride);
 
 /* Kernel-side surface accessors for the block GUI painter.  The LFB stays
  * supervisor-only; these expose the live mapped pointer and layout metrics
