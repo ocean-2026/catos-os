@@ -38,4 +38,10 @@ void      paint_node(block *b);
 /* layout.c */
 void      layout_run(void);
 
+/* input.c（探针注入钩子，复用真实命中/拖拽路径） */
+void      gui_inject_press(int x, int y);
+void      gui_inject_move(int x, int y);
+void      gui_inject_release(void);
+block_id  gui_hit_test(int x, int y);
+
 #endif /* CATOS_GUI_INT_H */

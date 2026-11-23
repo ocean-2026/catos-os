@@ -97,6 +97,8 @@ typedef struct block {
     uint8_t    visible, focusable, focused, inert;
 
     uint8_t    dirty_layout, dirty_paint, dirty_children, leaving;
+    uint8_t    moved;                    /* 被拖拽/移动过，布局保留其绝对位置 */
+    uint8_t    snap;                     /* 本帧快照：布局清位前记录的脏标记 */
 
     const char   *text;
     const uint8_t *pix;

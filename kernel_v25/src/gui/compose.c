@@ -37,6 +37,14 @@ static int rects_overlap(int ax, int ay, int aw, int ah,
 
 static void dmg_reset(void) { dmg_n = 0; dmg_full = 0; }
 
+static int dmg_hit(int x, int y, int w, int h) {
+    if (dmg_full) return 1;
+    for (int i = 0; i < dmg_n; i++)
+        if (rects_overlap(x, y, w, h, dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h))
+            return 1;
+    return 0;
+}
+
 static void dmg_add(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (dmg_full) return;
@@ -139,18 +147,33 @@ void gui_frame(void) {
     s_last_tick = timer_ticks;
 
     uint64_t t0 = perf_now();
-    layout_run();
 
-    dmg_reset();
-    paint_begin_frame();
     paint_count = 0;
     collect(gui_root_block());
     sort_paint();
 
+    /* 布局清位前先快照本帧脏块；布局阶段会清 dirty_layout，绘制以快照为准。 */
+    for (int i = 0; i < paint_count; i++)
+        paint_list[i]->snap =
+            (paint_list[i]->dirty_layout || paint_list[i]->dirty_paint) ? 1 : 0;
+
+    layout_run();
+
+    dmg_reset();
+    paint_begin_frame();
+
+    /* 第一遍：收集脏块矩形（v1 记当前矩形），合并成 damage 链表。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
-        if (b->dirty_paint || b->dirty_layout)
+        if (b->snap)
             dmg_add(b->x, b->y, b->w, b->h);
+    }
+
+    /* 第二遍：只重绘脏块，以及与 damage 相交的底层块（擦除旧位置）；
+     * 干净且落在所有 damage 矩形之外的节点跳过，不写 VRAM。 */
+    for (int i = 0; i < paint_count; i++) {
+        block *b = paint_list[i];
+        if (!b->snap && !dmg_hit(b->x, b->y, b->w, b->h)) continue;
         paint_node(b);
     }
 

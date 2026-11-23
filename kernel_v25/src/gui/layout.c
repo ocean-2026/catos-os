@@ -46,16 +46,10 @@ static void measure_node(block *b) {
     stat_add_layout_nodes(1);
 
     /* 根节点帧尺寸由 gui_begin 固定，不参与 auto 聚合。 */
-    if (b->kind == BLK_ROOT) {
-        for (block *c = b->first_child; c; c = c->next_sibling)
-            measure_node(c);
-        return;
-    }
+    if (b->kind == BLK_ROOT) return;
 
-    /* 先量子块，auto 尺寸向上聚合。 */
+    /* 子块尺寸已由 measure_dirty 后序遍历算好，这里只做聚合，不再下行重复计数。 */
     block *c = b->first_child;
-    while (c) { measure_node(c); c = c->next_sibling; }
-
     if (b->kind == BLK_COLUMN || b->kind == BLK_ROW || b->kind == BLK_STACK) {
         int max_w = 0, max_h = 0, sum_w = 0, sum_h = 0, n = 0;
         for (c = b->first_child; c; c = c->next_sibling, n++) {
@@ -161,7 +155,7 @@ static void layout_stack(block *b, int ax, int ay, int aw, int ah) {
         if (c->align_cross == XALN_STRETCH)    c->h = ah;
         else if (c->align_cross == XALN_CENTER) cy = ay + (ah - c->h) / 2;
         else if (c->align_cross == XALN_END)   cy = ay + ah - c->h;
-        c->x = cx; c->y = cy;
+        if (!c->moved) { c->x = cx; c->y = cy; }
         layout_node(c, c->x, c->y, c->w, c->h);
     }
 }
@@ -201,6 +195,7 @@ static void measure_dirty(block *b) {
         if (c->dirty_layout) child_dirty = 1;
     }
     if (!b->dirty_layout && !child_dirty) return;
+    if (child_dirty) b->dirty_layout = 1;   /* 脏位冒泡到最近布局容器 */
     measure_node(b);
 }
 

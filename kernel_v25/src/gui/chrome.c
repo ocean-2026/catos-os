@@ -201,6 +201,93 @@ void gui_probe_dirty(void) {
     gui_end();
 }
 
+void gui_probe_drag(void) {
+    gui_begin();
+    gui_root_block()->w = 800;
+    gui_root_block()->h = 600;
+
+    blk_spec wa = spec_rect(LAYER_WORK, 120, 80, 0x333340u, 0xFFFFFFu, 1);
+    block_id A = b_stack(0, &wa);
+    b_text(A, 0, "A");
+    block_id B = b_stack(0, &wa);
+    b_text(B, 0, "B");
+    layout_run();
+
+    block *pa = btable_get(A);
+    block *pb = btable_get(B);
+    int b0x = pb->x, b0y = pb->y, b0w = pb->w, b0h = pb->h;
+
+    gui_inject_press(20, 10);    /* A 标题栏区域 */
+    gui_inject_move(130, 110);    /* 拖到新位置 */
+    gui_inject_release();
+
+    gui_frame();
+
+    uint32_t measured = stat_layout_nodes();
+    uint32_t rects = stat_damage_rects();
+    uint32_t area = stat_damage_area();
+    uint32_t us = stat_last_frame_us();
+    uint32_t sub = tree_count_subtree(pa);
+    int b_same = pb->x == b0x && pb->y == b0y && pb->w == b0w && pb->h == b0h;
+
+    ser_write("GUI:drag ax="); ser_dec((uint32_t)pa->x);
+    ser_write(" ay="); ser_dec((uint32_t)pa->y);
+    ser_write(" bx="); ser_dec((uint32_t)pb->x);
+    ser_write(" by="); ser_dec((uint32_t)pb->y);
+    ser_write(" measured="); ser_dec(measured);
+    ser_write(" total="); ser_dec(tree_count_nodes());
+    ser_write(" subtree="); ser_dec(sub);
+    ser_write(" damage_rects="); ser_dec(rects);
+    ser_write(" damage_area="); ser_dec(area);
+    ser_write(" frame_us="); ser_dec(us);
+    ser_write(" b_same="); ser_dec(b_same ? 1 : 0);
+    int ok = b_same && measured <= sub + 1 && area <= 120000u && us <= 4000u;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+void gui_probe_hit(void) {
+    gui_begin();
+    gui_root_block()->w = 800;
+    gui_root_block()->h = 600;
+
+    blk_spec lo = spec_rect(LAYER_CONTENT, 160, 100, 0x333333u, 0xFFFFFFu, 1);
+    b_stack(0, &lo);
+    blk_spec hi = spec_rect(LAYER_CONTENT, 160, 100, 0x553333u, 0xFFFFFFu, 1);
+    hi.z = 1;
+    block_id Hi = b_stack(0, &hi);
+    layout_run();
+
+    block_id hit = gui_hit_test(80, 80);
+    ser_write("GUI:hit hit="); ser_dec(hit);
+    ser_write(" want="); ser_dec(Hi);
+    int ok = hit == Hi;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+extern volatile uint32_t timer_ticks;
+
+void gui_probe_rate(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    uint32_t t0 = timer_ticks;
+    for (int i = 0; i < 33; i++) {   /* 约 1 秒，3 tick/帧 */
+        gui_frame();
+        task_sleep_ticks(3);
+    }
+    uint32_t frames = stat_frames();
+    uint32_t dc = stat_double_commit();
+    ser_write("GUI:rate frames="); ser_dec(frames);
+    ser_write(" double_commit="); ser_dec(dc);
+    ser_write(" ticks="); ser_dec(timer_ticks - t0);
+    int ok = frames <= 33 && dc == 0;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 static void geom_walk(block *b) {
     ser_write("GUI:geom id="); ser_dec(b->id);
     ser_write(" kind="); ser_dec((uint32_t)b->kind);
@@ -231,6 +318,9 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return; }
         if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
         if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
+        if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
+        if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return; }
+        if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return; }
     }
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {

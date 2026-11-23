@@ -177,6 +177,7 @@ void paint_node(block *b) {
     paint_clip_pop();
 
     b->dirty_paint = 0;
+    b->snap = 0;
 }
 
 void paint_begin_frame(void) {

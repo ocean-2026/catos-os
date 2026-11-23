@@ -115,6 +115,7 @@ static void on_drag_move(int x, int y) {
     }
     b->dirty_layout = 1;
     b->dirty_paint = 1;
+    b->moved = 1;
 }
 
 static void on_release(void) {
@@ -139,6 +140,15 @@ void gui_pump_input(void) {
 }
 
 int gui_should_exit(void) { return exit_requested; }
+
+/* ---- 探针注入钩子：复用真实命中 / 拖拽路径，不另起一套模拟。 ---- */
+void gui_inject_press(int x, int y)  { on_press(x, y); }
+void gui_inject_move(int x, int y)   { on_drag_move(x, y); }
+void gui_inject_release(void)        { on_release(); }
+block_id gui_hit_test(int x, int y) {
+    block *b = hit_test(x, y);
+    return b ? b->id : 0;
+}
 
 /* 供探针 / M3 使用：模态块出现时向下层块设 inert。 */
 void gui_modal_inert(block_id overlay_id) {
