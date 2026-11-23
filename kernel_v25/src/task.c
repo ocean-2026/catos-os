@@ -1094,6 +1094,58 @@ void kpipe_assign_in(int tid, int h) {
     if (t) t->in_pipe = h;
 }
 
+/* Ring0 pipe block counter: every task_sleep_ticks() wait inside the FIFO
+ * helpers increments it so the bench can report the sleep/wake share. */
+static uint32_t g_pipe_sleeps;
+uint32_t kpipe_sleeps(void) { return g_pipe_sleeps; }
+
+int kpipe_write(int h, const void *data, int len) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp || len < 0) return -1;
+    const uint8_t *ud = (const uint8_t *)data;
+    int wrote = 0;
+    while (wrote < len) {
+        if (!pp->open_r) return -1;                 /* reader gone */
+        int free = PIPE_BUF - 1 - pp->len;
+        if (free <= 0) { g_pipe_sleeps++; task_sleep_ticks(1); continue; }
+        int n = len - wrote; if (n > free) n = free;
+        for (int k = 0; k < n; k++) {
+            pp->buf[pp->tail] = ud[wrote + k];
+            pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+        }
+        pp->len = (uint16_t)(pp->len + n);
+        wrote += n;
+    }
+    return 0;
+}
+
+int kpipe_read(int h, void *buf, int max) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp || max < 0) return -1;
+    uint8_t *ub = (uint8_t *)buf;
+    int got = 0;
+    while (got < max) {
+        while (pp->len == 0) {
+            if (!pp->open_w) return got;            /* writer closed = EOF */
+            g_pipe_sleeps++; task_sleep_ticks(1);
+        }
+        ub[got++] = pp->buf[pp->head];
+        pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
+        pp->len = (uint16_t)(pp->len - 1);
+    }
+    return got;
+}
+
+void kpipe_close_write(int h) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (pp) pp->open_w = 0;
+}
+
+void kpipe_close_read(int h) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (pp) pp->open_r = 0;
+}
+
 /* ---- the syscall dispatcher ---------------------------------------------- */
 
 static int sys_touch_uid(const char *upath, int uid, int gid) {
