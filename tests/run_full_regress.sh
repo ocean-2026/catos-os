@@ -66,6 +66,9 @@ fi
 if [ -f tests/gui_pixel_regress.py ]; then
     run guipix tests/gui_pixel_regress.py  "$ISO" --port 4723
 fi
+if [ -f tests/gui_console_clean.py ]; then
+    run guiclean tests/gui_console_clean.py "$ISO" --port 4724
+fi
 
 echo "===== sweep done ====="
 if [ ${#FAILED[@]} -gt 0 ]; then
