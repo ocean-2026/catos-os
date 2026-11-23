@@ -62,4 +62,10 @@ void      gui_probe_leak(void);
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 
+/* ---- v2 预留槽位（规格 §7，仅声明、v1 不实现；供给方为内核内模块） ----
+ * gui_surface_attach(w,h) -> 指向 24bpp 不透明位图槽的指针；
+ * gui_surface_dirty(x,y,w,h) 标记槽位脏区。v1 留空桩，链接期不提供定义。 */
+void     *gui_surface_attach(int w, int h);
+void      gui_surface_dirty(int x, int y, int w, int h);
+
 #endif /* CATOS_GUI_GUI_H */
