@@ -44,12 +44,16 @@ static void ser_hash(uint32_t h) {
 
 static blk_spec spec_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
     blk_spec s;
-    const struct style *tok = gui_active_style();
     memset(&s, 0, sizeof(s));
     s.req_w = w; s.req_h = h;
     s.layer = layer; s.z = 0;
     s.visible = 1; s.focusable = 0; s.inert = 0;
-    s.fg = tok->fg; s.bg = tok->bg; s.accent = tok->accent;
+    /* 按语义角色跟随活动令牌，不固化当时 RGB；切主题时整树重解析。 */
+    s.role_fg = ROLE_FG; s.role_accent = ROLE_ACCENT;
+    if (layer == LAYER_BG)                       s.role_bg = ROLE_BG;
+    else if (layer == LAYER_CHROME || layer == LAYER_OVERLAY) s.role_bg = ROLE_BAR;
+    else                                          s.role_bg = ROLE_PANEL;
+    s.fg = INHERIT_COLOR; s.bg = INHERIT_COLOR; s.accent = INHERIT_COLOR;
     s.scale = 1; s.border_w = border;
     return s;
 }
@@ -57,6 +61,23 @@ static blk_spec spec_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border)
 static block_id clock_row = 0;
 static block_id clock_text_blk = 0;
 static char clock_last[16] = "";
+
+#define DEMO_ICON_W 16
+#define DEMO_ICON_H 16
+static uint8_t demo_icon[DEMO_ICON_W * DEMO_ICON_H * 3];
+static int demo_icon_ready;
+
+static void demo_icon_build(void) {
+    if (demo_icon_ready) return;
+    for (int y = 0; y < DEMO_ICON_H; y++) {
+        for (int x = 0; x < DEMO_ICON_W; x++) {
+            uint8_t v = ((x ^ y) & 1) ? 0xE0u : 0x20u;
+            uint8_t *p = &demo_icon[((y * DEMO_ICON_W) + x) * 3];
+            p[0] = v; p[1] = v; p[2] = v;
+        }
+    }
+    demo_icon_ready = 1;
+}
 
 static block_id demo_add_sample(void) {
     block_id root_id = gui_root_block()->id;
@@ -67,14 +88,27 @@ static block_id demo_add_sample(void) {
 
     blk_spec title = spec_panel(LAYER_WORK, 320, 24, 0);
     title.pad_l = 4;
+    title.align_cross = XALN_CENTER;
+    title.role_bg = ROLE_BAR;
+    title.bg = INHERIT_COLOR;
     block_id bar = b_row(sample, &title);
-    b_text(bar, 0, "CatOS Sample");
+    blk_spec title_txt = spec_panel(LAYER_WORK, 96, 16, 0);
+    title_txt.align_cross = XALN_CENTER;
+    b_text(bar, &title_txt, "CatOS Sample");
 
     blk_spec body = spec_panel(LAYER_WORK, 320, 176, 0);
-    body.pad_l = 4;
-    block_id body_id = b_rect(sample, &body);
+    body.pad_l = 4; body.pad_r = 4; body.pad_t = 4; body.pad_b = 4;
+    body.gap = 8;
+    block_id body_id = b_column(sample, &body);
     blk_spec body_txt = spec_panel(LAYER_WORK, 200, 16, 0);
     b_text(body_id, &body_txt, "demo content area");
+
+    /* 完整链路样例：TEXT → DIVIDER → IMAGE → SPACER 竖排（COLUMN）。 */
+    blk_spec rule = spec_panel(LAYER_WORK, 200, 1, 0);
+    b_divider(body_id, &rule);
+    demo_icon_build();
+    b_image(body_id, 0, demo_icon, DEMO_ICON_W, DEMO_ICON_H);
+    b_space(body_id, 200, 8);
     return sample;
 }
 
@@ -100,6 +134,7 @@ static void clock_refresh(int force) {
 
 void gui_demo_build(void) {
     block *root = gui_root_block();
+    root->w = GFX24_W; root->h = GFX24_H;
     root->pad_l = 64; root->pad_r = 64; root->pad_t = 64; root->pad_b = 64;
     block_id root_id = root->id;
 
@@ -118,15 +153,21 @@ void gui_demo_build(void) {
 
     blk_spec start = spec_panel(LAYER_CHROME, 64, 24, 0);
     start.pad_l = 4;
+    start.align_cross = XALN_CENTER;
     start.on_click = gui_menu_toggle;
     block_id start_id = b_row(taskbar, &start);
-    b_text(start_id, 0, "Start");
+    blk_spec start_txt = spec_panel(LAYER_CHROME, 40, 16, 0);
+    start_txt.align_cross = XALN_CENTER;
+    b_text(start_id, &start_txt, "Start");
 
     blk_spec clk_s = spec_panel(LAYER_CHROME, 80, 24, 0);
     clk_s.align_main = ALN_END;
+    clk_s.align_cross = XALN_CENTER;
     clk_s.pad_l = 4;
     clock_row = b_row(taskbar, &clk_s);
-    clock_text_blk = b_text(clock_row, 0, "00:00:00");
+    blk_spec clk_txt = spec_panel(LAYER_CHROME, 64, 16, 0);
+    clk_txt.align_cross = XALN_CENTER;
+    clock_text_blk = b_text(clock_row, &clk_txt, "00:00:00");
     clock_refresh(1);
 }
 
@@ -558,7 +599,139 @@ void gui_probe_presence(void) {
     gui_end();
 }
 
+void gui_probe_theme(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    gui_theme_set(TOK_DARK);
+    const struct style *sd = gui_active_style();
+    gui_theme_set(TOK_LIGHT);
+    const struct style *sl = gui_active_style();
+    gui_theme_set(TOK_HIGH_CONTRAST);
+    const struct style *sh = gui_active_style();
+
+    int ok = sd->bg != sl->bg && sl->fg != sh->fg && sd->accent != sh->accent;
+    ser_write("GUI:theme dark_bg="); ser_hash(sd->bg);
+    ser_write(" light_bg="); ser_hash(sl->bg);
+    ser_write(" hc_bg="); ser_hash(sh->bg);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+void gui_probe_reset(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+    uint32_t nodes = tree_count_nodes();
+    uint32_t h = gui_tree_hash();
+    uint32_t live = stat_blocks_live();
+
+    gui_reset();
+    gui_demo_build();
+    layout_run();
+    uint32_t nodes2 = tree_count_nodes();
+    uint32_t h2 = gui_tree_hash();
+    uint32_t live2 = stat_blocks_live();
+    uint32_t orphan = live2 > nodes2 ? live2 - nodes2 : 0;
+
+    int ok = nodes == nodes2 && h == h2 && orphan == 0 && live == live2;
+    (void)live;
+    ser_write("GUI:reset nodes="); ser_dec(nodes2);
+    ser_write(" hash="); ser_hash(h2);
+    ser_write(" orphan="); ser_dec(orphan);
+    ser_write(" match="); ser_dec(h == h2 ? 1 : 0);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+static int gesture_clicked;
+static void probe_click_consume(block_id id, int32_t lx, int32_t ly) {
+    gesture_clicked = 1;   /* 模拟应用块消费点击 */
+}
+
+void gui_probe_gesture(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    blk_spec s = spec_panel(LAYER_WORK, 120, 80, 1);
+    s.focusable = 1;
+    block_id A = b_stack(0, &s);
+    block *pa = btable_get(A);
+    pa->on_click = probe_click_consume;
+    layout_run();
+    int x0 = pa->x, y0 = pa->y;
+
+    /* 标题栏拖拽：即便块挂了消费型 on_click，系统拖拽手势仍必须生效。 */
+    gui_inject_press(10, 10);
+    gui_inject_move(90, 70);
+    gui_inject_release();
+    int drag_moved = (pa->x != x0 || pa->y != y0);
+
+    /* 任务栏属于系统层：点击仍命中任务栏，不被应用块消费拦截。 */
+    blk_spec tb = spec_panel(LAYER_CHROME, GFX24_W, 32, 0);
+    block_id tb_id = b_row(0, &tb);
+    layout_run();
+    block *tbar = btable_get(tb_id);
+    block_id tb_hit = gui_hit_test(tbar->x + 10, tbar->y + 16);
+
+    int ok = drag_moved && tb_hit == tb_id && gesture_clicked == 1;
+    ser_write("GUI:gesture clicked="); ser_dec(gesture_clicked);
+    ser_write(" drag_moved="); ser_dec(drag_moved);
+    ser_write(" taskbar_hit="); ser_dec(tb_hit);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+void gui_probe_resize(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    blk_spec col = spec_panel(LAYER_WORK, 120, 80, 1);
+    block_id A = b_column(0, &col);
+    blk_spec leaf = spec_panel(LAYER_CONTENT, 60, 40, 0);
+    block_id B = b_rect(A, &leaf);
+    blk_spec cs = spec_panel(LAYER_WORK, 60, 40, 1);
+    block_id C = b_stack(0, &cs);
+    layout_run();
+
+    block *pa = btable_get(A);
+    block *pc = btable_get(C);
+    int c0x = pc->x, c0y = pc->y;
+    int aw0 = pa->w, ah0 = pa->h;
+
+    /* 右下角 resize 手柄：按压角落拖放，改 req_w/req_h，只重排该子树。 */
+    int hx = pa->x + pa->w - 6, hy = pa->y + pa->h - 6;
+    gui_inject_press(hx, hy);
+    gui_inject_move(pa->x + aw0 + 40, pa->y + ah0 + 30);
+    gui_inject_release();
+    layout_run();
+
+    int grew = pa->w > aw0 && pa->h > ah0;
+    int sibling_same = pc->x == c0x && pc->y == c0y;
+    block *pb = btable_get(B);
+    int leaf_inside = pb->x >= pa->x && pb->y >= pa->y &&
+                      pb->x + pb->w <= pa->x + pa->w &&
+                      pb->y + pb->h <= pa->y + pa->h;
+    int ok = grew && sibling_same && leaf_inside;
+    ser_write("GUI:resize w="); ser_dec(pa->w);
+    ser_write(" h="); ser_dec(pa->h);
+    ser_write(" sibling_same="); ser_dec(sibling_same);
+    ser_write(" leaf_inside="); ser_dec(leaf_inside);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
+
+static void gui_idle_loop(void) {
+    while (!gui_should_exit()) {
+        gui_pump_input();
+        clock_refresh(0);
+        gui_frame();                 /* 同 tick 重复调用由合成层去重 */
+        task_sleep_ticks(1);         /* 100Hz 节拍，3 tick 一帧 ≈33fps */
+    }
+}
 
 void gui_shell_cmd(const char *arg) {
     if (arg && *arg) {
@@ -573,7 +746,22 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
         if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
         if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
+        if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }
+        if (!strcmp_probe(arg, "reset"))  { gui_probe_reset(); return; }
+        if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return; }
+        if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return; }
     }
+
+    /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset。 */
+    int shot_menu = 0, shot_reset = 0;
+    enum gui_token shot_tok = TOK_DARK;
+    if (arg && *arg) {
+        if (!strcmp_probe(arg, "shot-menu"))  shot_menu = 1;
+        else if (!strcmp_probe(arg, "shot-light")) shot_tok = TOK_LIGHT;
+        else if (!strcmp_probe(arg, "shot-hc"))     shot_tok = TOK_HIGH_CONTRAST;
+        else if (!strcmp_probe(arg, "shot-reset")) shot_reset = 1;
+    }
+
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {
         con_write("gui: 进入图形块桌面失败\n");
@@ -581,14 +769,12 @@ void gui_shell_cmd(const char *arg) {
     }
     gui_begin();
     gui_demo_build();
+    if (shot_reset) { gui_reset(); gui_demo_build(); }
+    if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
+    if (shot_menu) gui_menu_open();
     gui_frame();
 
-    while (!gui_should_exit()) {
-        gui_pump_input();
-        clock_refresh(0);
-        gui_frame();                 /* 同 tick 重复调用由合成层去重 */
-        task_sleep_ticks(1);         /* 100Hz 节拍，3 tick 一帧 ≈33fps */
-    }
+    gui_idle_loop();
 
     gui_end();
     con_force_text();

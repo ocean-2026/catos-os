@@ -101,17 +101,39 @@ void gui_draw_border(int x, int y, int w, int h, uint32_t color, uint8_t bw) {
     }
 }
 
-/* ---- 样式继承：未显式给色则沿父链取最近显式值 ------------------------- */
+/* ---- 样式继承：显式色 → 父链 → 活动令牌角色（三级回落） ------------- */
+
+static uint32_t role_token(uint8_t role, const struct style *tok) {
+    switch (role) {
+    case ROLE_FG:     return tok->fg;
+    case ROLE_BG:     return tok->bg;
+    case ROLE_PANEL:  return tok->panel;
+    case ROLE_BAR:    return tok->bar;
+    case ROLE_ACCENT: return tok->accent;
+    case ROLE_BORDER: return tok->border;
+    case ROLE_LINE:   return tok->line;
+    default:          return 0;
+    }
+}
 
 static uint32_t resolve_color(block *b, int which) {
+    const struct style *tok = gui_active_style();
     block *cur = b;
     while (cur) {
-        if (which == 0 && cur->st.fg)  return cur->st.fg;
-        if (which == 1 && cur->st.bg)  return cur->st.bg;
-        if (which == 2 && cur->st.accent) return cur->st.accent;
+        if (which == 0) {
+            if (cur->st.fg)       return cur->st.fg;
+            if (cur->st.role_fg)  return role_token(cur->st.role_fg, tok);
+        }
+        if (which == 1) {
+            if (cur->st.bg)       return cur->st.bg;
+            if (cur->st.role_bg)  return role_token(cur->st.role_bg, tok);
+        }
+        if (which == 2) {
+            if (cur->st.accent)       return cur->st.accent;
+            if (cur->st.role_accent)  return role_token(cur->st.role_accent, tok);
+        }
         cur = cur->parent;
     }
-    const struct style *tok = gui_active_style();
     return which == 1 ? tok->bg : tok->fg;
 }
 
@@ -142,12 +164,14 @@ void paint_node(block *b) {
     uint32_t fg = resolve_color(b, 0);
     uint32_t bg = resolve_color(b, 1);
     uint32_t accent = resolve_color(b, 2);
+    (void)accent;   /* v1 尚未消费强调色，保留解析链路 */
 
     switch (b->kind) {
     case BLK_RECT:
         gui_fill_rect(b->x, b->y, b->w, b->h, bg);
         if (b->st.border_w)
-            gui_draw_border(b->x, b->y, b->w, b->h, accent, b->st.border_w);
+            gui_draw_border(b->x, b->y, b->w, b->h,
+                            gui_active_style()->border, b->st.border_w);
         break;
     case BLK_TEXT: {
         char buf[160];
@@ -161,13 +185,13 @@ void paint_node(block *b) {
         gui_blit24(b->pix, b->x, b->y, b->pix_w, b->pix_h);
         break;
     case BLK_DIVIDER:
-        gui_fill_rect(b->x, b->y, b->w, 1, accent);
+        gui_fill_rect(b->x, b->y, b->w, 1, gui_active_style()->line);
         break;
     case BLK_COLUMN:
     case BLK_ROW:
     case BLK_STACK:
     case BLK_ROOT:
-        if (b->st.bg) gui_fill_rect(b->x, b->y, b->w, b->h, bg);
+        if (b->st.bg || b->st.role_bg) gui_fill_rect(b->x, b->y, b->w, b->h, bg);
         break;
     default:
         break;

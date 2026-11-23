@@ -11,7 +11,14 @@
 #include <stdint.h>
 
 struct style {
-    uint32_t fg, bg, accent;   /* 0x00RRGGBB */
+    uint32_t fg, bg, accent;   /* 0x00RRGGBB；块级显式色，0 = 未显式指定 */
+    uint32_t panel;            /* 应用块底色（区别于桌面 bg） */
+    uint32_t bar;              /* 标题栏 / 任务栏 / 菜单底色 */
+    uint32_t border;           /* 块描边色 */
+    uint32_t line;             /* 分隔线色 */
+    /* 语义角色：非 0 表示该色跟随活动令牌的对应角色，不把具体 RGB
+     * 烧进块；主题切换时整树重解析，无需清除固化色。 */
+    uint8_t  role_fg, role_bg, role_accent;
     uint8_t  scale;            /* 字缩放 1 / 2 */
     uint8_t  pad;              /* 令牌级 padding（v1 未参与布局，保留） */
     uint8_t  border_w;         /* 0 / 1 / 2 */
@@ -26,6 +33,18 @@ enum gui_token {
     TOK_LIGHT,
     TOK_HIGH_CONTRAST,
     TOK_NTOK
+};
+
+/* 语义着色角色：块按角色跟随活动令牌，而不是固化当时的 RGB。 */
+enum gui_role {
+    ROLE_NONE = 0,
+    ROLE_FG,
+    ROLE_BG,
+    ROLE_PANEL,
+    ROLE_BAR,
+    ROLE_ACCENT,
+    ROLE_BORDER,
+    ROLE_LINE
 };
 
 const struct style *gui_token_style(enum gui_token t);

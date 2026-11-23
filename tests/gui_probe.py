@@ -50,12 +50,17 @@ EXPECT = {
     "home":  {"latest": {"result": "1"}, "flag": None},
     "menu":  {"latest": {"result": "1"}, "flag": None},
     "presence": {"latest": {"result": "1"}, "flag": None},
+    "theme":  {"latest": {"result": "1"}, "flag": None},
+    "reset":  {"latest": {"result": "1"}, "flag": None},
+    "gesture": {"latest": {"result": "1"}, "flag": None},
+    "resize": {"latest": {"result": "1"}, "flag": None},
 }
 
 
 def boot(qemu, iso, serial):
+    vga = os.environ.get("VGA", "vmware")
     return subprocess.Popen(
-        [qemu, "-m", "256", "-smp", "1", "-cpu", "qemu32", "-vga", "vmware",
+        [qemu, "-m", "256", "-smp", "1", "-cpu", "qemu32", "-vga", vga,
          "-no-reboot", "-net", "none", "-display", "none", "-boot", "order=d",
          "-cdrom", iso, "-serial", "file:" + serial,
          "-monitor", "tcp:127.0.0.1:%d,server,nowait" % PORT],

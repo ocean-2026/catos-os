@@ -26,6 +26,7 @@ void      tree_reset(void);
 
 /* compose.c */
 void      gui_presence_sweep(void);
+void      gui_theme_set(enum gui_token t);
 void      stat_set_layout_nodes(uint32_t n);
 void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,
@@ -45,6 +46,7 @@ void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
 block_id  gui_hit_test(int x, int y);
 void      gui_focus_raise(block_id id);
+void      gui_modal_inert(block_id overlay_id);
 
 /* chrome.c 开始菜单状态 */
 void      gui_menu_open(void);

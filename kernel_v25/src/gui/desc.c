@@ -9,8 +9,6 @@
 #include "gui_int.h"
 #include "kstring.h"
 
-#define INHERIT_COLOR 0xFFFFFFFFu
-
 static void apply_spec(block *b, const blk_spec *s) {
     if (!b) return;
     if (!s) return;
@@ -34,9 +32,16 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->focusable = s->focusable;
     b->inert = s->inert;
 
-    if (s->fg != INHERIT_COLOR)   b->st.fg = s->fg;
-    if (s->bg != INHERIT_COLOR)   b->st.bg = s->bg;
+    if (s->fg != INHERIT_COLOR)     b->st.fg = s->fg;
+    if (s->bg != INHERIT_COLOR)     b->st.bg = s->bg;
     if (s->accent != INHERIT_COLOR) b->st.accent = s->accent;
+    /* 角色跟随活动令牌；角色生效时不保留任何固化 RGB。 */
+    b->st.role_fg = s->role_fg;
+    b->st.role_bg = s->role_bg;
+    b->st.role_accent = s->role_accent;
+    if (b->st.role_fg)    b->st.fg = 0;
+    if (b->st.role_bg)    b->st.bg = 0;
+    if (b->st.role_accent) b->st.accent = 0;
     b->st.scale = s->scale ? s->scale : 1;
     b->st.border_w = s->border_w;
 
@@ -67,6 +72,7 @@ block_id b_row  (block_id parent, const blk_spec *s)  { block *b = create_block(
 block_id b_stack(block_id parent, const blk_spec *s)  { block *b = create_block(BLK_STACK,  parent, s);  return b ? b->id : 0; }
 block_id b_rect (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_RECT,   parent, s);  return b ? b->id : 0; }
 block_id b_surface(block_id parent, const blk_spec *s){ block *b = create_block(BLK_SURFACE,parent,s);  return b ? b->id : 0; }
+block_id b_divider(block_id parent, const blk_spec *s) { block *b = create_block(BLK_DIVIDER, parent, s); return b ? b->id : 0; }
 
 static blk_spec spec_or_inherit(block_id parent, const blk_spec *s) {
     blk_spec local;

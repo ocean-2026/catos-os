@@ -29,6 +29,7 @@ block_id  b_text   (block_id parent, const blk_spec *s, const char *txt);
 block_id  b_rect   (block_id parent, const blk_spec *s);
 block_id  b_image  (block_id parent, const blk_spec *s, const uint8_t *pix, int w, int h);
 block_id  b_surface(block_id parent, const blk_spec *s);
+block_id  b_divider(block_id parent, const blk_spec *s);
 block_id  b_space  (block_id parent, int w, int h);
 void      b_set_props(block_id id, const blk_spec *s);
 void      b_remove(block_id id);           /* 两阶段销毁 */

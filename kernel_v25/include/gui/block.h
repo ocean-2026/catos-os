@@ -11,6 +11,9 @@
 #include <stdint.h>
 #include "tokens.h"
 
+/* 声明色哨兵：0xFFFFFFFF 表示继承父块/角色，不固化具体 RGB。 */
+#define INHERIT_COLOR 0xFFFFFFFFu
+
 typedef uint32_t block_id;          /* 0 = 无效；>=1 全局唯一 */
 
 typedef enum {
@@ -62,6 +65,7 @@ typedef struct {
     int32_t  z;
     uint8_t  visible, focusable, inert;
     uint32_t fg, bg, accent;
+    uint8_t  role_fg, role_bg, role_accent;
     uint8_t  scale, border_w;
     const char   *text;
     const uint8_t *pix;

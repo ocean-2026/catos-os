@@ -42,14 +42,10 @@ block *btable_alloc_at(blk_kind kind, block_id id) {
 }
 
 block *btable_alloc(blk_kind kind) {
+    /* 取最小空闲槽：保证重建后 id 分配顺序确定，不依赖释放次序（LIFO 会乱序）。 */
     block *b = 0;
-    if (free_head) {
-        b = free_head;
-        free_head = b->free_next;
-    } else {
-        for (int i = 0; i < GUI_MAX_BLOCKS; i++) {
-            if (slots[i].id == 0) { b = &slots[i]; break; }
-        }
+    for (int i = 0; i < GUI_MAX_BLOCKS; i++) {
+        if (slots[i].id == 0) { b = &slots[i]; break; }
     }
     if (!b) return 0;
     memset(b, 0, sizeof(*b));

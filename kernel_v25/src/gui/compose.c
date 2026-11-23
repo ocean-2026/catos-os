@@ -38,14 +38,6 @@ static int rects_overlap(int ax, int ay, int aw, int ah,
 
 static void dmg_reset(void) { dmg_n = 0; dmg_full = 0; }
 
-static int dmg_hit(int x, int y, int w, int h) {
-    if (dmg_full) return 1;
-    for (int i = 0; i < dmg_n; i++)
-        if (rects_overlap(x, y, w, h, dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h))
-            return 1;
-    return 0;
-}
-
 static void dmg_add(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (dmg_full) return;
@@ -180,11 +172,12 @@ void gui_frame(void) {
             dmg_add(b->x, b->y, b->w, b->h);
     }
 
-    /* 第二遍：只重绘脏块，以及与 damage 相交的底层块（擦除旧位置）；
-     * 干净且落在所有 damage 矩形之外的节点跳过，不写 VRAM。 */
+    /* 第二遍：只重绘本帧脏节点。干净节点即使与 damage 相交也不整节点
+     * 重绘——背景/容器的命中重绘会把尚未重绘的干净前景整片擦掉（§4
+     * 损伤合成的擦旧位置应由背景在损伤条带内补齐，而不是整节点重绘）。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
-        if (!b->snap && !dmg_hit(b->x, b->y, b->w, b->h)) continue;
+        if (!b->snap) continue;
         paint_node(b);
     }
 
@@ -216,6 +209,20 @@ void gui_frame(void) {
     s_frames++;
 
     gui_presence_sweep();
+}
+
+static void mark_all_paint(block *b) {
+    if (!b) return;
+    b->dirty_paint = 1;
+    b->snap = 1;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        mark_all_paint(c);
+}
+
+/* 切主题：换活动令牌后整树标脏重绘（不做局部配色残留）。 */
+void gui_theme_set(enum gui_token t) {
+    gui_set_token(t);
+    mark_all_paint(gui_root_block());
 }
 
 /* Presence 回收：标 leaving 的块存活一帧（leaving 帧计数），

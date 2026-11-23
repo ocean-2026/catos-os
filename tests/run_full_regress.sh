@@ -63,6 +63,9 @@ fi
 if [ -f tests/ime_regress.py ]; then
     run ime    tests/ime_regress.py        "$ISO" --qemu "$Q" --port 4722
 fi
+if [ -f tests/gui_pixel_regress.py ]; then
+    run guipix tests/gui_pixel_regress.py  "$ISO" --port 4723
+fi
 
 echo "===== sweep done ====="
 if [ ${#FAILED[@]} -gt 0 ]; then
