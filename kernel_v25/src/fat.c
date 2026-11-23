@@ -91,6 +91,13 @@ static uint8_t  fat_jsec[(FAT_CACHE_MAX / 512) / 8];  /* dirty sector map */
 static int      fat_journal_n   = 0;
 static int      fat_journal_ovf = 0;
 
+/* one-slot data cluster cache: a repeated read of the same cluster skips the
+ * IDE PIO round-trip.  Read-only snapshot, invalidated on any cluster write
+ * and on volume switch.  BSS, one cluster sized, shared by all tasks. */
+static uint32_t cc_clus = 0;
+static uint8_t  cc_buf[FAT_CLUSTER_SZ_MAX];
+static int      cc_valid = 0;
+
 static uint32_t clus_lba(uint32_t c) { return data_start + (c - 2) * spc; }
 /* v2.34 (#118): valid cluster numbers end at vol_clusters+1.  max_clus
  * is the FAT *table* capacity and on small volumes can be ~2x larger
@@ -272,11 +279,21 @@ void fat_free_chain(uint32_t clus) {
 
 int fat_read_cluster(uint32_t clus, uint8_t *out) {
     if (clus < 2) return -1;
-    return ata_read(cur_drive, clus_lba(clus), (uint8_t)spc, out);
+    uint32_t csz = (uint32_t)spc * 512;
+    if (cc_valid && clus == cc_clus) {
+        memcpy_(out, cc_buf, (int)csz);
+        return 0;
+    }
+    if (ata_read(cur_drive, clus_lba(clus), (uint8_t)spc, cc_buf) != 0) return -1;
+    cc_clus = clus;
+    cc_valid = 1;
+    memcpy_(out, cc_buf, (int)csz);
+    return 0;
 }
 
 int fat_write_cluster(uint32_t clus, const uint8_t *buf) {
     if (clus < 2) return -1;
+    cc_valid = 0;   /* stale snapshot must not survive a write */
     return ata_write(cur_drive, clus_lba(clus), (uint8_t)spc, buf);
 }
 
@@ -1380,6 +1397,7 @@ void fat_activate(int slot) {
     if (slot < 0 || slot >= FAT_VOL_MAX || !g_vol[slot].d_present) return;
     if (g_active == slot) return;
     g_active = slot;
+    cc_valid = 0;   /* cluster snapshot belongs to the previous volume */
     /* reload this volume's FAT #1 into the shared cache; reset journal */
     read_fat_region();
 }
@@ -1408,6 +1426,7 @@ void fat_release_slot(int slot) {
 int fat_mkfs(void) {
     uint8_t mbr[512], sec[512];
     uint32_t i;
+    cc_valid = 0;   /* cluster snapshot belongs to the old, wiped volume */
 
     /* 0) drive size -- v2.32: no IDE disk is a hard error (writing a
      * phantom volume made every sector write burn its 10M-iteration

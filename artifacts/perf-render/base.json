@@ -1,0 +1,157 @@
+{
+ "tag": "render-base",
+ "runs": [
+  {
+   "boot": {
+    "uptime_ms": "140",
+    "mhz": 2337,
+    "tasks": "1",
+    "bss_end_lo": "34095056"
+   },
+   "gfx.frame": {
+    "cycles_hi": "0",
+    "cycles_lo": "136388746",
+    "frames": 6,
+    "cycles_glyph_hi": "0",
+    "cycles_glyph_lo": "81662282",
+    "cycles_flush_hi": "0",
+    "cycles_flush_lo": "54726464",
+    "cols": 100,
+    "rows": 37,
+    "mhz": 2337,
+    "cycles": 136388746,
+    "cycles_glyph": 81662282,
+    "cycles_flush": 54726464
+   },
+   "gfx.char": {
+    "cycles_hi": "0",
+    "cycles_lo": "17496154",
+    "count": 2000,
+    "cycles_fetch_hi": "0",
+    "cycles_fetch_lo": "141206",
+    "mhz": 2337,
+    "cycles": 17496154,
+    "cycles_fetch": 141206
+   },
+   "end": {
+    "handled": "1",
+    "args": "0"
+   }
+  },
+  {
+   "boot": {
+    "uptime_ms": "130",
+    "mhz": 2337,
+    "tasks": "1",
+    "bss_end_lo": "34095056"
+   },
+   "gfx.frame": {
+    "cycles_hi": "0",
+    "cycles_lo": "138273772",
+    "frames": 6,
+    "cycles_glyph_hi": "0",
+    "cycles_glyph_lo": "83774626",
+    "cycles_flush_hi": "0",
+    "cycles_flush_lo": "54499146",
+    "cols": 100,
+    "rows": 37,
+    "mhz": 2337,
+    "cycles": 138273772,
+    "cycles_glyph": 83774626,
+    "cycles_flush": 54499146
+   },
+   "gfx.char": {
+    "cycles_hi": "0",
+    "cycles_lo": "18110768",
+    "count": 2000,
+    "cycles_fetch_hi": "0",
+    "cycles_fetch_lo": "148564",
+    "mhz": 2337,
+    "cycles": 18110768,
+    "cycles_fetch": 148564
+   },
+   "end": {
+    "handled": "1",
+    "args": "0"
+   }
+  },
+  {
+   "boot": {
+    "uptime_ms": "130",
+    "mhz": 2337,
+    "tasks": "1",
+    "bss_end_lo": "34095056"
+   },
+   "gfx.frame": {
+    "cycles_hi": "0",
+    "cycles_lo": "140781576",
+    "frames": 6,
+    "cycles_glyph_hi": "0",
+    "cycles_glyph_lo": "65349986",
+    "cycles_flush_hi": "0",
+    "cycles_flush_lo": "75431590",
+    "cols": 100,
+    "rows": 37,
+    "mhz": 2337,
+    "cycles": 140781576,
+    "cycles_glyph": 65349986,
+    "cycles_flush": 75431590
+   },
+   "gfx.char": {
+    "cycles_hi": "0",
+    "cycles_lo": "19062316",
+    "count": 2000,
+    "cycles_fetch_hi": "0",
+    "cycles_fetch_lo": "154206",
+    "mhz": 2337,
+    "cycles": 19062316,
+    "cycles_fetch": 154206
+   },
+   "end": {
+    "handled": "1",
+    "args": "0"
+   }
+  }
+ ],
+ "median": {
+  "gfx.frame": {
+   "cycles_hi": "0",
+   "cycles_lo": "136388746",
+   "frames": 6,
+   "cycles_glyph_hi": "0",
+   "cycles_glyph_lo": "81662282",
+   "cycles_flush_hi": "0",
+   "cycles_flush_lo": "54726464",
+   "cols": 100,
+   "rows": 37,
+   "mhz": 2337,
+   "cycles": 136388746,
+   "cycles_glyph": 81662282,
+   "cycles_flush": 54726464,
+   "cycles_median": 138273772,
+   "cycles_all": [
+    136388746,
+    138273772,
+    140781576
+   ],
+   "spread": 0.031769076206296015
+  },
+  "gfx.char": {
+   "cycles_hi": "0",
+   "cycles_lo": "17496154",
+   "count": 2000,
+   "cycles_fetch_hi": "0",
+   "cycles_fetch_lo": "141206",
+   "mhz": 2337,
+   "cycles": 17496154,
+   "cycles_fetch": 141206,
+   "cycles_median": 18110768,
+   "cycles_all": [
+    17496154,
+    18110768,
+    19062316
+   ],
+   "spread": 0.0864768407391669
+  }
+ }
+}

@@ -1,0 +1,20 @@
+{
+ "repo": "/home/user/work/catos-perf-heavy",
+ "commit": "e17f888",
+ "branch": "perf/heavy",
+ "iso": {
+  "bytes": 11905024,
+  "sha256_8": "d44658d5"
+ },
+ "host": {
+  "nproc": 2,
+  "loadavg": "0.00 0.33 0.41 1/254 38955"
+ },
+ "qemu": {
+  "bin": "/usr/bin/qemu-system-i386",
+  "version": "QEMU emulator version 6.2.0 (Debian 1:6.2+dfsg-2ubuntu6.31)"
+ },
+ "cmdline": "taskset -c 1 qemu-system-i386 -m 256 -smp 1 -cpu qemu32 -no-reboot -net none -display none -cdrom <iso> -boot order=d [-drive file=<private copy>,format=raw,if=ide] -serial file:<log>",
+ "repeat": 3,
+ "batches": []
+}

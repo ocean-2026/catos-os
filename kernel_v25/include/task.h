@@ -33,6 +33,8 @@ typedef enum {
     T_SLEEPING,     /* until timer wake_tick                 */
     T_WAIT_KB,      /* blocked for a key                     */
     T_WAIT_CHILD,   /* shell waiting for a child to exit     */
+    T_WAIT_PIPE,    /* perf(pipe): blocked on pipe space/data,
+                       woken by the peer's write/read/close   */
     T_ZOMBIE,       /* exited, waiting to be reaped          */
     T_STOPPED,      /* v2.52: suspended by SIGTSTP, held by job control */
 } tstate_e;
@@ -186,5 +188,18 @@ int      task_page_fault(int_frame_t *f);
 int      kpipe_create(void);        /* handle >= 0, -1 if no slots */
 void     kpipe_assign_out(int tid, int h);
 void     kpipe_assign_in(int tid, int h);
+/* Ring0 FIFO accessors mirroring the SYS_PIPE_WRITE / SYS_PIPE_READ paths
+ * (same static pipes, same blocking semantics): no user-pointer copy or
+ * validation.  Used by the heavy bench scenarios; do not call from ISR. */
+int      kpipe_write(int h, const void *data, int len);
+int      kpipe_read(int h, void *buf, int max);
+void     kpipe_close_write(int h);
+void     kpipe_close_read(int h);
+/* Number of task_sleep_ticks() blockings across the pipe helpers since boot. */
+uint32_t kpipe_sleeps(void);
+/* perf(pipe): TSC cycles spent blocked waiting on the FIFO (wakeup latency
+ * included) and cycles spent in FIFO byte copy, accumulated since boot. */
+uint64_t kpipe_wait_cycles(void);
+uint64_t kpipe_copy_cycles(void);
 
 #endif

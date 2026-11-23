@@ -29,6 +29,9 @@
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
+#ifdef CATOS_BENCH
+#include "perf.h"    /* perf_now(): bench-only rdtsc split timing */
+#endif
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -112,6 +115,49 @@ static char e3_pr_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_READ snapshot  */
 static char e3_ur_buf[MAX_TASKS][E3_UR_MAX];    /* SYS_NET_UDP_RECV payload*/
 static char e3_ur_ip[MAX_TASKS][24];            /* SYS_NET_UDP_RECV ip     */
 
+#ifdef CATOS_BENCH
+/* ---- spawn/exit sub-step profiling (bench diagnostics only) ------------
+ * Accumulators split the wait_child() exit window into: child ring3 +
+ * syscalls until SYS_EXIT, each task_cleanup() sub-step, the parent wake,
+ * and the parent-side block->wake wait.  Read out one [perf] line per exit.
+ */
+static uint64_t g_sp_resume_tsc[MAX_TASKS];
+static struct {
+    uint64_t user;        /* child switched-in -> SYS_EXIT entry            */
+    uint64_t cleanup;     /* whole task_cleanup()                           */
+    uint64_t cr3;         /* switch CR3 back to kdir                        */
+    uint64_t destroy;     /* task_space_destroy()                           */
+    uint64_t vma;         /* VMA node list free                             */
+    uint64_t pipe;        /* pipe_task_cleanup()                            */
+    uint64_t console;     /* console release                                */
+    uint64_t banner;      /* exit banner vga_write                          */
+    uint64_t wake;        /* autoreap + parent wake                         */
+    uint64_t wait_parent; /* parent: task_wait_child block -> wake          */
+    uint64_t sys[64];     /* per-syscall kernel time (ring3 callers only)   */
+    uint64_t wr_copy;     /* SYS_WRITE: user-string snapshot phase          */
+    uint64_t wr_paint;    /* SYS_WRITE: console / ring output phase         */
+    uint32_t exits;
+} g_sp;
+extern uint64_t g_sp_pt_free, g_sp_pt2_free, g_sp_tab_free;
+extern uint32_t g_sp_frames;
+extern uint64_t g_sp_scroll_cycles;
+extern uint32_t g_sp_scroll_calls, g_sp_scroll_bytes;
+
+/* Light-axis syscall kernel-segment probe.  Armed only by bench_light.c
+ * around the ring3 benchrt probe; production builds omit this entirely.
+ * Bucket map mirrors extapp/benchrt.c:
+ *   0 = SYS_GETTID (nr 34), 1 = SYS_WRITE (nr 0), 2 = SYS_FILE_READ (nr 39).
+ * perf_sc_kern[k] = summed rdtsc delta from dispatcher entry to return,
+ * i.e. the kernel handler segment only (trap/iret live outside this span). */
+int      perf_sc_collect = 0;
+uint64_t perf_sc_kern[3] = {0, 0, 0};
+uint32_t perf_sc_count[3] = {0, 0, 0};
+/* file_read syscall boundary segments: pre = u2k_str + validate_uaddr +
+ * perm check; copyout = copy_to_user back to the caller.  The middle
+ * fs_read_at body is split out in fs.c (perf_fs_resolve/chain/ide/mem). */
+uint64_t perf_fr_pre = 0, perf_fr_copyout = 0;
+#endif
+
 static void idle_main(void);
 
 task_t *task_current(void) { return cur_task; }
@@ -186,6 +232,10 @@ static task_t *pick_ready(void) {
 static void schedule_to(task_t *next) {
     task_t *prev = cur_task;
     cur_task = next;
+#ifdef CATOS_BENCH
+    if (next->tid >= 0 && next->tid < MAX_TASKS)
+        g_sp_resume_tsc[next->tid] = perf_now();
+#endif
     next->state = T_RUNNING;
     if (next->ring0 || !next->resume_frame) {
         prev->resume_frame = 0;          /* cooperative frame */
@@ -373,15 +423,34 @@ static void task_cleanup(task_t *t) {
     /* free the user address space (safe: t never runs again).  We may be
      * running on the dying task's kernel stack - only its USER frames are
      * freed here; the kernel stack is reused when the slot respawns. */
+#ifdef CATOS_BENCH
+    uint64_t _ca = perf_now();
+#endif
     cpu_cr3_write(paging_kdir());         /* never walk a dying directory */
+#ifdef CATOS_BENCH
+    uint64_t _cb = perf_now(); g_sp.cr3 += _cb - _ca;
+#endif
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
+#ifdef CATOS_BENCH
+    uint64_t _cc = perf_now(); g_sp.destroy += _cc - _cb;
+#endif
     /* Free the VMA list nodes (each node is a kzalloc_frame'd block;
      * the actual pages mapped inside them are freed via task_space_destroy). */
     while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
+#ifdef CATOS_BENCH
+    uint64_t _cd = perf_now(); g_sp.vma += _cd - _cc;
+#endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
+#ifdef CATOS_BENCH
+    uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
+#endif
     if (console_owner_tid() == t->tid) console_wake_release(t->tid);
+#ifdef CATOS_BENCH
+    uint64_t _cf = perf_now(); g_sp.console += _cf - _ce;
+    g_sp.cleanup += _cf - _ca;
+#endif
 }
 
 /* #180: release the VMA node list.  task_space_destroy frees the mapped
@@ -415,11 +484,22 @@ void task_die_fault(int_frame_t *f) {
 
 void task_exit_current(int code) {
     task_t *t = cur_task;
+#ifdef CATOS_BENCH
+    uint64_t _e0 = perf_now();
+    if (t->tid >= 0 && t->tid < MAX_TASKS)
+        g_sp.user += _e0 - g_sp_resume_tsc[t->tid];
+#endif
     task_cleanup(t);
     t->exit_code = code;
     t->state = T_ZOMBIE;
+#ifdef CATOS_BENCH
+    uint64_t _e1 = perf_now();
+#endif
     w("[task "); wdec(t->tid); w(" '"); w(t->name); w("' exit(");
     wdec(code); w(")]\n");
+#ifdef CATOS_BENCH
+    uint64_t _e2 = perf_now(); g_sp.banner += _e2 - _e1;
+#endif
     /* v2.52 fix: reap BEFORE waking the parent.  Waking first flipped the
      * parent to T_READY, so maybe_autoreap() saw "nobody waits" and reaped
      * the zombie out from under a shell blocked in task_wait_child*(),
@@ -428,6 +508,47 @@ void task_exit_current(int code) {
     if (t->parent && t->parent->state == T_WAIT_CHILD) {
         t->parent->state = T_READY;
     }
+#ifdef CATOS_BENCH
+    uint64_t _e3 = perf_now(); g_sp.wake += _e3 - _e2;
+    g_sp.exits++;
+    {
+        static uint64_t s_user=0, s_cleanup=0, s_destroy=0, s_wake=0,
+            s_wait=0, s_wr=0, s_time=0, s_alloc=0, s_free=0,
+            s_copy=0, s_paint=0, s_scy=0;
+        static uint32_t s_frames=0, s_scall=0, s_sbytes=0;
+        perf_begin("spawn.exit");
+        perf_kv("tid", (uint32_t)t->tid);
+        perf_kv64("user", g_sp.user - s_user);
+        perf_kv64("cleanup", g_sp.cleanup - s_cleanup);
+        perf_kv64("destroy", g_sp.destroy - s_destroy);
+        perf_kv64("wake", g_sp.wake - s_wake);
+        perf_kv64("wait", g_sp.wait_parent - s_wait);
+        perf_kv("frames", g_sp_frames - s_frames);
+        perf_end();
+        perf_begin("spawn.sys");
+        /* enum order (defined below): WRITE=0 TIME_STR=4 ALLOC=11 FREE=12 */
+        perf_kv64("wr", g_sp.sys[0] - s_wr);
+        perf_kv64("copy", g_sp.wr_copy - s_copy);
+        perf_kv64("paint", g_sp.wr_paint - s_paint);
+        perf_kv64("time", g_sp.sys[4] - s_time);
+        perf_kv64("alloc", g_sp.sys[11] - s_alloc);
+        perf_kv64("free", g_sp.sys[12] - s_free);
+        perf_end();
+        s_user=g_sp.user; s_cleanup=g_sp.cleanup; s_destroy=g_sp.destroy;
+        s_wake=g_sp.wake; s_wait=g_sp.wait_parent;
+        s_wr=g_sp.sys[0]; s_time=g_sp.sys[4];
+        s_alloc=g_sp.sys[11]; s_free=g_sp.sys[12];
+        s_copy=g_sp.wr_copy; s_paint=g_sp.wr_paint;
+        perf_begin("spawn.scroll");
+        perf_kv64("cyc", g_sp_scroll_cycles - s_scy);
+        perf_kv("calls", g_sp_scroll_calls - s_scall);
+        perf_kv("bytes", g_sp_scroll_bytes - s_sbytes);
+        perf_end();
+        s_scy=g_sp_scroll_cycles; s_scall=g_sp_scroll_calls;
+        s_sbytes=g_sp_scroll_bytes;
+        s_frames=g_sp_frames;
+    }
+#endif
     reschedule();
     __builtin_unreachable();
 }
@@ -452,9 +573,15 @@ int task_kill(int tid, int by_uid) {
 }
 
 void task_wait_child(task_t *child) {
+#ifdef CATOS_BENCH
+    uint64_t _w0 = perf_now();
+#endif
     while (child->state == T_ZOMBIE || child->state == T_UNUSED ? 0 : 1)
         task_block(T_WAIT_CHILD);
     child->state = T_UNUSED;              /* reaped */
+#ifdef CATOS_BENCH
+    g_sp.wait_parent += perf_now() - _w0;
+#endif
 }
 
 /* v2.52: wait until the child exits (reaped, 0) or stops (1).  A stopped
@@ -1045,6 +1172,8 @@ typedef struct {
     uint16_t head, tail, len;
     uint8_t  open_w, open_r;
     uint8_t  used;
+    task_t  *wait_r;      /* reader blocked waiting for data   */
+    task_t  *wait_w;      /* writer blocked waiting for space  */
 } pipe_t;
 static pipe_t pipes[PIPE_MAX];
 
@@ -1055,20 +1184,24 @@ static pipe_t *pipe_by_handle(int h) {
     return pipes[idx].used ? &pipes[idx] : 0;
 }
 
+static void pipe_wake_reader(pipe_t *pp);
+static void pipe_wake_writer(pipe_t *pp);
+
 static void pipe_task_cleanup(task_t *t) {
     if (t->out_pipe >= 0) {
         pipe_t *p = pipe_by_handle(t->out_pipe);
-        if (p) p->open_w = 0;
+        if (p) { p->open_w = 0; pipe_wake_reader(p); }
         t->out_pipe = -1;
     }
     if (t->in_pipe >= 0) {
         pipe_t *p = pipe_by_handle(t->in_pipe);
-        if (p) p->open_r = 0;
+        if (p) { p->open_r = 0; pipe_wake_writer(p); }
         t->in_pipe = -1;
     }
     for (int i = 0; i < PIPE_MAX; i++)
         if (pipes[i].used && !pipes[i].open_w && !pipes[i].open_r) {
             pipes[i].used = 0; pipes[i].len = 0;
+            pipes[i].wait_r = 0; pipes[i].wait_w = 0;
         }
 }
 
@@ -1092,6 +1225,120 @@ void kpipe_assign_out(int tid, int h) {
 void kpipe_assign_in(int tid, int h) {
     task_t *t = task_by_tid(tid);
     if (t) t->in_pipe = h;
+}
+
+/* Ring0 pipe block counters: every blocking wait inside the FIFO helpers
+ * increments g_pipe_sleeps so the bench can report the sleep/wake share.
+ * g_pipe_wait_cycles accumulates TSC cycles spent blocked (wakeup latency
+ * included); g_pipe_copy_cycles accumulates cycles spent in the FIFO byte
+ * copy loops.  Both are zeroed nowhere; the bench snapshots deltas. */
+static uint32_t g_pipe_sleeps;
+static uint64_t g_pipe_wait_cycles;
+static uint64_t g_pipe_copy_cycles;
+uint32_t kpipe_sleeps(void) { return g_pipe_sleeps; }
+uint64_t kpipe_wait_cycles(void) { return g_pipe_wait_cycles; }
+uint64_t kpipe_copy_cycles(void) { return g_pipe_copy_cycles; }
+
+/* perf(pipe) block/wake primitives.  A blocked side parks on the peer's
+ * condition: the writer waits for free space, the reader waits for data.
+ * The peer signals after it appends bytes / drains bytes / closes its end.
+ *
+ * Scheduling: task_block() puts the caller in T_WAIT_PIPE and runs the
+ * normal round-robin pick_ready() -- other READY tasks keep being
+ * scheduled, the blocked task is not holding any lock and does not spin.
+ * Wakeup only flips the waiter back to T_READY; the peer keeps its own
+ * run until it blocks/yields/exits, so there is no direct handoff and no
+ * deadlock (a writer blocks only when full, a reader only when empty, so
+ * the two can never wait on each other simultaneously). */
+static void pipe_wake_reader(pipe_t *pp) {
+    task_t *w = pp->wait_r;
+    if (!w) return;
+    pp->wait_r = 0;
+    if (w->state == T_WAIT_PIPE) w->state = T_READY;
+}
+
+static void pipe_wake_writer(pipe_t *pp) {
+    task_t *w = pp->wait_w;
+    if (!w) return;
+    pp->wait_w = 0;
+    if (w->state == T_WAIT_PIPE) w->state = T_READY;
+}
+
+static void pipe_wait_writer(pipe_t *pp) {
+    g_pipe_sleeps++;
+    uint64_t t0 = perf_now();
+    pp->wait_w = cur_task;
+    task_block(T_WAIT_PIPE);
+    g_pipe_wait_cycles += perf_now() - t0;
+    pp->wait_w = 0;
+}
+
+static void pipe_wait_reader(pipe_t *pp) {
+    g_pipe_sleeps++;
+    uint64_t t0 = perf_now();
+    pp->wait_r = cur_task;
+    task_block(T_WAIT_PIPE);
+    g_pipe_wait_cycles += perf_now() - t0;
+    pp->wait_r = 0;
+}
+
+int kpipe_write(int h, const void *data, int len) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp || len < 0) return -1;
+    const uint8_t *ud = (const uint8_t *)data;
+    int wrote = 0;
+    while (wrote < len) {
+        if (!pp->open_r) return -1;                 /* reader gone */
+        int free = PIPE_BUF - 1 - pp->len;
+        if (free <= 0) { pipe_wait_writer(pp); continue; }
+        int n = len - wrote; if (n > free) n = free;
+        uint64_t c0 = perf_now();
+        for (int k = 0; k < n; k++) {
+            pp->buf[pp->tail] = ud[wrote + k];
+            pp->tail = (uint16_t)((pp->tail + 1) % PIPE_BUF);
+        }
+        g_pipe_copy_cycles += perf_now() - c0;
+        pp->len = (uint16_t)(pp->len + n);
+        wrote += n;
+        pipe_wake_reader(pp);
+    }
+    return 0;
+}
+
+int kpipe_read(int h, void *buf, int max) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp || max < 0) return -1;
+    uint8_t *ub = (uint8_t *)buf;
+    int got = 0;
+    while (got < max) {
+        while (pp->len == 0) {
+            if (!pp->open_w) return got;            /* writer closed = EOF */
+            pipe_wait_reader(pp);
+        }
+        uint64_t c0 = perf_now();
+        while (got < max && pp->len > 0) {
+            ub[got++] = pp->buf[pp->head];
+            pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
+            pp->len = (uint16_t)(pp->len - 1);
+        }
+        g_pipe_copy_cycles += perf_now() - c0;
+        pipe_wake_writer(pp);
+    }
+    return got;
+}
+
+void kpipe_close_write(int h) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp) return;
+    pp->open_w = 0;
+    pipe_wake_reader(pp);          /* EOF: unblock a reader waiting for data */
+}
+
+void kpipe_close_read(int h) {
+    pipe_t *pp = pipe_by_handle(h);
+    if (!pp) return;
+    pp->open_r = 0;
+    pipe_wake_writer(pp);          /* reader gone: unblock a full-pipe writer */
 }
 
 /* ---- the syscall dispatcher ---------------------------------------------- */
@@ -1175,6 +1422,10 @@ void isr_syscall(int_frame_t *f) {
      * preempt frame captured below. */
     t->resume_frame = 0;
     g_in_syscall++;
+#ifdef CATOS_BENCH
+    uint64_t _s0 = perf_now();        /* spawn axis: per-syscall accounting  */
+    uint64_t _sc_ent = perf_now();    /* light axis: dispatcher entry stamp  */
+#endif
 
     switch (nr) {
     case SYS_WRITE: {
@@ -1196,6 +1447,9 @@ void isr_syscall(int_frame_t *f) {
          * and reading past it would demand a page the caller never mapped. */
         while (total < SYS_WRITE_MAX && !done) {
             int i = 0;
+#ifdef CATOS_BENCH
+            uint64_t _w0 = perf_now();
+#endif
             while (i < SYS_WRITE_CHUNK) {
                 uint32_t a = (uint32_t)s + total + i;
                 uint32_t n = 4096u - (a & 0xFFFu);
@@ -1212,6 +1466,9 @@ void isr_syscall(int_frame_t *f) {
                 i += k;
                 if (done) break;
             }
+#ifdef CATOS_BENCH
+            uint64_t _w1 = perf_now(); g_sp.wr_copy += _w1 - _w0;
+#endif
             if (err || !i) break;
             /* v2.5 redirection: pipe target first, then file, else console */
             if (t->out_pipe >= 0) {
@@ -1221,7 +1478,7 @@ void isr_syscall(int_frame_t *f) {
                 while (wrote < i) {
                     if (!pp->open_r) { err = -1; break; }
                     int free = PIPE_BUF - 1 - pp->len;
-                    if (free <= 0) { task_sleep_ticks(1); continue; }
+                    if (free <= 0) { pipe_wait_writer(pp); continue; }
                     int n = i - wrote; if (n > free) n = free;
                     for (int k = 0; k < n; k++) {
                         pp->buf[pp->tail] = b[wrote + k];
@@ -1229,6 +1486,7 @@ void isr_syscall(int_frame_t *f) {
                     }
                     pp->len = (uint16_t)(pp->len + n);
                     wrote += n;
+                    pipe_wake_reader(pp);
                 }
                 if (err) break;
             } else if (t->out_file[0]) {
@@ -1246,6 +1504,9 @@ void isr_syscall(int_frame_t *f) {
                 if (t->bg_mode) task_log_append(t, b, (uint32_t)i);
                 else            vga_write_n(b, i, done);
             }
+#ifdef CATOS_BENCH
+            g_sp.wr_paint += perf_now() - _w1;
+#endif
             total += (uint32_t)i;
         }
         /* Hit the cap without a NUL: close any dangling UTF-8 sequence
@@ -1279,12 +1540,13 @@ void isr_syscall(int_frame_t *f) {
             for (;;) {
                 while (pp->len == 0) {
                     if (!pp->open_w) break;          /* writer closed = EOF */
-                    task_sleep_ticks(1);
+                    pipe_wait_reader(pp);
                 }
                 if (pp->len == 0) break;
                 char c = pp->buf[pp->head];
                 pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
                 pp->len = (uint16_t)(pp->len - 1);
+                pipe_wake_writer(pp);
                 b[bi++] = c;
                 if (c == '\n' || bi >= max - 1) break;
             }
@@ -1626,6 +1888,9 @@ void isr_syscall(int_frame_t *f) {
     case SYS_FILE_READ: {
         char p[FS_PATH_MAX];
         char *fbuf = e3_fr_buf[t->tid];
+#ifdef CATOS_BENCH
+        uint64_t _fp0 = perf_now();
+#endif
         if (u2k_str(p, (const char *)a1, sizeof(p)) != 0) { ret = (uint32_t)-3; break; }
         int max = (int)a3; if (max > 16384) max = 16384; if (max <= 0) { ret = (uint32_t)-3; break; }
         int off = (int)a4; if (off < 0) off = 0;
@@ -1634,11 +1899,20 @@ void isr_syscall(int_frame_t *f) {
          * full span, then copy through the task's page tables. */
         if (validate_uaddr(t, a2, (uint32_t)max) != 0) { ret = (uint32_t)-3; break; }
         if (fs_perm_check(p, uid, gid, PERM_READ) != 0) { ret = (uint32_t)-13; break; }
+#ifdef CATOS_BENCH
+        perf_fr_pre += perf_now() - _fp0;
+#endif
         int n = fs_read_at(p, fbuf, off, max);
         if (n < 0) { ret = (uint32_t)-1; break; }
+#ifdef CATOS_BENCH
+        uint64_t _fc0 = perf_now();
+#endif
         if (n > 0 && copy_to_user(t, (char *)a2, fbuf, (uint32_t)n) != 0) {
             ret = (uint32_t)-3; break;
         }
+#ifdef CATOS_BENCH
+        perf_fr_copyout += perf_now() - _fc0;
+#endif
         ret = (uint32_t)n;
         break;
     }
@@ -1712,7 +1986,7 @@ void isr_syscall(int_frame_t *f) {
         while (wrote < len) {
             if (!pp->open_r) { perr = -1; break; }       /* reader gone */
             int free = PIPE_BUF - 1 - pp->len;
-            if (free <= 0) { task_sleep_ticks(1); continue; }
+            if (free <= 0) { pipe_wait_writer(pp); continue; }
             int n = len - wrote; if (n > free) n = free;
             for (int k = 0; k < n; k++) {
                 pp->buf[pp->tail] = ud[wrote + k];
@@ -1720,6 +1994,7 @@ void isr_syscall(int_frame_t *f) {
             }
             pp->len = (uint16_t)(pp->len + n);
             wrote += n;
+            pipe_wake_reader(pp);
         }
         ret = perr ? (uint32_t)perr : 0;
         break;
@@ -1736,12 +2011,13 @@ void isr_syscall(int_frame_t *f) {
         for (;;) {
             while (pp->len == 0) {
                 if (!pp->open_w) goto pipe_rd_done;    /* writer closed = EOF */
-                task_sleep_ticks(1);
+                pipe_wait_reader(pp);
             }
             if (got >= max) break;
             prb[got++] = pp->buf[pp->head];
             pp->head = (uint16_t)((pp->head + 1) % PIPE_BUF);
             pp->len = (uint16_t)(pp->len - 1);
+            pipe_wake_writer(pp);
             if (pp->len == 0) break;    /* drained what we have: return now */
         }
     pipe_rd_done:
@@ -1758,7 +2034,12 @@ void isr_syscall(int_frame_t *f) {
         if (t->out_pipe == (int)a1) { pp->open_w = 0; t->out_pipe = -1; }
         else if (t->in_pipe == (int)a1) { pp->open_r = 0; t->in_pipe = -1; }
         else { pp->open_w = 0; pp->open_r = 0; }
-        if (!pp->open_w && !pp->open_r) { pp->used = 0; pp->len = 0; }
+        pipe_wake_reader(pp);
+        pipe_wake_writer(pp);
+        if (!pp->open_w && !pp->open_r) {
+            pp->used = 0; pp->len = 0;
+            pp->wait_r = 0; pp->wait_w = 0;
+        }
         ret = 0;
         break;
     }
@@ -1972,6 +2253,24 @@ void isr_syscall(int_frame_t *f) {
     }
     default: ret = (uint32_t)-8; break;
     }
+#ifdef CATOS_BENCH
+    if (!t->ring0 && nr < 64) g_sp.sys[nr] += perf_now() - _s0;
+#endif
+
+#ifdef CATOS_BENCH
+    /* light axis: kernel handler segment, entry -> just before return.
+     * Only the three probed nr are bucketed; every other syscall is ignored. */
+    if (perf_sc_collect) {
+        int _k = -1;
+        if (nr == 34u) _k = 0;            /* SYS_GETTID  */
+        else if (nr == 0u) _k = 1;        /* SYS_WRITE   */
+        else if (nr == 39u) _k = 2;       /* SYS_FILE_READ */
+        if (_k >= 0) {
+            perf_sc_kern[_k] += perf_now() - _sc_ent;
+            perf_sc_count[_k]++;
+        }
+    }
+#endif
 
     f->eax = ret;
     g_in_syscall--;

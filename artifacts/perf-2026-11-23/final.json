@@ -1,0 +1,112 @@
+{
+ "final": {
+  "shell.cmd.1": {
+   "fields": {
+    "cycles": 87311250,
+    "mhz": 2337,
+    "count": 50,
+    "kind": 1
+   },
+   "n": 3
+  },
+  "shell.cmd.2": {
+   "fields": {
+    "cycles": 4186111410,
+    "mhz": 2337,
+    "count": 50,
+    "kind": 2
+   },
+   "n": 3
+  },
+  "shell.cmd.3": {
+   "fields": {
+    "cycles": 266927622,
+    "mhz": 2337,
+    "count": 50,
+    "kind": 3
+   },
+   "n": 3
+  },
+  "spawn.one": {
+   "all_per_call": 24301290.0,
+   "steady_per_call": 26778648,
+   "n": 36
+  },
+  "syscall.rtt": {
+   "fields": {
+    "spawn_rc": 0,
+    "cycles": 16660644,
+    "mhz": 2337,
+    "count": 500,
+    "kind": 1
+   },
+   "n": 9
+  },
+  "syscall.kernel": {
+   "fields": {
+    "cycles": 15510222,
+    "mhz": 2337,
+    "count": 500,
+    "kind": 1
+   },
+   "n": 9
+  },
+  "login.verify": {
+   "fields": {
+    "cycles": 754806,
+    "mhz": 2337,
+    "count": 50
+   },
+   "n": 3
+  },
+  "login.hash": {
+   "fields": {
+    "cycles": 344084,
+    "mhz": 2337,
+    "count": 50
+   },
+   "n": 3
+  },
+  "gfx.frame": {
+   "fields": {
+    "cycles": 45076304,
+    "cycles_glyph": 35165338,
+    "cycles_flush": 9910966,
+    "mhz": 2336,
+    "frames": 6
+   },
+   "n": 3
+  },
+  "gfx.char": {
+   "fields": {
+    "cycles": 11071944,
+    "cycles_fetch": 157950,
+    "mhz": 2336,
+    "count": 2000
+   },
+   "n": 3
+  },
+  "pipe.tput": {
+   "fields": {
+    "cycles": 6447818,
+    "wt": 6021626,
+    "cp": 1934998,
+    "mhz": 2336,
+    "bytes": 65536
+   },
+   "n": 3
+  },
+  "disk.seq": {
+   "fields": {
+    "cycles": 638168284,
+    "cycles_wait": 250653624,
+    "cycles_xfer": 421276232,
+    "mhz": 2337,
+    "bytes": 4194304
+   },
+   "n": 3
+  }
+ },
+ "boot_host_ms": 727.4,
+ "boot_guest_s9_ms": 280
+}

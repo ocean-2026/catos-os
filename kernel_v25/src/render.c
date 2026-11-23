@@ -1374,6 +1374,7 @@ int con_get_mode(void) { return be->mode; }
 int con_cols(void)     { return cols; }
 int con_rows(void)     { return rows; }
 const char *con_backend_name(void) { return be->name; }
+struct render_be *con_backend(void) { return be; }
 const char *con_mode_name(int m) {
     if (m == CON_MODE_TEXT) return "text";
     if (m == CON_MODE_GFX)  return "graphics (8bpp indexed)";

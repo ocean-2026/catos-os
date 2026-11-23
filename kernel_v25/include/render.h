@@ -177,6 +177,10 @@ int         con_cols(void);
 int         con_rows(void);
 int         con_info(int what);
 const char *con_backend_name(void);
+struct render_be;
+/* Bench/introspection only: raw back-end pointer.  Do not bypass the
+ * front-end dirty tracker from normal shell/CE paths. */
+struct render_be *con_backend(void);
 const char *con_mode_name(int mode);
 
 /*
