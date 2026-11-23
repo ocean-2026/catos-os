@@ -216,22 +216,24 @@ void gui_menu_open(void) {
     if (menu_open) return;
     block_id root_id = gui_root_block()->id;
 
-    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 24, 0);
+    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 0, 0);
     menu.pad_l = 4; menu.pad_r = 4; menu.pad_t = 4; menu.pad_b = 4; menu.gap = 2;
     menu_root = b_column(root_id, &menu);
-    btable_get(menu_root)->x = 8;
-    btable_get(menu_root)->y = 400;
+    block *mr = btable_get(menu_root);
+    mr->x = 8;
+    mr->y = 400;
+    mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
 
     block_id wins[32];
     int n = menu_collect(wins, 32);
+    static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
     for (int i = 0; i < n; i++) {
         blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 0);
         row.on_click = on_menu_row;
         row.z = (int32_t)wins[i];
         block_id rid = b_row(menu_root, &row);
-        char lbl[24];
-        id_label(wins[i], lbl);
-        b_text(rid, 0, lbl);
+        id_label(wins[i], menu_labels[i]);
+        b_text(rid, 0, menu_labels[i]);
     }
 
     blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 0);
@@ -532,7 +534,6 @@ void gui_probe_menu(void) {
 
     gui_menu_open();
     layout_run();
-
     int overlay = 0;
     for (uint32_t id = 1; id <= btable_capacity(); id++) {
         block *b = btable_get(id);
