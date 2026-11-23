@@ -24,6 +24,7 @@
 #include "ata.h"
 #include "gfx24.h"
 #include "render.h"
+#include "render_be.h"
 #include "fs.h"
 #include "intr.h"
 #include "io.h"
@@ -105,6 +106,40 @@ static void bench_gfx(void) {
     perf_kv("rows", (uint32_t)rows);
     perf_kv("mhz", perf_mhz());
     perf_end();
+
+    /* ---- single-character micro-bench: glyph fetch vs full cell paint ---- */
+    struct render_be *be = con_backend();
+    if (be && be->draw_cell) {
+        const int CN = 2000;
+        con_cell_t cc;
+        cc.cp = 'x';
+        cc.fg = 0xDCDCDCu; cc.bg = 0x0C0C0Cu;
+        cc.fg_idx = 7; cc.bg_idx = 0;
+        cc.attrs = 0; cc.flags = CELL_F_SINGLE; cc.gslot = CELL_GSLOT_NONE;
+
+        /* glyph table lookup only */
+        uintptr_t sink = 0;
+        uint64_t a = perf_now();
+        for (int i = 0; i < CN; i++)
+            sink ^= (uintptr_t)render_font_glyph((unsigned char)cc.cp);
+        uint64_t b = perf_now();
+        uint64_t t_fetch = b - a;
+
+        /* full back-end cell paint: resolve colors + bg fill + ink raster */
+        a = perf_now();
+        for (int i = 0; i < CN; i++)
+            be->draw_cell(3, 3, &cc);
+        b = perf_now();
+        uint64_t t_draw = b - a;
+        (void)sink;
+
+        perf_begin("gfx.char");
+        perf_kv64("cycles", t_draw);
+        perf_kv("count", (uint32_t)CN);
+        perf_kv64("cycles_fetch", t_fetch);
+        perf_kv("mhz", perf_mhz());
+        perf_end();
+    }
 }
 
 /* =========================================================================

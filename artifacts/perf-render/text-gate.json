@@ -1,0 +1,8 @@
+{
+ "ready": true,
+ "panic": false,
+ "apps_echoed": [],
+ "screen_tail": " text: back to 80x25 text mode (CJK via dynamic font slots) root@catos:/# root@catos:/# ls /bin ls: no FAT32 volume (run 'format' first) root@catos:/# ",
+ "ok": true,
+ "text_rendered": true
+}

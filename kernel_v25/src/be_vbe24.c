@@ -138,13 +138,28 @@ static uint32_t find_lfb(void) {
  * from the active device: BGR (Bochs 24bpp) or BGRX (SVGA II 32bpp).
  * The 4th byte is forced opaque: QEMU's x8r8g8b8 ignores it, real
  * VMware's ARGB path would otherwise treat the pixel as transparent. */
+/* v2.73 perf: the only machine seen in the bench/regress builds packs the
+ * 32bpp channel in the canonical B,G,R,X slot order; when the active layout
+ * matches that order we can store a whole pixel in one 32-bit write instead
+ * of three (or four) byte stores.  Any non-canonical channel mask falls back
+ * to the exact byte-indexed path, so output stays byte-for-byte identical. */
+static inline int layout_packed4(void) {
+    return g_stride == 4u && g_b == 0 && g_g == 1 && g_r == 2 && g_x == 3;
+}
+
 static inline void put3(int x, int y, uint32_t c) {
     volatile uint8_t *p = lfb + (uint32_t)y * g_pitch
                               + (uint32_t)x * g_stride;
-    p[g_b] = (uint8_t)(c);
-    p[g_g] = (uint8_t)(c >> 8);
-    p[g_r] = (uint8_t)(c >> 16);
-    if (g_stride == 4u) p[g_x] = 0xFFu;
+    uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
+    if (layout_packed4()) {
+        *(volatile uint32_t *)p = (uint32_t)b | ((uint32_t)g << 8)
+                                | ((uint32_t)r << 16) | (0xFFu << 24);
+    } else {
+        p[g_b] = b;
+        p[g_g] = g;
+        p[g_r] = r;
+        if (g_stride == 4u) p[g_x] = 0xFFu;
+    }
 }
 
 static int clip(int *x, int *y, int *w, int *h) {
@@ -158,6 +173,47 @@ static int clip(int *x, int *y, int *w, int *h) {
 static void fill(int x, int y, int w, int h, uint32_t c) {
     if (!lfb || !clip(&x, &y, &w, &h)) return;
     uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
+
+    if (layout_packed4()) {
+        /* 32bpp canonical layout: one u32 store per pixel. */
+        uint32_t px = (uint32_t)b | ((uint32_t)g << 8)
+                    | ((uint32_t)r << 16) | (0xFFu << 24);
+        for (int j = 0; j < h; j++) {
+            volatile uint32_t *p = (volatile uint32_t *)(lfb
+                + (uint32_t)(y + j) * g_pitch + (uint32_t)x * 4u);
+            for (int i = 0; i < w; i++) p[i] = px;
+        }
+        return;
+    }
+
+    if (g_stride == 3u) {
+        /* Bochs 24bpp, BGR bytes.  Pair two pixels: a u32 holds
+         * B0 G0 R0 B1 and a trailing u16 holds G1 R1, so two pixels go
+         * out in two stores instead of six byte stores.  Odd trailing
+         * pixel uses the exact byte path. */
+        uint32_t lo = (uint32_t)b | ((uint32_t)g << 8) | ((uint32_t)r << 16)
+                    | ((uint32_t)b << 24);
+        uint16_t hi = (uint16_t)(g | ((uint32_t)r << 8));
+        for (int j = 0; j < h; j++) {
+            volatile uint8_t *p = lfb + (uint32_t)(y + j) * g_pitch
+                                      + (uint32_t)x * 3u;
+            int i = 0;
+            for (; i + 2 <= w; i += 2) {
+                volatile uint32_t *q = (volatile uint32_t *)(p + (uint32_t)i * 3u);
+                *q = lo;
+                *(volatile uint16_t *)(p + (uint32_t)i * 3u + 4u) = hi;
+            }
+            for (; i < w; i++) {
+                p[(uint32_t)i * 3u]     = b;
+                p[(uint32_t)i * 3u + 1] = g;
+                p[(uint32_t)i * 3u + 2] = r;
+            }
+        }
+        return;
+    }
+
+    /* Generic fallback (non-canonical channel mask, stride != 3): the
+     * original byte-indexed stores, kept verbatim for output parity. */
     for (int j = 0; j < h; j++) {
         volatile uint8_t *p = lfb + (uint32_t)(y + j) * g_pitch
                                   + (uint32_t)x * g_stride;
@@ -303,8 +359,14 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
                 ((uint32_t)j * (uint32_t)w + (uint32_t)i) * 3u;
             volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
                                       + (uint32_t)dx * g_stride;
-            p[g_r] = s[0]; p[g_g] = s[1]; p[g_b] = s[2];
-            if (g_stride == 4u) p[g_x] = 0xFFu;   /* RGB24 -> device */
+            if (layout_packed4()) {
+                /* src is RGB24: R=s[0] G=s[1] B=s[2]; device BGRX. */
+                *(volatile uint32_t *)p = (uint32_t)s[2] | ((uint32_t)s[1] << 8)
+                    | ((uint32_t)s[0] << 16) | (0xFFu << 24);
+            } else {
+                p[g_r] = s[0]; p[g_g] = s[1]; p[g_b] = s[2];
+                if (g_stride == 4u) p[g_x] = 0xFFu;   /* RGB24 -> device */
+            }
         }
     }
 }
@@ -533,7 +595,14 @@ static int v24_scroll(int n, uint32_t bg_rgb) {
     }
     uint32_t shift = (uint32_t)n * ch * g_pitch;
     uint32_t keep   = (uint32_t)(be_vbe24.rows - n) * ch * g_pitch;
-    for (uint32_t i = 0; i < keep; i++)
+    /* Forward copy: source sits above the destination (shift > 0), so a
+     * low-to-high walk never overwrites a byte still to be read.  Move four
+     * bytes per dword where the framebuffer width permits, then a byte tail. */
+    uint32_t i = 0;
+    for (; i + 4u <= keep; i += 4u)
+        *(volatile uint32_t *)(lfb + i) =
+            *(volatile uint32_t *)(lfb + i + shift);
+    for (; i < keep; i++)
         lfb[i] = lfb[i + shift];
     fill(0, (be_vbe24.rows - n) * ch, GFX24_W, n * ch, bg_rgb);
     if (had) mc_save_and_draw(mc_x, mc_y);
