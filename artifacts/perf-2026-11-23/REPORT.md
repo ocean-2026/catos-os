@@ -77,7 +77,8 @@
 | E3 并发管道 + 恶意指针 | `python3 tests/e3_regress.py` | **2/2 PASS**（`PASS badptr` / `PASS conc`，`gate-e3.txt`） |
 | F11 场景一（`$C$`/权限/掩码） | `python3 artifacts/f11-passwd/s1_format_perms.py` | **9/9 PASS**（`gate-f11-s1.txt`） |
 
-生产构建产物：`kernel_v25/build/kernel.bin` **1,190,644 B**、`kernel_v25/catos.iso` **11,917,312 B**（sha256 前 8 位 `b064376e`）。
+生产构建产物（**合入 main 后的主树重建**，门禁即跑在该 ISO 上）：`kernel_v25/build/kernel.bin` **1,190,596 B**、`kernel_v25/catos.iso` **11,917,312 B**（sha256 前 8 位 `9f25f13b`）。
+集成工作树同名产物为 1,190,644 B / `b064376e`：同一 commit 两次构建的 48 B 差异来自符号表生成顺序（`symtab.inc` 由临时代码 PE 的 nm 输出生成），不影响门禁结论——三项门禁在主树产物上重跑，结果一致。
 注：生产构建仍编入 `bench_light.c`/`bench_heavy.c` 的场景代码（shell 入口已 `#ifdef CATOS_BENCH` 移除、不可达），相对基线 kernel.bin +48,408 B；若要彻底去掉，可整文件包 `#ifdef CATOS_BENCH`（本轮未做，避免影响已验证的 bench 构建）。
 
 ## 5. 未优化 / 做不动的方向（如实）
