@@ -28,6 +28,9 @@
 #include "crypto.h"   /* v2.76: SHA-256 for the .catpkg digest */      /* v2.59 generic console pager                    */
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
+#ifdef CATOS_BENCH
+#include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
+#endif
 #include "power.h"      /* v2.67 ACPI power-off (no APM INT 15h)            */
 #include "hivecmd.h"
 #include "posix.h"
@@ -6981,6 +6984,9 @@ void shell_run(void) {
     }
 
     kb_set_completer(sh_complete);        /* v2.28: TAB completion */
+#ifdef CATOS_BENCH
+    perf_boot_marker();                  /* "[boot] shell-ready" serial anchor */
+#endif
     btime_mark("S9 shell prompt ready");
 
     while (1) {
@@ -7307,6 +7313,10 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "cal"))        cmd_cal(arg);
         else if (!strcmp_(cmd, "yes"))        cmd_yes(arg);
         else if (!strcmp_(cmd, "about"))      cmd_about();
+#ifdef CATOS_BENCH
+        /* benchmark build only: rdtsc scenario runner (see bench/PERF_SPEC.md) */
+        else if (!strcmp_(cmd, "bench"))      bench_cmd(arg);
+#endif
         else if (!strcmp_(cmd, "autostart"))  boot_autostart();
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
         else if (!strcmp_(cmd, "date"))       cmd_date();
