@@ -1,0 +1,6 @@
+# host-side dump of crafted legacy /etc/passwd (pre-boot)
+root:0:0:/root:/bin/shell.ce:ffffffff:
+user:100:100:/home/user:/bin/shell.ce:2b:
+carol:103:103:/home/carol:/bin/shell.ce:0:$S$1122334455667788$2f299a2a44c03fa55c09353dcc0801f4
+dave:104:104:/home/dave:/bin/shell.ce:0:$S$0a0b0c0d$4d83b993
+erin:105:105:/home/erin:/bin/shell.ce:0:2610fdbb

@@ -1,0 +1,24 @@
+root@catos:/# whoami
+  root
+root@catos:/# lsuser
+  UID  GID  PW   CAPS      NAME
+  0000 0000 no   FFFFFFFF  root
+  0100 0100 no   0000002B  user
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

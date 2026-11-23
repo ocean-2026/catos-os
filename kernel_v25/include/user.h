@@ -59,10 +59,13 @@ typedef struct {
      *   "$S$<16hex salt>$<32hex>" = v2 salted iterated FNV-1a (v2.51),
      *                               128-bit digest (four 32-bit lanes),
      *                               64-bit salt, rounds configurable.
-     * NOT cryptographic -- no crypto primitives in the kernel; memory-hard
-     * schemes (Argon2/scrypt) are deferred by design.  The goal is to resist
-     * shoulder-surfing AND cheap offline dictionary scans. */
-    char     pw[64];
+     *   "$C$<16hex salt>$<64hex>"= v3 (F11) salted SHA-256: digest =
+     *                               SHA-256(salt_bytes[8] || password),
+     *                               256-bit digest, 64-bit salt.  All new
+     *                               and upgraded records use this scheme.
+     * Legacy v1/v2/djb2 records are kept only to verify old databases and
+     * are rewritten to "$C$" on the next successful login. */
+    char     pw[96];
     int      used;
 } user_rec_t;
 
@@ -92,6 +95,7 @@ uint32_t    user_hash_pw(const char *pw);       /* djb2, non-cryptographic     *
  * viewer / guest.  Returns 0 and fills *out, or -1 for an unknown name. */
 int         user_preset_caps(const char *preset, uint32_t *out);
 int         user_pw_is_set(const user_rec_t *u);/* non-empty password record    */
+int         user_db_dirty(void);                 /* unpersisted table changes    */
 void        user_pw_set_rec(user_rec_t *u, const char *pw); /* salt+store      */
 
 /* ---- v2.53 supplementary groups (persistent /etc/group) ----

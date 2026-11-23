@@ -1,0 +1,24 @@
+  text: back to 80x25 text mode (CJK via dynamic font slots)
+root@catos:/#
+root@catos:/# login alice AlicePass1
+  logged in as alice (uid 101)
+alice@catos:/$ whoami
+  alice
+alice@catos:/$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

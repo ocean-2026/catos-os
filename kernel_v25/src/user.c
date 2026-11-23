@@ -9,6 +9,7 @@
 #include "task.h"
 #include "fs.h"
 #include "rtc.h"
+#include "crypto.h"
 
 /* ---- tiny local string helpers (kernel has no libc) -------------------- */
 static int ustrlen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
@@ -207,56 +208,121 @@ static void pw_salt_gen(const user_rec_t *u, const char *pw,
     *hi = avalanche32(b);
 }
 
+/* F11 v3 helpers: hex byte <-> text and a constant-time equality check that
+ * never bails out on the first mismatching byte (no early-return timing
+ * oracle). */
+static void pw_emit_hex(const uint8_t *b, int n, char *out) {
+    for (int i = 0; i < n; i++) {
+        out[i * 2]     = PWHEX[(b[i] >> 4) & 0xFu];
+        out[i * 2 + 1] = PWHEX[b[i] & 0xFu];
+    }
+    out[n * 2] = 0;
+}
+
+static int pw_parse_hex(const char *s, uint8_t *out, int nbytes) {
+    for (int i = 0; i < nbytes; i++) {
+        int hi, lo;
+        char c = s[i * 2];
+        if (c >= '0' && c <= '9') hi = c - '0';
+        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
+        else return -1;
+        c = s[i * 2 + 1];
+        if (c >= '0' && c <= '9') lo = c - '0';
+        else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
+        else return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+static int pw_ct_eq(const uint8_t *a, const uint8_t *b, int n) {
+    uint8_t diff = 0;
+    for (int i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+/* v3 (F11): record = "$C$" + 16 hex salt (8 bytes) + '$' + 64 hex digest.
+ * digest = SHA-256(salt_bytes || password); salt is per-account/per-set, so
+ * two accounts with the same password never share a record. */
 void user_pw_set_rec(user_rec_t *u, const char *pw) {
     uint32_t sl, sh;
     pw_salt_gen(u, pw, &sl, &sh);
-    uint32_t d[4];
-    pw_hash128(pw ? pw : "", sl, sh, d);
-    /* record = "$S$" + 16 hex salt (lo+hi) + '$' + 32 hex digest (4 words).
-     * 3+16+1+32 = 52 chars + NUL; pw[] holds 64. */
-    u->pw[0] = '$'; u->pw[1] = 'S'; u->pw[2] = '$';
-    pw_emit32(sl, u->pw + 3);
-    pw_emit32(sh, u->pw + 11);
+    uint8_t salt[8];
+    salt[0] = (uint8_t)(sl >> 24); salt[1] = (uint8_t)(sl >> 16);
+    salt[2] = (uint8_t)(sl >> 8);   salt[3] = (uint8_t)sl;
+    salt[4] = (uint8_t)(sh >> 24); salt[5] = (uint8_t)(sh >> 16);
+    salt[6] = (uint8_t)(sh >> 8);  salt[7] = (uint8_t)sh;
+    const char *p = pw ? pw : "";
+    uint8_t dg[32];
+    sha256_2(dg, salt, 8, (const uint8_t *)p, (uint32_t)ustrlen(p));
+    u->pw[0] = '$'; u->pw[1] = 'C'; u->pw[2] = '$';
+    pw_emit_hex(salt, 8, u->pw + 3);
     u->pw[19] = '$';
-    for (int i = 0; i < 4; i++) pw_emit32(d[i], u->pw + 20 + i * 8);
-    u->pw[52] = 0;
+    pw_emit_hex(dg, 32, u->pw + 20);
+    u->pw[84] = 0;
 }
 
 int user_pw_is_set(const user_rec_t *u) {
     return u && u->pw[0] != 0;
 }
 
+/* F11: non-zero when the in-memory record table has changes not yet
+ * persisted (e.g. a transparent legacy->v3 password upgrade on login). */
+int user_db_dirty(void) {
+    return users_dirty;
+}
+
 int user_check_pw(user_rec_t *u, const char *pw) {
     if (!u) return -1;
     if (u->pw[0] == 0) return 0;               /* open account */
+    const char *p = pw ? pw : "";
+
+    if (u->pw[0] == '$' && u->pw[1] == 'C' && u->pw[2] == '$') {
+        /* v3: "$C$" + 16 hex salt + '$' + 64 hex digest, SHA-256(salt||pw) */
+        if (u->pw[19] != '$') return -1;
+        uint8_t salt[8], want[32], got[32];
+        if (pw_parse_hex(u->pw + 3, salt, 8) != 0) return -1;
+        if (pw_parse_hex(u->pw + 20, want, 32) != 0) return -1;
+        sha256_2(got, salt, 8, (const uint8_t *)p, (uint32_t)ustrlen(p));
+        return pw_ct_eq(got, want, 32) ? 0 : -1;
+    }
+
     if (u->pw[0] == '$' && u->pw[1] == 'S' && u->pw[2] == '$') {
         if (u->pw[19] == '$') {
-            /* v2: "$S$" + 16 hex salt + '$' + 32 hex digest */
+            /* v2: "$S$" + 16 hex salt + '$' + 32 hex digest.  Verify with the
+             * legacy 128-bit mix, then transparently upgrade to v3. */
             uint32_t s0, s1, w[4], d[4];
             if (pw_parse32(u->pw + 3, &s0) != 0 ||
                 pw_parse32(u->pw + 11, &s1) != 0) return -1;
             for (int i = 0; i < 4; i++)
                 if (pw_parse32(u->pw + 20 + i * 8, &w[i]) != 0) return -1;
-            pw_hash128(pw ? pw : "", s0, s1, d);
-            for (int i = 0; i < 4; i++) if (d[i] != w[i]) return -1;
+            pw_hash128(p, s0, s1, d);
+            uint32_t diff = 0;                    /* constant-time: no early out */
+            for (int i = 0; i < 4; i++) diff |= d[i] ^ w[i];
+            if (diff != 0) return -1;
+            user_pw_set_rec(u, pw);
+            users_dirty = 1;
             return 0;
         }
         if (u->pw[11] == '$') {
             /* v1: "$S$" + 8 hex salt + '$' + 8 hex digest.  Verify with the
-             * legacy 32-bit mix, then transparently upgrade to v2. */
+             * legacy 32-bit mix, then transparently upgrade to v3. */
             uint32_t salt, want;
             if (pw_parse32(u->pw + 3, &salt) != 0 ||
                 pw_parse32(u->pw + 12, &want) != 0) return -1;
-            if (pw_hash_salted32(pw ? pw : "", salt) != want) return -1;
+            uint32_t got = pw_hash_salted32(p, salt);
+            if ((got ^ want) != 0) return -1;
             user_pw_set_rec(u, pw);
             users_dirty = 1;
             return 0;
         }
         return -1;
     }
-    /* legacy bare-djb2 record: verify, then upgrade in place */
+    /* legacy bare-djb2 record: verify, then upgrade in place to v3 */
     uint32_t want = parse_uint(u->pw, 16);
-    if (user_hash_pw(pw) == want) {
+    if ((user_hash_pw(p) ^ want) == 0) {
         user_pw_set_rec(u, pw);
         users_dirty = 1;
         return 0;
@@ -382,6 +448,11 @@ int user_save(void) {
     buf[o] = 0;
     (void)fs_delete("/etc/passwd");
     if (fs_write_raw("/etc/passwd", buf, (uint32_t)o) != 0) return -1;
+    /* F11: the passwd file holds password digests.  It was delete+rewritten
+     * above; force a root:root 0600 ACL (acl_default would not override an
+     * existing entry) and persist it to /etc/acl. */
+    acl_set("/etc/passwd", UID_ROOT, 0, 0600);
+    acl_save();
     users_dirty = 0;
     return 0;
 }
@@ -440,7 +511,7 @@ void user_db_init(void) {
                 ucopy(u->home, fld[3], 48);
                 ucopy(u->shell, fld[4], 32);
                 u->caps = parse_uint(fld[5], 16);
-                ucopy(u->pw, fld[6], 64);
+                ucopy(u->pw, fld[6], 96);
                 /* #185: an open account is the explicit legacy marker "0"
                  * (or a valid all-zero hex word).  A field that cannot be
                  * parsed as hex (e.g. "xyz") used to be cleared here and
@@ -457,6 +528,12 @@ void user_db_init(void) {
         line = eol ? nl + 1 : 0;
     }
     if (restored == 0) user_seed_default();
+    /* F11: /etc/passwd is a credential store.  Re-assert the root:root
+     * 0600 ACL at load time (covers volumes whose old /etc/acl carried no
+     * entry or a weaker one) and persist it before acl_init() reloads
+     * /etc/acl into memory. */
+    acl_set("/etc/passwd", UID_ROOT, 0, 0600);
+    acl_save();
 }
 
 /* ---- access control list ---------------------------------------------- */
@@ -554,19 +631,23 @@ int acl_save(void) {
     return 0;
 }
 
+/* scratch/system defaults, inserted only when no entry exists yet (they
+ * never override a persisted /etc/acl record). */
+static void acl_seed_defaults(void) {
+    acl_default("/home",       UID_ROOT, 0, 0777);
+    acl_default("/tmp",        UID_ROOT, 0, 0777);
+    acl_default("/bin",        UID_ROOT, 0, 0755);
+    acl_default("/appdevelop", UID_ROOT, 0, 0755);
+    acl_default("/etc",        UID_ROOT, 0, 0755);
+    acl_default("/root",       UID_ROOT, 0, 0700);
+}
+
 void acl_init(void) {
     for (int i = 0; i < ACL_MAX; i++) acl_tab[i].used = 0;
     static char buf[4096];
     int n = fs_read_text("/etc/acl", buf, sizeof(buf));
     if (n <= 0) {
-        /* same defaults the old fs_perm_seed() established, now with
-         * group semantics: world-writable scratch + read-only system */
-        acl_set("/home",       UID_ROOT, 0, 0777);
-        acl_set("/tmp",        UID_ROOT, 0, 0777);
-        acl_set("/bin",        UID_ROOT, 0, 0755);
-        acl_set("/appdevelop", UID_ROOT, 0, 0755);
-        acl_set("/etc",        UID_ROOT, 0, 0755);
-        acl_set("/root",       UID_ROOT, 0, 0700);
+        acl_seed_defaults();
         acl_save();
         return;
     }
@@ -588,15 +669,11 @@ void acl_init(void) {
         }
         line = eol ? nl + 1 : 0;
     }
-    if (restored == 0) {
-        acl_set("/home", UID_ROOT, 0, 0777);
-        acl_set("/tmp", UID_ROOT, 0, 0777);
-        acl_set("/bin", UID_ROOT, 0, 0755);
-        acl_set("/appdevelop", UID_ROOT, 0, 0755);
-        acl_set("/etc", UID_ROOT, 0, 0755);
-        acl_set("/root", UID_ROOT, 0, 0700);
-        acl_save();
-    }
+    /* F11: persisted entries win, but any missing scratch/system default is
+     * back-filled here instead of being dropped on a volume that already
+     * had an /etc/acl file. */
+    acl_seed_defaults();
+    if (restored == 0 || acl_dirty) acl_save();
 }
 
 /* ---- the permission check used by every file syscall ------------------- */
