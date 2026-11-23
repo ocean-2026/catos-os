@@ -1,0 +1,6 @@
+  PASS C IME on -> bar visible                  -------------------------------------------------------------------------------- / [IME] on: 1-9 pick, Up/Down select, Space confirm
+  PASS C IME off -> bar gone                     / 
+  PASS A F2-off + scrolling command              / 
+  PASS B Esc-off + scrolling command             / 
+
+ALL PASS

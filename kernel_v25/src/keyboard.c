@@ -563,6 +563,12 @@ static void rl_redraw(int x0, int y0, uint8_t base) {
 
 int kb_readline(char *buf, int len) {
     if (len <= 0) return 0;
+    /* v2.81: one write-only repaint per command.  If a scroll while the last
+     * command printed parked some text one row off (same column), the grid
+     * entry is still correct so the dirty-cell cache would keep the wrong
+     * pixels forever; re-painting the grid makes the prompt-time screen
+     * authoritative again.  No clear() -> no flash. */
+    con_resync_frame();
     int x0 = 0, y0 = 0;
     con_get_cursor(&x0, &y0);
     rl_y0_adj = -1; rl_last_rows = 1;   /* v2.66: fresh anchor per line */

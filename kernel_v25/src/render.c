@@ -345,6 +345,29 @@ static void repaint_all(void) {
     sync_cursor(1);
 }
 
+/* v2.81: re-verify the frame when the shell comes back to the prompt.
+ *
+ * Every scroll moves pixels through the back-end (v24 memmove, text VRAM
+ * shift, or hardware pan) while the cell grid and the dirty tracker are
+ * shifted in step.  If ANY of those pixel moves does not land exactly where
+ * the grid expects -- a half-applied pan, a save/restore of the mouse sprite
+ * landing after the shift, a host-side update caught mid-copy -- the result
+ * is a text fragment sitting one row away from where it belongs, at the same
+ * column ("错误换行 / 仅行偏移" in the bug report).  It then sticks, because
+ * the grid entry itself is correct, so the dirty-cell cache keeps skipping
+ * that cell forever.
+ *
+ * One write-only full repaint per command makes the resting screen
+ * authoritative again.  No be->clear() is involved, so this cannot flash;
+ * cost is a single frame's worth of cell paints per command. */
+static uint32_t s_scroll_events;
+
+void con_resync_frame(void) {
+    if (!be || s_scroll_events == 0) return;
+    s_scroll_events = 0;
+    repaint_all();
+}
+
 /* Text mode rebuilds its 128 dynamic font slots whenever the set of visible
  * hanzi changes.  Only the wide cells can differ, so repaint just those:
  * a full-screen redraw for every typed Chinese character was the single
@@ -445,6 +468,7 @@ static void scroll_one(void) {
         repaint_all();
     }
     if (bar_was) con_status_bar_reapply();   /* pin the IME bar to the new bottom */
+    s_scroll_events++;                       /* v2.81: prompt-time re-verify */
 }
 
 /* Overwriting either half of a hanzi must erase BOTH halves. */

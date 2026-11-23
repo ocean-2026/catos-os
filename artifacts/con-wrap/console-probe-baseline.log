@@ -1,0 +1,15 @@
+host HTTP 127.0.0.1:8099, 8 cases, vga=vmware
+booting gfx24 (vmware) ...
+frame 800x600 -> grid 100x37
+-- c0: 9 rows compared, settled=True, diffs=0
+-- c1: 9 rows compared, settled=True, diffs=0
+-- c2: 16 rows compared, settled=True, diffs=0
+-- c3: 4 rows compared, settled=True, diffs=0
+-- c4: 36 rows compared, settled=True, diffs=0
+-- c5: 2 rows compared, settled=True, diffs=0
+-- c6: 11 rows compared, settled=True, diffs=0
+-- c7: 36 rows compared, settled=True, diffs=1
+   row 33
+     exp|XX
+     got| X
+== exit 1 ==

@@ -161,6 +161,10 @@ void        con_status_bar(const char *s);
 void        con_status_bar_off(void);
 void        con_status_bar_reapply(void);   /* v2.76: re-pin after a grid move */
 void        con_status_bar_forget(void);    /* v2.76: drop the bar text (IME off) */
+/* v2.81: if a scroll happened since the last call, re-paint the whole grid
+ * (write-only, no clear) so the resting screen cannot keep a text fragment
+ * that a mis-landed scroll left one row off.  Called at the shell prompt. */
+void        con_resync_frame(void);
 /* v2.25: transient bar on an ARBITRARY row (the pinyin IME puts its
  * candidate list directly BELOW the input line).  Only one bar at a
  * time; switching rows restores the previous bar's row verbatim. */
