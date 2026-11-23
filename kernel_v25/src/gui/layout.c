@@ -204,13 +204,15 @@ static void measure_dirty(block *b) {
     measure_node(b);
 }
 
-static void layout_dirty(block *b) {
-    if (!b) return;
-    if (!b->dirty_layout) return;
-    layout_node(b, b->x, b->y, b->w, b->h);
+static int layout_dirty(block *b) {
+    if (!b) return 0;
+    int dirty = b->dirty_layout;
     for (block *c = b->first_child; c; c = c->next_sibling)
-        layout_dirty(c);
+        if (layout_dirty(c)) dirty = 1;
+    if (!dirty) return 0;
+    layout_node(b, b->x, b->y, b->w, b->h);
     b->dirty_layout = 0;
+    return 1;
 }
 
 void layout_run(void) {

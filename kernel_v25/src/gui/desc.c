@@ -144,8 +144,13 @@ void gui_commit_desc(const blk_desc *d, int n) {
             if (dd->text) b->text = dd->text;
             if (dd->pix) { b->pix = dd->pix; b->pix_w = dd->pix_w; b->pix_h = dd->pix_h; }
         } else {
-            b = create_block(dd->kind, dd->parent, dd->spec);
+            b = btable_alloc_at(dd->kind, dd->id);
+            if (!b) b = btable_alloc(dd->kind);
             if (b) {
+                block *p = btable_get(dd->parent);
+                apply_spec(b, dd->spec);
+                tree_attach(p ? p : gui_root_block(), b);
+                b->dirty_layout = 1;
                 if (dd->text) b->text = dd->text;
                 if (dd->pix) { b->pix = dd->pix; b->pix_w = dd->pix_w; b->pix_h = dd->pix_h; }
             }

@@ -9,6 +9,7 @@
 /* btable.c */
 block    *btable_get(block_id id);
 block    *btable_alloc(blk_kind kind);
+block    *btable_alloc_at(blk_kind kind, block_id id);
 void      btable_free(block *b);
 void      btable_reset(void);
 uint32_t  btable_live(void);
@@ -20,6 +21,7 @@ void      tree_attach(block *parent, block *child);
 void      tree_detach(block *b);
 void      tree_free_subtree(block *b);
 uint32_t  tree_count_nodes(void);
+uint32_t  tree_count_subtree(block *b);
 void      tree_reset(void);
 
 /* compose.c */

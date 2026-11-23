@@ -20,6 +20,27 @@ block *btable_get(block_id id) {
     return b->id == id ? b : 0;
 }
 
+static void free_unlink(block *target) {
+    block **pp = &free_head;
+    while (*pp) {
+        if (*pp == target) { *pp = target->free_next; return; }
+        pp = &(*pp)->free_next;
+    }
+}
+
+/* 按描述里的显式 id 落槽；id 槽位被占用时返回 0，由调用方退到空闲链。 */
+block *btable_alloc_at(blk_kind kind, block_id id) {
+    if (id == 0 || id > GUI_MAX_BLOCKS) return 0;
+    block *b = &slots[id - 1];
+    if (b->id != 0) return 0;
+    free_unlink(b);
+    memset(b, 0, sizeof(*b));
+    b->id = id;
+    b->kind = kind;
+    n_live++;
+    return b;
+}
+
 block *btable_alloc(blk_kind kind) {
     block *b = 0;
     if (free_head) {

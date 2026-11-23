@@ -12,6 +12,8 @@
 #include "task.h"
 #include "kstring.h"
 
+static void geom_walk(block *b);
+
 static int strcmp_probe(const char *a, const char *b) {
     while (*a && *b) {
         if (*a != *b) return (unsigned char)*a - (unsigned char)*b;
@@ -161,6 +163,44 @@ void gui_probe_leak(void) {
     gui_end();
 }
 
+void gui_probe_dirty(void) {
+    gui_begin();
+    gui_root_block()->w = 800;
+    gui_root_block()->h = 600;
+
+    blk_spec col = spec_rect(LAYER_CONTENT, 0, 0, 0x26262Eu, 0xFFFFFFu, 0);
+    col.gap = 2;
+    col.pad_l = col.pad_r = col.pad_t = col.pad_b = 2;
+    block_id A = b_column(0, &col);
+    blk_spec leaf = spec_rect(LAYER_CONTENT, 60, 40, 0x333333u, 0xFFFFFFu, 1);
+    block_id a1 = b_rect(A, &leaf);
+    b_rect(A, &leaf);
+    block_id B = b_column(0, &col);
+    b_rect(B, &leaf);
+    b_rect(B, &leaf);
+
+    layout_run();
+
+    blk_spec ch = leaf;
+    ch.req_w = 120;
+    b_set_props(a1, &ch);
+    layout_run();
+
+    uint32_t measured = stat_layout_nodes();
+    uint32_t total = tree_count_nodes();
+    block *pa = btable_get(A);
+    uint32_t sub = tree_count_subtree(pa);
+
+    ser_write("GUI:dirty measured="); ser_dec(measured);
+    ser_write(" total="); ser_dec(total);
+    ser_write(" affected_subtree="); ser_dec(sub);
+    ser_write(" untouched="); ser_dec(total - sub - 1);
+    int ok = (measured <= sub + 1) && (measured < total);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    geom_walk(gui_root_block());
+    gui_end();
+}
+
 static void geom_walk(block *b) {
     ser_write("GUI:geom id="); ser_dec(b->id);
     ser_write(" kind="); ser_dec((uint32_t)b->kind);
@@ -190,6 +230,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "idem"))  { gui_probe_idempotent(); return; }
         if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return; }
         if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
+        if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
     }
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {

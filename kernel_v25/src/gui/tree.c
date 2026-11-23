@@ -54,6 +54,16 @@ void tree_free_subtree(block *b) {
 
 uint32_t tree_count_nodes(void) { return n_tree; }
 
+static uint32_t subtree_walk(block *b) {
+    if (!b) return 0;
+    uint32_t n = 1;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        n += subtree_walk(c);
+    return n;
+}
+
+uint32_t tree_count_subtree(block *b) { return subtree_walk(b); }
+
 void tree_reset(void) {
     while (root_node.first_child)
         tree_free_subtree(root_node.first_child);
