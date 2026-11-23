@@ -48,7 +48,14 @@ def main():
 
         t = run(sock, "lsuser", 1.2)
         print("alice lsuser:", t)
-        results.append(("nonroot-lsuser-mask", "*" in t and "$C$" not in t, t))
+        # screen_text returns scrollback too, so judge only the segment after
+        # the last `alice@catos:/$ lsuser` prompt (stale root output above it
+        # still contains $C$ records).
+        aseg = t[t.rfind("alice@catos:/$ lsuser"):]
+        results.append(("nonroot-lsuser-mask",
+                         "$C$" not in aseg and
+                         re.search(r"0101\s+0101\s+\*\s+00000000\s+alice", aseg) is not None,
+                         aseg))
         shot(sock, "s1_nonroot_lsuser_mask")
         dump_text(sock, "s1_nonroot_lsuser_mask")
 
@@ -62,9 +69,12 @@ def main():
         shot(sock, "s1_root_passwd_records")
         dump_text(sock, "s1_root_passwd_records")
 
-        records = re.findall(r"(\w+):[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(\$C\$[0-9a-f]{16}\$[0-9a-f]{64})", t)
-        print("records:", records)
-        digests = [r[1] for r in records]
+        # long $C$ records wrap at the 80-col screen edge, so flatten the
+        # segment after the command prompt before matching full digests.
+        rseg = t[t.rfind("root@catos:/# edit -c /etc/passwd"):]
+        flat = re.sub(r"\s+", "", rseg)
+        digests = re.findall(r"\$C\$[0-9a-f]{16}\$[0-9a-f]{64}", flat)
+        print("records:", digests)
         results.append(("root-sees-C-records", len(digests) >= 2, t))
         results.append(("salts-differ-same-pw",
                          len(digests) >= 2 and len(set(digests)) == len(digests),

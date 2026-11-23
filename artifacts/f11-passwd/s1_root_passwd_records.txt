@@ -1,16 +1,16 @@
-  text: back to 80x25 text mode (CJK via dynamic font slots)
-root@catos:/#
+  0100 0100 no   0000002B  user
+  0101 0101 *    00000000  alice
+  0102 0102 *    00000000  bob
+alice@catos:/$ login root
+  logged in as root (uid 0)
 root@catos:/# edit -c /etc/passwd
   root:0:0:/root:/bin/shell.ce:ffffffff:
   user:100:100:/home/user:/bin/shell.ce:2b:
-  alice:101:101:/home/alice:/bin/shell.ce:0:$C$2d7462dac3bdb296$002f5c031a6bba4f
-8e413be1e5872769a54e2978fa3e36c179a4e4b07274ae68
-  bob:102:102:/home/bob:/bin/shell.ce:0:$C$2d0dc4b8656ef1c2$8512a8c51759f54a84f8
-63f645ee0dad8a9568b2b9e8493e217610c12acf3231
+  alice:101:101:/home/alice:/bin/shell.ce:0:$C$399cd7e12d4c245c$afe7a23384c29c44
+6458d0104f47e5eca27f7f35db39ff815eb82dec6803760b
+  bob:102:102:/home/bob:/bin/shell.ce:0:$C$2fcd5fc801b14681$3ce5255677b43d3901b3
+666a6d85f7c1cacd6c598b11b17ca3ffb7bf92fd0493
 root@catos:/#
-
-
-
 
 
 
