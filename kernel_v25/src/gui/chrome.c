@@ -17,6 +17,9 @@
 static void geom_walk(block *b);
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly);
 
+static uint32_t s_idle_frame_tick;
+static int gui_idle_step(void);
+
 static int strcmp_probe(const char *a, const char *b) {
     while (*a && *b) {
         if (*a != *b) return (unsigned char)*a - (unsigned char)*b;
@@ -224,15 +227,15 @@ void gui_menu_open(void) {
     mr->y = 400;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
 
-    block_id wins[32];
-    int n = menu_collect(wins, 32);
+    block_id menu_ids[32];
+    int n = menu_collect(menu_ids, 32);
     static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
     for (int i = 0; i < n; i++) {
         blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 0);
         row.on_click = on_menu_row;
-        row.z = (int32_t)wins[i];
+        row.z = (int32_t)menu_ids[i];
         block_id rid = b_row(menu_root, &row);
-        id_label(wins[i], menu_labels[i]);
+        id_label(menu_ids[i], menu_labels[i]);
         b_text(rid, 0, menu_labels[i]);
     }
 
@@ -455,6 +458,29 @@ void gui_probe_rate(void) {
     gui_end();
 }
 
+/* 生产节流实测：走与空闲循环同一条 gui_idle_step 路径跑满 99 tick（≈1s），
+ * 不自行 sleep 3 tick 造节拍；帧计数应 ≈33（≤33），同 tick 重复提交为 0。 */
+void gui_probe_idle(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    s_idle_frame_tick = timer_ticks - 3;   /* 首帧立即提交 */
+    uint32_t t0 = timer_ticks;
+    while (timer_ticks - t0 < 99) {
+        gui_idle_step();
+        task_sleep_ticks(1);
+    }
+    uint32_t frames = stat_frames();
+    uint32_t dc = stat_double_commit();
+    ser_write("GUI:idle frames="); ser_dec(frames);
+    ser_write(" double_commit="); ser_dec(dc);
+    ser_write(" ticks="); ser_dec(timer_ticks - t0);
+    int ok = frames <= 33 && dc == 0;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 static void geom_walk(block *b) {
     ser_write("GUI:geom id="); ser_dec(b->id);
     ser_write(" kind="); ser_dec((uint32_t)b->kind);
@@ -540,8 +566,8 @@ void gui_probe_menu(void) {
         if (b && b->layer == LAYER_OVERLAY) overlay++;
     }
     int items = 0;
-    block_id wins[32];
-    items = menu_collect(wins, 32);
+    block_id menu_ids[32];
+    items = menu_collect(menu_ids, 32);
 
     /* 触发 Launch demo 条目：应新增一个示例块并关闭菜单。 */
     block *mr = btable_get(menu_root);
@@ -597,6 +623,60 @@ void gui_probe_presence(void) {
     ser_write(" result=");
     ser_dec((live_after == base && leaked == 0 && leaving == 1) ? 1 : 0);
     ser_write("\n");
+    gui_end();
+}
+
+/* diff 路径两阶段销毁：第二轮描述里删掉一个块，应先进入 leaving 帧
+ * （句柄仍在块表、live 暂不回落），再过一帧才由 presence_sweep 回收。 */
+void gui_probe_diff(void) {
+    static blk_desc d_full[2], d_trim[1];
+    static blk_spec sp_root, sp_child;
+
+    gui_begin();
+    gui_root_block()->w = 800;
+    gui_root_block()->h = 600;
+
+    memset(&sp_root, 0, sizeof(sp_root));
+    sp_root.req_w = 200; sp_root.req_h = 120;
+    sp_root.layer = LAYER_WORK; sp_root.visible = 1; sp_root.scale = 1;
+    sp_root.fg = gui_active_style()->fg; sp_root.bg = gui_active_style()->bg;
+    memset(&sp_child, 0, sizeof(sp_child));
+    sp_child.req_w = 60; sp_child.req_h = 40;
+    sp_child.layer = LAYER_WORK; sp_child.visible = 1; sp_child.scale = 1;
+    sp_child.fg = gui_active_style()->fg; sp_child.bg = gui_active_style()->bg;
+
+    d_full[0].id = 1; d_full[0].kind = BLK_STACK; d_full[0].parent = 0;
+    d_full[0].spec = &sp_root; d_full[0].text = 0; d_full[0].pix = 0;
+    d_full[1].id = 2; d_full[1].kind = BLK_RECT; d_full[1].parent = 1;
+    d_full[1].spec = &sp_child; d_full[1].text = 0; d_full[1].pix = 0;
+    gui_commit_desc(d_full, 2);
+    layout_run();
+    gui_frame();
+    uint32_t base = stat_blocks_live();
+
+    /* 第二轮描述只留根：id 2 本轮 unseen，应走 leaving 两阶段。 */
+    d_trim[0] = d_full[0];
+    gui_commit_desc(d_trim, 1);
+    layout_run();
+    timer_ticks++;               /* 跨帧节拍，避免本帧被同 tick 去重 */
+    gui_frame();                 /* leaving 第一帧：句柄仍在块表 */
+    block *gone = btable_get(2);
+    uint32_t leaving = (gone && gone->leaving) ? 1 : 0;
+    uint32_t live_leaving = stat_blocks_live();
+
+    timer_ticks++;               /* 再跨一拍，第二帧由 sweep 回收 */
+    gui_frame();
+    uint32_t live_after = stat_blocks_live();
+    uint32_t leaked = stat_blocks_leaked();
+
+    ser_write("GUI:diff base="); ser_dec(base);
+    ser_write(" leaving="); ser_dec(leaving);
+    ser_write(" live_leaving="); ser_dec(live_leaving);
+    ser_write(" live_after="); ser_dec(live_after);
+    ser_write(" leaked="); ser_dec(leaked);
+    int ok = leaving == 1 && live_leaving == base &&
+             live_after == base - 1 && leaked == 0;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
 
@@ -725,12 +805,23 @@ void gui_probe_resize(void) {
 
 /* ---- shell 主循环 ------------------------------------------------------- */
 
+/* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
+ * 同 tick 内的重复提交仍由合成层去重（stat_double_commit）。 */
+static int gui_idle_step(void) {
+    gui_pump_input();
+    clock_refresh(0);
+    if (timer_ticks - s_idle_frame_tick < 3)
+        return 0;
+    s_idle_frame_tick = timer_ticks;
+    gui_frame();
+    return 1;
+}
+
 static void gui_idle_loop(void) {
+    s_idle_frame_tick = timer_ticks - 3;   /* 进入桌面后首帧尽快提交 */
     while (!gui_should_exit()) {
-        gui_pump_input();
-        clock_refresh(0);
-        gui_frame();                 /* 同 tick 重复调用由合成层去重 */
-        task_sleep_ticks(1);         /* 100Hz 节拍，3 tick 一帧 ≈33fps */
+        gui_idle_step();
+        task_sleep_ticks(1);         /* 100Hz 节拍，帧由 3-tick 门控节流 */
     }
 }
 
@@ -744,9 +835,11 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
         if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return; }
         if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return; }
+        if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return; }
         if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
         if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
         if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
+        if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return; }
         if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }
         if (!strcmp_probe(arg, "reset"))  { gui_probe_reset(); return; }
         if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return; }

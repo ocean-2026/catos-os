@@ -142,7 +142,10 @@ static void mark_unseen_leaving(block *b) {
         child = nxt;
     }
     if (b->desc_seen == 0) {
-        tree_free_subtree(b);
+        /* 与 b_remove 同口径：摘树并标 leaving，保留句柄一帧，
+         * 下一帧由 gui_presence_sweep 计数回收，不经本函数直接释放。 */
+        tree_detach(b);
+        mark_leaving(b);
     }
 }
 
