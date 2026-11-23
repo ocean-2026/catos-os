@@ -190,6 +190,9 @@
 | IME 候选框（v2.77） | 候选框不随滚动 | F2 输 `ni` 出候选框，连按 PgUp/PgDn 两页，框仍钉在底部 | 
 | `rm -r` + `fsck`（v2.77） | 递归删除一致性 | 3 层树 + 文件删除后 `fsck` 报 FAT mirror OK / directory tree OK | 
 | `pkg install`（v2.77） | 签名强校验 | `pkg install bc` 成功；旧摘要包被 `SIGNATURE VERIFICATION FAILED` 拒绝 | 
+| `curl https://`（v2.78） | TLS 1.2 客户端 | 宿主机 `openssl s_server -tls1_2 -cipher ECDHE-RSA-AES128-SHA256 -accept 8443`；guest `netcfg 10.0.2.15 10.0.2.2` 后 `curl https://10.0.2.2:8443/`，屏幕出现固定串 `CATOS_TLS_OK_278` |
+| `pkg fetch` 大包（v2.78） | 流式下载/落盘（>16 KiB） | 46 KiB 签名包经 Content-Length 与 chunked 两路：屏幕 `got 46456 bytes` → `installed …` → 运行打印 `D10 BIGPKG OK` + `46 KiB payload resident` |
+| 大 CE 镜像（v2.78） | 帧分配器保留用户虚存区 | 装 46 KiB 的 CE 应用后可直接运行，不出现 exit(0) 零输出；回归：小镜像应用行为不变 |
 | `shutdown`（v2.77） | ACPI 关机 | VMware 真机：`shutdown` 应直接断电，不再回退重启（云端无法验证） | 
 | `help`（v2.76） | 长输出按键跳过 | 输出超过一屏后按任意键，立即停止剩余输出并回提示符，按下的键保留在输入行 | 
 | `help > /tmp/h.txt`（v2.76） | 重定向不被跳过 | 重定向时按键不截断文件，`wc -l /tmp/h.txt` 为完整行数（简体中文 220 行） | 
