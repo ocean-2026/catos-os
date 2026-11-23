@@ -1,0 +1,24 @@
+  text: back to 80x25 text mode (CJK via dynamic font slots)
+root@catos:/#
+root@catos:/# useradd deluser 109 109 0
+  user added (persisted to /etc/passwd)
+root@catos:/# passwd deluser DelPass1
+  password set
+root@catos:/# userdel deluser
+  user deleted
+root@catos:/# lsuser
+  UID  GID  PW   CAPS      NAME
+  0000 0000 no   FFFFFFFF  root
+  0100 0100 no   0000002B  user
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+

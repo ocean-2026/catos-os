@@ -1,0 +1,24 @@
+  logged in as erin (uid 105)
+erin@catos:/$ login root
+  logged in as root (uid 0)
+root@catos:/# edit -c /etc/passwd
+  root:0:0:/root:/bin/shell.ce:ffffffff:
+  user:100:100:/home/user:/bin/shell.ce:2b:
+  carol:103:103:/home/carol:/bin/shell.ce:0:$C$3e7e0fe910916026$37f8be1544e9d934
+22e7c7f2fe2d698f472513f061b25bc7b8040496c4b91490
+  dave:104:104:/home/dave:/bin/shell.ce:0:$C$09541b842914cd4d$38f7c1d418220ce59e
+cadfb8b29b710ac7c0a576d025eb53c9b85f24bee87a31
+  erin:105:105:/home/erin:/bin/shell.ce:0:$C$6b7139d896b20de5$77553597940c6f199b
+8e1788bdce28aa89e151190782f4b2e8c96a5b837263b4
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+

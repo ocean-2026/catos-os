@@ -1,0 +1,24 @@
+root@catos:/# passwd bob AlicePass1
+  password set
+root@catos:/# lsuser
+  UID  GID  PW   CAPS      NAME
+  0000 0000 no   FFFFFFFF  root
+  0100 0100 no   0000002B  user
+  0101 0101 $C$  00000000  alice
+  0102 0102 $C$  00000000  bob
+root@catos:/# login alice AlicePass1
+  logged in as alice (uid 101)
+alice@catos:/$ edit -c /etc/passwd
+  cat: permission denied
+alice@catos:/$
+
+
+
+
+
+
+
+
+
+
+

@@ -3951,12 +3951,26 @@ static void print_hex8(uint32_t v) {
 
 static void cmd_lsuser(void) {
     vga_write("UID  GID  PW   CAPS      NAME\n");
+    /* F11: digest material is credential data.  Non-root sessions see only a
+     * mask; root sees the record scheme tag ($C$/$S$/hex), never the full
+     * digest through this listing. */
+    int is_root = (g_uid == UID_ROOT);
     for (int i = 0; i < MAX_USERS; i++) {
         user_rec_t *u = user_at(i);
         if (!u || !u->used) continue;
         print_pad(u->uid, 4); vga_write(" ");
         print_pad(u->gid, 4); vga_write(" ");
-        vga_write(user_pw_is_set(u) ? "yes  " : "no   ");
+        if (!user_pw_is_set(u)) {
+            vga_write("no   ");
+        } else if (!is_root) {
+            vga_write("*    ");
+        } else if (u->pw[0] == '$' && u->pw[1] == 'C') {
+            vga_write("$C$  ");
+        } else if (u->pw[0] == '$' && u->pw[1] == 'S') {
+            vga_write("$S$  ");
+        } else {
+            vga_write("hex  ");
+        }
         print_hex8(u->caps);
         vga_write("  ");
         vga_write(u->name);
@@ -4004,6 +4018,10 @@ static void cmd_login(char *arg, int as_su) {
         vga_write("login: incorrect password\n");
         return;
     }
+    /* F11: a legacy record verified just now was upgraded to $C$ in memory;
+     * persist the rewrite right away so the on-disk /etc/passwd reflects it
+     * without waiting for the next useradd/passwd mutation. */
+    if (user_db_dirty()) user_save();
     g_uid = u->uid;
     session_apply();
     vga_write("logged in as "); vga_write(u->name);
