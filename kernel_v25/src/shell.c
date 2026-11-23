@@ -997,6 +997,9 @@ static void cmd_svgainfo(void) {
 }
 
 static void cmd_about(void) {
+    extern int net_ready;
+    extern uint8_t net_mac[6];
+    extern uint8_t net_our_ip[4];
     vga_clear();
     con_set_fg_rgb(pal_rgb(PAL_ACCENT));
     vga_write(trs(
@@ -1020,6 +1023,29 @@ static void cmd_about(void) {
     vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n", "  输入         : PS/2 键盘（中断驱动）\n"));
     vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n", "  文件系统     : IDE 上的 FAT32（持久化）\n"));
     vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n", "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
+    vga_write("  Version      : CatOS v2.78\n");
+    /* v2.78: boot now runs `about`, which clears the screen, so the net
+     * adapter line printed during net_init would otherwise be lost -- restate
+     * it here so the first screen still answers "what am I running on". */
+    vga_write(trs("  Network      : ", "  网络         : "));
+    if (net_ready) {
+        vga_write("up, mac=");
+        for (int i = 0; i < 6; i++) {
+            int hi = (net_mac[i] >> 4) & 0xF, lo = net_mac[i] & 0xF;
+            char hc = (char)(hi < 10 ? '0' + hi : 'a' + hi - 10);
+            char lc = (char)(lo < 10 ? '0' + lo : 'a' + lo - 10);
+            vga_putc(hc); vga_putc(lc);
+            if (i < 5) vga_putc(':');
+        }
+        vga_write(", ip=");
+        for (int i = 0; i < 4; i++) {
+            print_int(net_our_ip[i]);
+            if (i < 3) vga_putc('.');
+        }
+    } else {
+        vga_write(trs("not initialised", "未初始化"));
+    }
+    vga_write("\n");
 }
 
 
@@ -7532,15 +7558,8 @@ static const char *const AUTOSTART_DEFAULT =
     "# CatOS boot scripts live in /etc/autoexec\n"
     "# (one shell command per line, '#' comments and blank lines skipped,\n"
     "#  8.3 file names -- the volume has no long-name support).\n"
-    "clear\n"
-    "echo \"       _   _          _____        \"\n"
-    "echo \"      | \\ | |   /\\   |  __ \\       \"\n"
-    "echo \"      |  \\/ |  /  \\  | |__) |      \"\n"
-    "echo \"      | \\   | / /\\ \\ |  ___/       \"\n"
-    "echo \"      |  \\_/ / ____ \\| |           \"\n"
-    "echo \"       \\___/_/    \\_\\_|           \"\n"
-    "echo \"                             CatOS v2.78                            \"\n"
-    "echo \"\"\n";
+    "about\n";
+
 
 /* v2.72 final: the sshd boot seed was removed on purpose (see
  * boot_autostart()); keeping the constant would invite someone to re-seed
@@ -7552,6 +7571,27 @@ static void boot_autostart(void) {
     fs_mkdir(AUTOSTART_DIR);
     fs_write_raw(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
                  (uint32_t)slen_(AUTOSTART_DEFAULT));
+    /* v2.78: the old seed printed an ASCII-art banner + version.  Volumes
+     * created before this change still hold that script, and fs_write_raw
+     * never overwrites, so boot stayed on the art splash.  Detect the
+     * legacy text and rewrite it once: boot now runs `about` directly. */
+    {
+        static char oldb[2048];
+        int on = fs_read_text(AUTOSTART_DIR "/banner.sh", oldb, (int)sizeof(oldb) - 1);
+        if (on > 0) {
+            oldb[on] = 0;
+            int legacy = 0;
+            for (int i = 0; i + 9 <= on; i++) {
+                const char *m = "CatOS v2.";
+                int k = 0;
+                while (k < 9 && oldb[i + k] == m[k]) k++;
+                if (k == 9) { legacy = 1; break; }
+            }
+            if (legacy)
+                fs_write_raw_mode(AUTOSTART_DIR "/banner.sh", AUTOSTART_DEFAULT,
+                                  (uint32_t)slen_(AUTOSTART_DEFAULT), 0);
+        }
+    }
     /* v2.72 final: sshd is NOT started at boot any more.  The seed below
      * is deliberately gone -- an always-on :22 listener on a hobby OS with
      * an unsigned package path is a liability, not a feature.  `sshd` (or
