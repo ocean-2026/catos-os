@@ -12,13 +12,14 @@
 | M1 | 布局：COLUMN/ROW/STACK、padding/gap/对齐、diff 提交、脏位 | 探针通过，待 M4 全量回归 | `gui idem` 20/20 match=1、`GUI:idempotent=OK`；`gui dirty` measured=3/total=7、affected_subtree=3、untouched=3、result=1；`gui leak` leaked=0 |
 | M2 | damage 合成、拖拽/resize、命中、焦点、层/z | 探针通过，待 M4 全量回归 | `gui drag` 两块互不干扰 b_same=1、measured=2/subtree=2、damage_rects=1、damage_area=9600（2.0% 屏）；`gui hit` 同层 z 高者命中；`gui rate` frames=33、double_commit=0；零异常 |
 | M3 | 任务栏、开始菜单、Presence | 探针通过，待 M4 全量回归 | `gui menu` open=1、items=1、overlay=5、launched=2、result=1；`gui presence` base=11、added=12、leaving=1、live_after=11、leaked=0、result=1；`gui leak` 1000 次开关 live=0/tree=1/leaked=0；时钟秒级自刷只打自身脏位 |
-| M4 | 令牌主题、`gui_reset` 重建、demo 块树、全量回归 | 主题/reset 探针通过；像素主题断言 PASS；门禁 vprobe/F11 通过，E3 conc 未通过 | `gui theme` 三套令牌 bg/fg/accent 互异、result=1；`gui reset` nodes=15、hash 前后一致、orphan=0、match=1；light/hc 分组像素断言 6/6 PASS；vprobe 10/10、F11 9/9；E3 badptr PASS / conc 故障（见 §3） |
+| M4 | 令牌主题、`gui_reset` 重建、demo 块树、全量回归 | 完成，三门禁全绿 | `gui theme` 三套令牌 bg/fg/accent 互异、result=1；`gui reset` nodes=15、hash 前后一致、orphan=0、match=1；light/hc 分组像素断言 6/6 PASS；vprobe 10/10、F11 9/9、E3 2/2（见 §3 R10） |
 | 旧 desktop 退役 | `build/pkg.list` 摘掉 desktop 包，源文件保留作学习参考 | 已完成 | pkg.list 摘包；desktop.c 加 LEGACY 注释；gfxdesk.c 仍不打包 |
 
 ## 2. 推进日志（追加，倒序在最上面）
 
 | 时间 | 轮次 | 做了什么 | 提交 | 探针结果 | 下一步 |
 |---|---|---|---|---|---|
+| 2026-11-24 05:10 | R10 | E3 conc 回退闭环：独立复现锁定根因为 `acl_tab/users` 随 GUI 镜像增长跨进 PDE 8/9 用户窗口，任务私有 PT 未映射该内核静态帧，syscall 在调用者 CR3 下 ring0 #PF（CR2=0x02001050=基址+206×0xac+0xa8）。采用 B' 方案：`task_space_create()` 把窗口内 `<frames_base` 的内核静态帧补成 supervisor-only PTE（不动上下文/地址布局/CE ABI）；摘 `gui/*.o` 对照 ISO 双 PASS 定性为布局非逻辑缺陷；新增 `tools/check_link_layout.py` 链接后布局护栏（关键表落窗口打 RISK，`--strict` 供 CI）；像素四组接入全量回归并自动映射 shot 子命令；六张 std 验收图按当前 ISO 重拍 | 94680d6 / b7ae5ce | E3 2/2（badptr+conc PASS）、vprobe 10/10、F11 9/9、15 探针全 PASS、dark/light/hc 6/6 + menu 2/2、洁净度 0.91% PASS | REPORT.md §5/§8 回填；push `feat/gui-blocks` |
 | 2026-11-24 04:20 | R9 | 主题 live 重着色改为语义角色三级回落（块显式色 → 父链 → 活动令牌角色），`spec_panel` 按 ROLE_BG/PANEL/BAR/FG/ACCENT 取角色不固化 RGB，`gui_theme_set` 换令牌后整树标脏重解析；菜单浮层修复：容器锚点置 `moved` 避免根 STACK 重排到 (64,64)，高度改 auto 聚合条目，条目标签改静态标签池修栈缓冲悬空；断言库补 light/hc/menu 分组（region_count 计数菜单底色/前景 ≥100px）；新增 `tests/gui_console_clean.py` 进出洁净度回归并挂入全量脚本 | 6e32624 / 2916717 | dark 6/6、light 6/6、hc 6/6、menu 2/2 像素 PASS；15 条串口探针全 PASS；控制台洁净度 0.91% 差异 PASS；lint GREEN；vprobe 10/10、F11 9/9；**E3 conc 故障未过**（§3） | 排查 E3 conc spawn/acl_lookup 页错误；REPORT.md 归档；push |
 | 2026-11-24 04:10 | R8 | 修复 WORK/CONTENT 层像素不上屏：第二遍损伤合成由"脏节点 + 命中 damage 的干净节点都重绘"改为只重绘脏节点（`snap`），消除全屏背景命中 damage 后整屏重填、擦掉干净前景的问题；新增 `tests/gui_pixel_assert.py`（P6 PPM 逐点采样：ne_bg / ne_color / color / pair_diff 四类断言）与 `tests/gui_pixel_regress.py`（`-vga std` 起机抓帧 + 跑默认三条断言）；`shot.sh`/回归截图统一 std | 6e32624 | std 桌面像素回归 6/6 PASS；15 条串口探针全 PASS；lint GREEN（0 violation / 36 advisory / 13 review） | 补拍其余 5 张验收图；全量门禁 vprobe/E3/F11；REPORT.md、sha256、push |
 | 2026-11-24 03:10 | R7 | M0 视觉 QC 代码侧修复：令牌扩 `panel/bar/border/line` 分层色（dark bg `0x1E1E26` / panel `0x2A2A34` / bar `0x3A3A48` / border `0x555A66` / accent `0x4C8DFF`；light/HC 同步填值），`spec_panel` 按层取色（BG 桌面色 / CHROME·OVERLAY 条色 / WORK 块色），描边走令牌 border、分隔线走令牌 line；demo 内容区由 RECT 改 COLUMN 竖排（TEXT → DIVIDER → IMAGE 16×16 → SPACER，gap 8）；开始按钮/时钟行 `align_cross=XALN_CENTER` 文字垂直居中；标题栏条色显式取 bar；新增截图专用壳命令 `gui shot-menu / shot-light / shot-hc / shot-reset`（进入对应状态后空闲等截）；`shot.sh` 加 `VGA` 环境变量可切后端 | 待提交 | 15 探针全 PASS 零异常；lint GREEN；geom 转储确认子块已竖排：id6 TEXT y=92、id7 DIVIDER y=116、id8 IMAGE 16×16 y=125、id9 SPACER y=149；时钟 ASCII `HH:MM:SS` 正常出数（无 `???`） | 待可截图环境补拍 6 张验收图（判据见 §3 阻塞行）；全量门禁与 REPORT.md |
@@ -34,6 +35,7 @@
 
 | 时间 | 问题 | 处理 | 结论 |
 |---|---|---|---|
+| 2026-11-24 05:10 | **E3 conc 回退（已修复闭环）**：根因——GUI 镜像增长把 `acl_tab`（feat `0x01ff8540..0x02003140`）、`users` 挤进 PDE 8/9 用户窗口 `[0x2000000,0x2800000)`；任务目录把 PDE 8/9 换成私有 4KiB PT，syscall 在调用者 CR3 遍历未 present 的内核静态帧 → ring0 #PF，CR2=0x02001050（=0x01ff8540+206×0xac+0xa8，与反汇编 `mov 0xa8(%esi),%edx` 吻合）。`USER_IMAGE_BASE` 是编译期常量不漂移，漂移的是 .bss 布局 | 选 B'：`paging.c` `mirror_kernel_static_in_arena()` 在 `task_space_create()` 对两窗口内物理帧 `<frames_base` 的内核静态帧装 supervisor-only PTE（P|RW 无 US），用户映射按需覆盖槽位；不切 CR3、不改地址/ABI。护栏 `tools/check_link_layout.py` 链接后 nm 审计窗口内关键表/静态。摘 gui 对象对照 ISO 双 PASS 定性布局问题 | **E3 2/2 PASS**（badptr+conc）；vprobe 10/10、F11 9/9 回归绿。残留：`acl_tab/users` 仍静态在窗口内，靠 B' 镜像兜底；根治需收缩 `.text/.bss` 把关键表拉回 `0x2000000` 以下后启用护栏 `--strict`。PTE 级运行时转储未补（BSOD 后未导 M map/P dump） |
 | 2026-11-23 23:00 | diff 提交幂等探针首轮外全部 match=0：新建块走空闲链分配 id，忽略描述里的显式 id；二次 commit 按 spec id 匹配失败，旧节点被判 unseen 回收、新节点另建 | 块表新增 `btable_alloc_at(kind,id)`，插入前先把目标槽从空闲链脱链；槽位占用才退回空闲链分配 | rebuild 与增量 commit 得到同一棵块树，20 组随机描述哈希一致 |
 | 2026-11-23 23:05 | 改叶子 req_w 后第二次布局不重排：`layout_dirty` 只在节点自带脏位时向下走，根脏位已清，脏后代被整棵跳过 | `layout_dirty` 改为先递归子节点、任一后代脏即标脏，再 layout_node 并清位 | 脏子树冒泡正确；未受影响兄弟子树不参与重排 |
 | 2026-11-23 23:20 | damage 首帧被整帧跳过：`layout_run` 在绘制前清掉 dirty_layout，收集 damage 时所有块已变干净，只画到底色 | 布局清位前先做帧快照 `snap`；damage 收集与绘制判定都以快照为准，绘制完成后清 `snap`/dirty_paint | 首帧桌面块/任务栏恢复；后续干净帧只重绘 damage 相交区 |
@@ -42,9 +44,11 @@
 | 备注 | 跨运行哈希值有小幅波动，但单轮内 rebuild/commit 一致（验收口径只要求轮内一致）；波动来源待 M4 复核 | — | 不阻塞 M1 |
 | 2026-11-24 00:15 | 进度正常未停滞：M2 探针运行中（build.sh + gui_probe drag 活跃），近 30 分钟 7 个串口证据持续产出，工作树 9 个文件为 M2 未提交改动 | 本线程只读，不改代码不提交 | 等 M2 提交后进 M3 |
 | 2026-11-24 04:10 | **WORK/CONTENT 层像素不上屏（已定位并修复，旧"环境抓不到 LFB"结论作废）**：对照实验证明 std 与 vmware 都能抓到帧、任务栏/文字落地，问题在合成层。块树/布局/首帧 damage/几何转储均正确，填充也到达后端 `fill()`；根因是第二遍损伤合成里"干净节点只要与 damage 相交就整节点重绘"：后续帧时钟等小块产生 damage，全屏背景节点 `id1` 命中 damage 后整屏重填底色，把尚未重绘的干净 WORK 前景整片擦掉，而 WORK 不与 damage 相交、不会被恢复。| 第二遍只重绘本帧脏节点（`snap`），移除"命中即重绘干净底层块"的整节点重绘；背景擦旧位置应由背景在损伤条带内补齐，不在此整节点重填。`tests/gui_pixel_assert.py` 固化三条像素断言（块边缘非底色 / 标题条与块底互异且非底色 / 任务栏与 Start 文字非底色），`tests/gui_pixel_regress.py` 起 std 客人机抓帧并回归 | 修复后 `-vga std` 桌面 6/6 断言 PASS：(65,65)=bar `0x3A3A48`、(150,70)=fg、(200,120)=panel `0x2A2A34`、(400,585)=bar、(20,585)=fg；15 条串口探针全 PASS，lint GREEN | 待补其余 5 张验收图（菜单/三套主题/reset），判据：② `m3-menu-open.png` OVERLAY 条目展开、下层任务栏仍可见；③ dark 分层色可辨；④ light 整屏跟随变浅；⑤ HC 黑底黄描边/黄强调；⑥ reset 后桌面与首帧一致 |
-| 2026-11-24 04:25 | **E3 conc 门禁在本分支 ISO 复现故障（未修复，标未验证）**：`run_e3.py` badptr PASS，`parent` 场景 `run /bin/e3probe.ce parent` 触发 kernel fault：`task e3probe tid 1 EIP=0x010480ED acl_lookup+0x5D CR2=0x02001050`。同机基线 ISO（main 94be727）E3 2/2 PASS；本分支 task.c/user.c/sec.c/ce.c/vma.c/paging.c 相对 main **无源码改动**，仅新增 gui/ 对象并扩大内核镜像（kernel.bin 1.163MB→1.229MB）；故障地址逐次运行完全确定，fresh scratch 盘不复现偶发。F11 9/9、vprobe 10/10 通过，故局限于并发 spawn/子任务路径，尚未定位是镜像体积触达保留边界还是链接地址漂移。 | 未在本轮改 security/spawn 源码；先如实记阻塞，不写成通过。下一步：对比 baseline/本分支 kernel.pe 段与 BSS 落点，核查内核镜像是否越界到 CE 用户扩展区（USER_EXT_BASE≈0x02000000，CR2=0x02001050 落在该区），必要时收紧 gui/ 静态块表容量或核对多引导镜像上限 | **E3 判据未达成**：1/2（badptr PASS、conc FAIL）；REPORT.md 标"未验证/阻塞" |
+| 2026-11-24 04:25 | **E3 conc 门禁在本分支 ISO 复现故障（已由 R10 修复，此行留作历史）**：`run_e3.py` badptr PASS，`parent` 场景 `run /bin/e3probe.ce parent` 触发 kernel fault：`task e3probe tid 1 EIP=0x010480ED acl_lookup+0x5D CR2=0x02001050`。同机基线 ISO（main 94be727）E3 2/2 PASS；故障地址逐次运行完全确定，fresh scratch 盘不复现偶发。F11 9/9、vprobe 10/10 通过，局限于并发 spawn/子任务路径。 | 当时未改 security/spawn 源码；后续 R10 定位为内核静态表跨进用户窗口、任务私有 PT 缺 supervisor 镜像（见上一行与 REPORT.md §5.1） | **已闭环**：R10 后 E3 2/2 PASS；本行 1/2 结论作废 |
 
 | 2026-11-24 02:15 | 进度活跃未停滞：M3 已提交 4f39fb8，M4 侧 15 探针全 PASS、lint GREEN，当前 qemu geom3 探针（monitor 4602）在跑，近 10 分钟 5 份串口日志产出；§2 顶行时间戳写 03:10 与实际 02:15 不符，属记录笔误 | 本线程只读，不改代码不提交 | 继续 M4 收尾：补截图验收、跑全量门禁、写 REPORT.md |
+
+| 2026-11-24 04:15 | 进度正常未停滞：M0–M3 完成且已提交（M3=4f39fb8、M4 修复 6e32624/2916717、收口 7e81168），工作树干净，REPORT.md 已出（04:11）；当时唯一门禁缺口 E3 conc FAIL（acl_lookup+0x5D、CR2=0x02001050，基线 ISO 2/2 PASS）；另有一个 geom3 探针 qemu 残留进程（pid 28395, monitor 4602）；§3 行时间顺序错乱（04:10/04:25 排在 02:15 之前） | 本线程只读，不改代码不提交 | （历史记录）E3 缺口已由 R10 闭环，见 §3 05:10 行；残留 qemu 进程已随后续探针结束清理 |
 
 ## 4. 性能打点基线（每次合成/布局跑完填）
 
@@ -54,13 +58,15 @@
 | 拖拽帧（damage ≤25% 屏） | 中位数 0.89 ms（样本 0.96 / 0.89 / 0.86 ms）；damage 9600 px ≈ 2.0% 屏，≤4ms PASS | 同上，`gui drag` 单块 120×80 移动 |
 | 布局节点数（单块拖拽） | 2（子树 2 + 根） | `stat_layout_nodes`，`gui drag` |
 
-### 门禁基线（2026-11-24 04:25，本分支 ISO）
+### 门禁基线（2026-11-24 05:10，本分支 ISO，B' 修复后）
 
 | 门禁 | 结果 | 耗时 | 条件/备注 |
 |---|---|---|---|
-| vprobe（Issue #78 跨页系统调用） | 10/10 PASS | 154.6s | `run_vprobe.py`，端口 4461，std/vmware 无关 |
-| E3（任务系统调用 staging buffer） | **1/2**：badptr PASS，conc FAIL | 80.3s | conc 触发 `acl_lookup+0x5D` 页错误 CR2=0x02001050；基线 ISO 2/2 PASS，见 §3 阻塞行 |
+| vprobe（Issue #78 跨页系统调用） | 10/10 PASS | 154.4s | `run_vprobe.py`，端口 4461，std/vmware 无关；日志 `logs/gate-vprobe-r10.log` |
+| E3（任务系统调用 staging buffer） | **2/2 PASS**：badptr + conc | 80.1s | `run_e3.py`，端口 4462；修复前 conc 3/3 FAIL（CR2=0x02001050），根因/修复见 §3 R10 与 REPORT.md §5.1；日志 `logs/gate-e3-r10.log` |
 | F11（$C$ 摘要/权限/掩码） | 9/9 PASS | 161.9s | `run_f11.py`，端口 4481；基准盘 `scratch/test_disk.img` 先复制 /tmp 私有副本，未写原盘 |
 | 控制台洁净度 | PASS（差异 0.91%，2338/256000 px） | — | `gui_console_clean.py`，进/出各抓 640×400 文本帧逐点比对，阈值 5% |
 | 本地串口探针 | 15/15 PASS | — | idem/leak/geom/bounds/dirty/drag/hit/rate/home/menu/presence/theme/reset/gesture/resize |
-| 像素分组断言 | dark 6/6、light 6/6、hc 6/6、menu 2/2 | — | `-vga std`，`gui_pixel_regress.py` |
+| 像素分组断言 | dark 6/6、light 6/6、hc 6/6、menu 2/2 | — | `-vga std`，`gui_pixel_regress.py`（组→shot 子命令自动映射） |
+
+ISO 指纹：`kernel_v25/catos.iso` 11,954,176 B，sha256 `a688f098284eeaf289b3559fe28efae2569080b7716d25cb09f4bef1df50fcdc`。
