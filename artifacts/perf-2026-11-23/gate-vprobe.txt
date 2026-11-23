@@ -1,0 +1,14 @@
+# gate: vprobe (Issue #78) -- production build, 2026-11-23
+# cmd: python3 tests/vprobe_regress.py   (repo = merged perf/integ worktree)
+PASS format           FAT32 volume ready
+PASS bin-has-vprobe   /bin/vprobe.ce=True
+PASS fr               verdict PASS
+PASS cat              verdict PASS
+PASS hw               verdict PASS
+PASS str              verdict PASS
+PASS strcpy           verdict PASS
+PASS wr               verdict PASS
+PASS fw               verdict PASS
+PASS pw               verdict PASS
+
+steps=10 ok=10 fail=0

@@ -1,0 +1,6 @@
+# gate: E3 (per-task syscall staging buffers) -- production build, 2026-11-23
+# cmd: python3 tests/e3_regress.py
+PASS badptr       verdict PASS
+PASS conc         verdict PASS
+
+steps=2 ok=2 fail=0
