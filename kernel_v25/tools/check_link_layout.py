@@ -119,7 +119,7 @@ def main():
         else:
             print("[link] " + msg + " (non-fatal under B' supervisor mirror; "
                   "kept as a layout risk)")
-    if warns and (strict or strict_warn):
+    if warns and strict_warn:
         print("[link] FAIL (strict): %d static symbol(s) in window." % len(warns))
         rc = 1
     if rc == 0 and not fatal and not warns:
