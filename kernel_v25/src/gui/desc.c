@@ -68,9 +68,19 @@ block_id b_stack(block_id parent, const blk_spec *s)  { block *b = create_block(
 block_id b_rect (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_RECT,   parent, s);  return b ? b->id : 0; }
 block_id b_surface(block_id parent, const blk_spec *s){ block *b = create_block(BLK_SURFACE,parent,s);  return b ? b->id : 0; }
 
-block_id b_text(block_id parent, const blk_spec *s, const char *txt) {
+static blk_spec spec_or_inherit(block_id parent, const blk_spec *s) {
     blk_spec local;
     if (s) local = *s; else memset(&local, 0, sizeof(local));
+    if (!s) {
+        block *p = btable_get(parent);
+        if (p) local.layer = p->layer;  /* 叶子缺省继承父层，避免被父底色覆盖 */
+        local.visible = 1;              /* 缺省可见，否则叶子被整棵跳过 */
+    }
+    return local;
+}
+
+block_id b_text(block_id parent, const blk_spec *s, const char *txt) {
+    blk_spec local = spec_or_inherit(parent, s);
     local.text = txt;
     block *b = create_block(BLK_TEXT, parent, &local);
     return b ? b->id : 0;
@@ -78,16 +88,14 @@ block_id b_text(block_id parent, const blk_spec *s, const char *txt) {
 
 block_id b_image(block_id parent, const blk_spec *s,
                  const uint8_t *pix, int w, int h) {
-    blk_spec local;
-    if (s) local = *s; else memset(&local, 0, sizeof(local));
+    blk_spec local = spec_or_inherit(parent, s);
     local.pix = pix; local.pix_w = w; local.pix_h = h;
     block *b = create_block(BLK_IMAGE, parent, &local);
     return b ? b->id : 0;
 }
 
 block_id b_space(block_id parent, int w, int h) {
-    blk_spec local;
-    memset(&local, 0, sizeof(local));
+    blk_spec local = spec_or_inherit(parent, 0);
     local.req_w = w; local.req_h = h;
     block *b = create_block(BLK_SPACER, parent, &local);
     return b ? b->id : 0;

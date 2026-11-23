@@ -311,6 +311,7 @@ static void cmd_help(void) {
     help_row("help",        "show this message");
     help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
+    help_row("gui",         "enter the block GUI desktop (Esc returns to console)");
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
     help_note("Ctrl+Up/Down   scroll back console output (any key returns)");

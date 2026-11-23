@@ -29,5 +29,7 @@ enum gui_token {
 };
 
 const struct style *gui_token_style(enum gui_token t);
+const struct style *gui_active_style(void);
+void      gui_set_token(enum gui_token t);
 
 #endif /* CATOS_GUI_TOKENS_H */

@@ -43,9 +43,11 @@ EXPECT = {
     "dirty": {"latest": {"result": "1"}, "flag": None},
     "leak":  {"latest": {"leaked": "0"}, "flag": None},
     "geom":  {"latest": {}, "flag": None},
+    "bounds": {"latest": {"result": "1"}, "flag": None},
     "drag":  {"latest": {"result": "1"}, "flag": None},
     "hit":   {"latest": {"result": "1"}, "flag": None},
     "rate":  {"latest": {"result": "1"}, "flag": None},
+    "home":  {"latest": {"result": "1"}, "flag": None},
 }
 
 

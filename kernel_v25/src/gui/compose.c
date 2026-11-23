@@ -7,6 +7,7 @@
  */
 #include "gui/gui.h"
 #include "gui_int.h"
+#include "gui/tokens.h"
 #include "gfx24.h"
 #include "render.h"
 #include "render_be.h"
@@ -108,6 +109,16 @@ static void sort_paint(void) {
     }
 }
 
+extern void ser_write(const char *s);
+extern void ser_putc(char c);
+
+static void ser_dec_u(uint32_t v) {
+    char buf[12]; int n = 0;
+    if (v == 0) { ser_write("0"); return; }
+    while (v) { buf[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) ser_putc(buf[--n]);
+}
+
 /* ---- 统计 --------------------------------------------------------------- */
 
 void stat_set_layout_nodes(uint32_t n) { s_layout_nodes = n; }
@@ -188,6 +199,20 @@ void gui_frame(void) {
     uint32_t area = 0;
     for (int i = 0; i < dmg_n; i++) area += (uint32_t)(dmg[i].w * dmg[i].h);
     stat_note_frame(t1 - t0, (uint32_t)dmg_n, area);
+
+    uint32_t seq = s_frames;
+    if (seq == 0) {
+        /* 首帧全量合成打点：验收首帧 ≤8ms；frame_us 别名供测量器直取。 */
+        ser_write("GUI:frame first=1 us="); ser_dec_u(s_last_us);
+        ser_write(" rects="); ser_dec_u((uint32_t)dmg_n);
+        ser_write(" area="); ser_dec_u(area);
+        ser_write(" frame_us="); ser_dec_u(s_last_us);
+        ser_write("\n");
+    } else if (seq % 30 == 0) {
+        ser_write("GUI:frame n="); ser_dec_u(seq + 1);
+        ser_write(" us="); ser_dec_u(s_last_us);
+        ser_write("\n");
+    }
     s_frames++;
 }
 
@@ -202,7 +227,7 @@ void gui_reset(void) {
 
 void gui_begin(void) {
     gui_reset();
-    gfx24_clear(0x1E1E26u);
+    gfx24_clear(gui_active_style()->bg);
     block *root = gui_root_block();
     root->x = 0; root->y = 0;
     root->w = GFX24_W; root->h = GFX24_H;

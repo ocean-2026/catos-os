@@ -6,6 +6,8 @@
  */
 #include "gui/gui.h"
 #include "gui_int.h"
+#include "gui/tokens.h"
+#include "gfx24.h"
 #include "render.h"
 #include "rtc.h"
 #include "serial_log.h"
@@ -39,14 +41,14 @@ static void ser_hash(uint32_t h) {
 
 /* ---- demo 块树 ---------------------------------------------------------- */
 
-static blk_spec spec_rect(uint16_t layer, int32_t w, int32_t h,
-                         uint32_t bg, uint32_t fg, uint8_t border) {
+static blk_spec spec_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
     blk_spec s;
+    const struct style *tok = gui_active_style();
     memset(&s, 0, sizeof(s));
     s.req_w = w; s.req_h = h;
     s.layer = layer; s.z = 0;
     s.visible = 1; s.focusable = 0; s.inert = 0;
-    s.fg = fg; s.bg = bg; s.accent = 0x4C8DFFu;
+    s.fg = tok->fg; s.bg = tok->bg; s.accent = tok->accent;
     s.scale = 1; s.border_w = border;
     return s;
 }
@@ -56,32 +58,38 @@ void gui_demo_build(void) {
     root->pad_l = 64; root->pad_r = 64; root->pad_t = 64; root->pad_b = 64;
     block_id root_id = root->id;
 
-    /* 桌面底色 */
-    blk_spec bg = spec_rect(LAYER_BG, 800, 600, 0x1E1E26u, 0xE8E8ECu, 0);
-    b_rect(root_id, &bg);
+    /* 桌面底色：全出血贴屏，忽略父级 padding。 */
+    blk_spec bg = spec_panel(LAYER_BG, GFX24_W, GFX24_H, 0);
+    block_id bg_id = b_rect(root_id, &bg);
+    btable_get(bg_id)->bleed = 1;
 
     /* 示例块：COLUMN = 标题栏 + 内容区，320x200，可拖拽 / 可聚焦 */
-    blk_spec win = spec_rect(LAYER_WORK, 320, 200, 0x2D2D38u, 0xE8E8ECu, 1);
-    win.focusable = 1;
-    win.pad_l = win.pad_r = win.pad_t = win.pad_b = 0;
-    block_id sample = b_column(root_id, &win);
+    blk_spec sample_spec = spec_panel(LAYER_WORK, 320, 200, 1);
+    sample_spec.focusable = 1;
+    sample_spec.pad_l = sample_spec.pad_r = sample_spec.pad_t = sample_spec.pad_b = 0;
+    block_id sample = b_column(root_id, &sample_spec);
 
-    blk_spec title = spec_rect(LAYER_WORK, 320, 24, 0x3C3C4Eu, 0xF2F2F6u, 0);
+    blk_spec title = spec_panel(LAYER_WORK, 320, 24, 0);
+    title.pad_l = 4;
     block_id bar = b_row(sample, &title);
-    b_text(bar, 0, "CatOS 示例块");
+    b_text(bar, 0, "CatOS Sample");
 
-    blk_spec body = spec_rect(LAYER_WORK, 320, 176, 0x26262Eu, 0xB8B8C4u, 0);
+    blk_spec body = spec_panel(LAYER_WORK, 320, 176, 0);
+    body.pad_l = 4;
     block_id body_id = b_rect(sample, &body);
-    blk_spec body_txt = spec_rect(LAYER_WORK, 200, 16, 0x26262Eu, 0xB8B8C4u, 0);
+    blk_spec body_txt = spec_panel(LAYER_WORK, 200, 16, 0);
     b_text(body_id, &body_txt, "demo content area");
 
-    /* 任务栏（CHROME 层，交叉轴 END 钉底） */
-    blk_spec bar_tb = spec_rect(LAYER_CHROME, 800, 32, 0x17171Du, 0xE8E8ECu, 0);
+    /* 任务栏：全出血贴底，宽 = 屏宽，交叉轴 END 钉下边缘。 */
+    blk_spec bar_tb = spec_panel(LAYER_CHROME, GFX24_W, 32, 0);
     bar_tb.align_cross = XALN_END;
     block_id taskbar = b_row(root_id, &bar_tb);
-    blk_spec start = spec_rect(LAYER_CHROME, 64, 24, 0x3C3C4Eu, 0xF2F2F6u, 0);
+    btable_get(taskbar)->bleed = 1;
+
+    blk_spec start = spec_panel(LAYER_CHROME, 64, 24, 0);
+    start.pad_l = 4;
     block_id start_id = b_row(taskbar, &start);
-    b_text(start_id, 0, "开始");
+    b_text(start_id, 0, "Start");
 
     rtc_time_t t;
     rtc_read(&t);
@@ -93,8 +101,9 @@ void gui_demo_build(void) {
     clk[o++] = ':';
     clk[o++] = (char)('0' + t.second / 10); clk[o++] = (char)('0' + t.second % 10);
     clk[o] = 0;
-    blk_spec clk_s = spec_rect(LAYER_CHROME, 80, 24, 0x17171Du, 0xE8E8ECu, 0);
+    blk_spec clk_s = spec_panel(LAYER_CHROME, 80, 24, 0);
     clk_s.align_main = ALN_END;
+    clk_s.pad_l = 4;
     block_id clk_id = b_row(taskbar, &clk_s);
     b_text(clk_id, 0, clk);
 }
@@ -127,8 +136,9 @@ void gui_probe_idempotent(void) {
             specs[i].gap = 2;
             specs[i].layer = LAYER_CONTENT;
             specs[i].visible = 1;
-            specs[i].fg = 0xFFFFFFu; specs[i].bg = 0x333333u;
             specs[i].border_w = 1; specs[i].scale = 1;
+            specs[i].fg = gui_active_style()->fg;
+            specs[i].bg = gui_active_style()->bg;
             descs[i].id = (block_id)(i + 1);
             descs[i].kind = i == 0 ? BLK_STACK
                 : (blk_kind)(BLK_RECT + ((seed >> 5) % 4));
@@ -168,11 +178,11 @@ void gui_probe_dirty(void) {
     gui_root_block()->w = 800;
     gui_root_block()->h = 600;
 
-    blk_spec col = spec_rect(LAYER_CONTENT, 0, 0, 0x26262Eu, 0xFFFFFFu, 0);
+    blk_spec col = spec_panel(LAYER_CONTENT, 0, 0, 0);
     col.gap = 2;
     col.pad_l = col.pad_r = col.pad_t = col.pad_b = 2;
     block_id A = b_column(0, &col);
-    blk_spec leaf = spec_rect(LAYER_CONTENT, 60, 40, 0x333333u, 0xFFFFFFu, 1);
+    blk_spec leaf = spec_panel(LAYER_CONTENT, 60, 40, 1);
     block_id a1 = b_rect(A, &leaf);
     b_rect(A, &leaf);
     block_id B = b_column(0, &col);
@@ -206,7 +216,7 @@ void gui_probe_drag(void) {
     gui_root_block()->w = 800;
     gui_root_block()->h = 600;
 
-    blk_spec wa = spec_rect(LAYER_WORK, 120, 80, 0x333340u, 0xFFFFFFu, 1);
+    blk_spec wa = spec_panel(LAYER_WORK, 120, 80, 1);
     block_id A = b_stack(0, &wa);
     b_text(A, 0, "A");
     block_id B = b_stack(0, &wa);
@@ -215,6 +225,8 @@ void gui_probe_drag(void) {
 
     block *pa = btable_get(A);
     block *pb = btable_get(B);
+    /* B 挪到右下，避免与 A 在原点重叠造成命中归属歧义。 */
+    pb->x = 200; pb->y = 100; pb->moved = 1;
     int b0x = pb->x, b0y = pb->y, b0w = pb->w, b0h = pb->h;
 
     gui_inject_press(20, 10);    /* A 标题栏区域 */
@@ -251,9 +263,9 @@ void gui_probe_hit(void) {
     gui_root_block()->w = 800;
     gui_root_block()->h = 600;
 
-    blk_spec lo = spec_rect(LAYER_CONTENT, 160, 100, 0x333333u, 0xFFFFFFu, 1);
+    blk_spec lo = spec_panel(LAYER_CONTENT, 160, 100, 1);
     b_stack(0, &lo);
-    blk_spec hi = spec_rect(LAYER_CONTENT, 160, 100, 0x553333u, 0xFFFFFFu, 1);
+    blk_spec hi = spec_panel(LAYER_CONTENT, 160, 100, 1);
     hi.z = 1;
     block_id Hi = b_stack(0, &hi);
     layout_run();
@@ -310,6 +322,56 @@ void gui_probe_geom(void) {
     gui_end();
 }
 
+static int bounds_walk(block *b, int *bad) {
+    int ok = 1;
+    for (block *c = b->first_child; c; c = c->next_sibling) {
+        int px = b->x, py = b->y, pw = b->w, ph = b->h;
+        if (!c->bleed) {
+            px += b->pad_l; py += b->pad_t;
+            pw -= b->pad_l + b->pad_r; ph -= b->pad_t + b->pad_b;
+        }
+        int inside = c->x >= px && c->y >= py &&
+                     c->x + c->w <= px + pw && c->y + c->h <= py + ph;
+        if (!inside) {
+            *bad = 1;
+            ser_write("GUI:bounds id="); ser_dec(c->id);
+            ser_write(" parent="); ser_dec(b->id);
+            ser_write(" child=("); ser_dec(c->x); ser_write(","); ser_dec(c->y);
+            ser_write(","); ser_dec(c->w); ser_write(","); ser_dec(c->h);
+            ser_write(") parent=("); ser_dec(px); ser_write(","); ser_dec(py);
+            ser_write(","); ser_dec(pw); ser_write(","); ser_dec(ph);
+            ser_write(")\n");
+        }
+        ok &= inside;
+        ok &= bounds_walk(c, bad);
+    }
+    return ok;
+}
+
+void gui_probe_bounds(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+    int bad = 0;
+    block *root = gui_root_block();
+    int root_ok = root->x >= 0 && root->y >= 0 &&
+                  root->x + root->w <= GFX24_W && root->y + root->h <= GFX24_H;
+    if (!root_ok) bad = 1;
+    bounds_walk(root, &bad);
+    ser_write("GUI:bounds result="); ser_dec(bad ? 0 : 1); ser_write("\n");
+    gui_end();
+}
+
+void gui_probe_home(void) {
+    gui_begin();
+    gui_demo_build();
+    gui_frame();                 /* 首帧全量合成，打点 GUI:frame first=1 */
+    uint32_t us = stat_last_frame_us();
+    ser_write("GUI:home frame_us="); ser_dec(us);
+    ser_write(" result="); ser_dec(us <= 8000u ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 void gui_shell_cmd(const char *arg) {
@@ -317,10 +379,12 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "idem"))  { gui_probe_idempotent(); return; }
         if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return; }
         if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
+        if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return; }
         if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
         if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
         if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return; }
         if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return; }
+        if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
     }
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {

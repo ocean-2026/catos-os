@@ -30,3 +30,12 @@ const struct style *gui_token_style(enum gui_token t) {
     default:                 return &tok_dark;
     }
 }
+
+/* 当前生效主题；绘制路径一律取这里，不允许在 UI 路径写死 RGB。 */
+static const struct style *active_style = &tok_dark;
+
+const struct style *gui_active_style(void) { return active_style; }
+
+void gui_set_token(enum gui_token t) {
+    active_style = gui_token_style(t);
+}

@@ -7,6 +7,7 @@
  */
 #include "gui/gui.h"
 #include "gui_int.h"
+#include "gui/tokens.h"
 #include "gfx24.h"
 #include "render_be.h"
 
@@ -110,7 +111,8 @@ static uint32_t resolve_color(block *b, int which) {
         if (which == 2 && cur->st.accent) return cur->st.accent;
         cur = cur->parent;
     }
-    return which == 1 ? 0x1E1E26u : 0xE8E8ECu;
+    const struct style *tok = gui_active_style();
+    return which == 1 ? tok->bg : tok->fg;
 }
 
 static int text_trimmed(const char *txt, int max_w, uint8_t scale,

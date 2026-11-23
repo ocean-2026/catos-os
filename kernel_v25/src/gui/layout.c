@@ -78,23 +78,35 @@ static void measure_node(block *b) {
     }
 }
 
-static void place_child(block *child, int ax, int ay, int aw, int ah,
-                        int cross_axis) {
-    /* cross_axis: 0 = 交叉轴横向（COLUMN），1 = 交叉轴纵向（ROW） */
-    int cx = ax, cy = ay;
+/* 子块可用框：bleed 子块对齐父级整框，其余对齐父级内容框（父原点+padding）。 */
+static void child_box(block *c,
+                      int fx, int fy, int fw, int fh,
+                      int cx, int cy, int cw, int ch,
+                      int *ox, int *oy, int *ow, int *oh) {
+    if (c->bleed) { *ox = fx; *oy = fy; *ow = fw; *oh = fh; }
+    else          { *ox = cx; *oy = cy; *ow = cw; *oh = ch; }
+}
+
+static void place_child(block *child, int bx, int by, int bw, int bh,
+                        int cross_axis, int mx, int my) {
+    /* cross_axis: 0 = 交叉轴横向（COLUMN），1 = 交叉轴纵向（ROW）；
+     * mx/my 为主轴光标位置（已按父内容框起算）。 */
+    int cx = mx, cy = my;
     if (cross_axis == 0) {
-        if (child->align_cross == XALN_STRETCH) child->w = aw;
-        else if (child->align_cross == XALN_CENTER) cx = ax + (aw - child->w) / 2;
-        else if (child->align_cross == XALN_END)   cx = ax + aw - child->w;
+        if (child->align_cross == XALN_STRETCH) child->w = bw;
+        else if (child->align_cross == XALN_CENTER) cx = bx + (bw - child->w) / 2;
+        else if (child->align_cross == XALN_END)   cx = bx + bw - child->w;
     } else {
-        if (child->align_cross == XALN_STRETCH) child->h = ah;
-        else if (child->align_cross == XALN_CENTER) cy = ay + (ah - child->h) / 2;
-        else if (child->align_cross == XALN_END)   cy = ay + ah - child->h;
+        if (child->align_cross == XALN_STRETCH) child->h = bh;
+        else if (child->align_cross == XALN_CENTER) cy = by + (bh - child->h) / 2;
+        else if (child->align_cross == XALN_END)   cy = by + bh - child->h;
     }
     child->x = cx; child->y = cy;
 }
 
-static void layout_column(block *b, int ax, int ay, int aw, int ah) {
+static void layout_column(block *b,
+                           int fx, int fy, int fw, int fh,
+                           int cx, int cy, int cw, int ch) {
     int n = 0;
     for (block *c = b->first_child; c; c = c->next_sibling) n++;
     if (n == 0) return;
@@ -103,24 +115,28 @@ static void layout_column(block *b, int ax, int ay, int aw, int ah) {
     total_h += gap * (n - 1);
 
     int y0;
-    if (b->align_main == ALN_CENTER)      y0 = ay + (ah - total_h) / 2;
-    else if (b->align_main == ALN_END)    y0 = ay + ah - total_h;
-    else                                  y0 = ay;
+    if (b->align_main == ALN_CENTER)      y0 = cy + (ch - total_h) / 2;
+    else if (b->align_main == ALN_END)    y0 = cy + ch - total_h;
+    else                                  y0 = cy;
 
     int extra = 0, slot = 0;
     if (b->align_main == ALN_SPACE_BETWEEN && n > 1) {
-        extra = ah - total_h;
+        extra = ch - total_h;
         slot = extra / (n - 1);
     }
     int y = y0;
     for (block *c = b->first_child; c; c = c->next_sibling) {
-        place_child(c, ax, y, aw, ah, 0);
+        int ox, oy, ow, oh;
+        child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
+        place_child(c, ox, oy, ow, oh, 0, ox, y);
         layout_node(c, c->x, c->y, c->w, c->h);
         y += c->h + gap + slot;
     }
 }
 
-static void layout_row(block *b, int ax, int ay, int aw, int ah) {
+static void layout_row(block *b,
+                       int fx, int fy, int fw, int fh,
+                       int cx, int cy, int cw, int ch) {
     int n = 0;
     for (block *c = b->first_child; c; c = c->next_sibling) n++;
     if (n == 0) return;
@@ -129,33 +145,39 @@ static void layout_row(block *b, int ax, int ay, int aw, int ah) {
     total_w += gap * (n - 1);
 
     int x0;
-    if (b->align_main == ALN_CENTER)      x0 = ax + (aw - total_w) / 2;
-    else if (b->align_main == ALN_END)    x0 = ax + aw - total_w;
-    else                                  x0 = ax;
+    if (b->align_main == ALN_CENTER)      x0 = cx + (cw - total_w) / 2;
+    else if (b->align_main == ALN_END)    x0 = cx + cw - total_w;
+    else                                  x0 = cx;
 
     int extra = 0, slot = 0;
     if (b->align_main == ALN_SPACE_BETWEEN && n > 1) {
-        extra = aw - total_w;
+        extra = cw - total_w;
         slot = extra / (n - 1);
     }
     int x = x0;
     for (block *c = b->first_child; c; c = c->next_sibling) {
-        place_child(c, x, ay, aw, ah, 1);
+        int ox, oy, ow, oh;
+        child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
+        place_child(c, ox, oy, ow, oh, 1, x, oy);
         layout_node(c, c->x, c->y, c->w, c->h);
         x += c->w + gap + slot;
     }
 }
 
-static void layout_stack(block *b, int ax, int ay, int aw, int ah) {
+static void layout_stack(block *b,
+                         int fx, int fy, int fw, int fh,
+                         int cx, int cy, int cw, int ch) {
     /* 主轴 = 横向，交叉轴 = 纵向（与 ROW 一致）。 */
     for (block *c = b->first_child; c; c = c->next_sibling) {
-        int cx = ax, cy = ay;
-        if (c->align_main == ALN_CENTER)       cx = ax + (aw - c->w) / 2;
-        else if (c->align_main == ALN_END)     cx = ax + aw - c->w;
-        if (c->align_cross == XALN_STRETCH)    c->h = ah;
-        else if (c->align_cross == XALN_CENTER) cy = ay + (ah - c->h) / 2;
-        else if (c->align_cross == XALN_END)   cy = ay + ah - c->h;
-        if (!c->moved) { c->x = cx; c->y = cy; }
+        int ox, oy, ow, oh;
+        child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
+        int ccx = ox, ccy = oy;
+        if (c->align_main == ALN_CENTER)       ccx = ox + (ow - c->w) / 2;
+        else if (c->align_main == ALN_END)    ccx = ox + ow - c->w;
+        if (c->align_cross == XALN_STRETCH)   c->h = oh;
+        else if (c->align_cross == XALN_CENTER) ccy = oy + (oh - c->h) / 2;
+        else if (c->align_cross == XALN_END)   ccy = oy + oh - c->h;
+        if (!c->moved) { c->x = ccx; c->y = ccy; }
         layout_node(c, c->x, c->y, c->w, c->h);
     }
 }
@@ -169,18 +191,19 @@ void layout_node(block *b, int ax, int ay, int aw, int ah) {
     if (cah < 0) cah = 0;
 
     switch (b->kind) {
-    case BLK_COLUMN: layout_column(b, cax, cay, caw, cah); break;
-    case BLK_ROW:    layout_row(b,    cax, cay, caw, cah); break;
+    case BLK_COLUMN: layout_column(b, ax, ay, aw, ah, cax, cay, caw, cah); break;
+    case BLK_ROW:    layout_row(b,    ax, ay, aw, ah, cax, cay, caw, cah); break;
     case BLK_STACK:
-    case BLK_ROOT:  layout_stack(b, cax, cay, caw, cah); break;
+    case BLK_ROOT:  layout_stack(b,  ax, ay, aw, ah, cax, cay, caw, cah); break;
     default: break;
     }
 
-    /* 叶子块的子块继承父块矩形（无自身容器布局）。 */
+    /* 叶子块的子块继承父块内容框（父原点 + padding）。 */
     if (b->kind != BLK_COLUMN && b->kind != BLK_ROW &&
         b->kind != BLK_STACK && b->kind != BLK_ROOT) {
+        int lx = b->x + pad_l, ly = b->y + pad_t;
         for (block *c = b->first_child; c; c = c->next_sibling) {
-            c->x = b->x; c->y = b->y;
+            c->x = lx; c->y = ly;
             layout_node(c, c->x, c->y, c->w, c->h);
         }
     }
