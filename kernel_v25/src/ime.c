@@ -240,7 +240,12 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
     if (key == KB_F2 || key == KB_IME_TOGGLE) {
         active = !active;
         if (active) { ime_clear(); ime_show(); }
-        else        { ime_clear(); con_status_bar_off(); }
+        /* v2.80 fix: deactivating must FORGET the bar, not merely repaint the
+         * two borrowed rows.  con_status_bar_off() keeps bar_active = 1, so the
+         * next scroll (i.e. the output of any command) re-pinned the stale
+         * candidate row to the bottom -- the "IME pops up after every command"
+         * report.  forget() restores the rows AND drops the text. */
+        else        { ime_clear(); con_status_bar_forget(); }
         return IME_CONSUME;
     }
     if (!active) return IME_PASS;
@@ -271,7 +276,7 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
     if (key == 27) {
         active = 0;
         ime_clear();
-        con_status_bar_off();
+        con_status_bar_forget();        /* v2.80: drop the text, not just the rows */
         return IME_CONSUME;
     }
     if ((key == KB_UP || key == KB_DOWN) && py_len > 0) {
@@ -318,11 +323,11 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
 
 void ime_refresh(void) {
     if (active) ime_show();
-    else        con_status_bar_off();
+    else        con_status_bar_forget();   /* v2.80: never leave a stale bar */
 }
 
 void ime_off(void) {
     active = 0;
     ime_clear();
-    con_status_bar_off();
+    con_status_bar_forget();               /* v2.80: clear bar_active too */
 }

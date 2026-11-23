@@ -214,7 +214,7 @@ int kb_getkey_timed(uint32_t ticks) {
             if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
             if (sc & 0x80) continue;                   /* other E0 breaks */
             int k = sc_to_key(sc);
-            if (k) return e0_map(k, ctrl);
+            if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
             continue;
         }
         if (sc == 0xE0) { got_e0 = 1; continue; }
@@ -230,9 +230,12 @@ int kb_getkey_timed(uint32_t ticks) {
         if (sc & 0x80) continue;
 
         int k = sc_to_key(sc);
-        if (k) return e0_map(k, ctrl);
-        if (sc == 0x0E) return 8;           /* backspace */
-        if (sc == 0x1C) return 10;          /* newline   */
+        /* v2.80: Shift held + any key is a COMBO, never an isolated tap --
+         * mark it before these early returns or Shift+Enter / Shift+Tab /
+         * Shift+Backspace would toggle the IME when the Shift is released. */
+        if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
+        if (sc == 0x0E) { SHIFT_MARK_COMBO(); return 8; }   /* backspace */
+        if (sc == 0x1C) { SHIFT_MARK_COMBO(); return 10; }  /* newline   */
 
         char c = (sc < 128) ? (shift ? sc_shift[sc] : sc_unshift[sc]) : 0;
         if (c == 0) continue;
@@ -262,7 +265,7 @@ int kb_getkey(void) {
             if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
             if (sc & 0x80) continue;           /* E0 break codes: ignore */
             int k = sc_to_key(sc);
-            if (k) return e0_map(k, ctrl);
+            if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
             continue;
         }
         if (sc == 0xE0) { got_e0 = 1; continue; }
@@ -280,9 +283,11 @@ int kb_getkey(void) {
 
         /* cursor / function keys (rare on PS/2 without E0, keep both) */
         int k = sc_to_key(sc);
-        if (k) return e0_map(k, ctrl);
-        if (sc == 0x0E) return '\b';
-        if (sc == 0x1C) return '\n';
+        /* v2.80: same combo rule as kb_getkey_timed -- a printable-free key
+         * pressed while Shift is held must not look like a shift tap. */
+        if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
+        if (sc == 0x0E) { SHIFT_MARK_COMBO(); return '\b'; }
+        if (sc == 0x1C) { SHIFT_MARK_COMBO(); return '\n'; }
 
         char c = (sc < 128) ? (shift ? sc_shift[sc] : sc_unshift[sc]) : 0;
         if (c == 0) continue;
@@ -562,6 +567,9 @@ int kb_readline(char *buf, int len) {
     con_get_cursor(&x0, &y0);
     rl_y0_adj = -1; rl_last_rows = 1;   /* v2.66: fresh anchor per line */
     ime_set_anchor(y0);             /* v2.25: candidate bar under the line */
+    /* v2.80: a fresh prompt must never inherit a detached IME bar -- if the
+     * IME is off, drop any stale bar text (bar_active) before the first key. */
+    if (!ime_active()) con_status_bar_forget();
     uint8_t base = con_get_fg();
     int cols = con_cols();
     int hist_pos = -1;                  /* -1 = the draft line being typed */
