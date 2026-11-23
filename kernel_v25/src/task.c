@@ -29,6 +29,9 @@
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
+#ifdef CATOS_BENCH
+#include "perf.h"    /* perf_now() sub-step rdtsc windows (bench builds only) */
+#endif
 
 extern void net_poll(void);
 extern int  net_http_get(const char *url, char *out, int max);
@@ -112,6 +115,35 @@ static char e3_pr_buf[MAX_TASKS][E3_PIPE_SLOT];  /* SYS_PIPE_READ snapshot  */
 static char e3_ur_buf[MAX_TASKS][E3_UR_MAX];    /* SYS_NET_UDP_RECV payload*/
 static char e3_ur_ip[MAX_TASKS][24];            /* SYS_NET_UDP_RECV ip     */
 
+#ifdef CATOS_BENCH
+/* ---- spawn/exit sub-step profiling (bench diagnostics only) ------------
+ * Accumulators split the wait_child() exit window into: child ring3 +
+ * syscalls until SYS_EXIT, each task_cleanup() sub-step, the parent wake,
+ * and the parent-side block->wake wait.  Read out one [perf] line per exit.
+ */
+static uint64_t g_sp_resume_tsc[MAX_TASKS];
+static struct {
+    uint64_t user;        /* child switched-in -> SYS_EXIT entry            */
+    uint64_t cleanup;     /* whole task_cleanup()                           */
+    uint64_t cr3;         /* switch CR3 back to kdir                        */
+    uint64_t destroy;     /* task_space_destroy()                           */
+    uint64_t vma;         /* VMA node list free                             */
+    uint64_t pipe;        /* pipe_task_cleanup()                            */
+    uint64_t console;     /* console release                                */
+    uint64_t banner;      /* exit banner vga_write                          */
+    uint64_t wake;        /* autoreap + parent wake                         */
+    uint64_t wait_parent; /* parent: task_wait_child block -> wake          */
+    uint64_t sys[64];     /* per-syscall kernel time (ring3 callers only)   */
+    uint64_t wr_copy;     /* SYS_WRITE: user-string snapshot phase          */
+    uint64_t wr_paint;    /* SYS_WRITE: console / ring output phase         */
+    uint32_t exits;
+} g_sp;
+extern uint64_t g_sp_pt_free, g_sp_pt2_free, g_sp_tab_free;
+extern uint32_t g_sp_frames;
+extern uint64_t g_sp_scroll_cycles;
+extern uint32_t g_sp_scroll_calls, g_sp_scroll_bytes;
+#endif
+
 static void idle_main(void);
 
 task_t *task_current(void) { return cur_task; }
@@ -186,6 +218,10 @@ static task_t *pick_ready(void) {
 static void schedule_to(task_t *next) {
     task_t *prev = cur_task;
     cur_task = next;
+#ifdef CATOS_BENCH
+    if (next->tid >= 0 && next->tid < MAX_TASKS)
+        g_sp_resume_tsc[next->tid] = perf_now();
+#endif
     next->state = T_RUNNING;
     if (next->ring0 || !next->resume_frame) {
         prev->resume_frame = 0;          /* cooperative frame */
@@ -373,15 +409,34 @@ static void task_cleanup(task_t *t) {
     /* free the user address space (safe: t never runs again).  We may be
      * running on the dying task's kernel stack - only its USER frames are
      * freed here; the kernel stack is reused when the slot respawns. */
+#ifdef CATOS_BENCH
+    uint64_t _ca = perf_now();
+#endif
     cpu_cr3_write(paging_kdir());         /* never walk a dying directory */
+#ifdef CATOS_BENCH
+    uint64_t _cb = perf_now(); g_sp.cr3 += _cb - _ca;
+#endif
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
+#ifdef CATOS_BENCH
+    uint64_t _cc = perf_now(); g_sp.destroy += _cc - _cb;
+#endif
     /* Free the VMA list nodes (each node is a kzalloc_frame'd block;
      * the actual pages mapped inside them are freed via task_space_destroy). */
     while (t->vm) { vma_t *v = t->vm; t->vm = v->next; vma_free(v); }
+#ifdef CATOS_BENCH
+    uint64_t _cd = perf_now(); g_sp.vma += _cd - _cc;
+#endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
+#ifdef CATOS_BENCH
+    uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
+#endif
     if (console_owner_tid() == t->tid) console_wake_release(t->tid);
+#ifdef CATOS_BENCH
+    uint64_t _cf = perf_now(); g_sp.console += _cf - _ce;
+    g_sp.cleanup += _cf - _ca;
+#endif
 }
 
 /* #180: release the VMA node list.  task_space_destroy frees the mapped
@@ -415,11 +470,22 @@ void task_die_fault(int_frame_t *f) {
 
 void task_exit_current(int code) {
     task_t *t = cur_task;
+#ifdef CATOS_BENCH
+    uint64_t _e0 = perf_now();
+    if (t->tid >= 0 && t->tid < MAX_TASKS)
+        g_sp.user += _e0 - g_sp_resume_tsc[t->tid];
+#endif
     task_cleanup(t);
     t->exit_code = code;
     t->state = T_ZOMBIE;
+#ifdef CATOS_BENCH
+    uint64_t _e1 = perf_now();
+#endif
     w("[task "); wdec(t->tid); w(" '"); w(t->name); w("' exit(");
     wdec(code); w(")]\n");
+#ifdef CATOS_BENCH
+    uint64_t _e2 = perf_now(); g_sp.banner += _e2 - _e1;
+#endif
     /* v2.52 fix: reap BEFORE waking the parent.  Waking first flipped the
      * parent to T_READY, so maybe_autoreap() saw "nobody waits" and reaped
      * the zombie out from under a shell blocked in task_wait_child*(),
@@ -428,6 +494,47 @@ void task_exit_current(int code) {
     if (t->parent && t->parent->state == T_WAIT_CHILD) {
         t->parent->state = T_READY;
     }
+#ifdef CATOS_BENCH
+    uint64_t _e3 = perf_now(); g_sp.wake += _e3 - _e2;
+    g_sp.exits++;
+    {
+        static uint64_t s_user=0, s_cleanup=0, s_destroy=0, s_wake=0,
+            s_wait=0, s_wr=0, s_time=0, s_alloc=0, s_free=0,
+            s_copy=0, s_paint=0, s_scy=0;
+        static uint32_t s_frames=0, s_scall=0, s_sbytes=0;
+        perf_begin("spawn.exit");
+        perf_kv("tid", (uint32_t)t->tid);
+        perf_kv64("user", g_sp.user - s_user);
+        perf_kv64("cleanup", g_sp.cleanup - s_cleanup);
+        perf_kv64("destroy", g_sp.destroy - s_destroy);
+        perf_kv64("wake", g_sp.wake - s_wake);
+        perf_kv64("wait", g_sp.wait_parent - s_wait);
+        perf_kv("frames", g_sp_frames - s_frames);
+        perf_end();
+        perf_begin("spawn.sys");
+        /* enum order (defined below): WRITE=0 TIME_STR=4 ALLOC=11 FREE=12 */
+        perf_kv64("wr", g_sp.sys[0] - s_wr);
+        perf_kv64("copy", g_sp.wr_copy - s_copy);
+        perf_kv64("paint", g_sp.wr_paint - s_paint);
+        perf_kv64("time", g_sp.sys[4] - s_time);
+        perf_kv64("alloc", g_sp.sys[11] - s_alloc);
+        perf_kv64("free", g_sp.sys[12] - s_free);
+        perf_end();
+        s_user=g_sp.user; s_cleanup=g_sp.cleanup; s_destroy=g_sp.destroy;
+        s_wake=g_sp.wake; s_wait=g_sp.wait_parent;
+        s_wr=g_sp.sys[0]; s_time=g_sp.sys[4];
+        s_alloc=g_sp.sys[11]; s_free=g_sp.sys[12];
+        s_copy=g_sp.wr_copy; s_paint=g_sp.wr_paint;
+        perf_begin("spawn.scroll");
+        perf_kv64("cyc", g_sp_scroll_cycles - s_scy);
+        perf_kv("calls", g_sp_scroll_calls - s_scall);
+        perf_kv("bytes", g_sp_scroll_bytes - s_sbytes);
+        perf_end();
+        s_scy=g_sp_scroll_cycles; s_scall=g_sp_scroll_calls;
+        s_sbytes=g_sp_scroll_bytes;
+        s_frames=g_sp_frames;
+    }
+#endif
     reschedule();
     __builtin_unreachable();
 }
@@ -452,9 +559,15 @@ int task_kill(int tid, int by_uid) {
 }
 
 void task_wait_child(task_t *child) {
+#ifdef CATOS_BENCH
+    uint64_t _w0 = perf_now();
+#endif
     while (child->state == T_ZOMBIE || child->state == T_UNUSED ? 0 : 1)
         task_block(T_WAIT_CHILD);
     child->state = T_UNUSED;              /* reaped */
+#ifdef CATOS_BENCH
+    g_sp.wait_parent += perf_now() - _w0;
+#endif
 }
 
 /* v2.52: wait until the child exits (reaped, 0) or stops (1).  A stopped
@@ -1227,6 +1340,9 @@ void isr_syscall(int_frame_t *f) {
      * preempt frame captured below. */
     t->resume_frame = 0;
     g_in_syscall++;
+#ifdef CATOS_BENCH
+    uint64_t _s0 = perf_now();
+#endif
 
     switch (nr) {
     case SYS_WRITE: {
@@ -1248,6 +1364,9 @@ void isr_syscall(int_frame_t *f) {
          * and reading past it would demand a page the caller never mapped. */
         while (total < SYS_WRITE_MAX && !done) {
             int i = 0;
+#ifdef CATOS_BENCH
+            uint64_t _w0 = perf_now();
+#endif
             while (i < SYS_WRITE_CHUNK) {
                 uint32_t a = (uint32_t)s + total + i;
                 uint32_t n = 4096u - (a & 0xFFFu);
@@ -1264,6 +1383,9 @@ void isr_syscall(int_frame_t *f) {
                 i += k;
                 if (done) break;
             }
+#ifdef CATOS_BENCH
+            uint64_t _w1 = perf_now(); g_sp.wr_copy += _w1 - _w0;
+#endif
             if (err || !i) break;
             /* v2.5 redirection: pipe target first, then file, else console */
             if (t->out_pipe >= 0) {
@@ -1298,6 +1420,9 @@ void isr_syscall(int_frame_t *f) {
                 if (t->bg_mode) task_log_append(t, b, (uint32_t)i);
                 else            vga_write_n(b, i, done);
             }
+#ifdef CATOS_BENCH
+            g_sp.wr_paint += perf_now() - _w1;
+#endif
             total += (uint32_t)i;
         }
         /* Hit the cap without a NUL: close any dangling UTF-8 sequence
@@ -2024,6 +2149,9 @@ void isr_syscall(int_frame_t *f) {
     }
     default: ret = (uint32_t)-8; break;
     }
+#ifdef CATOS_BENCH
+    if (!t->ring0 && nr < 64) g_sp.sys[nr] += perf_now() - _s0;
+#endif
 
     f->eax = ret;
     g_in_syscall--;

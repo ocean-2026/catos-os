@@ -41,6 +41,11 @@
 #include "svga.h"
 #include "io.h"
 #include "paging.h"
+#ifdef CATOS_BENCH
+#include "perf.h"
+uint64_t g_sp_scroll_cycles;
+uint32_t g_sp_scroll_calls, g_sp_scroll_bytes;
+#endif
 
 #define DISPI_INDEX_PORT 0x01CE
 #define DISPI_DATA_PORT  0x01CF
@@ -516,7 +521,26 @@ static void v24_draw_cell(int gx, int gy, const con_cell_t *c) {
 static void v24_set_cursor(int x, int y) { (void)x; (void)y; }
 
 /* Shift framebuffer pixels up by n cell-rows; fill scrolled-in area with bg.
- * Uses raw byte memcpy loop for portability (no libc). */
+ *
+ * The move is a verbatim byte copy (no channel reordering), so it can run
+ * word-at-a-time regardless of the 3-byte Bochs BGR vs 4-byte SVGA BGRX
+ * layout.  Both `shift` and `keep` are multiples of the line pitch, and the
+ * LFB base is page-aligned, so every word access is aligned.  Upward scroll
+ * is an overlapping move with dest < src; a forward copy is safe.
+ *
+ * perf: under TCG every volatile MMIO byte access exits the translator to
+ * the VGA emulation; the old byte loop paid one trap per byte for a 1.38 MiB
+ * shift.  Copying 4 bytes per access cuts the trap count ~4x. */
+static void lfb_move_up(uint32_t dst, uint32_t src, uint32_t len) {
+    uint32_t i = 0;
+    for (; i + 4u <= len; i += 4u) {
+        *(volatile uint32_t *)(lfb + dst + i) =
+            *(volatile uint32_t *)(lfb + src + i);
+    }
+    for (; i < len; i++)
+        lfb[dst + i] = lfb[src + i];
+}
+
 static int v24_scroll(int n, uint32_t bg_rgb) {
     if (n <= 0 || n >= be_vbe24.rows) return -1;
     int ch = v24_ch();
@@ -533,9 +557,16 @@ static int v24_scroll(int n, uint32_t bg_rgb) {
     }
     uint32_t shift = (uint32_t)n * ch * g_pitch;
     uint32_t keep   = (uint32_t)(be_vbe24.rows - n) * ch * g_pitch;
-    for (uint32_t i = 0; i < keep; i++)
-        lfb[i] = lfb[i + shift];
+#ifdef CATOS_BENCH
+    uint64_t _s0 = perf_now();
+#endif
+    lfb_move_up(0, shift, keep);
     fill(0, (be_vbe24.rows - n) * ch, GFX24_W, n * ch, bg_rgb);
+#ifdef CATOS_BENCH
+    g_sp_scroll_cycles += perf_now() - _s0;
+    g_sp_scroll_calls++;
+    g_sp_scroll_bytes += keep;
+#endif
     if (had) mc_save_and_draw(mc_x, mc_y);
     return 0;
 }
