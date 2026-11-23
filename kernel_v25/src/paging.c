@@ -24,6 +24,11 @@
 #include "paging.h"
 #include "cpu.h"
 #include "vga.h"
+#ifdef CATOS_BENCH
+#include "perf.h"
+uint64_t g_sp_pt_free, g_sp_pt2_free, g_sp_tab_free;
+uint32_t g_sp_frames;
+#endif
 
 #define KBASE        0x1000000u     /* kernel link base  */
 #define MEM_TOP      0x4000000u     /* legacy fallback: low 64 MiB      */
@@ -265,17 +270,42 @@ uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
 
 void task_space_destroy(task_space_t *s) {
     if (!s->pt) return;
+#ifdef CATOS_BENCH
+    uint64_t _p0 = perf_now();
+    uint32_t _nf = 0;
+#endif
     uint32_t *t = (uint32_t *)s->pt;
     for (uint32_t i = 0; i < 1024; i++)
-        if (t[i] & 1) frame_free(t[i] & ~0xFFFu);
+        if (t[i] & 1) { frame_free(t[i] & ~0xFFFu);
+#ifdef CATOS_BENCH
+            _nf++;
+#endif
+        }
+#ifdef CATOS_BENCH
+    uint64_t _p1 = perf_now(); g_sp_pt_free += _p1 - _p0;
+#endif
     frame_free(s->pt);
     if (s->pt2) {
+#ifdef CATOS_BENCH
+        uint64_t _p2 = perf_now();
+#endif
         uint32_t *t2 = (uint32_t *)s->pt2;
         for (uint32_t i = 0; i < 1024; i++)
-            if (t2[i] & 1) frame_free(t2[i] & ~0xFFFu);
+            if (t2[i] & 1) { frame_free(t2[i] & ~0xFFFu);
+#ifdef CATOS_BENCH
+                _nf++;
+#endif
+            }
+#ifdef CATOS_BENCH
+        uint64_t _p3 = perf_now(); g_sp_pt2_free += _p3 - _p2;
+#endif
         frame_free(s->pt2);
     }
     if (s->dir) frame_free(s->dir);
+#ifdef CATOS_BENCH
+    g_sp_tab_free += perf_now() - _p1;
+    g_sp_frames += _nf;
+#endif
     s->pt = 0;
     s->pt2 = 0;
     s->dir = 0;
