@@ -55,6 +55,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     btime_mark("K2 paging");
     intr_init();
     tasks_init();
+    paging_static_slot_guard_selftest();   /* #D11: prove static-slot overwrite is refused */
     intr_enable();
     btime_mark("K3 intr+tasks+sti");
     hw_mem_boot(lo, hi);

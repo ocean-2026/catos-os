@@ -24,6 +24,8 @@
 #include "paging.h"
 #include "cpu.h"
 #include "vga.h"
+#include "serial_log.h"
+#include "task.h"
 #ifdef CATOS_BENCH
 #include "perf.h"
 uint64_t g_sp_pt_free, g_sp_pt2_free, g_sp_tab_free;
@@ -270,6 +272,25 @@ int task_map_page(task_space_t *s, uint32_t vaddr, uint32_t pa, int user_writabl
     uint32_t *t = pt_for(s, vaddr);
     if (!t) return -1;
     uint32_t pte = (vaddr >> 12) & 0x3FF;
+    /* #D11 hardening: the allocator never hands out frames below frames_base
+     * (the kernel image/.bss slice).  If a user mapping ever targets such a
+     * physical frame, that would expose a kernel static frame to ring3 (a
+     * privilege hole) -- refuse it loudly instead of installing the PTE.
+     *
+     * Note: overwriting the B' supervisor mirror at this VA with a freshly
+     * allocated heap/user frame (<- pa >= frames_base) is the intended B'
+     * behavior: the kernel static frame stays resident under kdir, the task
+     * only loses its private mirror copy.  Do NOT refuse that case. */
+    uint32_t new_pa = pa & ~0xFFFu;
+    if (new_pa < frames_base) {
+        int tid = task_current() ? task_current()->tid : -1;
+        ser_write("[link][RISK] refuse user map onto kernel static frame ");
+        ser_hex("va=", vaddr);
+        ser_hex(" frame=", new_pa);
+        ser_hex(" pid=", (uint32_t)tid);
+        ser_write("\n");
+        return -1;
+    }
     t[pte] = (pa & ~0xFFFu) | 0x005u | (user_writable ? 0x002u : 0);
     cpu_invlpg(vaddr);
     return 0;
@@ -336,6 +357,47 @@ void task_space_destroy(task_space_t *s) {
     s->pt = 0;
     s->pt2 = 0;
     s->dir = 0;
+}
+
+/* #D11 guard self-test: build a throwaway task space, find a slot that holds
+ * the B' supervisor mirror of a kernel static frame, and attempt a user map
+ * over it.  The mapping must be refused (rc=-1) and the mirror PTE must be
+ * left byte-for-byte intact.  Prints a machine-readable [guard] result line. */
+static void guard_dec(uint32_t v) {
+    char b[12]; int n = 0;
+    if (!v) { ser_putc('0'); return; }
+    while (v) { b[n++] = (char)('0' + v % 10u); v /= 10u; }
+    while (n) ser_putc(b[--n]);
+}
+
+void paging_static_slot_guard_selftest(void) {
+    task_space_t ts;
+    if (task_space_create(&ts) != 0) {
+        ser_write("[guard] static-slot selftest: space create failed\n");
+        return;
+    }
+    /* Pick the first user-arena slot; try to install a user PTE onto a kernel
+     * static physical frame (identity pa below frames_base).  The guard must
+     * reject it and leave the slot PTE byte-for-byte intact. */
+    uint32_t va = USER_IMAGE_BASE;
+    uint32_t old = 0;
+    uint32_t *tp = pt_for(&ts, va);
+    if (tp) old = tp[(va >> 12) & 0x3FFu];
+    uint32_t static_pa = (frames_base > 0x1000u) ? frames_base - 0x1000u : 0;
+    int rejected = 0, intact = 0;
+    if (tp && static_pa) {
+        int rc = task_map_page(&ts, va, static_pa, 1);
+        rejected = (rc == -1);
+        uint32_t now = tp[(va >> 12) & 0x3FFu];
+        intact = (now == old);
+    }
+    task_space_destroy(&ts);
+
+    int ok = rejected && intact;
+    ser_write("[guard] static-slot guard rejected="); guard_dec((uint32_t)rejected);
+    ser_write(" intact="); guard_dec((uint32_t)intact);
+    ser_write(" result="); guard_dec((uint32_t)ok);
+    ser_write("\n");
 }
 
 /* ---- helpers exposed to the task layer --------------------------------- */
