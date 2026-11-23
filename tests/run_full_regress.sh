@@ -64,10 +64,23 @@ if [ -f tests/ime_regress.py ]; then
     run ime    tests/ime_regress.py        "$ISO" --qemu "$Q" --port 4722
 fi
 if [ -f tests/gui_pixel_regress.py ]; then
-    run guipix tests/gui_pixel_regress.py  "$ISO" --port 4723
+    for g in dark light hc menu; do
+        run "guipix-$g" tests/gui_pixel_regress.py "$ISO" --group "$g" --port 4723
+    done
 fi
 if [ -f tests/gui_console_clean.py ]; then
     run guiclean tests/gui_console_clean.py "$ISO" --port 4724
+fi
+
+# #D11 layout guardrail: report kernel statics sitting in the ring3 arena
+# window.  Non-fatal here: the B' supervisor mirror in paging.c keeps those
+# frames reachable on a caller CR3.  `--strict` is reserved for a future
+# layout-shrink milestone that pulls syscall-path tables back below the
+# window; see REPORT.md §5.
+if [ -f kernel_v25/build/kernel.pe ] && [ -f kernel_v25/tools/check_link_layout.py ]; then
+    echo "===== link-layout guardrail ====="
+    python3 kernel_v25/tools/check_link_layout.py kernel_v25/build/kernel.pe \
+        || echo "[link] guardrail reported risks (non-fatal under B' mirror)"
 fi
 
 echo "===== sweep done ====="

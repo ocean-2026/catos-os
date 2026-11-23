@@ -88,7 +88,9 @@ def capture(iso, cmd, settle, ppm, png, port=PORT):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("iso", nargs="?", default=ISO)
-    ap.add_argument("--cmd", default="gui")
+    ap.add_argument("--cmd", default=None,
+                    help="shell command that enters the frame; defaults to "
+                         "the shot subcommand matching --group")
     ap.add_argument("--settle", type=float, default=6.0)
     ap.add_argument("--ppm", default=None, help="verify an existing PPM only")
     ap.add_argument("--png", default=os.path.join(ART, "m0-desktop.png"))
@@ -97,9 +99,17 @@ def main():
                     default="dark", help="pixel assert group")
     args = ap.parse_args()
 
+    GROUP_CMD = {
+        "dark":  "gui",
+        "light": "gui shot-light",
+        "hc":    "gui shot-hc",
+        "menu":  "gui shot-menu",
+    }
+    cmd = args.cmd or GROUP_CMD[args.group]
+
     ppm = args.ppm or os.path.join(ART, "m0-desktop.ppm")
     if not args.ppm:
-        rc = capture(args.iso, args.cmd, args.settle, ppm, args.png,
+        rc = capture(args.iso, cmd, args.settle, ppm, args.png,
                       args.port)
         if rc != 0:
             return rc
