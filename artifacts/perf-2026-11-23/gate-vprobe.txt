@@ -1,5 +1,6 @@
-# gate: vprobe (Issue #78) -- production build, 2026-11-23
-# cmd: python3 tests/vprobe_regress.py   (repo = merged perf/integ worktree)
+# gate: vprobe (Issue #78)
+# build: main @ merge of perf/integ, production (no BENCH), kernel.bin 1,190,596 B / catos.iso sha8 9f25f13b
+# cmd: python3 tests/vprobe_regress.py     stdout: gates/vprobe.stdout.log
 PASS format           FAT32 volume ready
 PASS bin-has-vprobe   /bin/vprobe.ce=True
 PASS fr               verdict PASS

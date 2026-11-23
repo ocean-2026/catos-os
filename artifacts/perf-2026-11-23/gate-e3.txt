@@ -1,5 +1,6 @@
-# gate: E3 (per-task syscall staging buffers) -- production build, 2026-11-23
-# cmd: python3 tests/e3_regress.py
+# gate: E3 (per-task syscall staging buffers + bad-pointer hardening)
+# build: main @ merge of perf/integ, production (no BENCH), catos.iso sha8 9f25f13b
+# cmd: python3 tests/e3_regress.py     stdout: gates/e3.stdout.log
 PASS badptr       verdict PASS
 PASS conc         verdict PASS
 

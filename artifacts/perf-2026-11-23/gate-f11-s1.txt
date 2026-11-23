@@ -1,5 +1,6 @@
-# gate: F11 scenario 1 ($C$ digests / perms / masking) -- production build, 2026-11-23
-# cmd: python3 artifacts/f11-passwd/s1_format_perms.py
+# gate: F11 scenario 1 ($C$ digests / perms / masking)
+# build: main @ merge of perf/integ, production (no BENCH), catos.iso sha8 9f25f13b
+# cmd: python3 artifacts/f11-passwd/s1_format_perms.py     stdout: gates/f11-s1.stdout.log
 PASS passwd-alice
 PASS passwd-bob
 PASS root-lsuser-tags
@@ -10,6 +11,4 @@ PASS login-root
 PASS root-sees-C-records
 PASS salts-differ-same-pw
 
-# records (root edit -c /etc/passwd):
-# alice: $C$180e1e962970c707$4d941f72342d5325728e45ce42ac7db5b1d30e61bd1c8345273f4db82b813864
-# bob  : $C$3f60855bb6cb2fda$9b49ecf701aaae050b512847486674ab4b67eff05743831de0783a3734f4f255
+steps=9 ok=9 fail=0
