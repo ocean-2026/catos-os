@@ -1164,14 +1164,17 @@ static block *probe_find_taskbar(void) {
 }
 
 static block *probe_find_panel_body(void) {
+    /* 选面积最小的非标题带 WORK 块：避开含标题行的面板根，落到面板体。 */
+    block *best = 0; int best_area = (1 << 30);
     for (uint32_t id = 1; id <= btable_capacity(); id++) {
         block *b = btable_get(id);
         if (!b || b->layer != LAYER_WORK) continue;
-        if (b->st.role_bg == ROLE_BAR) continue;   /* 标题带不算面板体 */
+        if (b->st.role_bg == ROLE_BAR) continue;
         if (b->w < 40 || b->h < 24) continue;
-        return b;
+        int area = b->w * b->h;
+        if (area < best_area) { best = b; best_area = area; }
     }
-    return 0;
+    return best;
 }
 
 static void gui_probe_style(const char *mode) {

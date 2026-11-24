@@ -178,9 +178,12 @@ static void calm_masks_init(void) {
         int r = CALM_RADII[ri];
         uint32_t r5 = fifth_pow(r);
         for (int dy = 0; dy < r; dy++)
-            for (int dx = 0; dx < r; dx++)
+            for (int dx = 0; dx < r; dx++) {
+                /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
+                uint32_t u = (uint32_t)(r - dx), v = (uint32_t)(r - dy);
                 calm_mask[ri][dy][dx] =
-                    (fifth_pow(dx) + fifth_pow(dy) <= r5) ? 1 : 0;
+                    (fifth_pow(u) + fifth_pow(v) <= r5) ? 1 : 0;
+            }
     }
     calm_mask_ready = 1;
 }
@@ -201,10 +204,10 @@ static int calm_shape_eligible(block *b) {
 
 static int calm_r_index(int w, int h) {
     int s = w < h ? w : h;
-    if (s >= 96) return 3;
-    if (s >= 64) return 2;
-    if (s >= 32) return 1;
-    return 0;
+    if (s >= 128) return 3;   /* 24：应用图标 / 大型欢迎卡 */
+    if (s >= 64)  return 2;   /* 16：面板 / 弹出层外框 */
+    if (s >= 32)  return 1;   /* 12：按钮 / 图标卡 */
+    return 0;                 /* 8：小控件 */
 }
 
 static int calm_inset(int ri, int dy) {
