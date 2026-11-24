@@ -228,6 +228,14 @@ static void print_pad(int v, int w) {
     char b[12]; itoa(v, b, w); vga_write(b);
 }
 
+/* 串口十进制输出（与 GUI/chrome.c 的 ser_dec 同口径，独立副本避免跨模块依赖）。 */
+static void shell_ser_dec(int v) {
+    char b[12]; int n = 0;
+    if (v <= 0) { ser_write("0"); return; }
+    while (v) { b[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) ser_putc(b[--n]);
+}
+
 /* ---------- multiboot info ---------- */
 extern uint32_t multiboot_info_ptr;
 
@@ -3154,6 +3162,11 @@ static void cmd_curl(const char *arg) {
     vga_write(buf);
     if (n > 0 && buf[n-1] != '\n') vga_write("\n");
     vga_write("--- "); print_int(n); vga_write(" bytes ---\n");
+    /* 野站 HTTPS 成功打点：串口留 status/bytes 供回归探针断言（CBC 路径不在此改动）。 */
+    if (strncmp_(arg, "https://", 8) == 0) {
+        ser_write("TLS:wild status="); shell_ser_dec(st);
+        ser_write(" bytes="); shell_ser_dec(n); ser_write("\n");
+    }
 }
 
 /* ---------- ping: ICMP echo ---------- */
