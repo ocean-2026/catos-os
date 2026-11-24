@@ -31,6 +31,13 @@
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
 #include "serial_log.h" /* v2.81: GUI:deny / cv_* breadcrumbs on COM1 */
+
+/* Spawn/sched/syscall breadcrumbs.  Off by default: a release kernel must not
+ * flood COM1.  Build with -DCATOS_SPAWN_TRACE=1 to re-enable the diag lines. */
+#ifndef CATOS_SPAWN_TRACE
+#define CATOS_SPAWN_TRACE 0
+#endif
+
 #ifdef CATOS_BENCH
 #include "perf.h"    /* perf_now(): bench-only rdtsc split timing */
 #endif
@@ -272,6 +279,19 @@ static void schedule_to(task_t *next) {
         g_sp_resume_tsc[next->tid] = perf_now();
 #endif
     next->state = T_RUNNING;
+#if CATOS_SPAWN_TRACE
+    {
+        ser_write("[SCHED] tid="); ser_hex("", next->tid);
+        ser_hex(" ring0=", next->ring0); ser_hex(" rframe=", next->resume_frame);
+        ser_hex(" ksp=", next->ksp);
+        if (next->resume_frame && !next->ring0) {
+            int_frame_t *df = (int_frame_t *)next->ksp;
+            ser_hex(" eip=", df->eip); ser_hex(" cs=", df->cs);
+            ser_hex(" gs=", df->gs); ser_hex(" ds=", df->ds); ser_hex(" ss=", df->ss);
+        }
+        ser_write("\n");
+    }
+#endif
     if (next->ring0 || !next->resume_frame) {
         prev->resume_frame = 0;          /* cooperative frame */
         if (!next->ring0) {
@@ -507,6 +527,11 @@ static void maybe_autoreap(task_t *t) {
 
 void task_die_fault(int_frame_t *f) {
     task_t *t = cur_task;
+#if CATOS_SPAWN_TRACE
+    ser_write("\n[FAULT]"); ser_hex(" intno=", f->intno);
+    ser_hex(" eip=", f->eip); ser_hex(" cr2=", cpu_cr2_read());
+    ser_hex(" cs=", f->cs); ser_hex(" ss=", f->ss); ser_write("\n");
+#endif
     w("\n[task "); wdec(t->tid); w(" '"); w(t->name);
     w("' killed: "); w(f->intno == 14 ? "page fault" : "fault"); w(" at eip=");
     whex(f->eip); w(" cr2="); whex(cpu_cr2_read()); w("]\n");
@@ -1467,6 +1492,9 @@ void isr_syscall(int_frame_t *f) {
      * preempt frame captured below. */
     t->resume_frame = 0;
     g_in_syscall++;
+#if CATOS_SPAWN_TRACE
+    ser_write("[SYSC] tid="); ser_hex("", t->tid); ser_hex(" nr=", nr); ser_write("\n");
+#endif
 #ifdef CATOS_BENCH
     uint64_t _s0 = perf_now();        /* spawn axis: per-syscall accounting  */
     uint64_t _sc_ent = perf_now();    /* light axis: dispatcher entry stamp  */
@@ -2984,14 +3012,30 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
 }
 
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
+#if CATOS_SPAWN_TRACE
+    ser_write("[SPAWN] enter "); ser_write(path ? path : "(null)"); ser_write("\n");
+#endif
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
         if (tasks[i].state == T_UNUSED) { slot = i; break; }
-    if (slot < 0) return -1;
+    if (slot < 0) {
+#if CATOS_SPAWN_TRACE
+        ser_write("[SPAWN] ret -1 no slot\n");
+#endif
+        return -1; }
 
     uint32_t clus = 0, size = 0;
-    if (!path || fs_resolve_file(path, &clus, &size) != 0) return -2;
-    if (size < 4) return -3;
+    if (!path || fs_resolve_file(path, &clus, &size) != 0) {
+#if CATOS_SPAWN_TRACE
+        ser_write("[SPAWN] ret -2 resolve\n");
+#endif
+        return -2;
+    }
+    if (size < 4) {
+#if CATOS_SPAWN_TRACE
+        ser_write("[SPAWN] ret -3 size\n");
+#endif
+        return -3; }
     /* v2.15: enforce PERM_EXEC on the path before loading.  Without this
      * gate any read-accessible user could exec another user's CE binary –
      * /bin/hello.ce for example is world-readable (0755 in /etc/acl), so
@@ -3008,6 +3052,9 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
              * unless the resolver above returned an explicit match.  This
              * covers both "file not readable by anyone" and "chmod 000". */
             (void)clus; (void)size;
+#if CATOS_SPAWN_TRACE
+            ser_write("[SPAWN] ret -13 acl-mode\n");
+#endif
             /* #99: -13 EACCES, not -2 ENOENT.  -2 is what a genuinely
              * missing file returns, so the old code made "permission
              * denied" indistinguishable from "file not found" -- the
@@ -3020,8 +3067,12 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
          * The -13 propagates as CE error -13 which matches all other syscall
          * denials already in the tree. */
         user_rec_t *u = user_by_uid(uid);
-        if (fs_perm_check(path, uid, u ? u->gid : 0, PERM_EXEC) != 0)
+        if (fs_perm_check(path, uid, u ? u->gid : 0, PERM_EXEC) != 0) {
+#if CATOS_SPAWN_TRACE
+            ser_write("[SPAWN] ret -13 perm-check\n");
+#endif
             return -13;
+        }
     }
 
     /* v2.5: read the first cluster, parse the 20-byte header there (no
@@ -3082,6 +3133,9 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     for (uint32_t i = 0; i < sizeof(task_kstacks[0]); i++) ks[i] = 0;
 
     if (task_space_create(&t->space) != 0) return -6;
+#if CATOS_SPAWN_TRACE
+    ser_write("[SPAWN] space ok\n");
+#endif
 
     if (is_elf) {
         /* ELF path: segments are mapped, copied and VMA-tagged inside
@@ -3153,6 +3207,44 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         if (!f) goto fail_space6;
         task_map_page(&t->space, va, f, 1);
     }
+
+    /* [DIAG] per-page table check for the CE image, vsyscall and stack. */
+#if CATOS_SPAWN_TRACE
+    {
+        uint32_t *d  = (uint32_t *)t->space.dir;
+        uint32_t *pt = (uint32_t *)t->space.pt;
+        uint32_t span = (img + bss + 0xFFFu) & ~0xFFFu;
+        uint32_t ranges[3][2] = {
+            { USER_IMAGE_BASE, USER_IMAGE_BASE + span },
+            { USER_VSYSCALL,   USER_VSYSCALL + 4096u },
+            { USER_STACK_TOP - USER_STACK_SZ, USER_STACK_TOP },
+        };
+        for (int r = 0; r < 3; r++) {
+            for (uint32_t va = ranges[r][0]; va < ranges[r][1]; va += 4096u) {
+                uint32_t pde = d[va >> 22];
+                uint32_t pte = pt[(va >> 12) & 0x3FFu];
+                int bad = !(pde & 1) || !(pte & 1) || !(pte & 4);
+                if (bad) {
+                    ser_write("[PT] MISS va="); ser_hex("", va);
+                    ser_hex(" pde=", pde); ser_hex(" pte=", pte);
+                    ser_hex(" span=", span); ser_write("\n");
+                }
+            }
+        }
+        ser_write("[PT] done span="); ser_hex("", span);
+        ser_hex(" usp=", USER_STACK_TOP - 16u); ser_write("\n");
+        /* [DIAG] image content sanity: first 12 bytes at 0x2000000 vs source fbuf[20..] */
+        if (!is_elf && !is_pe) {
+            uint32_t ipa = task_virt_to_phys(&t->space, USER_IMAGE_BASE);
+            uint8_t *ic = (uint8_t *)ipa;
+            ser_write("[IMG] pa="); ser_hex("", ipa); ser_write(" bytes=");
+            for (int i = 0; i < 12; i++) ser_hex("", ic[i]);
+            ser_write(" src=");
+            for (int i = 0; i < 12; i++) ser_hex("", fbuf[20 + i]);
+            ser_write("\n");
+        }
+    }
+#endif
 
     /* Build the VMA list for this task (CE layout matches legacy offsets).
      * Image+bss: read-only (code+data), vsyscall: read-only,
@@ -3256,6 +3348,10 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
         for (i = 0; base[i] && base[i] != '.' && i < 15; i++) t->name[i] = base[i];
         t->name[i] = 0;
     }
+#if CATOS_SPAWN_TRACE
+    ser_write("[SPAWN] ok slot="); ser_putc('0' + slot);
+    ser_hex(" entry=", entry); ser_hex(" usp=", usp); ser_write("\n");
+#endif
     return slot;
 
     /* F1 fix (v2.5.4): every failure after task_space_create used to
