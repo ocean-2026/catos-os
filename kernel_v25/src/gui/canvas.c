@@ -14,14 +14,15 @@
 #include <stddef.h>
 #include "kstring.h"
 
-#define CV_MAX_PAGES 24
+#define CV_MAX_PAGES 64
 #define CV_DEMO_W    200
 #define CV_DEMO_H    160
 
 struct cv_alloc {
-    uint32_t phys[CV_MAX_PAGES];
+    uint32_t *phys;               /* PFN 表：帧分配一页，不入 .bss 静态数组 */
     int      pages;
     int      w, h;
+    int      dx, dy, dw, dh;      /* 脏子矩形；dw=0 = 无脏区 */
 };
 
 static struct cv_alloc cv_pool[2];
@@ -35,18 +36,24 @@ static struct cv_alloc *cv_alloc_record(int w, int h) {
     int pages = (bytes + 4095) / 4096;
     if (pages > CV_MAX_PAGES) return 0;
     for (int i = 0; i < 2; i++) {
-        if (cv_pool[i].pages == 0) {
+        if (cv_pool[i].pages == 0 && !cv_pool[i].phys) {
+            uint32_t ppt = frame_alloc();
+            if (!ppt) return 0;
+            uint32_t *phys = (uint32_t *)ppt;
             for (int p = 0; p < pages; p++) {
                 uint32_t pa = frame_alloc();
                 if (!pa) {
-                    for (int q = 0; q < p; q++) frame_free(cv_pool[i].phys[q]);
-                    cv_pool[i].pages = 0;
+                    for (int q = 0; q < p; q++) frame_free(phys[q]);
+                    frame_free(ppt);
                     return 0;
                 }
-                cv_pool[i].phys[p] = pa;
+                phys[p] = pa;
             }
+            cv_pool[i].phys = phys;
             cv_pool[i].pages = pages;
             cv_pool[i].w = w; cv_pool[i].h = h;
+            cv_pool[i].dx = 0; cv_pool[i].dy = 0;
+            cv_pool[i].dw = w; cv_pool[i].dh = h;   /* 首帧整幅脏 */
             return &cv_pool[i];
         }
     }
@@ -56,7 +63,27 @@ static struct cv_alloc *cv_alloc_record(int w, int h) {
 static void cv_free_record(struct cv_alloc *r) {
     if (!r) return;
     for (int p = 0; p < r->pages; p++) frame_free(r->phys[p]);
+    if (r->phys) frame_free((uint32_t)r->phys);
     memset(r, 0, sizeof(*r));
+}
+
+/* 脏子矩形并集（裁剪到缓冲内）；绘后由合成层清位。 */
+static void cv_union_rect(struct cv_alloc *r, int x, int y, int w, int h) {
+    if (!r || w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > r->w) w = r->w - x;
+    if (y + h > r->h) h = r->h - y;
+    if (w <= 0 || h <= 0) return;
+    if (r->dw == 0) {
+        r->dx = x; r->dy = y; r->dw = w; r->dh = h;
+    } else {
+        int x0 = r->dx < x ? r->dx : x;
+        int y0 = r->dy < y ? r->dy : y;
+        int x1 = r->dx + r->dw > x + w ? r->dx + r->dw : x + w;
+        int y1 = r->dy + r->dh > y + h ? r->dy + r->dh : y + h;
+        r->dx = x0; r->dy = y0; r->dw = x1 - x0; r->dh = y1 - y0;
+    }
 }
 
 /* ---- 建块 --------------------------------------------------------------- */
@@ -109,6 +136,7 @@ void cv_pixel(block_id id, int x, int y, uint32_t rgb) {
     p[0] = (uint8_t)(rgb >> 16);
     p[1] = (uint8_t)(rgb >> 8);
     p[2] = (uint8_t)(rgb);
+    cv_union_rect(b->usr, x, y, 1, 1);
     b->dirty_paint = 1;
 }
 
@@ -142,7 +170,30 @@ void cv_blit24(block_id id, const uint8_t *src, int x, int y,
             d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
         }
     }
+    cv_union_rect(b->usr, x, y, w, h);
     b->dirty_paint = 1;
+}
+
+/* 子矩形标脏：只重 blit 该子矩形；绘后由合成层清位。 */
+void cv_dirty(block_id id, int x, int y, int w, int h) {
+    block *b = btable_get(id);
+    if (!b || !b->usr) return;
+    cv_union_rect(b->usr, x, y, w, h);
+    b->dirty_paint = 1;
+}
+
+int cv_dirty_rect(block *b, int *rx, int *ry, int *rw, int *rh) {
+    if (!b || !b->usr) return 0;
+    struct cv_alloc *r = b->usr;
+    if (r->dw <= 0) return 0;
+    *rx = r->dx; *ry = r->dy; *rw = r->dw; *rh = r->dh;
+    return 1;
+}
+
+void cv_dirty_clear(block *b) {
+    if (!b || !b->usr) return;
+    struct cv_alloc *r = b->usr;
+    r->dw = 0; r->dh = 0;
 }
 
 /* ---- 自测演示：棋盘 + 渐变 + 移动小方块 ---------------------------------- */

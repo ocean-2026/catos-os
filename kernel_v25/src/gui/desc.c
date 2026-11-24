@@ -18,6 +18,11 @@ static void apply_spec(block *b, const blk_spec *s) {
     if (b->pad_t != s->pad_t || b->pad_r != s->pad_r ||
         b->pad_b != s->pad_b || b->pad_l != s->pad_l || b->gap != s->gap)
         geo_changed = 1;
+    if (b->pct_w != s->pct_w || b->pct_h != s->pct_h ||
+        b->min_w != s->min_w || b->min_h != s->min_h ||
+        b->max_w != s->max_w || b->max_h != s->max_h ||
+        b->anchor != s->anchor || b->overflow != s->overflow)
+        geo_changed = 1;
 
     b->req_w = s->req_w; b->req_h = s->req_h;
     b->pad_t = s->pad_t; b->pad_r = s->pad_r;
@@ -31,6 +36,23 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->visible = s->visible;
     b->focusable = s->focusable;
     b->inert = s->inert;
+
+    /* v2 自由布局 / 溢出 / 交互属性镜像。 */
+    b->overflow = s->overflow;
+    b->anchor = s->anchor;
+    b->pct_x = s->pct_x; b->pct_y = s->pct_y;
+    b->pct_w = s->pct_w; b->pct_h = s->pct_h;
+    b->px_x = s->px_x; b->px_y = s->px_y;
+    b->min_w = s->min_w; b->min_h = s->min_h;
+    b->max_w = s->max_w; b->max_h = s->max_h;
+    b->m_t = s->m_t; b->m_r = s->m_r; b->m_b = s->m_b; b->m_l = s->m_l;
+    b->drag_mode = s->drag_mode; b->drag_bounds = s->drag_bounds;
+    b->resize_dir = s->resize_dir; b->resize_edge = s->resize_edge;
+    b->resize_min_w = s->resize_min_w ? s->resize_min_w : 24;
+    b->resize_min_h = s->resize_min_h ? s->resize_min_h : 24;
+    b->resize_max_w = s->resize_max_w; b->resize_max_h = s->resize_max_h;
+    b->resize_step = s->resize_step;
+    b->scroll_x = s->scroll_x; b->scroll_y = s->scroll_y;
 
     if (s->fg != INHERIT_COLOR)     b->st.fg = s->fg;
     if (s->bg != INHERIT_COLOR)     b->st.bg = s->bg;
@@ -72,6 +94,7 @@ static block *create_block(blk_kind kind, block_id parent_id,
 block_id b_column(block_id parent, const blk_spec *s)  { block *b = create_block(BLK_COLUMN, parent, s);  return b ? b->id : 0; }
 block_id b_row  (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_ROW,    parent, s);  return b ? b->id : 0; }
 block_id b_stack(block_id parent, const blk_spec *s)  { block *b = create_block(BLK_STACK,  parent, s);  return b ? b->id : 0; }
+block_id b_free (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_FREE,   parent, s);  return b ? b->id : 0; }
 block_id b_rect (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_RECT,   parent, s);  return b ? b->id : 0; }
 block_id b_surface(block_id parent, const blk_spec *s){ block *b = create_block(BLK_SURFACE,parent,s);  return b ? b->id : 0; }
 block_id b_divider(block_id parent, const blk_spec *s) { block *b = create_block(BLK_DIVIDER, parent, s); return b ? b->id : 0; }

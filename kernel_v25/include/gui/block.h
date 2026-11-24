@@ -27,8 +27,48 @@ typedef enum {
     BLK_SURFACE,
     BLK_SPACER,
     BLK_DIVIDER,
-    BLK_CANVAS
+    BLK_CANVAS,
+    BLK_FREE                        /* v2 追加在末尾：自由布局容器 */
 } blk_kind;
+
+/* 溢出三态（v2，规格 v2 §2）。几何上允许越界；视觉/命中按本字段对齐。 */
+enum {
+    OVF_CLIP = 0,                   /* 默认：越界部分不画、不可点 */
+    OVF_VISIBLE = 1,                /* 越界仍绘制、仍可命中（浮层/徽标） */
+    OVF_SCROLL = 2                  /* 裁剪 + 按 scroll_x/y 平移，不改子树几何 */
+};
+
+/* 自由布局锚点位掩码（v2）。水平/垂直可独立组合。 */
+enum {
+    ANC_L       = 0x1,
+    ANC_R       = 0x2,
+    ANC_T       = 0x4,
+    ANC_B       = 0x8,
+    ANC_HCENTER = 0x10,
+    ANC_VCENTER = 0x20
+};
+
+/* 拖拽模式（v2 属性化手势）。 */
+enum {
+    DRAG_NONE  = 0,                 /* 不可拖 */
+    DRAG_TITLE = 1,                 /* 仅标题带可拖 */
+    DRAG_FULL  = 2                  /* 整块可拖 */
+};
+
+/* 拖拽边界约束（v2）。 */
+enum {
+    BOUND_FREE   = 0,               /* 不限 */
+    BOUND_PARENT = 1,               /* 限制父框内含 padding */
+    BOUND_SCREEN = 2                /* 限制屏幕内 */
+};
+
+/* 缩放方向位掩码（v2）；0 视为右下（R|B）。 */
+enum {
+    RESIZE_L = 0x1,
+    RESIZE_R = 0x2,
+    RESIZE_T = 0x4,
+    RESIZE_B = 0x8
+};
 
 /* 主轴对齐（COLUMN 纵向 / ROW 横向） */
 enum {
@@ -77,6 +117,23 @@ typedef struct {
      * 不做嵌套提交。usr 为组件私有上下文（v1 单实例，内核内使用）。 */
     void (*render)(block_id id);
     void  *usr;
+
+    /* ---- v2 自由布局 / 溢出 / 交互属性（规格 v2 §2/§3/§4） ---- */
+    uint8_t  overflow;              /* OVF_CLIP / VISIBLE / SCROLL */
+    uint8_t  anchor;                /* ANC_* 位掩码 */
+    int16_t  pct_x, pct_y;         /* 1/1000 父框偏移；0 = 未声明 */
+    int16_t  pct_w, pct_h;         /* 1/1000 父框尺寸；0 = 未声明 */
+    int16_t  px_x, px_y;           /* 相对锚点/父框的像素偏移 */
+    int16_t  min_w, min_h, max_w, max_h;   /* 0 = 不设 */
+    int16_t  m_t, m_r, m_b, m_l;   /* 外边距 */
+    uint8_t  drag_mode;            /* DRAG_NONE / TITLE / FULL */
+    uint8_t  drag_bounds;          /* BOUND_FREE / PARENT / SCREEN */
+    uint8_t  resize_dir;           /* RESIZE_* 位掩码；0 = 右下 */
+    uint8_t  resize_edge;          /* 边缘带 px，默认 6 */
+    int16_t  resize_min_w, resize_min_h;   /* 默认 24 */
+    int16_t  resize_max_w, resize_max_h;  /* 0 = 不设 */
+    int16_t  resize_step;          /* 0 = 连续 */
+    int16_t  scroll_x, scroll_y;    /* OVF_SCROLL 视口偏移，不改子块几何 */
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -106,9 +163,22 @@ typedef struct block {
     uint8_t    visible, focusable, focused, inert;
 
     uint8_t    dirty_layout, dirty_paint, dirty_children, leaving;
-    uint8_t    moved;                    /* 被拖拽/移动过，布局保留其绝对位置 */
+    uint8_t    moved;                    /* v1 兼容：被拖拽过，布局保留绝对位置 */
     uint8_t    snap;                     /* 本帧快照：布局清位前记录的脏标记 */
     uint8_t    bleed;                    /* 全出血：忽略父级 padding，对齐父级整框 */
+
+    /* ---- v2 声明几何镜像（与 blk_spec 对应） ---- */
+    uint8_t  overflow;
+    uint8_t  anchor;
+    int16_t  pct_x, pct_y, pct_w, pct_h;
+    int16_t  px_x, px_y;
+    int16_t  min_w, min_h, max_w, max_h;
+    int16_t  m_t, m_r, m_b, m_l;
+    uint8_t  drag_mode, drag_bounds;
+    uint8_t  resize_dir, resize_edge;
+    int16_t  resize_min_w, resize_min_h, resize_max_w, resize_max_h, resize_step;
+    int16_t  scroll_x, scroll_y;
+    int32_t  pos_x, pos_y;              /* 拖拽收敛的偏移属性，跨帧保持 */
 
     const char   *text;
     const uint8_t *pix;
