@@ -54,18 +54,18 @@ static void hit_collect(block *b, int depth) {
         hit_collect(c, depth + 1);
 }
 
+/* 命中顺序：layer 降序 → 深度降序（子块压过祖先）→ z 降序；选择排序，首个命中即返回。 */
 static block *hit_test(int x, int y) {
     hit_n = 0;
     hit_collect(gui_root_block(), 0);
-    /* layer 降序 → z 降序 → 深度降序；选择排序，首个命中即返回。 */
     for (int i = 0; i < hit_n; i++) {
         int best = i;
         for (int j = i + 1; j < hit_n; j++) {
             block *a = hit_list[best], *b = hit_list[j];
             if (b->layer > a->layer ||
-                (b->layer == a->layer && b->z > a->z) ||
-                (b->layer == a->layer && b->z == a->z &&
-                 hit_depth[j] > hit_depth[best]))
+                (b->layer == a->layer && hit_depth[j] > hit_depth[best]) ||
+                (b->layer == a->layer && hit_depth[j] == hit_depth[best] &&
+                 b->z > a->z))
                 best = j;
         }
         if (best != i) {
@@ -100,17 +100,26 @@ static void on_press(int x, int y) {
         gui_menu_close();
         return;
     }
-    if (b->focusable) focus_set(b);
 
-    int rx = b->x + b->w, ry = b->y + b->h;
+    /* 点击冒泡：命中的通常是最里层的标签/文本块，而 on_click 声明在
+     * 行/面板上。向上找最近一个带 on_click 的祖先（含自身），否则
+     * Start、菜单条目这类"行 + 文本子块"永远点不动。 */
+    block *act = b;
+    while (act && !act->on_click) act = act->parent;
+    block *t = act ? act : b;
+
+    if (act && act->focusable) focus_set(act);
+    else if (b->focusable)    focus_set(b);
+
+    int rx = t->x + t->w, ry = t->y + t->h;
     if (x >= rx - HANDLE && y >= ry - HANDLE) {
-        drag_block = b; drag_mode = DRAG_RESIZE;
-        drag_off_x = x - b->x; drag_off_y = y - b->y;
-    } else if (y < b->y + TITLE_H) {
-        drag_block = b; drag_mode = DRAG_MOVE;
-        drag_off_x = x - b->x; drag_off_y = y - b->y;
+        drag_block = t; drag_mode = DRAG_RESIZE;
+        drag_off_x = x - t->x; drag_off_y = y - t->y;
+    } else if (y < t->y + TITLE_H) {
+        drag_block = t; drag_mode = DRAG_MOVE;
+        drag_off_x = x - t->x; drag_off_y = y - t->y;
     }
-    if (b->on_click) b->on_click(b->id, x - b->x, y - b->y);
+    if (act && act->on_click) act->on_click(act->id, x - act->x, y - act->y);
 }
 
 static void on_drag_move(int x, int y) {

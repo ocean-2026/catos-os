@@ -691,6 +691,45 @@ void gui_probe_menu(void) {
     gui_end();
 }
 
+/* 菜单条目点击探针：开菜单 → 命中 Notepad 行（复用真实按下/命中路径）→
+ * 断言记事本被激活；菜单随点击关闭后下一帧损伤面积必须 >0（旧菜单像素
+ * 被底层重画掉，不留残影）。 */
+void gui_probe_menuclick(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    int active_before = gui_notepad_active();
+    gui_menu_open();
+    layout_run();
+
+    /* Notepad 条目：应用行 z = -1。 */
+    block *mr = btable_get(menu_root);
+    block *row = 0;
+    if (mr) for (block *c = mr->first_child; c; c = c->next_sibling)
+        if (c->z == -1) { row = c; break; }
+
+    int pressed = 0;
+    if (row) {
+        int cx = row->x + row->w / 2;
+        int cy = row->y + row->h / 2;
+        gui_inject_press(cx, cy);
+        gui_inject_release();
+        pressed = 1;
+    }
+    int active = gui_notepad_active();
+
+    gui_frame();   /* 关菜单后一帧：损伤面积 > 0 才说明旧菜单区域被重画。 */
+    uint32_t area = stat_damage_area();
+
+    int ok = pressed && active_before == 0 && active == 1 && area > 0;
+    ser_write("GUI:menuclick pressed="); ser_dec(pressed);
+    ser_write(" active="); ser_dec(active);
+    ser_write(" damage_area="); ser_dec(area);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 void gui_probe_presence(void) {
     gui_begin();
     gui_demo_build();
@@ -1018,6 +1057,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return; }
         if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
         if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
+        if (!strcmp_probe(arg, "menuclick")) { gui_probe_menuclick(); return; }
         if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
         if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return; }
         if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }

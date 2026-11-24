@@ -229,7 +229,11 @@ static void mark_subtree_paint(block *b) {
 }
 
 void gui_mark_dirty(block_id id) {
-    mark_subtree_paint(btable_get(id));
+    /* 根块是静态节点（id=ROOT_ID=1000），不在块表范围内，btable_get 返回 0；
+     * 直接查表会让"标脏根"静默失效（菜单关闭后整块旧像素残留）。 */
+    block *b = btable_get(id);
+    if (!b && gui_root_block() && gui_root_block()->id == id) b = gui_root_block();
+    mark_subtree_paint(b);
 }
 
 /* 切主题：换活动令牌后整树标脏重绘（不做局部配色残留）。 */

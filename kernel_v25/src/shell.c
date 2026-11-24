@@ -311,7 +311,8 @@ static void cmd_help(void) {
     help_row("help",        "show this message");
     help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
-    help_row("gui",         "enter the block GUI desktop (Esc returns to console)");
+    help_row("desktop",     "enter the block desktop (Esc returns to console)");
+    help_row("gui",         "alias of desktop (kept for scripts)");
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
     help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
@@ -1682,7 +1683,7 @@ static void cmd_echo(char *arg) {
 static const char *BUILTIN_NAMES[] = {
     "help", "lang", "export", "setenv", "env", "unset", "alias", "df",
     "mount", "umount",
-    "unalias", "clear", "cls", "gfx", "gui",
+    "unalias", "clear", "cls", "gfx", "desktop", "gui",
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
     "date", "mem", "reboot", "hang", "shutdown", "dir", "ls", "cd", "mkdir",
@@ -7294,7 +7295,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "clear") ||
                  !strcmp_(cmd, "cls"))      vga_clear();   /* NIGHT-P3: cls alias */
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx(arg);
-        else if (!strcmp_(cmd, "gui"))       cmd_gui(arg);
+        else if (!strcmp_(cmd, "desktop") || !strcmp_(cmd, "gui")) cmd_gui(arg);
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);

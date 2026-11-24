@@ -127,10 +127,16 @@ static void mark_leaving(block *b) {
 void b_remove(block_id id) {
     block *b = btable_get(id);
     if (!b) return;
+    block *parent = b->parent;
     /* 两阶段销毁：先摘出树并标 leaving，保留句柄一帧；
      * 下一帧由 gui_presence_sweep 回收并归还块表空闲链。 */
     tree_detach(b);
     mark_leaving(b);
+    /* v2.80 hotfix: 摘掉的子树不再参与绘制，但它占过的像素没有任何节点
+     * 负责重绘 -> 关闭菜单/组件后原地留一整块旧像素（看起来像"穿模/关不掉"）。
+     * 把父块整棵标脏，让底层在同帧把该区域重画掉。 */
+    if (parent) gui_mark_dirty(parent->id);
+    else        gui_mark_dirty(gui_root_block()->id);
 }
 
 /* ---- diff 提交 --------------------------------------------------------- */
