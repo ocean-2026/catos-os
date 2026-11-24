@@ -1012,32 +1012,57 @@ static void gui_idle_loop(void) {
     }
 }
 
+/* G-11a: 探针子命令分发。返回 1 表示命中并已跑完探针。
+ * 注意：探针本身在内部 gui_begin()/gui_end()；后端进/出由 gui_shell_cmd
+ * 统一收口，不再允许探针在 lfb=NULL 的旧文本/图形后端下提前 return。 */
+static int gui_probe_dispatch(const char *arg) {
+    if (!arg || !*arg) return 0;
+    if (!strcmp_probe(arg, "idem"))  { gui_probe_idempotent(); return 1; }
+    if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return 1; }
+    if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return 1; }
+    if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return 1; }
+    if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return 1; }
+    if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return 1; }
+    if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return 1; }
+    if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return 1; }
+    if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return 1; }
+    if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return 1; }
+    if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return 1; }
+    if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return 1; }
+    if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return 1; }
+    if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return 1; }
+    if (!strcmp_probe(arg, "reset"))  { gui_probe_reset(); return 1; }
+    if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return 1; }
+    if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return 1; }
+    if (!strcmp_probe(arg, "note"))    { gui_probe_note(); return 1; }
+    if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return 1; }
+    if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return 1; }
+    if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return 1; }
+    if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return 1; }
+    if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return 1; }
+    if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return 1; }
+    return 0;
+}
+
 void gui_shell_cmd(const char *arg) {
-    if (arg && *arg) {
-        if (!strcmp_probe(arg, "idem"))  { gui_probe_idempotent(); return; }
-        if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return; }
-        if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
-        if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return; }
-        if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
-        if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
-        if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return; }
-        if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return; }
-        if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return; }
-        if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
-        if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
-        if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
-        if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return; }
-        if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }
-        if (!strcmp_probe(arg, "reset"))  { gui_probe_reset(); return; }
-        if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return; }
-        if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return; }
-        if (!strcmp_probe(arg, "note"))    { gui_probe_note(); return; }
-        if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return; }
-        if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
-        if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
-        if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
-        if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
-        if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return; }
+    /* G-11a: 探针与桌面走同一条后端路径——先请求 VBE24 拿到帧缓冲
+     * （lfb 非空），再分发探针；旧实现探针提前 return，后端未进 VBE24，
+     * 像素类断言在 NULL lfb 上无意义。 */
+    con_clear();
+    con_set_gui_mode(1);
+    int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
+    if (r != 0) {
+        con_set_gui_mode(0);
+        con_write("gui: 进入图形块桌面失败\n");
+        return;
+    }
+
+    if (gui_probe_dispatch(arg)) {
+        gui_end();
+        con_set_gui_mode(0);
+        con_force_text();
+        con_clear();
+        return;
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
@@ -1068,16 +1093,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "browser"))   { app_open = APP_BROWSER; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
 
-    /* v2.80 hotfix: 进桌面先清空控制台文本并冻结控制台侧绘制/选中，
-     * 否则底下的 shell 内容会在鼠标/时钟等路径上被重绘进帧缓冲。 */
-    con_clear();
-    con_set_gui_mode(1);
-    int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
-    if (r != 0) {
-        con_set_gui_mode(0);
-        con_write("gui: 进入图形块桌面失败\n");
-        return;
-    }
+    /* 后端已在函数头部统一请求 VBE24（G-11a）；这里直接进桌面。 */
     gui_begin();
     gui_demo_build();
     if (shot_reset) { gui_reset(); gui_demo_build(); }
