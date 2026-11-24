@@ -28,6 +28,7 @@ vprobe
 e3probe
 sink_ce
 captest
+dektest
 ocntools
 adofai
 punctest

@@ -81,6 +81,30 @@ typedef struct {
 } cv_present_t;
 #endif
 
+/* ---- P3: declarative channel (user-visible mirror of kernel ce.h) ------- */
+#ifndef CATOS_DECL_TYPES_H
+#define CATOS_DECL_TYPES_H
+typedef struct {
+    int32_t  id;
+    int32_t  parent;
+    uint8_t  kind;
+    uint8_t  pad0;
+    uint16_t layer;
+    int32_t  req_w, req_h;
+    int32_t  text_off;
+    int32_t  pix_off;
+    int32_t  pix_w, pix_h;
+    int32_t  res;
+} ce_blk_rec_t;
+typedef struct {
+    int16_t  type;
+    int16_t  code;
+    int32_t  id;
+    int32_t  x, y;
+    int32_t  w, h;
+} ce_blk_event_t;
+#endif
+
 /* ---- v2.81: shared result codes (kernel + probes read the same table) ----
  * Legacy negatives stay: -8 ENOSYS, -12 ENOMEM, -14 EFAULT, -16 EBUSY,
  * -22 EINVAL.  The canvas/permission codes below are stable append-only. */
@@ -293,6 +317,12 @@ typedef struct catos_api {
     int     (*blk_canvas_create)(int w, int h, ce_canvas_t *out); /* 69 */
     int     (*blk_canvas_present)(const cv_present_t *r);         /* 70 */
     int     (*blk_canvas_destroy)(int res);                        /* 71 */
+    /* P3 declarative channel, slots 72..76 (append-only). */
+    int     (*blk_commit)(const void *recs, int n, const char *strings, int slen); /*72*/
+    int     (*blk_event_poll)(ce_blk_event_t *ev, int timeout_ms);                /*73*/
+    int     (*blk_image_load)(const char *path);                                  /*74*/
+    int     (*blk_image_free)(int res);                                            /*75*/
+    int     (*blk_text_width)(const char *s);                                     /*76*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
