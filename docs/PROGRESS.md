@@ -85,6 +85,24 @@
 P1：spawn 执行权限、多组支持、口令哈希升级、shell 作业控制（`&`/`jobs`/`fg`）。
 P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长文件名、目录操作命令。
 
+## 六、平台线（feat/smp，追加任务 C）
+
+### ACPI 只读表遍历（已落地）
+
+- 新增 `src/acpi.c` / `include/acpi.h`：RSDP 搜索（EBDA 指针 + 0xE0000–0xFFFFF，16B 对齐）
+  → RSDT(4B 项)/XSDT(8B 项) → FACP、APIC(MADT)。MADT 解析 Processor Local APIC(type 0)、
+  IO APIC(type 1)、Interrupt Source Override(type 2)，供后续 SMP 取用。
+- `paging` 暴露 `paging_map_top()`：identity-mapped PSE 窗口上界（可高于帧分配器 `mem_top`，
+  尾部 4 MiB 固件保留块被映射但不参与分配）。ACPI 固件指针按映射上界校验；分配器边界不变。
+- shell 新增 `acpi` 诊断命令：打印 RSDP/FADT/MADT 物理地址、LAPIC 基址、CPU(APIC ID/使能)、
+  IOAPIC(基址/中断基)、IRQ override、FADT 复位块。
+- 实测（QEMU 6.2，`-smp 2` / `-smp 4`）：`acpi` 列出 2 / 4 个使能 CPU，LAPIC `0xFEE00000`，
+  IOAPIC `0xFEC00000`，override 0→2、5→5、9/10/11。
+- 边界：本机 FADT 为 ACPI 1.0 修订（无 ResetReg GAS），复位块标注不可用；关机路径仍由
+  `power.c` 的 PM1_CNT / legacy 端口兜底承担，本次未改动。DSDT AML 不解码（沿用 power.c 字节扫描 `_S5_`）。
+- 门禁：E3 2/2、F11 9/9、链接布局 `--strict` RC=0。vprobe 在本环境基线即出现 post-`fr` 用例
+  超时空屏（基线同复现，判为环境性 flake，非本次回归）。
+
 ---
 
 *本文件随每轮交付滚动更新；历史汇报见 git 历史（`git log -- docs/PROGRESS.md`）。*

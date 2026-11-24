@@ -28,6 +28,7 @@
 #include "pager.h"
 #include "crypto.h"   /* v2.76: SHA-256 for the .catpkg digest */      /* v2.59 generic console pager                    */
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
+#include "acpi.h"       /* platform ACPI table diagnostic (`acpi`)          */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
 #ifdef CATOS_BENCH
 #include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
@@ -394,6 +395,7 @@ static void cmd_help(void) {
     help_row("unset K",     "delete variable; $K / ${K} / $? expand in typed lines");
     help_row("PATH",        "show PATH; drives bare-NAME lookup (default /bin)");
     help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
+    help_row("acpi",        "ACPI table diagnostic (RSDP/FADT/MADT CPUs/IOAPIC)");
 
     help_head("audio (SB16 ISA / ES1370-1371 PCI, POSIX options)");
     help_row("sndinfo [OPT]", "audio info: -h -v -l -p -c -d N -w -j -s -q -t (long forms too)");
@@ -1691,7 +1693,7 @@ static const char *BUILTIN_NAMES[] = {
     "rm", "cp", "mv", "format", "edit", "run", "sudo",
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
-    "top", "jobs", "log", "hwinfo", "sndinfo", "sndtest", "netcfg",
+    "top", "jobs", "log", "hwinfo", "acpi", "sndinfo", "sndtest", "netcfg",
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag", "sshd",
     "faultinfo", "crashlog", "fsck", "color",
     "bsod", "blue", "panicmode",
@@ -6776,7 +6778,7 @@ static void bar_put_str(char *b, int *n, const char *s) {
 static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","dns","echo","edit","env",
-    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo",
+    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo","acpi",
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
@@ -7502,6 +7504,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "bg"))         cmd_bg(arg);
         else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
+        else if (!strcmp_(cmd, "acpi"))        acpi_dump();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
         else if (!strcmp_(cmd, "fprobe"))      cmd_fprobe();    /* v2.72 */

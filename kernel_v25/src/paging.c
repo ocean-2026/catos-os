@@ -87,7 +87,8 @@ void paging_sync_lfb_dir(uint32_t dir_phys) {
 
 static uint32_t frames_base;                  /* first managed frame   */
 static uint32_t frames_count;
-static uint32_t mem_top;                     /* exclusive phys bound  */
+static uint32_t mem_top;                     /* exclusive allocator bound */
+static uint32_t map_top;                     /* end of identity-mapped PSE window */
 static uint32_t bitmap[FRAME_MAX / 32u];
 
 static void mark_frame(uint32_t pa, int used) {
@@ -118,6 +119,12 @@ void frame_free(uint32_t pa) {
  * dereference firmware-provided pointers (ACPI tables, SMBIOS) MUST bound
  * them with this before reading, or a bogus pointer becomes a #PF. */
 uint32_t paging_phys_top(void) { return mem_top; }
+/* Highest physical address inside the identity-mapped PSE window.  This can
+ * exceed mem_top: the trailing 4 MiB firmware-reserved block (ACPI tables,
+ * SMBIOS) is mapped but never handed to the frame allocator.  Firmware table
+ * readers bound their dereferences by this so the chain stays reachable; the
+ * allocator still only hands out frames below mem_top. */
+uint32_t paging_map_top(void) { return map_top; }
 
 void paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb) {
     (void)mem_lower_kb;
@@ -142,6 +149,7 @@ void paging_init(uint32_t mem_lower_kb, uint32_t mem_upper_kb) {
     if (pse_blocks > 1024) pse_blocks = 1024;
     for (uint32_t i = 0; i < pse_blocks; i++)
         kdir[i] = (i << 22) | 0x083u;
+    map_top = pse_blocks << 22;
 
     /* frames start after the kernel image (bss included) */
     frames_base = ((uint32_t)_bss_end + 0xFFF) & ~0xFFFu;
