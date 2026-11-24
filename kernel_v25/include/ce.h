@@ -74,6 +74,30 @@ typedef struct {
 } cv_present_t;
 #endif
 
+/* ---- P3: declarative channel (mirror of ce_abi.h) ----------------------- */
+#ifndef CATOS_DECL_TYPES_H
+#define CATOS_DECL_TYPES_H
+typedef struct {
+    int32_t  id;
+    int32_t  parent;
+    uint8_t  kind;
+    uint8_t  pad0;
+    uint16_t layer;
+    int32_t  req_w, req_h;
+    int32_t  text_off;
+    int32_t  pix_off;
+    int32_t  pix_w, pix_h;
+    int32_t  res;
+} ce_blk_rec_t;
+typedef struct {
+    int16_t  type;
+    int16_t  code;
+    int32_t  id;
+    int32_t  x, y;
+    int32_t  w, h;
+} ce_blk_event_t;
+#endif
+
 /* v2.81 shared result codes (mirror of ce_abi.h; guarded for co-inclusion). */
 #ifndef CATOS_CV_ERR_H
 #define CATOS_CV_ERR_H
@@ -221,6 +245,13 @@ typedef struct catos_api {
     int      (*blk_canvas_create)(int w, int h, ce_canvas_t *out);
     int      (*blk_canvas_present)(const cv_present_t *r);
     int      (*blk_canvas_destroy)(int res);
+
+    /* ---- P3: declarative channel (append-only; mirror slots 72-76) ---- */
+    int      (*blk_commit)(const void *recs, int n, const char *strings, int slen);
+    int      (*blk_event_poll)(ce_blk_event_t *ev, int timeout_ms);
+    int      (*blk_image_load)(const char *path);
+    int      (*blk_image_free)(int res);
+    int      (*blk_text_width)(const char *s);
 } catos_api_t;
 
 /* install the API (called once at boot) */

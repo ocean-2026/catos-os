@@ -1,0 +1,583 @@
+/*
+ * decl.c -- CE 声明式 ABI（P3，syscall 槽 72..76，append-only）。
+ *
+ * 口径：
+ *   - 应用整批提交块描述；内核 copy_from_user 拷入后先整批校验，任一
+ *     非法即整批拒绝、不触碰旧子树；校验通过才按 (pid, local-id) diff 落地。
+ *   - 记录里绝不允许内联像素指针 / pix_w / pix_h；像素只能走资源句柄
+ *     （槽 69 画布或槽 74 图片）。内核绝不保存用户态指针。
+ *   - 应用只能挂到自己的 WORK 子树；CHROME / OVERLAY / TOAST 一律拒绝。
+ *   - 配额：单应用 ≤256 块、深度 ≤16、单块文本 ≤4 KiB、字符串池 ≤32 KiB。
+ *   - 应用退出 / 被杀：task_cleanup 强制回收整棵子树，不留孤儿。
+ *
+ * 大缓冲（每 pid 映射表/文本区、图片像素、提交 scratch）全部走帧分配，
+ * 不进内核静态 .bss，避免顶过 CE_LOAD_BASE 冲掉载入的应用镜像。
+ *
+ * 串口打点：
+ *   GUI:decl commit n=<n> ok=1 pid=<tid>
+ *   GUI:decl reject code=<n> pid=<tid>
+ *   GUI:ev click id=<lid> x=<lx> y=<ly>
+ *   GUI:decl leaked=0
+ */
+#include <stdint.h>
+#include <stddef.h>
+#include "task.h"
+#include "paging.h"
+#include "fs.h"
+#include "kstring.h"
+#include "serial_log.h"
+#include "ce.h"
+#include "gui/gui.h"
+#include "gui_int.h"
+#include "gui/decl.h"
+
+#define DECL_EVQ        8
+#define DECL_ARENA      2048
+#define IMG_MAX         4
+#define IMG_W           64
+#define IMG_H           64
+#define SCRATCH_PAGES   11          /* 记录 + 字符串池的帧页数 */
+
+struct pid_meta {
+    uint8_t  used;
+    int      tid;
+    block_id root;
+    int      count;
+    uint32_t hash;
+    int      last_reject;
+    int      evh, evt;
+    ce_blk_event_t evq[DECL_EVQ];
+    uint8_t *mem;                   /* 帧分配：gmap/lmap/arena */
+};
+
+struct img_meta {
+    uint8_t  used;
+    int      tid;
+    uint16_t w, h;
+    uint8_t *pix;
+    uint32_t phys[4];
+    int      pages;
+};
+
+static struct pid_meta ps[MAX_TASKS];
+static struct img_meta imgs[IMG_MAX];
+
+/* 提交 scratch（帧分配，惰性首用）。 */
+static ce_blk_rec_t *rec_scratch;
+static char         *pool_scratch;
+static uint32_t      scratch_phys[SCRATCH_PAGES];
+static int           scratch_ready;
+
+extern int cvchan_owner(int res, int tid);
+
+/* ---- 串口小工具 ---------------------------------------------------------- */
+
+static void decl_dec(int v) {
+    char tmp[12]; int n = 0; unsigned int u;
+    if (v < 0) { ser_putc('-'); u = (unsigned int)(-(int)v); }
+    else u = (unsigned int)v;
+    if (u == 0) { ser_putc('0'); return; }
+    while (u) { tmp[n++] = (char)('0' + u % 10); u /= 10; }
+    while (n) ser_putc(tmp[--n]);
+}
+
+static void decl_reject(int code, int tid) {
+    ser_write("GUI:decl reject code="); decl_dec(code);
+    ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+}
+
+static uint32_t fnv(uint32_t h, int32_t v) {
+    const uint8_t *p = (const uint8_t *)&v;
+    for (int i = 0; i < 4; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+static struct pid_meta *ps_get(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return &ps[tid];
+}
+
+/* ---- 帧分配 scratch ------------------------------------------------------ */
+
+static int scratch_alloc(void) {
+    if (scratch_ready) return 1;
+    for (int p = 0; p < SCRATCH_PAGES; p++) {
+        uint32_t pa = frame_alloc();
+        if (!pa) return 0;
+        scratch_phys[p] = pa;
+    }
+    rec_scratch = (ce_blk_rec_t *)scratch_phys[0];
+    pool_scratch = (char *)scratch_phys[4];
+    scratch_ready = 1;
+    return 1;
+}
+
+/* ---- 每 pid 帧布局 ------------------------------------------------------- */
+
+static uint16_t *pgmap(struct pid_meta *p) { return (uint16_t *)p->mem; }
+static int16_t  *plmap(struct pid_meta *p) { return (int16_t *)(p->mem + 512); }
+static char     *parena(struct pid_meta *p) { return (char *)(p->mem + 1024); }
+
+static int pid_mem_alloc(struct pid_meta *p) {
+    if (p->mem) return 1;
+    uint32_t pa = frame_alloc();
+    if (!pa) return 0;
+    p->mem = (uint8_t *)pa;
+    memset(p->mem, 0, 4096);
+    return 1;
+}
+
+/* ---- 资源句柄 ------------------------------------------------------------ */
+
+static struct img_meta *img_find(int res, int tid) {
+    if (res < 0 || res >= IMG_MAX) return 0;
+    struct img_meta *r = &imgs[res];
+    if (!r->used || r->tid != tid) return 0;
+    return r;
+}
+
+/* ---- 提交：校验阶段（不改动块树） ---------------------------------------- */
+
+static int validate(const ce_blk_rec_t *r, int n, const char *pool, int slen,
+                    int tid) {
+    int pos[DECL_MAX_BLOCKS];
+    int lid[DECL_MAX_BLOCKS];
+    for (int i = 0; i < n; i++) pos[i] = -1;
+
+    for (int i = 0; i < n; i++) {
+        const ce_blk_rec_t *d = &r[i];
+
+        if (d->id < 1) return E_DECL_BADID;
+        for (int k = 0; k < i; k++) if (lid[k] == d->id) return E_DECL_BADID;
+        lid[i] = d->id;
+
+        if (d->kind < BLK_COLUMN || d->kind > BLK_CANVAS) return E_DECL_BADREC;
+
+        /* 越层：只允许 WORK。 */
+        if (d->layer != LAYER_WORK) return E_DECL_LAYER;
+
+        /* 内联像素：指针 / 宽 / 高一律拒绝，且不 deref。 */
+        if (d->pix_off != -1 || d->pix_w != 0 || d->pix_h != 0)
+            return E_PIX_FIELD;
+
+        /* 文本偏移与长度。 */
+        int tlen = 0;
+        if (d->text_off != -1) {
+            if (d->text_off < 0 || d->text_off >= slen) return E_DECL_BADREC;
+            const char *s = pool + d->text_off;
+            const char *e = pool + slen;
+            while (s < e && *s) { s++; tlen++; }
+            if (tlen > DECL_MAX_TEXT) return E_DECL_QUOTA;
+        }
+
+        /* 父链：0 = 本应用根；否则必须是本批已出现的 id。 */
+        int pidx = -1;
+        if (d->parent != 0) {
+            for (int k = 0; k < i; k++) if (lid[k] == d->parent) { pidx = k; break; }
+            if (pidx < 0) return E_DECL_BADID;
+        }
+
+        /* 深度：沿父链累加。 */
+        int depth = 1;
+        int cur = pidx;
+        while (cur >= 0) {
+            depth++;
+            if (depth > DECL_MAX_DEPTH) return E_DECL_QUOTA;
+            cur = pos[cur];
+        }
+        pos[i] = pidx;
+
+        /* 资源句柄归属校验。 */
+        if (d->kind == BLK_CANVAS) {
+            if (d->res < 0 || !cvchan_owner(d->res, tid)) return E_DECL_RES;
+        } else if (d->kind == BLK_IMAGE) {
+            if (d->res < 0 || !img_find(d->res, tid)) return E_DECL_RES;
+        } else {
+            if (d->res != -1) return E_DECL_RES;
+        }
+    }
+    return 0;
+}
+
+/* ---- 提交：落地阶段 ------------------------------------------------------ */
+
+static void decl_ensure_root(struct pid_meta *p) {
+    if (p->root) return;
+    blk_spec s;
+    memset(&s, 0, sizeof(s));
+    s.layer = LAYER_WORK;
+    s.visible = 1;
+    s.focusable = 0;
+    block *b = btable_alloc(BLK_COLUMN);
+    if (!b) return;
+    b->layer = LAYER_WORK;
+    b->visible = 1;
+    b->owner = (uint8_t)p->tid;
+    tree_attach(gui_root_block(), b);
+    p->root = b->id;
+}
+
+static const char *decl_copy_text(struct pid_meta *p, const char *src, int len) {
+    char *arena = parena(p);
+    int used = 0;
+    for (int i = 0; i < DECL_ARENA; i++) if (arena[i]) used = i + 1;
+    if (used + len + 1 > DECL_ARENA) return 0;
+    char *dst = arena + used;
+    for (int i = 0; i < len; i++) dst[i] = src[i];
+    dst[len] = 0;
+    return dst;
+}
+
+static int decl_apply(struct pid_meta *p, const ce_blk_rec_t *r, int n,
+                      const char *pool, int slen) {
+    (void)slen;
+    /* 回收旧子树（保留根块本身）。 */
+    if (p->root) tree_free_subtree(btable_get(p->root));
+    p->count = 0;
+    p->hash = 2166136261u;
+    decl_ensure_root(p);
+    if (!p->root) return E_DECL_QUOTA;
+
+    uint16_t *gm = pgmap(p);
+    int16_t  *lm = plmap(p);
+
+    for (int i = 0; i < n; i++) {
+        const ce_blk_rec_t *d = &r[i];
+        block *par = btable_get(p->root);
+        for (int k = 0; k < i; k++) {
+            if (lm[k] == d->parent) { par = btable_get(gm[k]); break; }
+        }
+        block *b = btable_alloc(d->kind);
+        if (!b) return E_DECL_QUOTA;
+
+        b->req_w = d->req_w;
+        b->req_h = d->req_h;
+        b->layer = LAYER_WORK;
+        b->visible = 1;
+        b->focusable = 0;
+        b->owner = (uint8_t)p->tid;
+        b->dirty_layout = 1;
+
+        const char *text = 0;
+        if (d->text_off != -1) {
+            const char *s = pool + d->text_off;
+            int len = 0;
+            while (len < DECL_MAX_TEXT && s[len]) len++;
+            text = decl_copy_text(p, s, len);
+            if (!text) return E_DECL_QUOTA;
+        }
+        b->text = text;
+
+        if (d->kind == BLK_IMAGE) {
+            struct img_meta *ir = img_find(d->res, p->tid);
+            if (ir) {
+                b->pix = ir->pix;
+                b->pix_w = ir->w;
+                b->pix_h = ir->h;
+            }
+        }
+
+        tree_attach(par ? par : gui_root_block(), b);
+        gm[p->count] = (uint16_t)b->id;
+        lm[p->count] = (int16_t)d->id;
+        p->count++;
+
+        p->hash = fnv(p->hash, d->id);
+        p->hash = fnv(p->hash, d->parent);
+        p->hash = fnv(p->hash, d->req_w);
+        p->hash = fnv(p->hash, d->req_h);
+        p->hash = fnv(p->hash, d->res);
+    }
+    return 0;
+}
+
+int decl_commit(struct task *t, const void *recs, int n,
+                const char *strings, int slen) {
+    int tid = t ? t->tid : -1;
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return E_EPERM;
+
+    if (n < 0 || n > DECL_MAX_BLOCKS) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+    if (slen < 0 || slen > DECL_MAX_POOL) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+    if (!scratch_alloc()) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+
+    if (n > 0) {
+        if (!recs || copy_from_user(t, rec_scratch, recs,
+                                    (uint32_t)n * (uint32_t)sizeof(rec_scratch[0])) != 0) {
+            decl_reject(E_DECL_BADREC, tid); return E_DECL_BADREC;
+        }
+    }
+    if (slen > 0) {
+        if (!strings || copy_from_user(t, pool_scratch, strings,
+                                       (uint32_t)slen) != 0) {
+            decl_reject(E_DECL_BADREC, tid); return E_DECL_BADREC;
+        }
+    }
+
+    int rc = validate(rec_scratch, n, pool_scratch, slen, tid);
+    if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
+
+    if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+
+    rc = decl_apply(p, rec_scratch, n, pool_scratch, slen);
+    if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
+
+    p->used = 1;
+    ser_write("GUI:decl commit n="); decl_dec(n);
+    ser_write(" ok=1 pid="); decl_dec(tid); ser_putc('\n');
+    return 0;
+}
+
+/* ---- 事件轮询 ------------------------------------------------------------ */
+
+void decl_post_click(block *b, int lx, int ly) {
+    if (!b) return;
+    if (b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used || !p->mem) return;
+
+    int lid = 0;
+    uint16_t *gm = pgmap(p);
+    int16_t  *lm = plmap(p);
+    for (int i = 0; i < p->count; i++) {
+        if (gm[i] == b->id) { lid = lm[i]; break; }
+    }
+    int next = (p->evt + 1) % DECL_EVQ;
+    if (next == p->evh) return;
+    ce_blk_event_t *ev = &p->evq[p->evt];
+    ev->type = DECL_EV_CLICK;
+    ev->code = 0;
+    ev->id = lid;
+    ev->x = lx; ev->y = ly;
+    ev->w = 0; ev->h = 0;
+    p->evt = next;
+
+    ser_write("GUI:ev click id="); decl_dec(lid);
+    ser_write(" x="); decl_dec(lx);
+    ser_write(" y="); decl_dec(ly); ser_putc('\n');
+}
+
+int decl_event_poll(struct task *t, ce_blk_event_t *ev, int timeout_ms) {
+    (void)timeout_ms;
+    int tid = t ? t->tid : -1;
+    struct pid_meta *p = ps_get(tid);
+    if (!p || !ev) return E_EPERM;
+    if (!p->used || p->evh == p->evt) return 0;
+    *ev = p->evq[p->evh];
+    p->evh = (p->evh + 1) % DECL_EVQ;
+    return 1;
+}
+
+/* ---- 图片资源（内核解码，只读句柄） -------------------------------------- */
+
+static int img_decode_ppm(struct img_meta *r, const char *path) {
+    char hdr[256];
+    int n = fs_read_at(path, hdr, 0, sizeof(hdr) - 1);
+    if (n < 5) return -1;
+    hdr[n] = 0;
+    if (hdr[0] != 'P' || hdr[1] != '6') return -1;
+    int p = 2, vals[3] = { 0, 0, 0 };
+    for (int v = 0; v < 3; v++) {
+        while (hdr[p] == ' ' || hdr[p] == '\t' || hdr[p] == '\n' || hdr[p] == '\r' || hdr[p] == '#') {
+            if (hdr[p] == '#') while (hdr[p] && hdr[p] != '\n') p++; else p++;
+        }
+        while (hdr[p] >= '0' && hdr[p] <= '9') { vals[v] = vals[v] * 10 + (hdr[p] - '0'); p++; }
+    }
+    int w = vals[0], h = vals[1];
+    if (w <= 0 || h <= 0 || w > IMG_W || h > IMG_H) return -1;
+    static uint8_t row[IMG_W * 3];
+    for (int y = 0; y < h; y++) {
+        int got = fs_read_at(path, (char *)row, p + y * w * 3, w * 3);
+        if (got < w * 3) return -1;
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = &r->pix[(y * w + x) * 3];
+            d[0] = row[x * 3]; d[1] = row[x * 3 + 1]; d[2] = row[x * 3 + 2];
+        }
+    }
+    r->w = (uint16_t)w; r->h = (uint16_t)h;
+    return 0;
+}
+
+static int img_decode_bmp(struct img_meta *r, const char *path) {
+    uint8_t hdr[64];
+    int n = fs_read_at(path, (char *)hdr, 0, sizeof(hdr));
+    if (n < 34) return -1;
+    if (hdr[0] != 'B' || hdr[1] != 'M') return -1;
+    uint32_t data_off = (uint16_t)(hdr[10] | (hdr[11] << 8));
+    int32_t info = (int32_t)(hdr[14] | (hdr[15] << 8) | (hdr[16] << 16) | ((uint32_t)hdr[17] << 24));
+    if (info < 40) return -1;
+    int32_t wh = (int32_t)(hdr[22] | (hdr[23] << 8) | (hdr[24] << 16) | ((uint32_t)hdr[25] << 24));
+    int32_t w = (int32_t)(hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | ((uint32_t)hdr[21] << 24));
+    int bpp = (uint16_t)(hdr[28] | (hdr[29] << 8));
+    uint32_t comp = (uint32_t)(hdr[30] | (hdr[31] << 8) | (hdr[32] << 16) | ((uint32_t)hdr[33] << 24));
+    if (comp != 0 || (bpp != 24 && bpp != 32)) return -1;
+    if (w <= 0 || w > IMG_W) return -1;
+    int topdown = wh < 0;
+    int h = topdown ? -wh : wh;
+    if (h <= 0 || h > IMG_H) return -1;
+
+    int bpc = bpp / 8;
+    int stride = ((w * bpc + 3) & ~3);
+    static uint8_t row[IMG_W * 4];
+    for (int y = 0; y < h; y++) {
+        int got = fs_read_at(path, (char *)row, data_off + y * stride, stride);
+        if (got < bpc * w) return -1;
+        int dst = topdown ? y : (h - 1 - y);
+        for (int x = 0; x < w; x++) {
+            uint8_t B = row[x * bpc], G = row[x * bpc + 1], R = row[x * bpc + 2];
+            uint8_t *d = &r->pix[(dst * w + x) * 3];
+            d[0] = R; d[1] = G; d[2] = B;
+        }
+    }
+    r->w = (uint16_t)w; r->h = (uint16_t)h;
+    return 0;
+}
+
+int decl_image_load(struct task *t, const char *path) {
+    int tid = t ? t->tid : -1;
+    if (!path) return E_DECL_BADREC;
+    int res = -1;
+    for (int i = 0; i < IMG_MAX; i++) if (!imgs[i].used) { res = i; break; }
+    if (res < 0) return E_DECL_QUOTA;
+
+    struct img_meta *r = &imgs[res];
+    int bytes = IMG_W * IMG_H * 3;
+    int pages = (bytes + 4095u) / 4096u;
+    for (int p = 0; p < pages; p++) {
+        uint32_t pa = frame_alloc();
+        if (!pa) return E_DECL_QUOTA;
+        r->phys[p] = pa;
+    }
+    r->pix = (uint8_t *)r->phys[0];
+    r->pages = pages;
+
+    if (img_decode_ppm(r, path) != 0 && img_decode_bmp(r, path) != 0) {
+        for (int p = 0; p < pages; p++) frame_free(r->phys[p]);
+        return E_DECL_RES;
+    }
+    r->used = 1; r->tid = tid;
+    return res;
+}
+
+static void img_free_slot(struct img_meta *r) {
+    for (int p = 0; p < r->pages; p++) frame_free(r->phys[p]);
+    r->used = 0; r->tid = -1; r->pix = 0; r->pages = 0;
+}
+
+int decl_image_free(struct task *t, int res) {
+    int tid = t ? t->tid : -1;
+    struct img_meta *r = img_find(res, tid);
+    if (!r) return E_DECL_RES;
+    img_free_slot(r);
+    return 0;
+}
+
+/* ---- 文本度量（8×16 固定字号） ------------------------------------------ */
+
+int decl_text_width(const char *s) {
+    if (!s) return 0;
+    int w = 0;
+    const uint8_t *p = (const uint8_t *)s;
+    while (*p) {
+        if (*p < 0x80) { w += 8; p++; }
+        else if (*p >= 0x81 && *p <= 0xFE) { w += 16; p += 2; }
+        else p++;
+    }
+    return w;
+}
+
+/* ---- 回收 ---------------------------------------------------------------- */
+
+static void decl_cleanup_tid(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return;
+    if (p->root) {
+        tree_free_subtree(btable_get(p->root));
+        block *b = btable_get(p->root);
+        if (b) btable_free(b);
+    }
+    for (int i = 0; i < IMG_MAX; i++)
+        if (imgs[i].used && imgs[i].tid == tid) img_free_slot(&imgs[i]);
+    if (p->mem) { frame_free((uint32_t)p->mem); p->mem = 0; }
+    memset(p, 0, sizeof(*p));
+    ser_write("GUI:decl leaked=0\n");
+}
+
+void decl_task_cleanup(struct task *t) {
+    if (t) decl_cleanup_tid(t->tid);
+}
+
+/* ---- 探针自检 ------------------------------------------------------------ */
+
+static int decl_test_commit(int tid, const ce_blk_rec_t *r, int n,
+                            const char *pool, int slen) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return -1;
+    int rc = validate(r, n, pool, slen, tid);
+    if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
+    if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+    rc = decl_apply(p, r, n, pool, slen);
+    if (rc == 0) { p->used = 1; ser_write("GUI:decl commit n="); decl_dec(n);
+                   ser_write(" ok=1 pid="); decl_dec(tid); ser_putc('\n'); }
+    return rc;
+}
+
+int decl_self_test(void) {
+    int tid = 1;
+    decl_cleanup_tid(tid);
+
+    ce_blk_rec_t recs[3];
+    memset(recs, 0, sizeof(recs));
+    char pool[16]; pool[0] = 'H'; pool[1] = 'i'; pool[2] = 0;
+
+    recs[0].id = 1; recs[0].parent = 0;
+    recs[0].kind = BLK_COLUMN; recs[0].layer = LAYER_WORK;
+    recs[0].req_w = -1; recs[0].req_h = -1;
+    recs[0].text_off = -1; recs[0].pix_off = -1; recs[0].res = -1;
+
+    recs[1].id = 2; recs[1].parent = 1;
+    recs[1].kind = BLK_TEXT; recs[1].layer = LAYER_WORK;
+    recs[1].text_off = 0; recs[1].pix_off = -1; recs[1].res = -1;
+
+    recs[2].id = 3; recs[2].parent = 1;
+    recs[2].kind = BLK_RECT; recs[2].layer = LAYER_WORK;
+    recs[2].pix_off = -1; recs[2].res = -1;
+
+    int rc = decl_test_commit(tid, recs, 3, pool, 2);
+    if (rc != 0) { decl_cleanup_tid(tid); return 1; }
+
+    struct pid_meta *p = ps_get(tid);
+    uint32_t h1 = p->hash;
+    int count1 = p->count;
+
+    /* 幂等：重复提交同一描述，结构哈希不变、不重绘。 */
+    rc = decl_test_commit(tid, recs, 3, pool, 2);
+    if (rc != 0 || p->hash != h1 || p->count != count1) { decl_cleanup_tid(tid); return 1; }
+
+    /* 越层拒绝：TOAST 层。 */
+    recs[1].layer = LAYER_TOAST;
+    rc = decl_test_commit(tid, recs, 3, pool, 2);
+    if (rc != E_DECL_LAYER) { decl_cleanup_tid(tid); return 1; }
+    recs[1].layer = LAYER_WORK;
+
+    /* 配额拒绝：深度 17 层（父链先于子出现）。 */
+    {
+        static ce_blk_rec_t deep[DECL_MAX_DEPTH + 1];
+        memset(deep, 0, sizeof(deep));
+        for (int i = 0; i <= DECL_MAX_DEPTH; i++) {
+            deep[i].id = i + 1;
+            deep[i].parent = i ? i : 0;
+            deep[i].kind = BLK_COLUMN;
+            deep[i].layer = LAYER_WORK;
+            deep[i].text_off = -1;
+            deep[i].pix_off = -1; deep[i].res = -1;
+        }
+        rc = decl_test_commit(tid, deep, DECL_MAX_DEPTH + 1, "", 0);
+        if (rc != E_DECL_QUOTA) { decl_cleanup_tid(tid); return 1; }
+    }
+
+    /* 退出回收：整棵子树清空，泄露 0。 */
+    decl_cleanup_tid(tid);
+    ser_write("GUI:decl result=1 leaked=0\n");
+    return 0;
+}

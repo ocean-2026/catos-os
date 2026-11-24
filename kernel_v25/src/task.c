@@ -23,6 +23,7 @@
 #include "fat.h"
 #include "net.h"
 #include "ce.h"
+#include "gui/decl.h"   /* P3: ce_blk_rec_t / ce_blk_event_t */
 #include "hw.h"
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
@@ -51,6 +52,13 @@ extern int  cvchan_create(task_t *t, int w, int h, ce_canvas_t *out);
 extern int  cvchan_present(task_t *t, const cv_present_t *r);
 extern int  cvchan_destroy(task_t *t, int res);
 extern void cvchan_task_cleanup(task_t *t);
+extern int  decl_commit(task_t *t, const void *recs, int n,
+                        const char *strings, int slen);
+extern int  decl_event_poll(task_t *t, ce_blk_event_t *ev, int timeout_ms);
+extern int  decl_image_load(task_t *t, const char *path);
+extern int  decl_image_free(task_t *t, int res);
+extern int  decl_text_width(const char *s);
+extern void decl_task_cleanup(task_t *t);
 
 /* Command-drawing gate: a CE-origin call to a banned pixel entry is logged
  * on COM1 as `GUI:deny <slot> pid=<tid>` and answered E_EPERM.  Kernel-
@@ -471,6 +479,7 @@ static void task_cleanup(task_t *t) {
 #endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
     cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
+    decl_task_cleanup(t);                 /* P3: reclaim declarative subtree */
 #ifdef CATOS_BENCH
     uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
 #endif
@@ -806,6 +815,9 @@ enum {
     /* v2.81: isolated canvas channel.  Append-only: old binaries keep their
      * slot indices.  The ONLY legal pixel exit for a CE desktop app. */
     SYS_CV_CREATE, SYS_CV_PRESENT, SYS_CV_DESTROY,
+    /* P3 CE 声明式 ABI（append-only，槽 72..76） */
+    SYS_DECL_COMMIT, SYS_DECL_EVENT_POLL,
+    SYS_DECL_IMAGE_LOAD, SYS_DECL_IMAGE_FREE, SYS_DECL_TEXT_WIDTH,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -879,6 +891,7 @@ static void build_vsyscall_page(uint8_t *page) {
              * stale args.  Fixed v2.69. */
         /*66*/0, /*67*/0, /*68*/0,               /* mouse_x/y/buttons: no args */
         /*69*/3, /*70*/1, /*71*/1,               /* canvas create/present/destroy */
+        /*72*/4, /*73*/2, /*74*/1, /*75*/1, /*76*/1, /* decl commit/poll/load/free/textw */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -2291,6 +2304,51 @@ void isr_syscall(int_frame_t *f) {
     case SYS_CV_DESTROY:
         ret = (uint32_t)cvchan_destroy(t, (int)a1);
         break;
+
+    /* ---- P3: CE 声明式 ABI（槽 72..76） -------------------------- */
+    case SYS_DECL_COMMIT: {
+        const void *recs = (const void *)a1;
+        int n = (int)a2;
+        const char *strings = (const char *)a3;
+        int slen = (int)a4;
+        ret = (uint32_t)decl_commit(t, recs, n, strings, slen);
+        break;
+    }
+    case SYS_DECL_EVENT_POLL: {
+        ce_blk_event_t ev;
+        if (a1 == 0) { ret = (uint32_t)E_DECL_BADREC; break; }
+        if (copy_from_user(t, &ev, (const void *)a1, sizeof(ev)) != 0) {
+            ret = (uint32_t)E_DECL_BADREC; break;
+        }
+        int rc = decl_event_poll(t, &ev, (int)a2);
+        if (rc > 0 && copy_to_user(t, (void *)a1, &ev, sizeof(ev)) != 0)
+            rc = E_DECL_BADREC;
+        ret = (uint32_t)rc;
+        break;
+    }
+    case SYS_DECL_IMAGE_LOAD: {
+        char path[FS_NAME_MAX];
+        if (a1 == 0 || copy_from_user(t, path, (const void *)a1,
+                                      FS_NAME_MAX - 1) != 0) {
+            ret = (uint32_t)E_DECL_BADREC; break;
+        }
+        path[FS_NAME_MAX - 1] = 0;
+        ret = (uint32_t)decl_image_load(t, path);
+        break;
+    }
+    case SYS_DECL_IMAGE_FREE:
+        ret = (uint32_t)decl_image_free(t, (int)a1);
+        break;
+    case SYS_DECL_TEXT_WIDTH: {
+        char buf[DECL_MAX_TEXT];
+        if (a1 == 0) { ret = 0; break; }
+        if (copy_from_user(t, buf, (const void *)a1, sizeof(buf) - 1) != 0) {
+            ret = (uint32_t)E_DECL_BADREC; break;
+        }
+        buf[sizeof(buf) - 1] = 0;
+        ret = (uint32_t)decl_text_width(buf);
+        break;
+    }
     default: ret = (uint32_t)-8; break;
     }
 #ifdef CATOS_BENCH

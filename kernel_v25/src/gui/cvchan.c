@@ -85,6 +85,10 @@ static struct cv_slot *cv_find(int res, int tid) {
     return s;
 }
 
+int cvchan_owner(int res, int tid) {
+    return cv_find(res, tid) != 0;
+}
+
 static void cv_free_slot(struct cv_slot *s) {
     if (s->uaddr && s->tid >= 0 && s->tid < MAX_TASKS) {
         /* VMA 节点由 task_cleanup 的地址空间销毁兜底；这里只解除映射。 */

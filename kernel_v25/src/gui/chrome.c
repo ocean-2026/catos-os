@@ -40,6 +40,9 @@ extern void gui_sak_poll(void);
 extern int  gui_sak_probe(void);
 extern void gui_sak_reset(void);
 
+/* P3 声明式 ABI（src/gui/decl.c）。 */
+extern int  decl_self_test(void);
+
 static void split_word(const char *arg, char *word, int cap, const char **rest) {
     word[0] = 0; *rest = 0;
     if (!arg) return;
@@ -1038,6 +1041,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
         if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return; }
+        if (!strcmp_probe(arg, "decl"))    { decl_self_test(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
