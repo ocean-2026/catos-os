@@ -47,13 +47,13 @@
 | rate | `frames=33 double_commit=0 ticks=99 result=1`（探针自造节拍，仅验证去重） | PASS |
 | idle | **生产空闲路径**：`frames=25 double_commit=0 ticks=100 result=1`（3-tick 节流下 100 tick 提交 25 帧，≤33 帧/秒口径，零重复提交） | PASS |
 | diff | 两阶段销毁：`base=2 leaving=1 live_leaving=2 live_after=1 leaked=0 result=1`（删掉的块先入 leaving 帧，下一帧才回收，live 回落） | PASS |
-| home | `frame first=1 us=1783 rects=1 area=480000 frame_us=1783 result=1` | PASS |
+| home | 首帧全量建树 `rects=1 area=480000 result=1`；首帧耗时 3 次中位数 2.03 ms（见 §6） | PASS |
 | menu | `open=0 items=1 overlay=5 launched=2 result=1`（探针结束前已关菜单） | PASS |
 | presence | `base=14 added=15 leaving=1 live_after=14 leaked=0 result=1` | PASS |
 | theme | `dark_bg=0x001E1E26 light_bg=0x00ECECF1 hc_bg=0x00000000 result=1` | PASS（链路级；像素级见 §4 分组断言） |
 | reset | `nodes=15 hash=0x9E82D66C orphan=0 match=1 result=1` | PASS |
 | gesture | `clicked=1 drag_moved=1 taskbar_hit=2 result=1` | PASS |
-| resize | `grew=1 sibling_same=1 leaf_inside=1 result=1` | PASS |
+| resize | `w=160 h=110 sibling_same=1 leaf_inside=1 result=1`（串口无 `grew` 令牌；拉伸结果由 w/h 与兄弟/叶子不变量判定） | PASS |
 
 本地串口探针合计 **17/17 PASS**（原 15 + `idle` 生产节流、`diff` 两阶段销毁），零内核异常。
 
@@ -63,7 +63,7 @@
 
 | 分组 | 点位/区域 | 结果 |
 |---|---|---|
-| dark（M0 三条，6 check） | (65,65) 块边缘；(150,70) 标题条 / (200,120) 块底互异；(400,585) 任务栏 / (20,585) Start 文字 | **6/6 PASS**：bar `(58,58,72)`、fg `(232,232,236)`、panel `(42,42,52)` |
+| dark（M0 三条，6 check） | (65,65) 仅断言非桌面底色（块体存在，不采边框色）；标题条 (150,70) / 块底 (200,120) 互异；任务栏 (400,585) / Start 文字 (20,585)。边框令牌 `#555A66` 实测在 y=116 分隔线 x68..267（约 200 px），不在外角点位 | **6/6 PASS**：bar `(58,58,72)`、fg `(232,232,236)`、panel `(42,42,52)` |
 | light（6 check） | 桌面底 (300,300)=`0xECECF1`、块体 (200,120)=`0xDDDDE6`、条 (400,585)=`0xC8C8D6`，且均 ≠ 暗色令牌 | **6/6 PASS** |
 | hc（6 check） | 底 `0x000000`、块 `0x101010`、条 `0x202020`，且 ≠ 暗色令牌 | **6/6 PASS** |
 | menu（2 check） | 浮层矩形 (8,400,180,96) 内 bar 色 ≥100px、fg 色 ≥100px | **2/2 PASS**（bar 9951px / fg 489px） |
@@ -129,15 +129,17 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 
 按 `build.sh` 正常链接顺序（保持 `boot.o cpu.o` 在最前，入口不动），把 `user.o`、`task.o` 紧随其后前置，其余对象顺序不变。重链后护栏 `tools/check_link_layout.py --strict` 退出 0，syscall 路径关键表全部回到 `0x2000000` 用户窗口以下：
 
-| 关键表 | 地址（重链后） | 窗口 `[0x02000000, 0x02800000)` |
+| 关键表 | 地址（冻结 ISO `e80f5f5e` 构建） | 窗口 `[0x02000000, 0x02800000)` |
 |---|---|---|
-| `_acl_tab` | `0x01136440` | 界下 |
-| `_users` | `0x01141060` | 界下 |
-| `_pipes` | `0x011abe00` | 界下 |
-| `_cur_task` | `0x012555e4` | 界下 |
-| `_tasks` | `0x01255600` | 界下 |
+| `_acl_tab` | `0x01137440` | 界下 |
+| `_users` | `0x01142060` | 界下 |
+| `_pipes` | `0x011ace00` | 界下 |
+| `_cur_task` | `0x012565e4` | 界下 |
+| `_tasks` | `0x01256600` | 界下 |
 
-`_bss_end / _load_end = 0x020af0a0`；仍有大量**非 syscall 路径**静态（GUI 节点池、日志缓冲、音频/PCI 小标量等）落在窗口内，由 B' supervisor 镜像兜底，护栏对它们只打 `[link][warn]`；`--strict` 只对关键表落窗口判失败，`--strict-warn` 才对其余静态判失败。对照实验与结论见 §9.1。
+> 关键表**地址随每次重建整体平移**（相对 R11 构建约 +0x1000），不锁固定绝对地址；护栏以“是否落在用户窗口 `[0x02000000, 0x02800000)` 以下”这一区间判定，`--strict` 只对关键表落窗口判失败。地址快照随构建变化，结论（五张表均界下）不变。
+
+`_bss_end / _load_end = 0x020b5e80`；仍有大量**非 syscall 路径**静态（GUI 节点池、日志缓冲、音频/PCI 小标量等）落在窗口内，由 B' supervisor 镜像兜底，护栏对它们只打 `[link][warn]`；`--strict` 只对关键表落窗口判失败，`--strict-warn` 才对其余静态判失败。对照实验与结论见 §9.1。
 
 ### 5.2 B' 兜底安全性加固（拒绝把内核静态帧装成用户 PTE）
 
@@ -169,7 +171,7 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 | 4 | 本地串口探针 | **17/17 PASS**（原 15 + `idle`/`diff`），零异常 | `artifacts/gui-blocks/<subcmd>-serial.log` | 达成 |
 | 5 | 像素断言 dark/light/hc/menu/drag/crop | 6/6、6/6、6/6、2/2、1/1、1/1（六组全 PASS） | `tests/gui_pixel_regress.py`；PPM 落 `artifacts/gui-blocks/` | 达成 |
 | 6 | 控制台洁净度 | 2338/256000 px（0.91%，阈值 5%）PASS | `tests/gui_console_clean.py` | 达成 |
-| 7 | 链接顺序根治：关键表回到窗口以下 | `acl_tab 0x01136440`、`users 0x01141060`、`pipes 0x011abe00`、`cur_task 0x012555e4`、`tasks 0x01255600`，均 `<0x2000000`；`check_link_layout.py --strict` 退出 0 | `kernel_v25/tools/check_link_layout.py`；提交 `67ad3ea` | 达成 |
+| 7 | 链接顺序根治：关键表回到窗口以下 | 五张关键表（`acl_tab/users/pipes/cur_task/tasks`）当前构建均 `<0x2000000` 界下；地址随重建平移，护栏按界下区间判定（快照见 §5.1.1）；`check_link_layout.py --strict` 退出 0 | `kernel_v25/tools/check_link_layout.py`；提交 `67ad3ea` | 达成 |
 | 8 | B' 兜底：拒绝用户映射覆盖内核静态槽 | `[link][RISK] refuse user map onto kernel static frame va=02000000 frame=020af000 pid=00000000`；自检 `rejected=1 intact=1 result=1` | `artifacts/gui-blocks/home-serial.log`；`paging.c`/`kernel.c`；提交 `fc327e3` | 达成（口径见 §5.2：只拒绝静态帧入用户 PTE，合法堆帧按槽覆盖放行） |
 | 9 | D2 无 window 语义命名；lint C1 收紧 `\bwin\w*` | lint **0 violation / 39 advisory / 14 review**，GREEN；代码侧无 `win*` 命名 | `probes/lint/gui-lint.py`；提交 `cc7b8b1` | 达成 |
 | 10 | D1 生产循环 3-tick 节流；实测 ≤33 帧/秒，零重复提交 | 生产 `idle frames=25 double_commit=0 ticks=100`（≈25fps） | `artifacts/gui-blocks/idle-serial.log`；提交 `cc7b8b1` | 达成 |
@@ -183,15 +185,31 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 
 **未达成 / 残留（如实标注，见 §9.3）**：探针后端统一（11a，`lfb=NULL`）；D5 demo 树拆 `src/gui/demo.c`；D6 五个分项测试脚本拆分；BSOD 后 PTE/PT 运行时转储。D7 超框位图像素断言（§9.3-1）与 11b 拖拽残影像素断言本轮已闭环。
 
-## 6. 帧耗时基线（条件：QEMU `-cpu qemu32 -m 256 -smp 1`，800×600）
+### 5.4 独立终验差异与处置
 
-| 指标 | 值 | 条件 |
+依据只读复核 `probes/FINAL-VERIFY.md`（2026-11-24 07:24–08:05）指出的 7 项，逐条处置如下：
+
+| # | 终验指出的差异 | 处置 / 现状 |
 |---|---|---|
-| 首帧全量合成 | 1.783 ms（`home` 探针 area=480000px，≤8ms PASS）；历史中位数 1.88ms（2.19/1.87/1.88） | `gui home` 全量建树后首帧 |
-| 拖拽帧（damage ≤25% 屏） | 0.877 ms；damage 9600px ≈ 2.0% 屏（≤4ms PASS） | `gui drag` 单块 120×80 移动 |
-| 节流帧（探针节拍） | `GUI:frame n=31 us=9`；同 tick 重复提交由合成层去重 | `gui rate` 33 帧 |
-| **生产空闲节流** | 100 tick 提交 **25 帧**，`double_commit=0`（≈25fps，满足“每 3 tick 一帧 ≈33fps”规格；上限口径 ≤33 帧/秒） | `gui idle` 走同一条生产 `gui_idle_step()` 路径 |
+| 1 | 性能口径：§6 首帧 1.783ms、拖拽帧 0.877ms 不可复现；终验采到区间首帧 1.982–3.334ms、拖拽 0.944–1.024ms | §6 已改为本轮冻结 ISO 同命令行 3 次中位数：首帧 **2.03ms**（1.98 / 2.03 / 2.07）、拖拽帧 **1.09ms**（1.05 / 1.09 / 1.10）；旧最佳值弃用，不保留无法复算的单点值 |
+| 2 | §8 指纹与实物不符（旧 `f9bf3a27…` / 11,956,224 B / 1,228,936 B / `0x020af0a0`） | 已与磁盘实物核对一致：ISO `e80f5f5e…c890cbc`、11,960,320 B、`kernel.bin` 1,233,052 B、`_bss_end=0x020b5e80`；§8 只保留这一个权威指纹 |
+| 3 | 关键表地址随重建平移约 0x1000（旧 `0x01136440` 等 → 当前 `0x01137440` 等） | §5.1.1 已改为当前构建地址，并注明“地址随构建漂移、护栏按界下区间判定，不锁固定地址”；结论五表均界下不变 |
+| 4 | §3 resize 写 `grew=1`，串口实际无该令牌 | §3 已改为实际打点 `w=160 h=110 sibling_same=1 leaf_inside=1 result=1`，如实注明无 grew 令牌 |
+| 5 | §4 dark 点位偏差：(65,65) 被当作边框采样点，实测外角为 bar 色；边框令牌在 y=116 分隔线 | §4 已改正：(65,65) 仅断言非底色；边框 `#555A66` 位置写明 y=116 分隔线 x68..267（约 200 px） |
+| 6 | idle / diff / lint 在该镜像上未复算（仅归档日志佐证） | 已在冻结镜像 `e80f5f5e` 复算：`idle frames=25 double_commit=0 ticks=100 result=1`；`diff base=2 leaving=1 live_leaving=2 live_after=1 leaked=0 result=1`；lint **0 violation / 39 advisory / 14 review**，GREEN。最后实测于 sha `e80f5f5e…c890cbc` |
+| 7 | F11 驱动瞬时启动竞争：第二轮 `qemu exited rc=1`（2.2s，无 `steps=` 行），同命令行手动起机正常，单独重跑 9/9 PASS | 判定为端口 / 盘 staging 的**驱动级瞬时竞争**，非客人机 verdict、非内核回归；已记入 §9.3 残留，建议加固驱动并发稳健性，避免把瞬时启动失败误读成 guest 故障 |
+
+## 6. 帧耗时基线（冻结 ISO `e80f5f5e…c890cbc`；条件：QEMU `-cpu qemu32 -m 256 -smp 1`、800×600、`-vga std`；每指标同一条命令行独立跑 3 次，取中位数，括号内为三次实测）
+
+| 指标 | 中位数（区间） | 条件 / 备注 |
+|---|---|---|
+| 首帧全量合成 | **2.03 ms**（3 次：1.98 / 2.03 / 2.07 ms；µs 1975 / 2034 / 2070；区间 1.975–2.070 ms），area=480000px，≤8ms PASS | `gui home` 全量建树后首帧 |
+| 拖拽帧（damage ≤25% 屏） | **1.09 ms**（3 次：1.05 / 1.09 / 1.10 ms；µs 1050 / 1086 / 1103；区间 1.050–1.103 ms）；damage 9600px ≈ 2.0% 屏，≤4ms PASS | `gui drag` 单块 120×80 移动 |
+| 节流帧（探针节拍） | 空闲帧 us 7–10 µs 抖动（归档 7 / 首轮 9 / 次轮 10）；同 tick 重复提交由合成层去重 | `gui rate` 33 帧 |
+| **生产空闲节流** | 100 tick 提交 **25 帧**，`double_commit=0`（≈25fps，满足“每 3 tick 一帧 ≈33fps”规格；上限口径 ≤33 帧/秒）；冻结镜像复算一致 | `gui idle` 走同一条生产 `gui_idle_step()` 路径 |
 | 布局节点数（单块拖拽） | 2（子树 2 + 根） | `stat_layout_nodes` |
+
+> 旧记录的首帧 1.783 ms、拖拽帧 0.877 ms、历史中位数 1.88ms（2.19/1.87/1.88）为早期单次值或不可复算最佳值，已弃用，不再保留。独立终验采到的首帧区间 1.982–3.334 ms、拖拽帧区间 0.944–1.024 ms 见 §5.4。
 
 ## 7. 验收截图（`artifacts/gui-blocks/`，均 `-vga std`）
 
@@ -235,6 +253,7 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 1. **探针后端统一（11a）**：探针子命令提前 return 分支未请求 `CON_MODE_VBE24`，探针帧后端 `lfb=NULL`；串口判定不依赖图形后端。需统一走“进桌面→dump→退出”同一条后端路径，影响后续像素类断言可信度，本轮未改（17 条探针后端切换开放面大，避免动绿基线）。
 2. 主题探针目前为链路级（标脏/结果位）；像素级覆盖由 `gui_pixel_assert.py` 的 light/hc 分组在客人机上完成。
 3. PTE 级取证未补（见 §5.1 末）：BSOD 后未自动导出 PDE/PT；如需闭环“私有 PT 该页 present 与否”的运行时实证，待加 BSOD 转储导出。
+4. **F11 驱动瞬时启动竞争（非内核回归）**：独立终验第二轮出现一次 `qemu exited rc=1`（2.2s 退出、无 `steps=` 行），同命令行手动起机正常，单独重跑 F11 即 9/9 PASS。属端口 / 盘 staging 的驱动级瞬时竞争，重跑可恢复；建议后续加固驱动起机等待与端口/盘副本的并发稳健性，避免把瞬时启动失败误判为客人机 verdict。
 
 > 本轮已闭环并移出残留：**D7 超框位图像素断言**（`shot-crop`，父框外右条非底色 0/4760 px）与 **11b 拖拽残影像素断言**（`shot-drag`，旧矩形非底色 0/9600 px），均见 §4 / §5.3。
 
