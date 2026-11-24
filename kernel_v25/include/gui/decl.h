@@ -55,6 +55,11 @@ void decl_post_focus(struct block *b, int in);
 void decl_post_resize(struct block *b, int w, int h);
 void decl_post_close(struct block *b);
 
+/* 跨应用焦点链（#33）：Tab 循环 / Esc 归还 / 直接置焦。 */
+void decl_focus_set(int tid);
+void decl_focus_next(void);
+void decl_focus_clear(void);
+
 /* 诊断与统计。 */
 void decl_dump_pid(int tid);
 int  decl_pid_blocks(int tid);

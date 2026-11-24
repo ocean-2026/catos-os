@@ -48,7 +48,15 @@ struct pid_meta {
     int      evh, evt;
     ce_blk_event_t evq[DECL_EVQ];
     uint8_t *mem;                   /* 帧分配：gmap/lmap/arena */
+    /* per-pid 统计（#33）。 */
+    int      stat_events;           /* 已入队事件数 */
+    int      stat_damage;           /* 落地置脏布局标记数 */
+    int      stat_frames;            /* 成功落地提交批次数 */
+    int      toast_hints;           /* 系统侧非法声明提示次数 */
 };
+
+/* 当前焦点所属声明式应用；-1 = 焦点归还内核。跨应用焦点链 #33。 */
+static int focus_tid = -1;
 
 struct img_meta {
     uint8_t  used;
@@ -70,6 +78,8 @@ static int           scratch_ready;
 
 extern int cvchan_owner(int res, int tid);
 
+static struct pid_meta *ps_get(int tid);
+
 #define DECL_COMMIT_FRAME_MAX 4     /* 单帧提交上限，超出节流 */
 static uint8_t commit_frame_cnt;
 
@@ -89,6 +99,13 @@ static void decl_dec(int v) {
 static void decl_reject(int code, int tid) {
     ser_write("GUI:decl reject code="); decl_dec(code);
     ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+    /* 系统侧非法声明提示（不建应用层 TOAST 块，仅打点 + 计数）。 */
+    struct pid_meta *p = ps_get(tid);
+    if (p) {
+        p->toast_hints++;
+        ser_write("GUI:decl toast code="); decl_dec(code);
+        ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+    }
 }
 
 static uint32_t fnv(uint32_t h, int32_t v) {
@@ -286,6 +303,7 @@ static int decl_apply(struct pid_meta *p, const ce_blk_rec_t *r, int n,
         gm[p->count] = (uint16_t)b->id;
         lm[p->count] = (int16_t)d->id;
         p->count++;
+        p->stat_damage++;
 
         p->hash = fnv(p->hash, d->id);
         p->hash = fnv(p->hash, d->parent);
@@ -336,6 +354,7 @@ int decl_commit(struct task *t, const void *recs, int n,
     if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
 
     p->used = 1;
+    p->stat_frames++;
     ser_write("GUI:decl commit n="); decl_dec(n);
     ser_write(" ok=1 pid="); decl_dec(tid); ser_putc('\n');
     return 0;
@@ -348,6 +367,7 @@ static void enqueue(struct pid_meta *p, const ce_blk_event_t *e) {
     if (next == p->evh) return;
     p->evq[p->evt] = *e;
     p->evt = next;
+    p->stat_events++;
 }
 
 static int block_local_id(block *b) {
@@ -359,6 +379,15 @@ static int block_local_id(block *b) {
     for (int i = 0; i < p->count; i++)
         if (gm[i] == b->id) return lm[i];
     return 0;
+}
+
+/* 跨 pid damage 隔离：子树内每一块都必须归属 tid，越界即判失败。 */
+static int subtree_owner_ok(block *b, int tid) {
+    if (!b) return 1;
+    if (b->owner != tid) return 0;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        if (!subtree_owner_ok(c, tid)) return 0;
+    return 1;
 }
 
 void decl_post_click(block *b, int lx, int ly) {
@@ -378,20 +407,55 @@ void decl_post_click(block *b, int lx, int ly) {
     ser_write(" y="); decl_dec(ly); ser_putc('\n');
 }
 
-void decl_post_key(int code, int mods) {
-    /* 投给最近活动的声明式应用；焦点链跨应用回收在 #33 后续细化。 */
-    for (int t = MAX_TASKS - 1; t >= 0; t--) {
-        struct pid_meta *p = &ps[t];
-        if (p->used) {
-            ce_blk_event_t ev;
-            ev.type = DECL_EV_KEY; ev.code = (int16_t)mods; ev.id = 0;
-            ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
-            enqueue(p, &ev);
-            ser_write("GUI:ev key code="); decl_dec(code);
-            ser_write(" mods="); decl_dec(mods); ser_putc('\n');
-            return;
-        }
+static void focus_post(struct pid_meta *p, int in) {
+    ce_blk_event_t ev;
+    ev.type = in ? DECL_EV_FOCUS_IN : DECL_EV_FOCUS_OUT;
+    ev.code = 0; ev.id = 0; ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
+    ser_write(in ? "GUI:ev focus_in id=0\n" : "GUI:ev focus_out id=0\n");
+}
+
+void decl_focus_set(int tid) {
+    if (focus_tid == tid) return;
+    if (focus_tid >= 0) {
+        struct pid_meta *o = ps_get(focus_tid);
+        if (o && o->used) focus_post(o, 0);
     }
+    focus_tid = tid;
+    if (tid >= 0) {
+        struct pid_meta *n = ps_get(tid);
+        if (n && n->used) focus_post(n, 1);
+    }
+}
+
+void decl_focus_next(void) {            /* Tab：在已挂载应用间循环焦点 */
+    int start = focus_tid;
+    for (int i = 1; i <= MAX_TASKS; i++) {
+        int t = ((start + i) % MAX_TASKS + MAX_TASKS) % MAX_TASKS;
+        if (ps[t].used) { decl_focus_set(t); return; }
+    }
+}
+
+void decl_focus_clear(void) {           /* Esc：焦点归还内核 */
+    decl_focus_set(-1);
+}
+
+void decl_post_key(int code, int mods) {
+    /* 焦点归属：投给当前焦点应用；无焦点时回退最近活动应用。 */
+    int target = focus_tid;
+    if (target < 0 || !ps_get(target) || !ps_get(target)->used) {
+        for (int t = MAX_TASKS - 1; t >= 0; t--)
+            if (ps[t].used) { target = t; break; }
+    }
+    if (target < 0) return;
+    struct pid_meta *p = ps_get(target);
+    ce_blk_event_t ev;
+    ev.type = DECL_EV_KEY; ev.code = (int16_t)code; ev.id = 0;
+    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
+    ser_write("GUI:ev key code="); decl_dec(code);
+    ser_write(" mods="); decl_dec(mods);
+    ser_write(" pid="); decl_dec(target); ser_putc('\n');
 }
 
 void decl_post_focus(block *b, int in) {
@@ -441,6 +505,10 @@ void decl_dump_pid(int tid) {
     ser_write("GUI:blkdbg pid="); decl_dec(tid);
     ser_write(" blocks="); decl_dec(p->count);
     ser_write(" quota="); decl_dec(DECL_MAX_BLOCKS);
+    ser_write(" frames="); decl_dec(p->stat_frames);
+    ser_write(" events="); decl_dec(p->stat_events);
+    ser_write(" damage="); decl_dec(p->stat_damage);
+    ser_write(" toast="); decl_dec(p->toast_hints);
     ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 
@@ -605,7 +673,7 @@ static int decl_test_commit(int tid, const ce_blk_rec_t *r, int n,
     if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
     if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
     rc = decl_apply(p, r, n, pool, slen);
-    if (rc == 0) { p->used = 1; ser_write("GUI:decl commit n="); decl_dec(n);
+    if (rc == 0) { p->used = 1; p->stat_frames++; ser_write("GUI:decl commit n="); decl_dec(n);
                    ser_write(" ok=1 pid="); decl_dec(tid); ser_putc('\n'); }
     return rc;
 }
@@ -690,6 +758,78 @@ int decl_self_test(void) {
         if (!have_click || click.id != 2 || click.x != 5 || click.y != 7) {
             decl_cleanup_tid(tid); return 1;
         }
+    }
+
+    /* #33：跨 pid 隔离 + 焦点链 + per-pid 统计 + TOAST 提示断言。 */
+    {
+        int tid2 = 2;
+        decl_cleanup_tid(tid2);
+
+        ce_blk_rec_t r2;
+        memset(&r2, 0, sizeof(r2));
+        r2.id = 1; r2.parent = 0;
+        r2.kind = BLK_RECT; r2.layer = LAYER_WORK;
+        r2.text_off = -1; r2.pix_off = -1; r2.res = -1;
+        if (decl_test_commit(tid2, &r2, 1, "", 0) != 0) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+        struct pid_meta *p2 = ps_get(tid2);
+
+        /* 隔离：两棵子树归属各自 pid；pid1 映射表不得出现 pid2 的块。 */
+        if (!subtree_owner_ok(btable_get(p->root), tid) ||
+            !subtree_owner_ok(btable_get(p2->root), tid2)) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+        block *b2 = btable_get(pgmap(p2)[0]);
+        for (int i = 0; i < p->count; i++)
+            if (pgmap(p)[i] == b2->id) {
+                decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+            }
+
+        /* 焦点链：置焦 pid1 → 按键进 pid1；Tab 循环到 pid2 → 按键进 pid2；Esc 归还。 */
+        decl_focus_set(tid);
+        decl_post_key(0x10, 0);
+        decl_focus_next();
+        decl_post_key(0x11, 0);
+        decl_focus_clear();
+
+        int k1 = 0, k2 = 0, fi = 0, fo = 0;
+        while (p->evh != p->evt) {
+            ce_blk_event_t e = p->evq[p->evh];
+            if (e.type == DECL_EV_KEY) k1 = 1;
+            p->evh = (p->evh + 1) % DECL_EVQ;
+        }
+        while (p2->evh != p2->evt) {
+            ce_blk_event_t e = p2->evq[p2->evh];
+            if (e.type == DECL_EV_KEY) k2 = 1;
+            if (e.type == DECL_EV_FOCUS_IN) fi = 1;
+            if (e.type == DECL_EV_FOCUS_OUT) fo = 1;
+            p2->evh = (p2->evh + 1) % DECL_EVQ;
+        }
+        if (!k1 || !k2 || !fi || !fo) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+
+        /* per-pid 统计：落地帧/脏标记/事件均应非零。 */
+        if (p->stat_frames < 1 || p->stat_damage < 3 || p->stat_events <= 0) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+
+        /* TOAST 提示：非法整批被拒后应增加一条系统提示计数并打点。 */
+        ce_blk_rec_t bad;
+        memset(&bad, 0, sizeof(bad));
+        bad.id = 1; bad.parent = 0;
+        bad.kind = BLK_RECT; bad.layer = LAYER_TOAST;
+        bad.text_off = -1; bad.pix_off = -1; bad.res = -1;
+        int before = p->toast_hints;
+        if (decl_test_commit(tid, &bad, 1, "", 0) != E_DECL_LAYER) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+        if (p->toast_hints <= before) {
+            decl_cleanup_tid(tid); decl_cleanup_tid(tid2); return 1;
+        }
+
+        decl_cleanup_tid(tid2);
     }
 
     /* 退出回收：整棵子树清空，泄露 0。 */
