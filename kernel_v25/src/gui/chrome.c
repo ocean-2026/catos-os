@@ -1263,6 +1263,8 @@ static void gui_probe_term(void) {
     gui_term_open();
     gui_term_run(0, "cd /");
     gui_term_run(0, "ls");
+    gui_term_run(0, "help");
+    gui_term_run(0, "cat /etc/lang");
     gui_term_open();
     gui_term_run(1, "mkdir /work");
     gui_term_run(1, "cd /work");
@@ -1276,12 +1278,22 @@ static void gui_probe_term(void) {
     int two = n >= 2;
     int cwd_diff = strcmp_probe(c0, c1) != 0;
     int line_diff = strcmp_probe(l0, l1) != 0;
-    int result = two && cwd_diff && line_diff;
+
+    /* shell_exec 复用证据：help 首行标题命中命令清单；cat /etc/lang 有回显。 */
+    int help_ok = 0, lang_ok = 0;
+    for (int k = 0; k < gui_term_lines(0); k++) {
+        const char *ln = gui_term_line(0, k);
+        if (style_contains(ln, "command")) help_ok = 1;
+        if (style_contains(ln, "lang") || style_contains(ln, "cat")) lang_ok = 1;
+    }
+    int result = two && cwd_diff && line_diff && help_ok && lang_ok;
 
     ser_write("GUI:term count="); ser_dec(n);
     ser_write(" cwd0="); ser_write(c0);
     ser_write(" cwd1="); ser_write(c1);
     ser_write(" iso="); ser_dec(cwd_diff && line_diff);
+    ser_write(" help="); ser_dec(help_ok);
+    ser_write(" lang="); ser_dec(lang_ok);
     ser_write(" result="); ser_dec(result);
     ser_write("\n");
 

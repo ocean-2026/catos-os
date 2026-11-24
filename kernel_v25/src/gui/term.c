@@ -2,11 +2,11 @@
  * term.c -- BLK_TERM 多会话块内终端（规格 §7 组件层）。
  *
  * 每个会话独立持有：当前目录、200 行回看环、历史环、单行编辑缓冲。
- * 后端抽象（vc_backend）把输出写进本会话的行环，不直写 VGA；命令集为
- * 内核内置子集（help/pwd/ls/cd/echo/clear/history）。行编辑支持
- * Left/Right/Home/End/Backspace/Up/Down；Tab 不补全。最小 SGR：不解析
- * 转义序列，输出侧不生成彩色码。Ctrl+N 新建会话，Esc 只关当前会话，
- * 重开会话缓冲保留（同槽位复用）。
+ * vc_backend 复用 shell.c 全部内置：命令行经 shell_ssh_exec_line 提交，
+ * 输出经 tee 捕获进本会话行环，不直写真实控制台；执行前把全局 cwd 切到
+ * 会话目录，执行后回读。行编辑 Left/Right/Home/End/Backspace/Up/Down；
+ * Tab 不补全。输出侧剥离 SGR 与其余转义序列（不画 `?`）。Ctrl+N 新建，
+ * Esc 只关当前会话，缓冲跨关闭保留，重开续上。
  */
 #include "gui/gui.h"
 #include "gui_int.h"
@@ -15,6 +15,10 @@
 #include "keyboard.h"
 #include <stdint.h>
 #include <stddef.h>
+
+/* shell.c 远程命令执行入口：复用同一套内置分发，输出经 tee 捕获到缓冲。 */
+extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
+                                int *rc);
 
 #define TERM_MAX   4
 #define T_COLS     80
@@ -69,11 +73,25 @@ static void t_trim(char *s) {
 
 /* ---- 行环后端（vc_backend：只写本会话缓冲，不碰真实控制台） ------------- */
 
+/* 捕获输出入环：剥离 ESC 序列（SGR 等）与 \r / 其余 C0 控制字符，
+ * 换行拆行；超宽截断，不做换行折叠。 */
 static void t_ring_push(term_t *t, const char *text) {
     const char *p = text;
     while (*p) {
         int o = 0;
         while (*p && *p != '\n') {
+            if (*p == 0x1B) {                 /* 转义序列：跳到终止字母 */
+                p++;
+                if (*p == '[') {
+                    p++;
+                    while (*p && !((*p >= 'A' && *p <= 'Z') ||
+                                    (*p >= 'a' && *p <= 'z'))) p++;
+                }
+                if (*p) p++;
+                continue;
+            }
+            if (*p == '\r') { p++; continue; }
+            if (*p < 0x20)  { p++; continue; }
             if (o < T_COLS - 1) t->ring[t->ring_tail][o++] = *p;
             p++;
         }
@@ -90,41 +108,6 @@ static void t_ring_clear(term_t *t) { t->ring_n = 0; t->ring_tail = 0; }
 static const char *t_ring_at(term_t *t, int logical) {
     if (logical < 0 || logical >= t->ring_n) return "";
     return t->ring[(t->ring_tail - t->ring_n + logical + T_RING) % T_RING];
-}
-
-/* ---- 路径解析（每会话独立 cwd，不读写全局 shell 目录） ------------------- */
-
-static void t_resolve(term_t *t, const char *arg, char *out, int cap) {
-    char raw[FS_PATH_MAX];
-    raw[0] = 0;
-    if (arg && arg[0] == '/') t_copy(raw, sizeof(raw), arg);
-    else if (arg && arg[0]) {
-        t_copy(raw, sizeof(raw), t->cwd);
-        if (raw[t_len(raw) - 1] != '/') t_cat(raw, sizeof(raw), "/");
-        t_cat(raw, sizeof(raw), arg);
-    } else t_copy(raw, sizeof(raw), t->cwd);
-
-    char segs[16][FS_NAME_MAX];
-    int ns = 0;
-    char *scan = raw;
-    while (*scan) {
-        while (*scan == '/') scan++;
-        if (!*scan) break;
-        char comp[FS_NAME_MAX]; int cl = 0;
-        while (*scan && *scan != '/') {
-            if (cl < FS_NAME_MAX - 1) comp[cl++] = *scan;
-            scan++;
-        }
-        comp[cl] = 0;
-        if (comp[0] == 0 || !strcmp_(comp, ".")) continue;
-        if (!strcmp_(comp, "..")) { if (ns > 0) ns--; continue; }
-        if (ns < FS_PATH_MAX / FS_NAME_MAX) t_copy(segs[ns++], FS_NAME_MAX, comp);
-    }
-    out[0] = '/'; out[1] = 0;
-    for (int i = 0; i < ns; i++) {
-        t_cat(out, cap, segs[i]);
-        if (i < ns - 1) t_cat(out, cap, "/");
-    }
 }
 
 static int strcmp_(const char *a, const char *b) {
@@ -153,81 +136,20 @@ static void t_exec(term_t *t, const char *raw) {
     t->hist_n = t->hist_n < T_HIST ? t->hist_n + 1 : T_HIST;
     t->hist_idx = t->hist_n;
 
-    char cmd[32], rest[T_LINE];
-    int cl = 0; const char *p = line;
-    while (*p == ' ') p++;
-    while (*p && *p != ' ' && cl < 31) cmd[cl++] = *p++;
-    cmd[cl] = 0;
-    while (*p == ' ') p++;
-    t_copy(rest, sizeof(rest), p);
-
-    if (!strcmp_(cmd, "help")) {
-        t_ring_push(t, "Commands: help pwd ls [dir] cd <dir> echo <text> clear history");
-    } else if (!strcmp_(cmd, "pwd")) {
-        t_ring_push(t, t->cwd);
-    } else if (!strcmp_(cmd, "clear")) {
+    /* clear/cls 只清本会话行环；其余命令交 shell.c 全内置分发。 */
+    if (!strcmp_(line, "clear") || !strcmp_(line, "cls")) {
         t_ring_clear(t);
-    } else if (!strcmp_(cmd, "mkdir")) {
-        char target[FS_PATH_MAX];
-        t_resolve(t, rest, target, sizeof(target));
-        int rc = fs_mkdir(target);
-        if (rc != FS_OK) {
-            char msg[T_COLS];
-            t_copy(msg, sizeof(msg), "mkdir: cannot create ");
-            t_cat(msg, sizeof(msg), rest);
-            t_ring_push(t, msg);
-        }
-    } else if (!strcmp_(cmd, "history")) {
-        char buf[T_COLS];
-        for (int i = 0; i < t->hist_n; i++) {
-            buf[0] = 0;
-            char num[8]; int n = 0, v = i + 1;
-            if (v == 0) num[n++] = '0';
-            while (v) { num[n++] = (char)('0' + v % 10); v /= 10; }
-            while (n) t_cat(buf, sizeof(buf), &num[--n]);
-            t_cat(buf, sizeof(buf), "  ");
-            t_cat(buf, sizeof(buf), t->hist[i]);
-            t_ring_push(t, buf);
-        }
-    } else if (!strcmp_(cmd, "echo")) {
-        t_ring_push(t, rest[0] ? rest : "");
-    } else if (!strcmp_(cmd, "cd")) {
-        char target[FS_PATH_MAX];
-        t_resolve(t, rest[0] ? rest : "/", target, sizeof(target));
-        if (fs_is_dir(target)) t_copy(t->cwd, sizeof(t->cwd), target);
-        else {
-            char msg[T_COLS];
-            t_copy(msg, sizeof(msg), "cd: not a directory: ");
-            t_cat(msg, sizeof(msg), rest);
-            t_ring_push(t, msg);
-        }
-    } else if (!strcmp_(cmd, "ls")) {
-        char target[FS_PATH_MAX];
-        t_resolve(t, rest[0] ? rest : t->cwd, target, sizeof(target));
-        char names[32][FS_NAME_MAX];
-        int n = fs_enum_entries(target, names, 32);
-        if (n < 0) {
-            t_ring_push(t, "ls: cannot open directory");
-        } else if (n == 0) {
-            t_ring_push(t, "(empty)");
-        } else {
-            char buf[T_COLS]; buf[0] = 0;
-            for (int i = 0; i < n; i++) {
-                int add = t_len(names[i]) + 1;
-                if (t_len(buf) + add >= T_COLS - 1) {
-                    t_ring_push(t, buf); buf[0] = 0;
-                }
-                t_cat(buf, sizeof(buf), names[i]);
-                t_cat(buf, sizeof(buf), " ");
-            }
-            if (buf[0]) t_ring_push(t, buf);
-        }
-    } else {
-        char msg[T_COLS];
-        t_copy(msg, sizeof(msg), "term: command not found: ");
-        t_cat(msg, sizeof(msg), cmd);
-        t_ring_push(t, msg);
+        return;
     }
+
+    fs_chdir(t->cwd);                       /* 全局 cwd 对齐本会话 */
+    char cap[2048];
+    int rc = 0;
+    shell_ssh_exec_line(line, cap, sizeof(cap), &rc);
+    t_ring_push(t, cap);
+    char pwd[FS_PATH_MAX];
+    fs_pwd(pwd, sizeof(pwd));
+    if (pwd[0]) t_copy(t->cwd, sizeof(t->cwd), pwd);
 }
 
 /* ---- 面板规格 ----------------------------------------------------------- */
@@ -490,6 +412,16 @@ const char *gui_term_cwd(int i) {
 const char *gui_term_last_line(int i) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
     return t_ring_at(&terms[i], terms[i].ring_n - 1);
+}
+
+int gui_term_lines(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return 0;
+    return terms[i].ring_n;
+}
+
+const char *gui_term_line(int i, int idx) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
+    return t_ring_at(&terms[i], idx);
 }
 
 /* 复位（进桌面 / 退桌面时清空会话句柄，缓冲槽位保留供探针复用）。 */

@@ -126,6 +126,8 @@ int       gui_term_count(void);
 int       gui_term_active_idx(void);
 const char *gui_term_cwd(int i);
 const char *gui_term_last_line(int i);
+int       gui_term_lines(int i);
+const char *gui_term_line(int i, int idx);
 void      gui_term_run(int i, const char *cmd);
 
 /* ---- shell 命令入口 ---- */
