@@ -222,6 +222,43 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 | `m4-theme-contrast.png` | 高对比：黑底 `0x000000`、块 `0x101010`、条 `0x202020`、白字、黄分隔线 `0xFFFF00` |
 | `m4-reset.png` | `gui_reset` 重建后桌面，与首帧 dark 一致（`reset` 探针 nodes=15、哈希前后一致、orphan=0） |
 
+## 7.5 组件层（提交 `6e0ab40`，2026-11-24）
+
+> 四组件在同一次提交落地（**合并于 `6e0ab40`，不追溯拆分**）。组件本身也是块，
+> 只从开始菜单条目或 `gui` 命令打开；公开 API 见 `include/gui/gui.h`。
+
+### 7.5.1 组件与打开方式
+
+| 组件 | 源码 | 菜单条目 / 命令 | 探针子命令 | 功能要点 |
+|---|---|---|---|---|
+| 记事本 | `src/gui/notepad.c` | 菜单条目；`gui notepad [路径]` | `gui note` | 静态文档缓冲；标题条 + 自绘文本区 + 状态行；Enter/Backspace/方向键/Home/End/PgUp/PgDn/可打印字符、Ctrl+S 保存、Esc 关闭；满缓冲显式 `full`；状态行 ASCII（dirty/saved/full） |
+| 画布（`BLK_CANVAS`） | `src/gui/canvas.c` | 菜单条目；`gui canvas` | `gui cv` | 24bpp 运行时帧分配缓冲；原语 pixel/hline/vline/fill_rect/blit24 全走裁剪栈，只置自身 `dirty_paint`；演示棋盘 + 水平渐变 + 小方块；200×160 |
+| 文件资源管理器 | `src/gui/filemgr.c` | 菜单条目；`gui files [路径]` | `gui fm` | 路径栏 + 工具栏（上级 / 刷新）+ 列表行；`fs_enum_entries_raw` 判目录；单击选中、上下移动、回车/双击进入；`.txt` 交记事本，其他类型报不支持；状态行 ASCII（ready/empty/read failed/unsupported type） |
+| 图片查看器 | `src/gui/images.c` | 菜单条目；`gui images [路径]` | `gui img` | BMP BI_RGB 24/32bpp（bottom-up/top-down，32 位丢 alpha）+ PPM P6 最小解码器，`fs_read_at` 流式分块读；1:1 居中、方向键平移；状态行含文件名/源尺寸/偏移/解码耗时；样例 `/samples/desktop.bmp` 800×600 |
+
+共享改动：`include/gui/block.h`（`BLK_CANVAS` 枚举、render/usr/buf 字段）、`include/gui/gui.h`（公开 API）、`src/gui/desc.c`（`apply_spec` 拷贝 render/usr）、`src/gui/paint.c`（CANVAS blit + render 回调）、`src/gui/input.c`（key_hook）、`src/gui/gui_int.h`、`src/gui/compose.c`（`gui_mark_dirty`）、`src/gui/layout.c`（CANVAS 纳入叶子自然宽高）、`src/gui/chrome.c`（菜单/命令/探针分发）、`build.sh`（四 `.c/.o` 进两条 ld 行）。
+
+### 7.5.2 探针与像素断言
+
+- 本地串口探针 **21/21 PASS**（旧 17：idem/dirty/leak/geom/bounds/drag/hit/rate/idle/diff/home/menu/presence/theme/reset/gesture/resize；新 4：`note` result=1、`cv` result=1 200×160、`fm` result=1、`img` ok=1 800×600 `desktop.bmp`），零异常。
+- 像素断言新增四组全 PASS：**notepad 2/2、canvas 3/3、files 2/2、images 2/2**；原有 dark/light/hc 6/6、menu 2/2、drag 1/1、crop 1/1 不退化。
+- 三门禁全绿：**vprobe 10/10**（端口 4461）、**E3 2/2**（4462）、**F11 9/9**（4481，`CATOS_ISO` 环境变量）。
+- 链接护栏 `tools/check_link_layout.py --strict` 退出 0；lint GREEN。
+
+### 7.5.3 组件层交付物指纹（`6e0ab40` 镜像）
+
+- ISO：`kernel_v25/catos.iso`，**11,984,896 字节**；`build/kernel.bin` **1,258,892 字节**；`_bss_end = 0x020c32e4`（在 `0x02000000` 用户窗口界下）。
+- ISO sha256：`7c04385faeed816db9b15e8dec83c934d0c3d5397bf1914e63d261bbf7dd2a16`。
+
+### 7.5.4 上机缺陷与修法（四个）
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 运行期从菜单/命令打开组件，新子树首帧不绘制 | 打开后显式 `layout_run()` 清掉脏位，收集 damage 时新子树已变干净 | 新增 `gui_mark_dirty(root)` 整树标脏；四组件 open 路径在建树后调用；声明为正式接口（`gui_int.h`） |
+| 2 | 画布首帧整块黑缓冲 | 缓冲惰性填充：render 回调在默认 blit 之后才执行，首帧 blit 到未填缓冲 | 建块时先 `cv_demo_paint` 预填缓冲，render 回调只做后续增量 |
+| 3 | 图片视口块布局不生效 / 自然尺寸错 | 视口块手工 `btable_alloc` 漏置 `dirty_layout=1`；`BLK_CANVAS` 未纳入 layout 叶子自然宽高 | 补脏位置位；`layout.c` 自然宽高计算加入 CANVAS 分支 |
+| 4 | 组件状态行中文在 8×16 字形下渲染成 `?` | 子集字模不含该状态文案汉字 | 状态行改 ASCII：notepad `dirty/saved/full`；filemgr `ready/empty/read failed/unsupported type`；images `unsupported format` |
+
 ## 8. 交付物指纹
 
 - ISO：`kernel_v25/catos.iso`
@@ -254,6 +291,9 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 2. 主题探针目前为链路级（标脏/结果位）；像素级覆盖由 `gui_pixel_assert.py` 的 light/hc 分组在客人机上完成。
 3. PTE 级取证未补（见 §5.1 末）：BSOD 后未自动导出 PDE/PT；如需闭环“私有 PT 该页 present 与否”的运行时实证，待加 BSOD 转储导出。
 4. **F11 驱动瞬时启动竞争（非内核回归）**：独立终验第二轮出现一次 `qemu exited rc=1`（2.2s 退出、无 `steps=` 行），同命令行手动起机正常，单独重跑 F11 即 9/9 PASS。属端口 / 盘 staging 的驱动级瞬时竞争，重跑可恢复；建议后续加固驱动起机等待与端口/盘副本的并发稳健性，避免把瞬时启动失败误判为客人机 verdict。
+5. **组件层拆分残留（G-D5 / G-D6，非阻塞）**：demo 块树仍在 `chrome.c`，待按规格 §11 拆到 `src/gui/demo.c`（G-D5）；组件层探针仍集中在 `tests/gui_probe.py`，待补五个分项脚本或在报告明确映射（G-D6）。
+
+**新增风险（GUI 线）**：画布缓冲与解码器 `.bss` / 帧池增长挤压链接布局——关键 syscall 表必须留在用户窗口 `[0x2000000, 0x2800000)` 以下；每次新增静态表 / 大数组后必须复跑 `kernel_v25/tools/check_link_layout.py --strict`，退出 0 才算过，红了调链接顺序，不许绕护栏。组件层镜像 `_bss_end=0x020c32e4`，仍在界下。
 
 > 本轮已闭环并移出残留：**D7 超框位图像素断言**（`shot-crop`，父框外右条非底色 0/4760 px）与 **11b 拖拽残影像素断言**（`shot-drag`，旧矩形非底色 0/9600 px），均见 §4 / §5.3。
 
