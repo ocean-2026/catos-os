@@ -66,6 +66,7 @@ void gui_style_set(int calm) {
     st_persist();
     /* 整树标脏重绘 + 重排（网格归整 / 角档 / 阴影都依赖档位）。 */
     gui_mark_dirty(gui_root_block()->id);
+    gui_force_next_frame();
     layout_run();
     if (st_active) st_refresh_options();
 }

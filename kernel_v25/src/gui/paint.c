@@ -282,6 +282,26 @@ static void paint_halo(block *b) {
     }
 }
 
+/* 角部覆写 pass：子树照常画完后，把父块四个角掩码之外的像素用桌面底色
+ * 覆写，盖住子块矩形填进圆角切口的部分；full-bleed / 根块 / chrome / bg
+ * 由 calm_shape_eligible 排除。 */
+static void corner_restore(block *b) {
+    if (!calm_shape_eligible(b)) return;
+    calm_masks_init();
+    int ri = calm_r_index(b->w, b->h);
+    int r = CALM_RADII[ri];
+    if (r * 2 > b->w || r * 2 > b->h) return;
+    uint32_t c = gui_active_style()->bg;
+    for (int row = 0; row < r; row++) {
+        int ins = calm_inset(ri, row);
+        gui_fill_rect(b->x, b->y + row, ins, 1, c);
+        gui_fill_rect(b->x + b->w - ins, b->y + row, ins, 1, c);
+        int rowb = b->h - 1 - row;
+        gui_fill_rect(b->x, b->y + rowb, ins, 1, c);
+        gui_fill_rect(b->x + b->w - ins, b->y + rowb, ins, 1, c);
+    }
+}
+
 void paint_node(block *b) {
     if (!b || !b->visible) return;
 
@@ -352,6 +372,7 @@ void paint_node(block *b) {
     for (block *c = b->first_child; c; c = c->next_sibling)
         paint_node(c);
     paint_clip_pop();
+    corner_restore(b);
 
     b->dirty_paint = 0;
     b->snap = 0;

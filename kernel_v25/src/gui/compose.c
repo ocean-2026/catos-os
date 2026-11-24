@@ -293,6 +293,10 @@ void gui_raise_to_front(block_id id) {
     mark_all_paint(gui_root_block());
 }
 
+/* 强制下一帧提交：同 tick 内连续 gui_frame() 会被双提交门控判为重复，
+ * 运行期切档位后需要拆掉该门控，否则切换结果不重绘。 */
+void gui_force_next_frame(void) { s_last_tick = 0; }
+
 /* 切主题：换活动令牌后整树标脏重绘（不做局部配色残留）。 */
 void gui_theme_set(enum gui_token t) {
     gui_set_token(t);

@@ -36,6 +36,7 @@ void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,
                           uint32_t damage_area);
 void      stat_note_double_commit(void);
+void      gui_force_next_frame(void);
 
 /* paint.c */
 void      paint_begin_frame(void);

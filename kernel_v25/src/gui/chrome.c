@@ -1214,9 +1214,9 @@ static void gui_probe_style(const char *mode) {
 
     block *panel = probe_find_panel_body();
     int corner_cut = 0;
-    if (panel) {
+    if (panel && want_calm) {
         uint32_t outer = probe_read_px(panel->x, panel->y);
-        /* calm 外角被超椭圆裁成背景色；app 外角是描边/面板色，不判背景。 */
+        /* calm 外角被超椭圆裁成背景色；app 不圆角，外角不判背景。 */
         corner_cut = (outer == tok->bg);
     }
 
@@ -1227,7 +1227,8 @@ static void gui_probe_style(const char *mode) {
     layout_run(); gui_frame();
     int residue = 1;
     if (panel) {
-        uint32_t inner = probe_read_px(panel->x + 2, panel->y + 2);
+        /* 取面板体中点，避开圆角切口与边缘描边，校验内填未残留上一档。 */
+        uint32_t inner = probe_read_px(panel->x + panel->w / 2, panel->y + panel->h / 2);
         residue = (inner == tok->panel);
     }
 
