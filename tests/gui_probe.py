@@ -32,10 +32,10 @@ from qemu_driver import (find_qemu, kill_qemu, force_text,  # noqa: E402
                          sendkey, type_text, wait_for_prompt)
 from gui_parse import parse_log  # noqa: E402
 
-ART = os.path.join(REPO, "artifacts", "gui-blocks")
+ART = os.environ.get("PROBE_ART", os.path.join(REPO, "artifacts", "gui-blocks"))
 os.makedirs(ART, exist_ok=True)
 ISO = os.path.join(REPO, "kernel_v25", "catos.iso")
-PORT = 4471
+PORT = int(os.environ.get("PROBE_PORT", "4471"))
 
 # 子命令 -> (期望打点, 断言说明)
 EXPECT = {
@@ -62,6 +62,9 @@ EXPECT = {
     "img":    {"latest": {"ok": "1"}, "flag": None},
     "br":     {"latest": {"result": "1"}, "flag": None},
     "cvchan": {"latest": {"result": "1"}, "flag": None},
+    "free":    {"latest": {"result": "1"}, "flag": None},
+    "cvdirty": {"latest": {"result": "1"}, "flag": None},
+    "interact": {"latest": {"result": "1"}, "flag": None},
 }
 
 
@@ -77,7 +80,7 @@ def boot(qemu, iso, serial):
     vga = os.environ.get("VGA", "vmware")
     scratch = os.environ.get(
         "SCRATCH_IMG",
-        "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
+        "/home/user/work/artifacts/gui-v2/samples/gui-samples.img")
     cmd = [qemu, "-m", "256", "-smp", "1", "-cpu", "qemu32", "-vga", vga,
            "-no-reboot", "-net", "none", "-display", "none", "-boot", "order=d",
            "-cdrom", iso, "-serial", "file:" + serial,

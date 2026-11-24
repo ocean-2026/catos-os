@@ -161,9 +161,16 @@ static void shot_drag_build(void) {
     gui_frame();                               /* 拖拽后帧：旧矩形应回底色 */
 }
 
+static void mark_subtree_paint(block *b) {
+    if (!b) return;
+    b->dirty_paint = 1;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        mark_subtree_paint(c);
+}
+
 /* 样例一：仪表盘式卡片叠放（FREE 内错位叠放，z 递增）。 */
 static void shot_free_dash_build(void) {
-    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
     block_id F = b_free(0, &fr);
     const char *names[3] = { "Card 1", "Card 2", "Card 3" };
     for (int i = 0; i < 3; i++) {
@@ -175,12 +182,11 @@ static void shot_free_dash_build(void) {
         blk_spec t = spec_panel(LAYER_WORK, 120, 16, 0);
         b_text(c, &t, names[i]);
     }
-    layout_run();
 }
 
 /* 样例二：右侧固定侧栏 + 中央自适应区。 */
 static void shot_free_side_build(void) {
-    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
     block_id F = b_free(0, &fr);
 
     blk_spec side = spec_panel(LAYER_WORK, 180, 0, 1);
@@ -196,12 +202,47 @@ static void shot_free_side_build(void) {
     block_id M = b_rect(F, &main);
     blk_spec mt = spec_panel(LAYER_CONTENT, 160, 16, 0);
     b_text(M, &mt, "Adaptive center");
+}
+
+/* 样例四：溢出三态像素断言。父面板内 VISIBLE 子块拖出父框：旧位置恢复
+ * 父底色，新位置显示子块；另放一对叠放块验证 z 高者覆盖重叠区。 */
+static void shot_free_overflow_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec par = spec_panel(LAYER_WORK, 240, 160, 1);
+    block_id P = b_rect(F, &par);
+    block *pp = btable_get(P);
+    pp->x = 100; pp->y = 100; pp->moved = 1;
+
+    blk_spec ch = spec_panel(LAYER_WORK, 80, 60, 1);
+    ch.overflow = OVF_VISIBLE;
+    ch.role_bg = ROLE_BAR;
+    ch.drag_mode = DRAG_FULL;
+    ch.px_x = 20; ch.px_y = 20;
+    block_id C = b_rect(P, &ch);
+
+    /* 叠放对：A 面板在下，B 条色在上（z=1），重叠区只显示 B。 */
+    blk_spec oa = spec_panel(LAYER_WORK, 100, 80, 1);
+    oa.role_bg = ROLE_PANEL; oa.px_x = 40; oa.px_y = 300;
+    b_rect(F, &oa);
+    blk_spec ob = spec_panel(LAYER_WORK, 100, 80, 1);
+    ob.role_bg = ROLE_BAR; ob.z = 1; ob.px_x = 70; ob.px_y = 320;
+    b_rect(F, &ob);
     layout_run();
+    mark_subtree_paint(gui_root_block());
+    block *pc = btable_get(C);
+
+    /* 把子块从父内 (120,120) 拖到父外 (300,220)。 */
+    gui_inject_press(pc->x + 10, pc->y + 10);
+    gui_inject_move(310, 230);
+    gui_inject_release();
+    gui_frame();
 }
 
 /* 样例三：悬浮球 + 百分比定位徽标（OVF_VISIBLE 浮层）。 */
 static void shot_free_float_build(void) {
-    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
     block_id F = b_free(0, &fr);
 
     blk_spec ball = spec_panel(LAYER_OVERLAY, 48, 48, 1);
@@ -213,7 +254,33 @@ static void shot_free_float_build(void) {
     badge.anchor = ANC_R | ANC_T; badge.pct_y = 150;
     badge.overflow = OVF_VISIBLE;
     b_rect(F, &badge);
+}
+
+/* 样例五：左手柄缩放像素断言。BAR 块初始 (230,90,160,100)，拖左手柄
+ * 左移到 180：左边界随动，右边界保持 390 不动（min 80 / max 300）。 */
+static void shot_free_interact_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec par = spec_panel(LAYER_WORK, 300, 200, 1);
+    block_id P = b_rect(F, &par);
+    block *pp = btable_get(P);
+    pp->x = 180; pp->y = 60; pp->moved = 1;
+
+    blk_spec r = spec_panel(LAYER_WORK, 160, 100, 1);
+    r.role_bg = ROLE_BAR;
+    r.resize_dir = RESIZE_L | RESIZE_R;
+    r.resize_min_w = 80; r.resize_max_w = 300;
+    block_id R = b_rect(P, &r);
+    block *pr = btable_get(R);
+    pr->x = 230; pr->y = 90; pr->moved = 1;
     layout_run();
+    mark_subtree_paint(gui_root_block());
+
+    gui_inject_press(pr->x + 3, pr->y + pr->h / 2);
+    gui_inject_move(180, pr->y + pr->h / 2);
+    gui_inject_release();
+    gui_frame();
 }
 
 static block_id demo_add_sample(void) {
@@ -587,12 +654,13 @@ void gui_probe_hit(void) {
     ser_write(" want="); ser_dec(Hi);
     int ok = hit == Hi;
 
-    /* 父块角 3px 内返回 RESIZE：边缘带优先于子块命中。 */
+    /* 父块角 3px 内返回 RESIZE：边缘带优先于子块命中。放到空白右下角。 */
     blk_spec pc = spec_panel(LAYER_CONTENT, 160, 100, 1);
     pc.resize_dir = RESIZE_R | RESIZE_B;
     block_id P2 = b_rect(0, &pc);
     layout_run();
     block *pp2 = btable_get(P2);
+    pp2->x = 560; pp2->y = 420; pp2->moved = 1;
     block_id act = 0; uint8_t rdir = 0;
     int mode = gui_interaction_at(pp2->x + pp2->w - 3,
                                   pp2->y + pp2->h - 3, &act, &rdir);
@@ -981,7 +1049,7 @@ static void gui_probe_free(void) {
     gui_begin();
     gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
 
-    blk_spec fr = spec_panel(LAYER_CONTENT, 0, 0, 0);
+    blk_spec fr = spec_panel(LAYER_CONTENT, GFX24_W, GFX24_H, 0);
     block_id Fr = b_free(0, &fr);
 
     /* A：左上锚点 + 像素偏移 20,20，120×80。 */
@@ -1080,9 +1148,10 @@ static void gui_probe_interact(void) {
     block_id R = b_rect(P, &r);
     block *pr = btable_get(R);
 
-    /* 父框约束拖拽块。 */
+    /* 父框约束拖拽块（右下角，避开可缩放块 R）。 */
     blk_spec g = spec_panel(LAYER_WORK, 60, 60, 1);
     g.drag_bounds = BOUND_PARENT; g.drag_mode = DRAG_FULL;
+    g.anchor = ANC_R | ANC_B;
     block_id G = b_rect(P, &g);
     block *pg = btable_get(G);
 
@@ -1297,7 +1366,8 @@ void gui_shell_cmd(const char *arg) {
      * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）；
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
-    int free_dash = 0, free_side = 0, free_float = 0;
+    int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
+    int free_interact = 0;
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
     int app_open = APP_NONE;
@@ -1314,6 +1384,8 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-dash"))  free_dash = 1;
     else if (!strcmp_probe(word, "shot-free-sidebar")) free_side = 1;
     else if (!strcmp_probe(word, "shot-free-float")) free_float = 1;
+    else if (!strcmp_probe(word, "shot-free-overflow")) free_overflow = 1;
+    else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
@@ -1335,7 +1407,8 @@ void gui_shell_cmd(const char *arg) {
         con_write("gui: 进入图形块桌面失败\n");
         return;
     }
-    int free_sample = free_dash || free_side || free_float;
+    int free_sample = free_dash || free_side || free_float || free_overflow ||
+                      free_interact;
     gui_begin();
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
@@ -1346,6 +1419,8 @@ void gui_shell_cmd(const char *arg) {
     if (free_dash)  shot_free_dash_build();
     if (free_side)  shot_free_side_build();
     if (free_float) shot_free_float_build();
+    if (free_overflow) shot_free_overflow_build();
+    if (free_interact) shot_free_interact_build();
     if (app_open == APP_NOTEPAD) gui_notepad_open(app_path[0] ? app_path : 0);
     if (app_open == APP_CANVAS)  gui_canvas_demo();
     if (app_open == APP_FILEMGR) gui_filemgr_open(app_path[0] ? app_path : 0);

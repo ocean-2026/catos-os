@@ -136,8 +136,33 @@ BROWSER_CHECKS = [
      "color": DARK_FG, "min": 20, "label": "browser text fg"},
 ]
 
+# v2 自由布局 / 溢出断言（shot-free-overflow）：
+#   1. 叠放重叠区只显示 z 高者（BAR 在上）；
+#   2. OVF_VISIBLE 子块移出后，旧位置恢复父面板底色；
+#   3. 新位置显示子块（BAR）。
+FREE_CHECKS = [
+    {"kind": "color", "pt": (80, 330), "color": DARK_BAR,
+     "label": "overlap shows z-high"},
+    {"kind": "region_count", "rect": (120, 120, 80, 60),
+     "color": DARK_PANEL, "min": 100, "label": "overflow old rect restored"},
+    {"kind": "region_count", "rect": (300, 220, 80, 60),
+     "color": DARK_BAR, "min": 100, "label": "overflow new rect child"},
+]
+
+# v2 左手柄缩放断言（shot-free-interact）：BAR 块由 (230,90,160,100) 拖
+# 左手柄到 x=180，新左边界落在 180、右边界保持 390 不动。
+INTERACT_CHECKS = [
+    {"kind": "region_count", "rect": (180, 90, 50, 100),
+     "color": DARK_BAR, "min": 100, "label": "left edge stretched to 180"},
+    {"kind": "color", "pt": (388, 140), "color": DARK_BAR,
+     "label": "right edge still block interior"},
+    {"kind": "ne_color", "pt": (396, 140), "color": DARK_BAR,
+     "label": "right boundary unchanged at 390"},
+]
+
 CHECK_GROUPS = {
     "dark": DEFAULT_CHECKS,
+    "free": FREE_CHECKS,
     "light": THEME_LIGHT_CHECKS,
     "hc": THEME_HC_CHECKS,
     "menu": MENU_CHECKS,
@@ -148,6 +173,7 @@ CHECK_GROUPS = {
     "files": FILES_CHECKS,
     "images": IMAGES_CHECKS,
     "browser": BROWSER_CHECKS,
+    "interact": INTERACT_CHECKS,
 }
 
 GROUP_BG = {
@@ -162,6 +188,8 @@ GROUP_BG = {
     "files": DARK_BG,
     "images": DARK_BG,
     "browser": DARK_BG,
+    "free": DARK_BG,
+    "interact": DARK_BG,
 }
 
 
