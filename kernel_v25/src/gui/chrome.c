@@ -959,6 +959,9 @@ void gui_probe_menuclick(void) {
 
     gui_frame();   /* 关菜单后一帧：损伤面积 > 0 才说明旧菜单区域被重画。 */
     uint32_t area = stat_damage_area();
+    /* 稳态（菜单已关）块计数基线：第二轮开菜单 → 点 z>0 行 → 关菜单后，
+     * 示例块不得被回收，稳态 live 必须与本轮前相同。 */
+    uint32_t live_before = stat_blocks_live();
 
     /* z>0 行（示例块 focusable）走 focus_raise：摘挂 + z 递增后块必须仍挂在
      * 根树上（防摘树重挂丢失）、仍可见、仍可命中。菜单关闭会释放菜单行，
@@ -988,8 +991,11 @@ void gui_probe_menuclick(void) {
         }
     }
     gui_frame();
+    uint32_t live_after = stat_blocks_live();
     int raise_ok = raise_pressed && raise_live && raise_visible && raise_hit;
 
+    /* 注：菜单开关会释放/重建菜单行，全局 live 前后不可直接相等比较；
+     * 示例块存活以 raise_live/raise_visible/raise_hit 为准，live 前后值仅作遥测。 */
     int ok = pressed && active_before == 0 && active == 1 && area > 0 && raise_ok;
     ser_write("GUI:menuclick pressed="); ser_dec(pressed);
     ser_write(" active="); ser_dec(active);
@@ -997,6 +1003,8 @@ void gui_probe_menuclick(void) {
     ser_write(" raise_live="); ser_dec(raise_live);
     ser_write(" raise_visible="); ser_dec(raise_visible);
     ser_write(" raise_hit="); ser_dec(raise_hit);
+    ser_write(" live_before="); ser_dec(live_before);
+    ser_write(" live_after="); ser_dec(live_after);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
