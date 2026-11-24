@@ -37,33 +37,18 @@ os.makedirs(ART, exist_ok=True)
 ISO = os.path.join(REPO, "kernel_v25", "catos.iso")
 PORT = 4471
 
-# 子命令 -> (期望打点, 断言说明)
-EXPECT = {
-    "idem":  {"latest": {"match": "1"}, "flag": "GUI:idempotent=OK"},
-    "dirty": {"latest": {"result": "1"}, "flag": None},
-    "leak":  {"latest": {"leaked": "0"}, "flag": None},
-    "geom":  {"latest": {}, "flag": None},
-    "bounds": {"latest": {"result": "1"}, "flag": None},
-    "drag":  {"latest": {"result": "1"}, "flag": None},
-    "hit":   {"latest": {"result": "1"}, "flag": None},
-    "rate":  {"latest": {"result": "1"}, "flag": None},
-    "idle":  {"latest": {"result": "1"}, "flag": None},
-    "diff":  {"latest": {"result": "1"}, "flag": None},
-    "home":  {"latest": {"result": "1"}, "flag": None},
-    "menu":  {"latest": {"result": "1"}, "flag": None},
-    "presence": {"latest": {"result": "1"}, "flag": None},
-    "theme":  {"latest": {"result": "1"}, "flag": None},
-    "reset":  {"latest": {"result": "1"}, "flag": None},
-    "gesture": {"latest": {"result": "1"}, "flag": None},
-    "resize": {"latest": {"result": "1"}, "flag": None},
-    "note":   {"latest": {"result": "1"}, "flag": None},
-    "cv":     {"latest": {"result": "1"}, "flag": None},
-    "fm":     {"latest": {"result": "1"}, "flag": None},
-    "img":    {"latest": {"ok": "1"}, "flag": None},
-    "br":     {"latest": {"result": "1"}, "flag": None},
-    "cvchan": {"latest": {"result": "1"}, "flag": None},
-    "sak":    {"latest": {"result": "1"}, "flag": None},
-}
+# G-D6: 子命令期望字典按域拆到 gui_layout/paint/idempotent/drag/leak 五个
+# 分项模块；本文件保留原命令行入口与合并后的 EXPECT 查找，外部调用方无感知。
+from gui_layout import EXPECT as _EXPECT_LAYOUT      # noqa: E402
+from gui_paint import EXPECT as _EXPECT_PAINT        # noqa: E402
+from gui_idempotent import EXPECT as _EXPECT_IDEM    # noqa: E402
+from gui_drag import EXPECT as _EXPECT_DRAG           # noqa: E402
+from gui_leak import EXPECT as _EXPECT_LEAK           # noqa: E402
+
+EXPECT = {}
+for _slice in (_EXPECT_LAYOUT, _EXPECT_PAINT, _EXPECT_IDEM,
+               _EXPECT_DRAG, _EXPECT_LEAK):
+    EXPECT.update(_slice)
 
 
 def _stage(src):
