@@ -28,6 +28,9 @@ void      tree_reset(void);
 void      gui_presence_sweep(void);
 void      gui_theme_set(enum gui_token t);
 void      gui_mark_dirty(block_id id);
+void      gui_mark_dirty_union(block *b, int x, int y, int w, int h);
+int32_t   layer_max_z(uint16_t layer);
+void      gui_raise_to_front(block_id id);
 void      stat_set_layout_nodes(uint32_t n);
 void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,
@@ -71,5 +74,13 @@ void      ib_reset(void);
 int       ib_is_active(void);
 int       ib_key(int code, void *ud);
 void      ib_render(block_id id);
+
+/* settings.c 外观设置组件 + 风格档位（app / calm） */
+void      gui_settings_open(void);
+void      gui_settings_close(void);
+int       gui_settings_active(void);
+int       gui_style_calm(void);
+void      gui_style_set(int calm);
+void      gui_style_load(void);
 
 #endif /* CATOS_GUI_INT_H */

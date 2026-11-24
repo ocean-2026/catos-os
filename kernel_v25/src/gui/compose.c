@@ -228,12 +228,69 @@ static void mark_subtree_paint(block *b) {
         mark_subtree_paint(c);
 }
 
+/* 同层当前最大 z：新开面板据此取 max+1，避免与既有工作面板同层同序。 */
+int32_t layer_max_z(uint16_t layer) {
+    int32_t maxz = -1;
+    for (uint32_t i = 1; i <= btable_capacity(); i++) {
+        block *q = btable_get(i);
+        if (q && q->layer == layer && q->z > maxz) maxz = q->z;
+    }
+    return maxz;
+}
+
+/* 标脏「子树 b ∪ 与矩形 r 相交的同层兄弟」：开/关面板时，被它遮挡或
+ * 释放出的旧像素都要由兄弟/背景在同一帧补齐，避免重叠区穿模或残影。 */
+void gui_mark_dirty_union(block *b, int x, int y, int w, int h) {
+    mark_subtree_paint(b);
+    uint16_t layer = b ? b->layer : LAYER_WORK;
+    for (uint32_t i = 1; i <= btable_capacity(); i++) {
+        block *q = btable_get(i);
+        if (!q || q == b || q->layer != layer) continue;
+        if (rects_overlap(x, y, w, h, q->x, q->y, q->w, q->h))
+            mark_subtree_paint(q);
+    }
+}
+
+/* 树先序收集（用于同层 z 全量重排）。 */
+static void preorder(block *b, block **out, int *n) {
+    if (!b || *n >= GUI_PAINT_MAX) return;
+    out[(*n)++] = b;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        preorder(c, out, n);
+}
+
+/* 同层 z 按当前先序依次赋 0..n-1：绘制顺序只认 layer/z，不依赖挂树先序。 */
+static void reorder_z(void) {
+    block *list[GUI_PAINT_MAX];
+    int n = 0;
+    preorder(gui_root_block(), list, &n);
+    for (int i = 0; i < n; i++) {
+        int32_t k = 0;
+        for (int j = 0; j < i; j++)
+            if (list[j]->layer == list[i]->layer) k++;
+        list[i]->z = k;
+    }
+}
+
 void gui_mark_dirty(block_id id) {
     /* 根块是静态节点（id=ROOT_ID=1000），不在块表范围内，btable_get 返回 0；
      * 直接查表会让"标脏根"静默失效（菜单关闭后整块旧像素残留）。 */
     block *b = btable_get(id);
     if (!b && gui_root_block() && gui_root_block()->id == id) b = gui_root_block();
     mark_subtree_paint(b);
+}
+
+/* 抬到最前：先缓存父节点（detach 会清空 b->parent），摘挂回同一父链末尾，
+ * 再按树先序全量重排同层 z；整树标脏——面板矩形与其遮挡兄弟矩形的并集
+ * 都要重绘，避免旧像素穿模残留。父节点缓存错误会导致块脱离树不再绘制。 */
+void gui_raise_to_front(block_id id) {
+    block *b = btable_get(id);
+    if (!b && gui_root_block() && gui_root_block()->id == id) b = gui_root_block();
+    if (!b) return;
+    block *p = b->parent;
+    if (p) { tree_detach(b); tree_attach(p, b); }
+    reorder_z();
+    mark_all_paint(gui_root_block());
 }
 
 /* 切主题：换活动令牌后整树标脏重绘（不做局部配色残留）。 */
@@ -274,6 +331,7 @@ void gui_begin(void) {
     gui_filemgr_close();
     gui_images_close();
     gui_browser_close();
+    gui_settings_close();
     ib_reset();
     gui_input_reset();
     gui_chrome_reset();

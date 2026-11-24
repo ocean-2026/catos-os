@@ -302,6 +302,7 @@ static void clock_refresh(int force) {
 }
 
 void gui_demo_build(void) {
+    gui_style_load();   /* 开机 / 进桌面读取 /etc/style 档位，默认 app */
     block *root = gui_root_block();
     root->w = GFX24_W; root->h = GFX24_H;
     root->pad_l = 64; root->pad_r = 64; root->pad_t = 64; root->pad_b = 64;
@@ -389,6 +390,7 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
         case 3: gui_filemgr_open(0); break;
         case 4: gui_images_open(0);  break;
         case 5: gui_browser_open(0); break;
+        case 6: gui_settings_open(); break;
         }
     }
     gui_menu_close();
@@ -418,8 +420,8 @@ void gui_menu_open(void) {
         b_text(rid, 0, menu_labels[i]);
     }
 
-    static const char *app_labels[5] = { "Notepad", "Canvas demo", "Files", "Images", "Browser" };
-    for (int a = 0; a < 5; a++) {
+    static const char *app_labels[6] = { "Notepad", "Canvas demo", "Files", "Images", "Browser", "Settings" };
+    for (int a = 0; a < 6; a++) {
         blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
         app.z = -(a + 1);
@@ -811,10 +813,43 @@ void gui_probe_menuclick(void) {
     gui_frame();   /* 关菜单后一帧：损伤面积 > 0 才说明旧菜单区域被重画。 */
     uint32_t area = stat_damage_area();
 
-    int ok = pressed && active_before == 0 && active == 1 && area > 0;
+    /* z>0 行（示例块 focusable）走 focus_raise：摘挂 + z 递增后块必须仍挂在
+     * 根树上（防摘树重挂丢失）、仍可见、仍可命中。菜单关闭会释放菜单行，
+     * 全局块表计数会回落，故这里沿父链验证目标块仍挂到根，不比全局计数。 */
+    int raise_pressed = 0, raise_live = 0, raise_visible = 0, raise_hit = 0;
+    gui_menu_open();
+    layout_run();
+    block *mr2 = btable_get(menu_root);
+    block *srow = 0;
+    if (mr2) for (block *c = mr2->first_child; c; c = c->next_sibling)
+        if (c->z > 0) { srow = c; break; }
+    if (srow) {
+        int cx = srow->x + srow->w / 2;
+        int cy = srow->y + srow->h / 2;
+        gui_inject_press(cx, cy);
+        gui_inject_release();
+        raise_pressed = 1;
+        block *sample = btable_get((block_id)srow->z);
+        if (sample) {
+            block *up = sample;
+            while (up->parent) up = up->parent;
+            raise_live = (up == gui_root_block()) ? 1 : 0;
+            raise_visible = sample->visible ? 1 : 0;
+            int hx = sample->x + sample->w / 2;
+            int hy = sample->y + sample->h / 2;
+            raise_hit = gui_hit_test(hx, hy) != 0 ? 1 : 0;
+        }
+    }
+    gui_frame();
+    int raise_ok = raise_pressed && raise_live && raise_visible && raise_hit;
+
+    int ok = pressed && active_before == 0 && active == 1 && area > 0 && raise_ok;
     ser_write("GUI:menuclick pressed="); ser_dec(pressed);
     ser_write(" active="); ser_dec(active);
     ser_write(" damage_area="); ser_dec(area);
+    ser_write(" raise_live="); ser_dec(raise_live);
+    ser_write(" raise_visible="); ser_dec(raise_visible);
+    ser_write(" raise_hit="); ser_dec(raise_hit);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
@@ -1099,6 +1134,114 @@ static void gui_probe_br(void) {
     gui_end();
 }
 
+/* ---- style 档位探针（app / calm） --------------------------------------- */
+
+static int style_contains(const char *s, const char *needle) {
+    if (!s || !needle) return 0;
+    for (; *s; s++) {
+        const char *a = s, *b = needle;
+        while (*b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static uint32_t probe_read_px(int x, int y) {
+    volatile uint8_t *fb = gfx24_lfb_ptr();
+    if (!fb || x < 0 || y < 0 || x >= GFX24_W || y >= GFX24_H) return 0;
+    uint32_t pitch = gfx24_pitch();
+    uint8_t stride = gfx24_stride();
+    const uint8_t *p = fb + (uint32_t)y * pitch + (uint32_t)x * stride;
+    return ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
+}
+
+static block *probe_find_taskbar(void) {
+    for (uint32_t id = 1; id <= btable_capacity(); id++) {
+        block *b = btable_get(id);
+        if (b && b->layer == LAYER_CHROME && b->bleed) return b;
+    }
+    return 0;
+}
+
+static block *probe_find_panel_body(void) {
+    for (uint32_t id = 1; id <= btable_capacity(); id++) {
+        block *b = btable_get(id);
+        if (!b || b->layer != LAYER_WORK) continue;
+        if (b->st.role_bg == ROLE_BAR) continue;   /* 标题带不算面板体 */
+        if (b->w < 40 || b->h < 24) continue;
+        return b;
+    }
+    return 0;
+}
+
+static void gui_probe_style(const char *mode) {
+    int want_calm = mode && style_contains(mode, "calm");
+    /* 像素读数必须在 gfx24 后端上：探针在文本控制台里直跑时 LFB 为空，
+     * 读数恒 0；先进入 VBE24，收尾再强制回文本控制台。 */
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        con_set_gui_mode(0);
+        ser_write("GUI:style mode="); ser_write(want_calm ? "calm" : "app");
+        ser_write(" file=0 taskbar=0 panel_corner=0 residue=0 result=0\n");
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    gui_style_set(want_calm);
+    layout_run();
+    gui_frame();
+
+    char buf[64]; buf[0] = 0;
+    fs_read_text("/etc/style", buf, sizeof(buf) - 1);
+    int file_ok = want_calm ? style_contains(buf, "calm")
+                            : style_contains(buf, "app");
+
+    const struct style *tok = gui_active_style();
+    block *tb = probe_find_taskbar();
+    int tb_ok = 0;
+    if (tb) {
+        uint32_t px = probe_read_px(tb->x + 4, tb->y + 4);
+        tb_ok = (px == tok->bar);   /* full-bleed 任务栏满铺（取内行，避开边缘描边） */
+    }
+
+    block *panel = probe_find_panel_body();
+    int corner_cut = 0;
+    if (panel) {
+        uint32_t outer = probe_read_px(panel->x, panel->y);
+        /* calm 外角被超椭圆裁成背景色；app 外角是描边/面板色，不判背景。 */
+        corner_cut = (outer == tok->bg);
+    }
+
+    /* 连切两次回到目标档位：内填不得残留上一档形状。 */
+    gui_style_set(!want_calm);
+    layout_run(); gui_frame();
+    gui_style_set(want_calm);
+    layout_run(); gui_frame();
+    int residue = 1;
+    if (panel) {
+        uint32_t inner = probe_read_px(panel->x + 2, panel->y + 2);
+        residue = (inner == tok->panel);
+    }
+
+    int result = file_ok && tb_ok && residue &&
+                 (!want_calm || corner_cut);
+    ser_write("GUI:style mode="); ser_write(want_calm ? "calm" : "app");
+    ser_write(" file="); ser_dec(file_ok);
+    ser_write(" taskbar="); ser_dec(tb_ok);
+    ser_write(" panel_corner="); ser_dec(corner_cut);
+    ser_write(" residue="); ser_dec(residue);
+    ser_write(" result="); ser_dec(result);
+    ser_write("\n");
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -1159,6 +1302,11 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
+        {
+            char w2[24]; const char *r2 = 0;
+            split_word(arg, w2, sizeof(w2), &r2);
+            if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
+        }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /

@@ -31,11 +31,25 @@ static int leaf_natural_w(block *b) {
     return 0;
 }
 
+/* Calm 8pt 网格：内边距 / 间距归整到 {4,8,12,16,24}；1px 描边不动。 */
+static int grid_snap(int v) {
+    if (!gui_style_calm() || v <= 0) return v;
+    static const int steps[5] = { 4, 8, 12, 16, 24 };
+    for (int i = 0; i < 5; i++)
+        if (v <= steps[i]) return steps[i];
+    return 24;
+}
+
 static int leaf_natural_h(block *b) {
     if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON ||
         b->kind == BLK_INPUT) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
-        return 16 * (int)sc;
+        int h = 16 * (int)sc;
+        if (gui_style_calm() && b->kind != BLK_TEXT) {
+            /* 控件高 24（16 字形 + 上下各 4） */
+            h = h < 24 ? 24 : h;
+        }
+        return h;
     }
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
         b->kind == BLK_CANVAS)
@@ -61,7 +75,7 @@ static void measure_node(block *b) {
             if (c->h > max_h) max_h = c->h;
             sum_w += c->w; sum_h += c->h;
         }
-        int gap = n > 1 ? b->gap * (n - 1) : 0;
+        int gap = n > 1 ? grid_snap(b->gap) * (n - 1) : 0;
         int nat_w, nat_h;
         if (b->kind == BLK_COLUMN) {
             nat_w = b->pad_l + b->pad_r + max_w;
@@ -114,7 +128,7 @@ static void layout_column(block *b,
     int n = 0;
     for (block *c = b->first_child; c; c = c->next_sibling) n++;
     if (n == 0) return;
-    int total_h = 0, gap = n > 1 ? b->gap : 0;
+    int total_h = 0, gap = n > 1 ? grid_snap(b->gap) : 0;
     for (block *c = b->first_child; c; c = c->next_sibling) total_h += c->h;
     total_h += gap * (n - 1);
 
@@ -144,7 +158,7 @@ static void layout_row(block *b,
     int n = 0;
     for (block *c = b->first_child; c; c = c->next_sibling) n++;
     if (n == 0) return;
-    int total_w = 0, gap = n > 1 ? b->gap : 0;
+    int total_w = 0, gap = n > 1 ? grid_snap(b->gap) : 0;
     for (block *c = b->first_child; c; c = c->next_sibling) total_w += c->w;
     total_w += gap * (n - 1);
 
@@ -188,7 +202,8 @@ static void layout_stack(block *b,
 
 void layout_node(block *b, int ax, int ay, int aw, int ah) {
     if (!b) return;
-    int pad_l = b->pad_l, pad_r = b->pad_r, pad_t = b->pad_t, pad_b = b->pad_b;
+    int pad_l = grid_snap(b->pad_l), pad_r = grid_snap(b->pad_r);
+    int pad_t = grid_snap(b->pad_t), pad_b = grid_snap(b->pad_b);
     int cax = ax + pad_l, cay = ay + pad_t;
     int caw = aw - pad_l - pad_r, cah = ah - pad_t - pad_b;
     if (caw < 0) caw = 0;

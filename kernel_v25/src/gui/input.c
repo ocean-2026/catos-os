@@ -115,13 +115,19 @@ static void on_press(int x, int y) {
     if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
     else if (ib_is_active())           gui_set_key_hook(0, 0);
 
-    int rx = t->x + t->w, ry = t->y + t->h;
+    /* 拖拽目标：沿父链上溯到最近的可聚焦面板——叶子文本 / 行不单独拖，
+     * 否则点标题文字只会拖动一个字块、面板本体纹丝不动。 */
+    block *panel = b;
+    while (panel->parent && panel->parent->kind != BLK_ROOT && !panel->focusable)
+        panel = panel->parent;
+
+    int rx = panel->x + panel->w, ry = panel->y + panel->h;
     if (x >= rx - HANDLE && y >= ry - HANDLE) {
-        drag_block = t; drag_mode = DRAG_RESIZE;
-        drag_off_x = x - t->x; drag_off_y = y - t->y;
-    } else if (y < t->y + TITLE_H) {
-        drag_block = t; drag_mode = DRAG_MOVE;
-        drag_off_x = x - t->x; drag_off_y = y - t->y;
+        drag_block = panel; drag_mode = DRAG_RESIZE;
+        drag_off_x = x - panel->x; drag_off_y = y - panel->y;
+    } else if (y < panel->y + TITLE_H) {
+        drag_block = panel; drag_mode = DRAG_MOVE;
+        drag_off_x = x - panel->x; drag_off_y = y - panel->y;
     }
     if (act && act->on_click) act->on_click(act->id, x - act->x, y - act->y);
 }
@@ -143,6 +149,8 @@ static void on_drag_move(int x, int y) {
     b->dirty_layout = 1;
     b->dirty_paint = 1;
     b->moved = 1;
+    /* 旧位置必须由背景/兄弟整树补齐：只标拖动块会在拖出轨迹上留残影。 */
+    gui_mark_dirty(gui_root_block()->id);
 }
 
 static void on_release(void) {
@@ -176,11 +184,9 @@ void gui_focus_raise(block_id id) {
     block *b = btable_get(id);
     if (!b) return;
     focus_set(b);
-    /* 同层兄弟末尾 = 最前绘制/命中；摘树后重新挂到父链末尾。 */
-    if (b->parent) {
-        tree_detach(b);
-        tree_attach(b->parent, b);
-    }
+    /* 摘挂到父链末尾 + 同层 z 递增 + 整树标脏（摘挂后父指针已清空，必须先
+     * 缓存父节点再重挂；z 同步重算，避免点一次"跳层"或摘树后消失）。 */
+    gui_raise_to_front(id);
 }
 
 int gui_should_exit(void) { return exit_requested; }

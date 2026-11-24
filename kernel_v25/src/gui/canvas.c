@@ -197,9 +197,13 @@ static blk_spec cv_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
 }
 
 void gui_canvas_close_all(void) {
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(cv_root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
     if (cv_root) { b_remove(cv_root); cv_root = 0; }
     for (int i = 0; i < 2; i++) cv_free_record(&cv_pool[i]);
     cv_active = 0;
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
 void gui_canvas_demo(void) {
@@ -224,7 +228,7 @@ void gui_canvas_demo(void) {
     if (cb) cv_demo_paint(cb);
     cv_active = 1;
     layout_run();
-    gui_mark_dirty(cv_root);
+    gui_raise_to_front(cv_root);
 }
 
 int  gui_canvas_active(void) { return cv_active; }
