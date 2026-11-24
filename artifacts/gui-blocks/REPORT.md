@@ -179,7 +179,7 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 | 13 | 链接后布局护栏（关键表落窗口告警/失败） | `--strict` 关键表 RISK 判失败；`--strict-warn` 其余静态判失败；本次 strict 退出 0 | `kernel_v25/tools/check_link_layout.py`；提交 `67ad3ea` | 达成 |
 | 14 | D8 v2 槽位空桩声明 | `gui_surface_attach/gui_surface_dirty` 原型入 `include/gui/gui.h`，未实现 | 提交 `a87bf76` | 达成 |
 | 15 | REPORT §4/§5/§8 与进度表回填、ISO 指纹 | ISO 11,960,320 B，`kernel.bin` 1,233,052 B，`_bss_end=0x020b5e80`，sha256 `e80f5f5ea1b4d16a8035781bd771c8129be296a839c4bc438156d8174c890cbc` | `artifacts/gui-blocks/REPORT.md` §8；`docs/块化GUI-进度.md` §4 | 达成 |
-| 16 | 推送 `feat/gui-blocks` | `9bfa10f..5151ff6`（6 提交） | 远端 `ocean-2026/catos-os` | 达成 |
+| 16 | 推送 `feat/gui-blocks` | 本地/远端头 `2d21119`；本轮 `2de3c3b..2d21119`（2 提交：`d8de0a1` 代码+测试、`2d21119` 文档） | 远端 `ocean-2026/catos-os` | 达成 |
 
 **未达成 / 残留（如实标注，见 §9.3）**：探针后端统一（11a，`lfb=NULL`）；D5 demo 树拆 `src/gui/demo.c`；D6 五个分项测试脚本拆分；BSOD 后 PTE/PT 运行时转储。D7 超框位图像素断言（§9.3-1）与 11b 拖拽残影像素断言本轮已闭环。
 
