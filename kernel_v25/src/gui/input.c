@@ -47,7 +47,7 @@ static int inside(block *b, int x, int y) {
 static int hit_allowed(block *b, int x, int y) {
     for (block *p = b->parent; p; p = p->parent) {
         if (b->layer > p->layer) continue;
-        if (p->overflow == OVF_VISIBLE) continue;
+        if (b->overflow == OVF_VISIBLE || p->overflow == OVF_VISIBLE) continue;
         if (!inside(p, x, y)) return 0;
     }
     return 1;
@@ -112,11 +112,20 @@ static int in_resize_band(block *b, int x, int y) {
     return resize_dir_at(b, x, y) != 0;
 }
 
-/* 沿父链解析手势归属：先扫所有祖先的 resize 边缘带，再扫拖拽带。
+static int drag_band_hit(block *cur, int y) {
+    /* drag_mode=0 回落标题带拖拽（v1 兼容默认；v2 可显式声明整块/不可拖）。 */
+    uint8_t dm = cur->drag_mode ? cur->drag_mode : DRAG_TITLE;
+    if (dm == DRAG_FULL) return 1;
+    if (dm == DRAG_TITLE && y < cur->y + TITLE_H) return 1;
+    return 0;
+}
+
+/* 命中优先级：resize 边缘带（父链就近）> 子块自身拖拽 > 祖先拖拽带 > 子块命中。
  * 返回作用块；*mode 为 DRAG_NONE/MOVE/RESIZE，*rdir 填缩放方向位。 */
 static block *resolve_interaction(block *b, int x, int y,
                                   int *mode, uint8_t *rdir) {
     *mode = DRAG_NONE; *rdir = 0;
+    /* 1) resize 边缘带：父块与子块重叠时父块边缘带优先。 */
     for (block *cur = b; cur; cur = cur->parent) {
         if (in_resize_band(cur, x, y)) {
             *mode = DRAG_RESIZE;
@@ -124,13 +133,13 @@ static block *resolve_interaction(block *b, int x, int y,
             return cur;
         }
     }
-    for (block *cur = b; cur; cur = cur->parent) {
-        /* drag_mode=0 回落标题带拖拽（v1 兼容默认；v2 可显式声明整块/不可拖）。 */
-        uint8_t dm = cur->drag_mode ? cur->drag_mode : DRAG_TITLE;
-        if (dm == DRAG_FULL) {
-            *mode = DRAG_MOVE; return cur;
-        }
-        if (dm == DRAG_TITLE && y < cur->y + TITLE_H) {
+    /* 2) 子块自身拖拽属性。 */
+    if (drag_band_hit(b, y)) {
+        *mode = DRAG_MOVE; return b;
+    }
+    /* 3) 祖先拖拽带（标题栏托举整棵子树，v1 面板拖拽路径）。 */
+    for (block *cur = b->parent; cur; cur = cur->parent) {
+        if (drag_band_hit(cur, y)) {
             *mode = DRAG_MOVE; return cur;
         }
     }
@@ -286,6 +295,7 @@ void gui_input_reset(void) {
     focused = 0;
     focus_n = 0;
     for (int i = 0; i < 4; i++) focus_stack[i] = 0;
+    hover_block = 0;
     key_hook = 0;
     key_ud = 0;
 }

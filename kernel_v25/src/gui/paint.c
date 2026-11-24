@@ -256,8 +256,10 @@ void paint_node(block *b) {
     if (b->overflow == OVF_SCROLL)
         paint_trans_push(b->scroll_x, b->scroll_y);
     for (block *c = b->first_child; c; c = c->next_sibling) {
-        /* 层高于父级的块（CHROME/OVERLAY/TOAST 浮层）不受父框裁剪。 */
-        int escape = c->layer > b->layer;
+        /* 逃逸父框：子块自身 VISIBLE / 父块放开裁剪 / 层高于父级浮层。 */
+        int escape = c->layer > b->layer ||
+                     c->overflow == OVF_VISIBLE ||
+                     b->overflow == OVF_VISIBLE;
         if (escape && clip_self) paint_clip_pop();
         paint_node(c);
         if (escape && clip_self) paint_clip_push(b->x, b->y, b->w, b->h);
@@ -282,7 +284,7 @@ void paint_node_clipped(block *b) {
         chain[n++] = p;
     for (int k = n - 1; k >= 0; k--) {
         block *p = chain[k];
-        if (p->overflow == OVF_VISIBLE) continue;   /* 显式放开裁剪 */
+        if (b->overflow == OVF_VISIBLE || p->overflow == OVF_VISIBLE) continue;
         if (b->layer > p->layer) continue;         /* 浮层逃逸父框 */
         paint_clip_push(p->x, p->y, p->w, p->h);
     }
