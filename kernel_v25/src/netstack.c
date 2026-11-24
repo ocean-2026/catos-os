@@ -1320,7 +1320,7 @@ static int http_fetch(const char *url, uint8_t *out, int max) {
     s_http_status = 0;
     s_http_location[0] = 0;
 
-    for (int hop = 0; hop <= 4; hop++) {
+    for (int hop = 0; hop <= 6; hop++) {
         uint8_t loc[192];
         loc[0] = 0;
         int st = 0;
@@ -1430,7 +1430,7 @@ int net_http_download_stream(const char *url, long range_from,
     hl_copy(cur, sizeof(cur), url);
     if (cur[0] == 0) return -1;
 
-    for (int hop = 0; hop <= 4; hop++) {
+    for (int hop = 0; hop <= 6; hop++) {
         uint8_t peer[4]; uint16_t port; const char *path; char host[128];
         int is_https = 0;
         int r = http_parse_url(cur, peer, &port, &path, host, sizeof(host),

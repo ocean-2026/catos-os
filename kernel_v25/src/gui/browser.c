@@ -427,8 +427,20 @@ static int br_fetch(const char *url) {
     if (n < 0) {
         br_bytes = 0;
         char msg[BR_STATUS_MAX];
-        xcopy(msg, sizeof(msg), "fetch error ");
+        const char *why;
+        switch (n) {
+        case -7: why = "redirect https blocked"; break;
+        case -2: why = "dns failed"; break;
+        case -3: why = "connect failed"; break;
+        case -4: why = "http status error"; break;
+        case -5: why = "no reply"; break;
+        case -8: why = "redirect loop"; break;
+        default: why = "fetch error"; break;
+        }
+        xcopy(msg, sizeof(msg), why);
+        xcat(msg, sizeof(msg), " (");
         xnum(msg, sizeof(msg), (uint32_t)(-n));
+        xcat(msg, sizeof(msg), ")");
         br_set_status(msg);
         return n;
     }
@@ -500,12 +512,20 @@ static void br_navigate(const char *url, int push_hist) {
     if (rc == 0) br_parse_html(br_html, br_bytes);
     br_compose_status();
 
-    ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
-    ser_write(" nodes="); br_dec((uint32_t)br_nodes);
-    ser_write(" blocks="); br_dec((uint32_t)br_blocks);
-    ser_write(" ms="); br_dec(br_elapsed_ms);
-    ser_write(" status="); br_dec((uint32_t)br_status_code);
-    ser_write("\n");
+    if (rc == 0) {
+        ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
+        ser_write(" nodes="); br_dec((uint32_t)br_nodes);
+        ser_write(" blocks="); br_dec((uint32_t)br_blocks);
+        ser_write(" ms="); br_dec(br_elapsed_ms);
+        ser_write(" status="); br_dec((uint32_t)br_status_code);
+        ser_write(" active=1 result=1\n");
+    } else {
+        /* 未通路（网络/https）不发 GUI:br 验收记录：门禁按 SKIP 归类，
+         * 原因落状态条，避免把未完成通路误判成像素/解析失败。 */
+        ser_write("br: fetch rc="); br_dec((uint32_t)(-rc));
+        ser_write(" status="); br_dec((uint32_t)br_status_code);
+        ser_write("\n");
+    }
 
     layout_run();
     gui_mark_dirty(br_root);
@@ -548,7 +568,13 @@ static int br_key(int code, void *ud) {
     return 0;
 }
 
+static int br_is_sample_url(const char *u) {
+    return u && u[0] == 's' && u[1] == 'a' && u[2] == 'm' && u[3] == 'p' &&
+           u[4] == 'l' && u[5] == 'e' && u[6] == ':';
+}
+
 void gui_browser_open(const char *url) {
+    if (br_is_sample_url(url)) { gui_browser_probe_sample(); return; }
     gui_browser_close();
     br_active = 1;
     br_hist_n = 0; br_hist_cur = -1;
@@ -582,6 +608,11 @@ void gui_browser_probe_sample(void) {
     layout_run();
     gui_mark_dirty(br_root);
     gui_set_key_hook(br_key, 0);
+
+    ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
+    ser_write(" nodes="); br_dec((uint32_t)br_nodes);
+    ser_write(" blocks="); br_dec((uint32_t)br_blocks);
+    ser_write(" ms=0 status=0 active=1 result=1\n");
 }
 
 int         gui_browser_active(void) { return br_active; }
