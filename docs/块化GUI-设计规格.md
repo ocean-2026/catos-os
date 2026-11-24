@@ -23,7 +23,8 @@ typedef uint32_t block_id;          /* 0 = 无效；>=1 全局唯一 */
 typedef enum {
     BLK_ROOT = 0, BLK_COLUMN, BLK_ROW, BLK_STACK,   /* 容器 */
     BLK_TEXT, BLK_RECT, BLK_IMAGE, BLK_SURFACE,      /* 叶 */
-    BLK_SPACER, BLK_DIVIDER, BLK_CANVAS
+    BLK_SPACER, BLK_DIVIDER, BLK_CANVAS,
+    BLK_FREE                                         /* v2 追加在末尾：自由布局容器，规格见 块化GUI-v2-规格.md */
 } blk_kind;
 
 typedef struct block {
