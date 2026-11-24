@@ -64,6 +64,7 @@ EXPECT = {
     "br":     {"latest": {"result": "1"}, "flag": None},
     "cvchan": {"latest": {"result": "1"}, "flag": None},
     "term":   {"latest": {"result": "1"}, "flag": None},
+    "style":  {"latest": {"result": "1"}, "flag": None},
 }
 
 
