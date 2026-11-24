@@ -327,6 +327,102 @@ class FatImage(object):
         return errs
 
 
+# R21 交付盘种子：/etc/autostart 内容 `gui`，含该文件的镜像开机直接进块桌面。
+# 门禁 / 探针镜像用 scratch 盘且编译开关默认 0，不受此文件影响。
+AUTOSTART_SEED_NAME = "autostart"
+AUTOSTART_SEED_DATA = b"gui\n"
+
+
+def _dbr_geometry(img):
+    """Read spc / fatsz back out of the DBR at partition LBA 1."""
+    sec = img[PART_START * 512:(PART_START + 1) * 512]
+    spc = sec[0x0D]
+    fatsz = struct.unpack_from("<H", sec, 0x24)[0]
+    data_start = PART_START + RESERVED + NUM_FATS * fatsz
+    return spc, fatsz, data_start
+
+
+def seed_autostart_image(path):
+    """Patch an existing delivery disk in place: add /etc/autostart=gui.
+
+    Deliberately does NOT rebuild the frozen app set -- only one dirent +
+    one cluster are allocated, every other byte of the image is preserved.
+    """
+    with open(path, "rb") as fh:
+        img = bytearray(fh.read())
+    spc, fatsz, data_start = _dbr_geometry(img)
+
+    def clus_off(c):
+        return (data_start + (c - 2) * spc) * 512
+
+    def fat_off(c):
+        return (PART_START + RESERVED) * 512 + c * 4
+
+    # locate the ETC directory cluster from the root directory.
+    root_buf = img[clus_off(ROOT_CLUS):clus_off(ROOT_CLUS) + spc * 512]
+    etc_clus = None
+    for i in range(0, spc * 512, 32):
+        d = root_buf[i:i + 32]
+        if d[0] in (0x00, 0xE5) or d[11] != 0x10:
+            continue
+        if d[0:8].decode("ascii", "replace").strip() == "ETC":
+            etc_clus = struct.unpack_from("<H", d, 26)[0] | \
+                       (struct.unpack_from("<H", d, 20)[0] << 16)
+            break
+    if etc_clus is None:
+        raise RuntimeError("etc directory not found in root")
+
+    # free slot in the ETC directory.
+    ebuf_off = clus_off(etc_clus)
+    slot = None
+    for i in range(0, spc * 512, 32):
+        if img[ebuf_off + i] in (0x00, 0xE5):
+            slot = ebuf_off + i
+            break
+    if slot is None:
+        raise RuntimeError("etc directory full")
+
+    # allocate one free cluster from FAT #1.
+    max_clus = fatsz * 512 // 4
+    new_clus = None
+    for c in range(3, max_clus):
+        v = struct.unpack_from("<I", img, fat_off(c))[0] & 0x0FFFFFFF
+        if v == 0:
+            new_clus = c
+            break
+    if new_clus is None:
+        raise RuntimeError("no free cluster")
+
+    # write the seed content (cluster padded with NULs).
+    chunk = AUTOSTART_SEED_DATA.ljust(spc * 512, b"\x00")
+    img[clus_off(new_clus):clus_off(new_clus) + spc * 512] = chunk
+    struct.pack_into("<I", img, fat_off(new_clus), FAT32_EOC)
+
+    # dirent, 8.3 name matching fat_name83() truncation.
+    d = bytearray(32)
+    d[0:11] = name83(AUTOSTART_SEED_NAME)
+    d[11] = 0x20
+    struct.pack_into("<H", d, 14, DOS_TIME)
+    struct.pack_into("<H", d, 16, DOS_DATE)
+    struct.pack_into("<H", d, 18, DOS_DATE)
+    struct.pack_into("<H", d, 20, new_clus >> 16)
+    struct.pack_into("<H", d, 22, DOS_TIME)
+    struct.pack_into("<H", d, 24, DOS_DATE)
+    struct.pack_into("<H", d, 26, new_clus & 0xFFFF)
+    struct.pack_into("<I", d, 28, len(AUTOSTART_SEED_DATA))
+    img[slot:slot + 32] = d
+
+    # mirror FAT #1 -> FAT #2.
+    f1 = (PART_START + RESERVED) * 512
+    f2 = f1 + fatsz * 512
+    img[f2:f2 + fatsz * 512] = img[f1:f1 + fatsz * 512]
+
+    with open(path, "wb") as fh:
+        fh.write(img)
+    print("OK -> seeded /etc/%s (%d bytes) on cluster %d" %
+          (AUTOSTART_SEED_NAME, len(AUTOSTART_SEED_DATA), new_clus))
+
+
 def build(out_path, miB, with_files=True):
     g = _load_gen_builtin()
     img = FatImage(miB)
@@ -391,6 +487,9 @@ def build(out_path, miB, with_files=True):
 
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "--seed-autostart":
+        seed_autostart_image(args[1])
+        return 0
     out = "catos_disk.img"
     miB = 64
     with_files = True
