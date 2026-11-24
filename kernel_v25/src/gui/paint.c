@@ -211,6 +211,24 @@ void paint_node(block *b) {
     b->snap = 0;
 }
 
+/* 平面遍历入口：脏叶子可能挂在未脏的祖先容器下（祖先本帧 snap=0，未走
+ * 递归绘制）。此时祖先裁剪框不在栈上，直接 paint_node 会让位图越出父块。
+ * 进入前先把祖先链裁剪框压栈，退出时还原；与递归路径同口径。 */
+void paint_node_clipped(block *b) {
+    if (!b || !b->visible) return;
+    int depth0 = clip_depth;
+    block *chain[CLIP_DEPTH];
+    int n = 0;
+    for (block *p = b->parent; p && p->parent && n < CLIP_DEPTH - 1;
+         p = p->parent)
+        chain[n++] = p;
+    for (int k = n - 1; k >= 0; k--)
+        paint_clip_push(chain[k]->x, chain[k]->y, chain[k]->w, chain[k]->h);
+    paint_node(b);
+    while (clip_depth > depth0)
+        paint_clip_pop();
+}
+
 void paint_begin_frame(void) {
     clip_depth = 0;
 }

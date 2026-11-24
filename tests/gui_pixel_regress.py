@@ -104,6 +104,8 @@ def main():
         "light": "gui shot-light",
         "hc":    "gui shot-hc",
         "menu":  "gui shot-menu",
+        "drag":  "gui shot-drag",
+        "crop":  "gui shot-crop",
     }
     cmd = args.cmd or GROUP_CMD[args.group]
 

@@ -82,6 +82,60 @@ static void demo_icon_build(void) {
     demo_icon_ready = 1;
 }
 
+/* D7 裁剪探针：一张 200x40 的强调色位图，塞进 80x40 的窄父块，
+ * 超出父框的部分必须被裁剪栈切掉，父框外保持桌面底色。 */
+#define CROP_BMP_W 200
+#define CROP_BMP_H 40
+static uint8_t crop_bmp[CROP_BMP_W * CROP_BMP_H * 3];
+static int crop_bmp_ready;
+
+static void crop_bmp_build(void) {
+    if (crop_bmp_ready) return;
+    uint32_t acc = gui_active_style()->accent;
+    uint8_t r = (uint8_t)((acc >> 16) & 0xFFu);
+    uint8_t g = (uint8_t)((acc >> 8) & 0xFFu);
+    uint8_t b = (uint8_t)(acc & 0xFFu);
+    for (int i = 0; i < CROP_BMP_W * CROP_BMP_H; i++) {
+        crop_bmp[i * 3 + 0] = r;
+        crop_bmp[i * 3 + 1] = g;
+        crop_bmp[i * 3 + 2] = b;
+    }
+    crop_bmp_ready = 1;
+}
+
+static void shot_crop_build(void) {
+    crop_bmp_build();
+    blk_spec parent = spec_panel(LAYER_WORK, 80, 40, 1);
+    block_id pid = b_column(0, &parent);
+    b_image(pid, 0, crop_bmp, CROP_BMP_W, CROP_BMP_H);
+    layout_run();
+    block *pp = btable_get(pid);
+    pp->x = 440; pp->y = 80; pp->w = 80; pp->h = 40; pp->moved = 1;
+    for (block *c = pp->first_child; c; c = c->next_sibling) {
+        c->x = 440; c->y = 80; c->moved = 1;
+    }
+}
+
+/* 11b 拖拽残影探针：A 先落在旧矩形 (64,300,120,80)，拖到右侧；
+ * 抓帧断言旧矩形区域已回到桌面底色，不残留 A 的旧像素。 */
+static void shot_drag_build(void) {
+    blk_spec wa = spec_panel(LAYER_WORK, 120, 80, 1);
+    block_id A = b_stack(0, &wa);
+    b_text(A, 0, "A");
+    block_id B = b_stack(0, &wa);
+    b_text(B, 0, "B");
+    layout_run();
+    block *pa = btable_get(A);
+    block *pb = btable_get(B);
+    pa->x = 64;  pa->y = 300; pa->moved = 1;
+    pb->x = 300; pb->y = 300; pb->moved = 1;
+    gui_frame();                              /* 先把 A/B 画到固定位置 */
+    gui_inject_press(70, 305);
+    gui_inject_move(200, 320);
+    gui_inject_release();
+    gui_frame();                               /* 拖拽后帧：旧矩形应回底色 */
+}
+
 static block_id demo_add_sample(void) {
     block_id root_id = gui_root_block()->id;
     blk_spec sample_spec = spec_panel(LAYER_WORK, 320, 200, 1);
@@ -846,14 +900,17 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return; }
     }
 
-    /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset。 */
-    int shot_menu = 0, shot_reset = 0;
+    /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
+     * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）。 */
+    int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     enum gui_token shot_tok = TOK_DARK;
     if (arg && *arg) {
         if (!strcmp_probe(arg, "shot-menu"))  shot_menu = 1;
         else if (!strcmp_probe(arg, "shot-light")) shot_tok = TOK_LIGHT;
         else if (!strcmp_probe(arg, "shot-hc"))     shot_tok = TOK_HIGH_CONTRAST;
         else if (!strcmp_probe(arg, "shot-reset")) shot_reset = 1;
+        else if (!strcmp_probe(arg, "shot-crop"))  shot_crop = 1;
+        else if (!strcmp_probe(arg, "shot-drag"))  shot_drag = 1;
     }
 
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
@@ -866,7 +923,9 @@ void gui_shell_cmd(const char *arg) {
     if (shot_reset) { gui_reset(); gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
     if (shot_menu) gui_menu_open();
-    gui_frame();
+    if (shot_crop) shot_crop_build();
+    if (shot_drag) shot_drag_build();
+    if (!shot_crop && !shot_drag) gui_frame();
 
     gui_idle_loop();
 

@@ -87,11 +87,27 @@ MENU_CHECKS = [
      "color": DARK_FG, "min": 100, "label": "menu fg"},
 ]
 
+# 11b 拖拽残影断言：A 从旧矩形 (64,300,120,80) 拖走后，该区域必须回到
+# 桌面底色；允许极少数边缘像素差异（max_bad 容差像素数）。
+DRAG_CHECKS = [
+    {"kind": "region_bg", "rect": (64, 300, 120, 80),
+     "max_bad": 50, "label": "drag old rect"},
+]
+
+# D7 超框位图断言：200 宽位图塞进 80 宽父块，父框外右条 (520,80,119,40)
+# 必须保持桌面底色，不允许溢出像素。
+CROP_CHECKS = [
+    {"kind": "region_bg", "rect": (520, 80, 119, 40),
+     "max_bad": 20, "label": "crop outside parent"},
+]
+
 CHECK_GROUPS = {
     "dark": DEFAULT_CHECKS,
     "light": THEME_LIGHT_CHECKS,
     "hc": THEME_HC_CHECKS,
     "menu": MENU_CHECKS,
+    "drag": DRAG_CHECKS,
+    "crop": CROP_CHECKS,
 }
 
 GROUP_BG = {
@@ -99,6 +115,8 @@ GROUP_BG = {
     "light": LIGHT_BG,
     "hc": HC_BG,
     "menu": DARK_BG,
+    "drag": DARK_BG,
+    "crop": DARK_BG,
 }
 
 
@@ -165,6 +183,17 @@ def _run_checks(ppm, checks, bg, tol):
             ok = n >= int(ch["min"])
             msg = "%s rect=%s count=%d want >=%d ~= %s" % (
                 ch.get("label", "region"), ch["rect"], n, ch["min"], want)
+        elif kind == "region_bg":
+            rx, ry, rw, rh = ch["rect"]
+            bad = 0
+            for y in range(ry, min(ry + rh, ppm.h)):
+                for x in range(rx, min(rx + rw, ppm.w)):
+                    if not _close(ppm.px(x, y), bg, tol):
+                        bad += 1
+            ok = bad <= int(ch["max_bad"])
+            msg = "%s rect=%s non-bg=%d want <=%d bg=%s" % (
+                ch.get("label", "region"), ch["rect"], bad,
+                int(ch["max_bad"]), bg)
         else:
             failures.append("check %d: unknown kind %r" % (idx, kind))
             continue

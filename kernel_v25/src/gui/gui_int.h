@@ -36,6 +36,7 @@ void      stat_note_double_commit(void);
 /* paint.c */
 void      paint_begin_frame(void);
 void      paint_node(block *b);
+void      paint_node_clipped(block *b);
 
 /* layout.c */
 void      layout_run(void);

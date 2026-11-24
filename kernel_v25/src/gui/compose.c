@@ -178,7 +178,7 @@ void gui_frame(void) {
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
         if (!b->snap) continue;
-        paint_node(b);
+        paint_node_clipped(b);
     }
 
     /* 光标：合成结束后统一画，使用后端已有的 save/restore 精灵机制。 */
