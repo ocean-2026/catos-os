@@ -122,30 +122,34 @@ static int drag_band_hit(block *cur, int y) {
     return 0;
 }
 
-/* 命中优先级：resize 边缘带（父链就近）> 子块自身拖拽 > 祖先拖拽带 > 子块命中。
- * 返回作用块；*mode 为 DRAG_NONE/MOVE/RESIZE，*rdir 填缩放方向位。 */
+/* 命中优先级：先上溯到最近的可聚焦面板（叶子文本/行不单独拖），
+ * 再判 resize 边缘带 > 标题/整块拖拽带。返回作用块；*mode 为
+ * DRAG_NONE/MOVE/RESIZE，*rdir 填缩放方向位。 */
 static block *resolve_interaction(block *b, int x, int y,
                                   int *mode, uint8_t *rdir) {
     *mode = DRAG_NONE; *rdir = 0;
-    /* 1) resize 边缘带：父块与子块重叠时父块边缘带优先。 */
-    for (block *cur = b; cur; cur = cur->parent) {
-        if (in_resize_band(cur, x, y)) {
-            *mode = DRAG_RESIZE;
-            *rdir = resize_dir_at(cur, x, y);
-            return cur;
-        }
+
+    /* 交互目标：沿父链上溯到最近的可聚焦面板；点标题文字时拖的是面板本体，
+     * 而不是那个字块。根的直接子块即停（根不可拖）。自身声明了缩放方向或
+     * 显式拖拽模式的块本身就是交互目标，不继续上溯。 */
+    block *target = b;
+    while (target->parent && target->parent->kind != BLK_ROOT &&
+           !target->focusable && !target->resize_dir &&
+           target->drag_mode == 0)
+        target = target->parent;
+
+    /* 1) resize 边缘带（优先于拖拽带）。 */
+    if (in_resize_band(target, x, y)) {
+        *mode = DRAG_RESIZE;
+        *rdir = resize_dir_at(target, x, y);
+        return target;
     }
-    /* 2) 子块自身拖拽属性。 */
-    if (drag_band_hit(b, y)) {
-        *mode = DRAG_MOVE; return b;
+    /* 2) 拖拽带：整块 DRAG_FULL，或标题带 TITLE_H。 */
+    if (drag_band_hit(target, y)) {
+        *mode = DRAG_MOVE;
+        return target;
     }
-    /* 3) 祖先拖拽带（标题栏托举整棵子树，v1 面板拖拽路径）。 */
-    for (block *cur = b->parent; cur; cur = cur->parent) {
-        if (drag_band_hit(cur, y)) {
-            *mode = DRAG_MOVE; return cur;
-        }
-    }
-    return b;
+    return target;
 }
 
 static int clamp_step(int v, int step) {
@@ -189,7 +193,7 @@ static void on_press(int x, int y) {
     if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
     else if (ib_is_active())           gui_set_key_hook(0, 0);
 
-    /* 拖拽：v2 交互解析（resize 边缘带 > 自身拖拽属性 > 祖先拖拽带）。 */
+    /* 拖拽/缩放：解析到可聚焦面板（resize 边缘带 > 标题/整块拖拽带）。 */
     int mode; uint8_t rdir;
     block *drag_target = resolve_interaction(b, x, y, &mode, &rdir);
     if (mode == DRAG_RESIZE) {
@@ -198,21 +202,7 @@ static void on_press(int x, int y) {
     } else if (mode == DRAG_MOVE) {
         drag_block = drag_target; drag_mode = DRAG_MOVE;
         drag_off_x = x - drag_target->x; drag_off_y = y - drag_target->y;
-    } else {
-        /* v1 面板兜底：上溯到最近的可聚焦面板——叶子文本 / 行不单独拖。 */
-        block *panel = b;
-        while (panel->parent && panel->parent->kind != BLK_ROOT && !panel->focusable)
-            panel = panel->parent;
-        int rx = panel->x + panel->w, ry = panel->y + panel->h;
-        if (x >= rx - HANDLE && y >= ry - HANDLE) {
-            drag_block = panel; drag_mode = DRAG_RESIZE;
-            drag_off_x = x - panel->x; drag_off_y = y - panel->y;
-        } else if (y < panel->y + TITLE_H) {
-            drag_block = panel; drag_mode = DRAG_MOVE;
-            drag_off_x = x - panel->x; drag_off_y = y - panel->y;
-        }
     }
-
     if (act && act->on_click) act->on_click(act->id, x - act->x, y - act->y);
     /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
     if (b->owner) decl_post_click(b, x - b->x, y - b->y);

@@ -1335,6 +1335,14 @@ static void gui_probe_interact(void) {
     block *pg = btable_get(G);
 
     layout_run();
+
+    /* 同构断言：解析归属与真实 mousedown/move/up 走同一 resolve_interaction。 */
+    block_id ract = 0, gact = 0; uint8_t rdir = 0, gdir = 0;
+    int rm = gui_interaction_at(pr->x + pr->w - 3, pr->y + pr->h / 2, &ract, &rdir);
+    int gm = gui_interaction_at(pg->x + 10, pg->y + 10, &gact, &gdir);
+    int resolve_r = (rm == GUI_IT_RESIZE && ract == R && (rdir & RESIZE_R));
+    int resolve_g = (gm == GUI_IT_MOVE && gact == G);
+
     int w0 = pr->w;
 
     /* 右边缘 +50。 */
@@ -1392,7 +1400,7 @@ static void gui_probe_interact(void) {
     uint32_t measured = stat_layout_nodes();
     uint32_t total = tree_count_nodes();
     int ok = grew_r && grew_l && grew_b && grew_t && min_ok && max_ok &&
-             clamped && persist && measured <= total;
+             clamped && persist && measured <= total && resolve_r && resolve_g;
 
     ser_write("GUI:interact grew_r="); ser_dec(grew_r);
     ser_write(" grew_l="); ser_dec(grew_l);
@@ -1402,6 +1410,8 @@ static void gui_probe_interact(void) {
     ser_write(" max_ok="); ser_dec(max_ok);
     ser_write(" clamped="); ser_dec(clamped);
     ser_write(" persist="); ser_dec(persist);
+    ser_write(" resolve_r="); ser_dec(resolve_r);
+    ser_write(" resolve_g="); ser_dec(resolve_g);
     ser_write(" measured="); ser_dec(measured);
     ser_write(" total="); ser_dec(total);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
