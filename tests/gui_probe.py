@@ -56,17 +56,35 @@ EXPECT = {
     "reset":  {"latest": {"result": "1"}, "flag": None},
     "gesture": {"latest": {"result": "1"}, "flag": None},
     "resize": {"latest": {"result": "1"}, "flag": None},
+    "note":   {"latest": {"result": "1"}, "flag": None},
+    "cv":     {"latest": {"result": "1"}, "flag": None},
+    "fm":     {"latest": {"result": "1"}, "flag": None},
+    "img":    {"latest": {"ok": "1"}, "flag": None},
+    "dbg":    {"latest": {}, "flag": None},
 }
+
+
+def _stage(src):
+    import shutil, tempfile
+    dst = os.path.join(tempfile.gettempdir(),
+                       "gui-probe-%d-%s" % (os.getpid(), os.path.basename(src)))
+    shutil.copy2(src, dst)
+    return dst
 
 
 def boot(qemu, iso, serial):
     vga = os.environ.get("VGA", "vmware")
-    return subprocess.Popen(
-        [qemu, "-m", "256", "-smp", "1", "-cpu", "qemu32", "-vga", vga,
-         "-no-reboot", "-net", "none", "-display", "none", "-boot", "order=d",
-         "-cdrom", iso, "-serial", "file:" + serial,
-         "-monitor", "tcp:127.0.0.1:%d,server,nowait" % PORT],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scratch = os.environ.get(
+        "SCRATCH_IMG",
+        "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
+    cmd = [qemu, "-m", "256", "-smp", "1", "-cpu", "qemu32", "-vga", vga,
+           "-no-reboot", "-net", "none", "-display", "none", "-boot", "order=d",
+           "-cdrom", iso, "-serial", "file:" + serial,
+           "-monitor", "tcp:127.0.0.1:%d,server,nowait" % PORT]
+    if os.path.exists(scratch):
+        cmd += ["-drive", "file=%s,format=raw,if=ide" % _stage(scratch)]
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
 
 
 def main():

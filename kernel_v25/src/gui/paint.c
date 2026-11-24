@@ -189,6 +189,9 @@ void paint_node(block *b) {
     case BLK_SURFACE:
         gui_blit24(b->pix, b->x, b->y, b->pix_w, b->pix_h);
         break;
+    case BLK_CANVAS:
+        gui_blit24(b->buf, b->x, b->y, b->pix_w, b->pix_h);
+        break;
     case BLK_DIVIDER:
         gui_fill_rect(b->x, b->y, b->w, 1, gui_active_style()->line);
         break;
@@ -201,6 +204,9 @@ void paint_node(block *b) {
     default:
         break;
     }
+
+    /* 组件自绘：在默认绘制之后、本块裁剪框内回调；回调只打脏位。 */
+    if (b->render) b->render(b->id);
 
     paint_clip_push(b->x, b->y, b->w, b->h);
     for (block *c = b->first_child; c; c = c->next_sibling)

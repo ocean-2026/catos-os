@@ -27,6 +27,7 @@ void      tree_reset(void);
 /* compose.c */
 void      gui_presence_sweep(void);
 void      gui_theme_set(enum gui_token t);
+void      gui_mark_dirty(block_id id);
 void      stat_set_layout_nodes(uint32_t n);
 void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,
@@ -37,6 +38,12 @@ void      stat_note_double_commit(void);
 void      paint_begin_frame(void);
 void      paint_node(block *b);
 void      paint_node_clipped(block *b);
+void      gui_fill_rect(int x, int y, int w, int h, uint32_t rgb);
+void      gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale);
+void      gui_blit24(const uint8_t *src, int x, int y, int w, int h);
+
+/* input.c 组件键盘钩子 */
+void      gui_set_key_hook(int (*fn)(int code, void *ud), void *ud);
 
 /* layout.c */
 void      layout_run(void);

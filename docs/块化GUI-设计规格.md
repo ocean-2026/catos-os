@@ -23,7 +23,7 @@ typedef uint32_t block_id;          /* 0 = 无效；>=1 全局唯一 */
 typedef enum {
     BLK_ROOT = 0, BLK_COLUMN, BLK_ROW, BLK_STACK,   /* 容器 */
     BLK_TEXT, BLK_RECT, BLK_IMAGE, BLK_SURFACE,      /* 叶 */
-    BLK_SPACER, BLK_DIVIDER
+    BLK_SPACER, BLK_DIVIDER, BLK_CANVAS
 } blk_kind;
 
 typedef struct block {

@@ -26,7 +26,8 @@ typedef enum {
     BLK_IMAGE,
     BLK_SURFACE,
     BLK_SPACER,
-    BLK_DIVIDER
+    BLK_DIVIDER,
+    BLK_CANVAS
 } blk_kind;
 
 /* 主轴对齐（COLUMN 纵向 / ROW 横向） */
@@ -72,6 +73,10 @@ typedef struct {
     int32_t  pix_w, pix_h;
     void (*on_click)(block_id id, int32_t lx, int32_t ly);
     void (*on_drag )(block_id id, int32_t dx, int32_t dy, uint8_t phase);
+    /* 组件自绘回调：合成层在默认绘制之后、裁剪框内调用；回调只打脏位，
+     * 不做嵌套提交。usr 为组件私有上下文（v1 单实例，内核内使用）。 */
+    void (*render)(block_id id);
+    void  *usr;
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -114,6 +119,9 @@ typedef struct block {
 
     void (*on_click)(block_id id, int32_t lx, int32_t ly);
     void (*on_drag )(block_id id, int32_t dx, int32_t dy, uint8_t phase);
+    void (*render)(block_id id);
+    void  *usr;
+    uint8_t *buf;                       /* BLK_CANVAS 运行时缓冲（24bpp） */
 
     /* ---- 内部字段（不对外） ---- */
     struct block *free_next;             /* 空闲链 */

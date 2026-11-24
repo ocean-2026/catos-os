@@ -51,6 +51,8 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->pix_h = s->pix_h;
     b->on_click = s->on_click;
     b->on_drag  = s->on_drag;
+    b->render   = s->render;
+    b->usr      = s->usr;
 
     if (geo_changed) b->dirty_layout = 1;
     else             b->dirty_paint = 1;

@@ -24,6 +24,15 @@ static block    *drag_block;
 static int       drag_mode;
 static int       drag_off_x, drag_off_y;
 
+/* 组件键盘钩子：返回 1 表示消费该键，默认 Esc 退出路径不再触发。 */
+static int       (*key_hook)(int code, void *ud);
+static void     *key_ud;
+
+void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
+    key_hook = fn;
+    key_ud = ud;
+}
+
 static int inside(block *b, int x, int y) {
     return x >= b->x && x < b->x + b->w &&
            y >= b->y && y < b->y + b->h;
@@ -141,6 +150,9 @@ void gui_pump_input(void) {
         }
     }
     int k = kb_getkey_timed(1);
+    if (k >= 0 && key_hook) {
+        if (key_hook(k, key_ud)) k = -1;          /* 组件消费，不走默认路径 */
+    }
     if (k == 27) {
         if (gui_menu_is_open()) gui_menu_close();  /* Esc 先关菜单 */
         else exit_requested = 1;                   /* Esc 退回文本控制台 */

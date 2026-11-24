@@ -219,6 +219,19 @@ static void mark_all_paint(block *b) {
         mark_all_paint(c);
 }
 
+/* 运行期打开组件：建块后显式 layout_run 会清掉 dirty_layout；这里把整棵
+ * 新子树标脏，确保下一帧快照命中并整组重绘（否则叶子落在干净帧上不绘制）。 */
+static void mark_subtree_paint(block *b) {
+    if (!b) return;
+    b->dirty_paint = 1;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        mark_subtree_paint(c);
+}
+
+void gui_mark_dirty(block_id id) {
+    mark_subtree_paint(btable_get(id));
+}
+
 /* 切主题：换活动令牌后整树标脏重绘（不做局部配色残留）。 */
 void gui_theme_set(enum gui_token t) {
     gui_set_token(t);

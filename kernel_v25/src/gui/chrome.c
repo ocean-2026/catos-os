@@ -28,6 +28,24 @@ static int strcmp_probe(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+static void split_word(const char *arg, char *word, int cap, const char **rest) {
+    word[0] = 0; *rest = 0;
+    if (!arg) return;
+    while (*arg == ' ') arg++;
+    int n = 0;
+    while (*arg && *arg != ' ' && n < cap - 1) word[n++] = *arg++;
+    word[n] = 0;
+    while (*arg == ' ') arg++;
+    *rest = arg;
+}
+
+static void xcopy_local(char *d, int cap, const char *s) {
+    int n = 0; if (s) while (s[n]) n++;
+    if (n > cap - 1) n = cap - 1;
+    for (int i = 0; i < n; i++) d[i] = s[i];
+    d[n] = 0;
+}
+
 static void ser_dec(uint32_t v) {
     char b[12]; int n = 0;
     if (v == 0) { ser_write("0"); return; }
@@ -263,9 +281,19 @@ static int menu_collect(block_id *out, int cap) {
 static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
     block *row = btable_get(id);
     if (!row) return;
-    block_id target = (block_id)row->z;
-    if (target) gui_focus_raise(target);
-    else        demo_add_sample();
+    int32_t act = row->z;
+    if (act > 0) {
+        gui_focus_raise((block_id)act);
+    } else if (act == 0) {
+        demo_add_sample();
+    } else {
+        switch (-act) {
+        case 1: gui_notepad_open(0); break;
+        case 2: gui_canvas_demo();   break;
+        case 3: gui_filemgr_open(0); break;
+        case 4: gui_images_open(0);  break;
+        }
+    }
     gui_menu_close();
 }
 
@@ -291,6 +319,15 @@ void gui_menu_open(void) {
         block_id rid = b_row(menu_root, &row);
         id_label(menu_ids[i], menu_labels[i]);
         b_text(rid, 0, menu_labels[i]);
+    }
+
+    static const char *app_labels[4] = { "Notepad", "Canvas demo", "Files", "Images" };
+    for (int a = 0; a < 4; a++) {
+        blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+        app.on_click = on_menu_row;
+        app.z = -(a + 1);
+        block_id aid = b_row(menu_root, &app);
+        b_text(aid, 0, app_labels[a]);
     }
 
     blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 0);
@@ -857,6 +894,96 @@ void gui_probe_resize(void) {
     gui_end();
 }
 
+/* ---- 组件层自检探针 ------------------------------------------------------ */
+
+static void gui_probe_note(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_notepad_open("/notes.txt");
+    gui_frame();
+    ser_write("GUI:note lines="); ser_dec(gui_notepad_lines());
+    ser_write(" col="); ser_dec(gui_notepad_col());
+    ser_write(" dirty="); ser_dec(gui_notepad_dirty());
+    ser_write(" full="); ser_dec(gui_notepad_full());
+    ser_write(" result="); ser_dec(gui_notepad_active() ? 1 : 0);
+    ser_write("\n");
+    gui_end();
+}
+
+static void gui_probe_cv(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_canvas_demo();
+    gui_frame();
+    ser_write("GUI:canvas w="); ser_dec(gui_canvas_w());
+    ser_write(" h="); ser_dec(gui_canvas_h());
+    ser_write(" active="); ser_dec(gui_canvas_active());
+    ser_write(" result="); ser_dec(gui_canvas_active() ? 1 : 0);
+    ser_write("\n");
+    gui_end();
+}
+
+static void gui_probe_fm(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_filemgr_open("/");
+    gui_frame();
+    ser_write("GUI:fm entries="); ser_dec(gui_filemgr_count());
+    ser_write(" active="); ser_dec(gui_filemgr_active());
+    ser_write(" result="); ser_dec(gui_filemgr_active() ? 1 : 0);
+    ser_write("\n");
+    gui_end();
+}
+
+static void gui_probe_img(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_images_open("/samples/desktop.bmp");
+    gui_frame();
+    ser_write("GUI:img file="); ser_write(gui_images_name());
+    ser_write(" w="); ser_dec(gui_images_w());
+    ser_write(" h="); ser_dec(gui_images_h());
+    ser_write(" ok="); ser_dec(gui_images_ok());
+    ser_write(" result="); ser_dec(gui_images_ok() ? 1 : 0);
+    ser_write("\n");
+    gui_end();
+}
+
+static const char *dbg_kind[] = {
+    "ROOT", "COL", "ROW", "STK", "TXT", "RECT", "IMG", "SURF",
+    "SPR", "DIV", "CV"
+};
+
+static void dbg_walk(block *b, int d) {
+    if (!b) return;
+    ser_write("D ");
+    for (int i = 0; i < d; i++) ser_write("  ");
+    ser_dec(b->id); ser_write(" ");
+    ser_write(dbg_kind[b->kind < 11 ? b->kind : 0]);
+    ser_write(" x="); ser_dec((uint32_t)b->x);
+    ser_write(" y="); ser_dec((uint32_t)b->y);
+    ser_write(" w="); ser_dec((uint32_t)b->w);
+    ser_write(" h="); ser_dec((uint32_t)b->h);
+    ser_write(" vis="); ser_dec(b->visible);
+    ser_write(" rb="); ser_dec(b->st.role_bg);
+    ser_write(" rw="); ser_dec((uint32_t)b->req_w);
+    ser_write(" rh="); ser_dec((uint32_t)b->req_h);
+    ser_write(" pw="); ser_dec((uint32_t)b->pix_w);
+    ser_write(" ph="); ser_dec((uint32_t)b->pix_h);
+    ser_write(" buf="); ser_dec((uint32_t)(uintptr_t)b->buf);
+    ser_write("\n");
+    for (block *c = b->first_child; c; c = c->next_sibling) dbg_walk(c, d + 1);
+}
+
+static void gui_probe_dbg(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_images_open("/samples/desktop.bmp");
+    layout_run();
+    dbg_walk(gui_root_block(), 0);
+    gui_end();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -898,20 +1025,38 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "reset"))  { gui_probe_reset(); return; }
         if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return; }
         if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return; }
+        if (!strcmp_probe(arg, "note"))    { gui_probe_note(); return; }
+        if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return; }
+        if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
+        if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
+        if (!strcmp_probe(arg, "dbg"))    { gui_probe_dbg(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
-     * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）。 */
+     * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）；
+     * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     enum gui_token shot_tok = TOK_DARK;
-    if (arg && *arg) {
-        if (!strcmp_probe(arg, "shot-menu"))  shot_menu = 1;
-        else if (!strcmp_probe(arg, "shot-light")) shot_tok = TOK_LIGHT;
-        else if (!strcmp_probe(arg, "shot-hc"))     shot_tok = TOK_HIGH_CONTRAST;
-        else if (!strcmp_probe(arg, "shot-reset")) shot_reset = 1;
-        else if (!strcmp_probe(arg, "shot-crop"))  shot_crop = 1;
-        else if (!strcmp_probe(arg, "shot-drag"))  shot_drag = 1;
-    }
+    enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES };
+    int app_open = APP_NONE;
+    char app_path[160]; app_path[0] = 0;
+    const char *rest = 0;
+    char word[24];
+    split_word(arg, word, sizeof(word), &rest);
+    if (!strcmp_probe(word, "shot-menu"))  shot_menu = 1;
+    else if (!strcmp_probe(word, "shot-light")) shot_tok = TOK_LIGHT;
+    else if (!strcmp_probe(word, "shot-hc"))    shot_tok = TOK_HIGH_CONTRAST;
+    else if (!strcmp_probe(word, "shot-reset")) shot_reset = 1;
+    else if (!strcmp_probe(word, "shot-crop"))  shot_crop = 1;
+    else if (!strcmp_probe(word, "shot-drag"))  shot_drag = 1;
+    else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
+    else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "shot-images"))  { app_open = APP_IMAGES; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "notepad")) { app_open = APP_NOTEPAD; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
+    else if (!strcmp_probe(word, "canvas"))   { app_open = APP_CANVAS; }
+    else if (!strcmp_probe(word, "files"))    { app_open = APP_FILEMGR; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
+    else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
 
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {
@@ -925,6 +1070,10 @@ void gui_shell_cmd(const char *arg) {
     if (shot_menu) gui_menu_open();
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();
+    if (app_open == APP_NOTEPAD) gui_notepad_open(app_path[0] ? app_path : 0);
+    if (app_open == APP_CANVAS)  gui_canvas_demo();
+    if (app_open == APP_FILEMGR) gui_filemgr_open(app_path[0] ? app_path : 0);
+    if (app_open == APP_IMAGES)  gui_images_open(app_path[0] ? app_path : 0);
     if (!shot_crop && !shot_drag) gui_frame();
 
     gui_idle_loop();

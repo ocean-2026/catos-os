@@ -56,7 +56,11 @@ def capture(iso, cmd, settle, ppm, png, port=PORT):
         print("FAIL: qemu-system-i386 not found")
         return 2
     serial = os.path.join(ART, "pixel-serial.log")
-    proc, sock = boot(qemu, iso, port,
+    scratch = os.environ.get(
+        "SCRATCH_IMG",
+        "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
+    disk = scratch if os.path.exists(scratch) else None
+    proc, sock = boot(qemu, iso, port, disk=disk,
                       extra_args=["-vga", "std", "-serial", "file:" + serial])
     try:
         force_text(sock)
@@ -106,6 +110,10 @@ def main():
         "menu":  "gui shot-menu",
         "drag":  "gui shot-drag",
         "crop":  "gui shot-crop",
+        "notepad": "gui shot-notepad",
+        "canvas":  "gui shot-canvas",
+        "files":   "gui shot-files",
+        "images":  "gui shot-images",
     }
     cmd = args.cmd or GROUP_CMD[args.group]
 

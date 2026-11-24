@@ -101,6 +101,34 @@ CROP_CHECKS = [
      "max_bad": 20, "label": "crop outside parent"},
 ]
 
+# 记事本：文本区块 (144,96,512,272) 必须是面板底色，且区别于桌面底色。
+NOTEPAD_CHECKS = [
+    {"kind": "ne_bg", "pt": (300, 200)},
+    {"kind": "region_count", "rect": (144, 96, 512, 272),
+     "color": DARK_PANEL, "min": 100, "label": "notepad body panel"},
+]
+
+# 画布演示：棋盘格左上 (158,104) 与渐变段 (230,120) 互异，棋盘前景存在。
+CANVAS_CHECKS = [
+    {"kind": "ne_bg", "pt": (158, 104)},
+    {"kind": "pair_diff", "pts": [(158, 104), (230, 120)]},
+    {"kind": "region_count", "rect": (158, 104, 200, 160),
+     "color": DARK_FG, "min": 20, "label": "canvas checker fg"},
+]
+
+# 资源管理器：列表区 (144,124,512,280) 必须是面板底色，区别于桌面底色。
+FILES_CHECKS = [
+    {"kind": "ne_bg", "pt": (300, 200)},
+    {"kind": "region_count", "rect": (144, 124, 512, 280),
+     "color": DARK_PANEL, "min": 50, "label": "files list panel"},
+]
+
+# 图片查看器：视口 (152,72,560,400) 内存在非桌面底色的真实图像内容。
+IMAGES_CHECKS = [
+    {"kind": "ne_bg", "pt": (300, 200)},
+    {"kind": "ne_bg", "pt": (500, 350)},
+]
+
 CHECK_GROUPS = {
     "dark": DEFAULT_CHECKS,
     "light": THEME_LIGHT_CHECKS,
@@ -108,6 +136,10 @@ CHECK_GROUPS = {
     "menu": MENU_CHECKS,
     "drag": DRAG_CHECKS,
     "crop": CROP_CHECKS,
+    "notepad": NOTEPAD_CHECKS,
+    "canvas": CANVAS_CHECKS,
+    "files": FILES_CHECKS,
+    "images": IMAGES_CHECKS,
 }
 
 GROUP_BG = {
@@ -117,6 +149,10 @@ GROUP_BG = {
     "menu": DARK_BG,
     "drag": DARK_BG,
     "crop": DARK_BG,
+    "notepad": DARK_BG,
+    "canvas": DARK_BG,
+    "files": DARK_BG,
+    "images": DARK_BG,
 }
 
 

@@ -59,6 +59,46 @@ uint32_t  gui_tree_hash(void);
 void      gui_probe_idempotent(void);
 void      gui_probe_leak(void);
 
+/* ---- 组件层（内核内块子树，无进程 / IPC / 显示服务） ---- */
+/* 记事本 */
+void      gui_notepad_open(const char *path);
+void      gui_notepad_close(void);
+int       gui_notepad_active(void);
+int       gui_notepad_lines(void);
+int       gui_notepad_col(void);
+int       gui_notepad_dirty(void);
+int       gui_notepad_full(void);
+
+/* 画布兼容层 */
+block_id  b_canvas(block_id parent, const blk_spec *s, int w, int h);
+uint8_t  *gui_canvas_buffer(block_id id);
+void      cv_pixel(block_id id, int x, int y, uint32_t rgb);
+void      cv_hline(block_id id, int x0, int x1, int y, uint32_t rgb);
+void      cv_vline(block_id id, int x, int y0, int y1, uint32_t rgb);
+void      cv_fill_rect(block_id id, int x, int y, int w, int h, uint32_t rgb);
+void      cv_blit24(block_id id, const uint8_t *src, int x, int y,
+                    int w, int h, int src_stride);
+void      gui_canvas_demo(void);
+void      gui_canvas_close_all(void);
+int       gui_canvas_active(void);
+int       gui_canvas_w(void);
+int       gui_canvas_h(void);
+
+/* 资源管理器 */
+void      gui_filemgr_open(const char *path);
+void      gui_filemgr_close(void);
+int       gui_filemgr_active(void);
+int       gui_filemgr_count(void);
+
+/* 图片查看器 */
+void      gui_images_open(const char *path);
+void      gui_images_close(void);
+int       gui_images_active(void);
+int       gui_images_ok(void);
+int       gui_images_w(void);
+int       gui_images_h(void);
+const char *gui_images_name(void);
+
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 

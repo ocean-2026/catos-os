@@ -22,7 +22,8 @@ static int leaf_natural_w(block *b) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
         return 8 * (int)sc * text_len(b->text);
     }
-    if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE)
+    if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
+        b->kind == BLK_CANVAS)
         return b->pix_w;
     if (b->kind == BLK_SPACER) return b->req_w;
     if (b->kind == BLK_DIVIDER) return 0;
@@ -34,7 +35,8 @@ static int leaf_natural_h(block *b) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
         return 16 * (int)sc;
     }
-    if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE)
+    if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
+        b->kind == BLK_CANVAS)
         return b->pix_h;
     if (b->kind == BLK_SPACER) return b->req_h;
     if (b->kind == BLK_DIVIDER) return 1;
