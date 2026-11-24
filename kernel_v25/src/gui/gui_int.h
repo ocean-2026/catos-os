@@ -41,6 +41,10 @@ void      paint_node_clipped(block *b);
 void      gui_fill_rect(int x, int y, int w, int h, uint32_t rgb);
 void      gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale);
 void      gui_blit24(const uint8_t *src, int x, int y, int w, int h);
+void      gui_blit24_stride(const uint8_t *src, int x, int y, int w, int h,
+                            int stride);
+int       cv_dirty_rect(block *b, int *rx, int *ry, int *rw, int *rh);
+void      cv_dirty_clear(block *b);
 
 /* input.c 组件键盘钩子 */
 void      gui_set_key_hook(int (*fn)(int code, void *ud), void *ud);
@@ -53,6 +57,11 @@ void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
 block_id  gui_hit_test(int x, int y);
+int       gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir);
+#define GUI_IT_NONE   0
+#define GUI_IT_MOVE   1
+#define GUI_IT_RESIZE 2
+block    *gui_hover_target(void);
 void      gui_focus_raise(block_id id);
 void      gui_modal_inert(block_id overlay_id);
 

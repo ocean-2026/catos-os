@@ -25,6 +25,7 @@ void      gui_reset(void);                 /* 清空块表重建（含根），�
 block_id  b_column (block_id parent, const blk_spec *s);
 block_id  b_row    (block_id parent, const blk_spec *s);
 block_id  b_stack  (block_id parent, const blk_spec *s);
+block_id  b_free   (block_id parent, const blk_spec *s);
 block_id  b_text   (block_id parent, const blk_spec *s, const char *txt);
 block_id  b_rect   (block_id parent, const blk_spec *s);
 block_id  b_image  (block_id parent, const blk_spec *s, const uint8_t *pix, int w, int h);
@@ -76,6 +77,7 @@ void      cv_pixel(block_id id, int x, int y, uint32_t rgb);
 void      cv_hline(block_id id, int x0, int x1, int y, uint32_t rgb);
 void      cv_vline(block_id id, int x, int y0, int y1, uint32_t rgb);
 void      cv_fill_rect(block_id id, int x, int y, int w, int h, uint32_t rgb);
+void      cv_dirty(block_id id, int x, int y, int w, int h);
 void      cv_blit24(block_id id, const uint8_t *src, int x, int y,
                     int w, int h, int src_stride);
 void      gui_canvas_demo(void);

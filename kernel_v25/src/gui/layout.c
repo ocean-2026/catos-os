@@ -52,7 +52,8 @@ static void measure_node(block *b) {
 
     /* 子块尺寸已由 measure_dirty 后序遍历算好，这里只做聚合，不再下行重复计数。 */
     block *c = b->first_child;
-    if (b->kind == BLK_COLUMN || b->kind == BLK_ROW || b->kind == BLK_STACK) {
+    if (b->kind == BLK_COLUMN || b->kind == BLK_ROW || b->kind == BLK_STACK ||
+        b->kind == BLK_FREE) {
         int max_w = 0, max_h = 0, sum_w = 0, sum_h = 0, n = 0;
         for (c = b->first_child; c; c = c->next_sibling, n++) {
             if (c->w > max_w) max_w = c->w;
@@ -184,6 +185,61 @@ static void layout_stack(block *b,
     }
 }
 
+/* FREE 子块解约束：父框 → 锚点/百分比 → min/max → 落矩形。
+ * 布局阶段绝不 clamp 子块坐标（越界与否由溢出策略在绘制/命中层对齐）；
+ * FREE 子块不参与父容器主轴流动，各自按声明几何落位。 */
+static void layout_free_child(block *c, int fx, int fy, int fw, int fh) {
+    int l = c->m_l, r = c->m_r, t = c->m_t, b = c->m_b;
+    int ax = fx + l, ay = fy + t;
+    int aw = fw - l - r, ah = fh - t - b;
+    if (aw < 0) aw = 0;
+    if (ah < 0) ah = 0;
+
+    int w, h;
+    if (c->pct_w > 0) w = aw * (int)c->pct_w / 1000;
+    else              w = c->req_w > 0 ? c->req_w : leaf_natural_w(c);
+    if (c->pct_h > 0) h = ah * (int)c->pct_h / 1000;
+    else              h = c->req_h > 0 ? c->req_h : leaf_natural_h(c);
+
+    /* min/max 只约束尺寸，不回写坐标。 */
+    if (c->min_w > 0 && w < c->min_w) w = c->min_w;
+    if (c->min_h > 0 && h < c->min_h) h = c->min_h;
+    if (c->max_w > 0 && w > c->max_w) w = c->max_w;
+    if (c->max_h > 0 && h > c->max_h) h = c->max_h;
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    c->w = w; c->h = h;
+
+    int x, y;
+    if (c->anchor & ANC_R)            x = ax + aw - w - c->px_x;
+    else if (c->anchor & ANC_HCENTER) x = ax + (aw - w) / 2 + c->px_x;
+    else {
+        x = ax + c->px_x;
+        if (c->pct_x > 0) x = ax + aw * (int)c->pct_x / 1000;
+    }
+    if (c->anchor & ANC_B)            y = ay + ah - h - c->px_y;
+    else if (c->anchor & ANC_VCENTER) y = ay + (ah - h) / 2 + c->px_y;
+    else {
+        y = ay + c->px_y;
+        if (c->pct_y > 0) y = ay + ah * (int)c->pct_y / 1000;
+    }
+
+    /* 拖拽收敛为 pos 偏移属性：布局不重置，跨帧保持。 */
+    c->x = x + c->pos_x;
+    c->y = y + c->pos_y;
+}
+
+static void layout_free(block *b,
+                        int fx, int fy, int fw, int fh,
+                        int cx, int cy, int cw, int ch) {
+    for (block *c = b->first_child; c; c = c->next_sibling) {
+        int ox, oy, ow, oh;
+        child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
+        layout_free_child(c, ox, oy, ow, oh);
+        layout_node(c, c->x, c->y, c->w, c->h);
+    }
+}
+
 void layout_node(block *b, int ax, int ay, int aw, int ah) {
     if (!b) return;
     int pad_l = b->pad_l, pad_r = b->pad_r, pad_t = b->pad_t, pad_b = b->pad_b;
@@ -197,12 +253,14 @@ void layout_node(block *b, int ax, int ay, int aw, int ah) {
     case BLK_ROW:    layout_row(b,    ax, ay, aw, ah, cax, cay, caw, cah); break;
     case BLK_STACK:
     case BLK_ROOT:  layout_stack(b,  ax, ay, aw, ah, cax, cay, caw, cah); break;
+    case BLK_FREE:  layout_free(b,  ax, ay, aw, ah, cax, cay, caw, cah); break;
     default: break;
     }
 
     /* 叶子块的子块继承父块内容框（父原点 + padding）。 */
     if (b->kind != BLK_COLUMN && b->kind != BLK_ROW &&
-        b->kind != BLK_STACK && b->kind != BLK_ROOT) {
+        b->kind != BLK_STACK && b->kind != BLK_ROOT &&
+        b->kind != BLK_FREE) {
         int lx = b->x + pad_l, ly = b->y + pad_t;
         for (block *c = b->first_child; c; c = c->next_sibling) {
             c->x = lx; c->y = ly;

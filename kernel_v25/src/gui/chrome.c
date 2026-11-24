@@ -161,6 +161,61 @@ static void shot_drag_build(void) {
     gui_frame();                               /* 拖拽后帧：旧矩形应回底色 */
 }
 
+/* 样例一：仪表盘式卡片叠放（FREE 内错位叠放，z 递增）。 */
+static void shot_free_dash_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    block_id F = b_free(0, &fr);
+    const char *names[3] = { "Card 1", "Card 2", "Card 3" };
+    for (int i = 0; i < 3; i++) {
+        blk_spec s = spec_panel(LAYER_WORK, 220, 140, 1);
+        s.anchor = ANC_L | ANC_T;
+        s.px_x = 60 + i * 40; s.px_y = 50 + i * 30;
+        s.z = i;
+        block_id c = b_rect(F, &s);
+        blk_spec t = spec_panel(LAYER_WORK, 120, 16, 0);
+        b_text(c, &t, names[i]);
+    }
+    layout_run();
+}
+
+/* 样例二：右侧固定侧栏 + 中央自适应区。 */
+static void shot_free_side_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec side = spec_panel(LAYER_WORK, 180, 0, 1);
+    side.anchor = ANC_R | ANC_T | ANC_B; side.pct_h = 1000;
+    block_id S = b_rect(F, &side);
+    blk_spec st = spec_panel(LAYER_WORK, 160, 16, 0);
+    b_text(S, &st, "Sidebar");
+
+    blk_spec main = spec_panel(LAYER_CONTENT, 0, 0, 1);
+    main.anchor = ANC_L | ANC_T | ANC_B;
+    main.pct_w = 700; main.pct_h = 1000;
+    main.m_r = 180;
+    block_id M = b_rect(F, &main);
+    blk_spec mt = spec_panel(LAYER_CONTENT, 160, 16, 0);
+    b_text(M, &mt, "Adaptive center");
+    layout_run();
+}
+
+/* 样例三：悬浮球 + 百分比定位徽标（OVF_VISIBLE 浮层）。 */
+static void shot_free_float_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, 0, 0, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec ball = spec_panel(LAYER_OVERLAY, 48, 48, 1);
+    ball.anchor = ANC_HCENTER | ANC_VCENTER;
+    ball.overflow = OVF_VISIBLE;
+    b_rect(F, &ball);
+
+    blk_spec badge = spec_panel(LAYER_OVERLAY, 40, 24, 1);
+    badge.anchor = ANC_R | ANC_T; badge.pct_y = 150;
+    badge.overflow = OVF_VISIBLE;
+    b_rect(F, &badge);
+    layout_run();
+}
+
 static block_id demo_add_sample(void) {
     block_id root_id = gui_root_block()->id;
     blk_spec sample_spec = spec_panel(LAYER_WORK, 320, 200, 1);
@@ -531,6 +586,20 @@ void gui_probe_hit(void) {
     ser_write("GUI:hit hit="); ser_dec(hit);
     ser_write(" want="); ser_dec(Hi);
     int ok = hit == Hi;
+
+    /* 父块角 3px 内返回 RESIZE：边缘带优先于子块命中。 */
+    blk_spec pc = spec_panel(LAYER_CONTENT, 160, 100, 1);
+    pc.resize_dir = RESIZE_R | RESIZE_B;
+    block_id P2 = b_rect(0, &pc);
+    layout_run();
+    block *pp2 = btable_get(P2);
+    block_id act = 0; uint8_t rdir = 0;
+    int mode = gui_interaction_at(pp2->x + pp2->w - 3,
+                                  pp2->y + pp2->h - 3, &act, &rdir);
+    int resize_hit = (mode == GUI_IT_RESIZE && act == P2 &&
+                      (rdir & RESIZE_R) && (rdir & RESIZE_B));
+    ok = ok && resize_hit;
+    ser_write(" resize_hit="); ser_dec(resize_hit);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
@@ -902,6 +971,195 @@ void gui_probe_resize(void) {
     gui_end();
 }
 
+/* ---- v2 自由布局 / 溢出 / 交互探针 -------------------------------------- */
+
+#define FREE_CHK(blk, ex, ey, ew, eh) \
+    ((blk)->x == (ex) && (blk)->y == (ey) && \
+     (blk)->w == (ew) && (blk)->h == (eh))
+
+static void gui_probe_free(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    blk_spec fr = spec_panel(LAYER_CONTENT, 0, 0, 0);
+    block_id Fr = b_free(0, &fr);
+
+    /* A：左上锚点 + 像素偏移 20,20，120×80。 */
+    blk_spec a = spec_panel(LAYER_CONTENT, 120, 80, 1);
+    a.anchor = ANC_L | ANC_T; a.px_x = 20; a.px_y = 20;
+    block_id A = b_free(Fr, &a);
+
+    /* B：右上锚点，宽 25% 父框（200），高 80。 */
+    blk_spec b = spec_panel(LAYER_CONTENT, 0, 80, 1);
+    b.anchor = ANC_R | ANC_T; b.pct_w = 250;
+    block_id B = b_free(Fr, &b);
+
+    /* C：水平 + 垂直居中，100×60。 */
+    blk_spec c = spec_panel(LAYER_CONTENT, 100, 60, 1);
+    c.anchor = ANC_HCENTER | ANC_VCENTER;
+    block_id C = b_free(Fr, &c);
+
+    /* D：百分比定位 50%,50%，尺寸 30%×30%（240×180）。 */
+    blk_spec d = spec_panel(LAYER_CONTENT, 0, 0, 1);
+    d.pct_x = 500; d.pct_y = 500; d.pct_w = 300; d.pct_h = 300;
+    block_id D = b_free(Fr, &d);
+
+    /* E：min/max clamp：req 400 被 max_w=120 收到 120，底边锚定。 */
+    blk_spec e = spec_panel(LAYER_CONTENT, 400, 60, 1);
+    e.max_w = 120; e.anchor = ANC_L | ANC_B;
+    block_id E = b_free(Fr, &e);
+
+    layout_run();
+    block *pa = btable_get(A), *pb = btable_get(B), *pc = btable_get(C);
+    block *pd = btable_get(D), *pe = btable_get(E);
+
+    int ok = FREE_CHK(pa, 20, 20, 120, 80) &&
+             FREE_CHK(pb, 600, 0, 200, 80) &&
+             FREE_CHK(pc, 350, 270, 100, 60) &&
+             FREE_CHK(pd, 400, 300, 240, 180) &&
+             FREE_CHK(pe, 0, 540, 120, 60);
+
+    ser_write("GUI:free A=("); ser_dec(pa->x); ser_write(","); ser_dec(pa->y);
+    ser_write(","); ser_dec(pa->w); ser_write(","); ser_dec(pa->h); ser_write(")");
+    ser_write(" B=("); ser_dec(pb->x); ser_write(","); ser_dec(pb->y);
+    ser_write(","); ser_dec(pb->w); ser_write(","); ser_dec(pb->h); ser_write(")");
+    ser_write(" C=("); ser_dec(pc->x); ser_write(","); ser_dec(pc->y);
+    ser_write(","); ser_dec(pc->w); ser_write(","); ser_dec(pc->h); ser_write(")");
+    ser_write(" D=("); ser_dec(pd->x); ser_write(","); ser_dec(pd->y);
+    ser_write(","); ser_dec(pd->w); ser_write(","); ser_dec(pd->h); ser_write(")");
+    ser_write(" E=("); ser_dec(pe->x); ser_write(","); ser_dec(pe->y);
+    ser_write(","); ser_dec(pe->w); ser_write(","); ser_dec(pe->h); ser_write(")");
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+static void gui_probe_cvdirty(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    block_id cid = b_canvas(0, 0, 64, 48);
+    block *b = btable_get(cid);
+    cv_fill_rect(cid, 0, 0, 64, 48, 0x1E1E26);
+    cv_dirty(cid, 10, 10, 20, 20);
+    cv_fill_rect(cid, 10, 10, 20, 20, 0x4C8DFF);
+    gui_frame();
+
+    /* 子矩形外不得出现蓝色像素；子矩形内必须是蓝色。 */
+    int outside_bad = 0, inside_miss = 0;
+    uint8_t *buf = b->buf;
+    for (int y = 0; y < 48; y++) {
+        for (int x = 0; x < 64; x++) {
+            uint8_t *p = buf + (y * 64 + x) * 3;
+            int blue = (p[0] == 0x4C && p[1] == 0x8D && p[2] == 0xFF);
+            int inside = x >= 10 && x < 30 && y >= 10 && y < 30;
+            if (!inside && blue) outside_bad++;
+            if (inside && !blue) inside_miss++;
+        }
+    }
+    int ok = outside_bad == 0 && inside_miss == 0;
+    ser_write("GUI:cvdirty outside_bad="); ser_dec(outside_bad);
+    ser_write(" inside_miss="); ser_dec(inside_miss);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+static void gui_probe_interact(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    blk_spec par = spec_panel(LAYER_WORK, 300, 200, 1);
+    block_id P = b_free(0, &par);
+    block *pp = btable_get(P);
+    pp->x = 50; pp->y = 50; pp->moved = 1;
+
+    /* 8 方向可缩放块：min 40，max 200。 */
+    blk_spec r = spec_panel(LAYER_WORK, 100, 80, 1);
+    r.resize_dir = RESIZE_L | RESIZE_R | RESIZE_T | RESIZE_B;
+    r.resize_min_w = 40; r.resize_min_h = 40;
+    r.resize_max_w = 200; r.resize_max_h = 200;
+    block_id R = b_rect(P, &r);
+    block *pr = btable_get(R);
+
+    /* 父框约束拖拽块。 */
+    blk_spec g = spec_panel(LAYER_WORK, 60, 60, 1);
+    g.drag_bounds = BOUND_PARENT; g.drag_mode = DRAG_FULL;
+    block_id G = b_rect(P, &g);
+    block *pg = btable_get(G);
+
+    layout_run();
+    int w0 = pr->w;
+
+    /* 右边缘 +50。 */
+    gui_inject_press(pr->x + pr->w - 3, pr->y + pr->h / 2);
+    gui_inject_move(pr->x + pr->w + 50, pr->y + pr->h / 2);
+    gui_inject_release();
+    int grew_r = pr->w > w0;
+
+    /* 左边缘左移 30：宽增大、原点左移。 */
+    int lw = pr->w, lx = pr->x;
+    gui_inject_press(pr->x + 3, pr->y + pr->h / 2);
+    gui_inject_move(pr->x - 30, pr->y + pr->h / 2);
+    gui_inject_release();
+    int grew_l = pr->w > lw && pr->x < lx;
+
+    /* 下边缘 +30。 */
+    int bh = pr->h;
+    gui_inject_press(pr->x + pr->w / 2, pr->y + pr->h - 3);
+    gui_inject_move(pr->x + pr->w / 2, pr->y + pr->h + 30);
+    gui_inject_release();
+    int grew_b = pr->h > bh;
+
+    /* 上边缘上移 20：高增大、原点上移。 */
+    int th = pr->h, ty = pr->y;
+    gui_inject_press(pr->x + pr->w / 2, pr->y + 3);
+    gui_inject_move(pr->x + pr->w / 2, pr->y - 20);
+    gui_inject_release();
+    int grew_t = pr->h > th && pr->y < ty;
+
+    /* min clamp：右下拖到极小，宽高不得低于 40。 */
+    gui_inject_press(pr->x + pr->w - 3, pr->y + pr->h - 3);
+    gui_inject_move(pr->x + 5, pr->y + 5);
+    gui_inject_release();
+    int min_ok = pr->w >= 40 && pr->h >= 40;
+
+    /* max clamp：右边缘继续拉宽，宽不得超过 200。 */
+    gui_inject_press(pr->x + pr->w - 3, pr->y + pr->h / 2);
+    gui_inject_move(pr->x + 400, pr->y + pr->h / 2);
+    gui_inject_release();
+    int max_ok = pr->w <= 200;
+
+    /* 父框约束拖拽：拖向父框外，必须夹回父框内。 */
+    gui_inject_press(pg->x + 10, pg->y + 10);
+    gui_inject_move(pp->x - 60, pp->y - 60);
+    gui_inject_release();
+    int clamped = pg->x >= pp->x && pg->y >= pp->y &&
+                  pg->x + pg->w <= pp->x + pp->w &&
+                  pg->y + pg->h <= pp->y + pp->h;
+
+    /* 偏移跨帧保持：再跑一轮布局，位置不得被重置。 */
+    int gx = pg->x, gy = pg->y;
+    layout_run();
+    int persist = pg->x == gx && pg->y == gy;
+
+    uint32_t measured = stat_layout_nodes();
+    uint32_t total = tree_count_nodes();
+    int ok = grew_r && grew_l && grew_b && grew_t && min_ok && max_ok &&
+             clamped && persist && measured <= total;
+
+    ser_write("GUI:interact grew_r="); ser_dec(grew_r);
+    ser_write(" grew_l="); ser_dec(grew_l);
+    ser_write(" grew_b="); ser_dec(grew_b);
+    ser_write(" grew_t="); ser_dec(grew_t);
+    ser_write(" min_ok="); ser_dec(min_ok);
+    ser_write(" max_ok="); ser_dec(max_ok);
+    ser_write(" clamped="); ser_dec(clamped);
+    ser_write(" persist="); ser_dec(persist);
+    ser_write(" measured="); ser_dec(measured);
+    ser_write(" total="); ser_dec(total);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 /* ---- 组件层自检探针 ------------------------------------------------------ */
 
 static void gui_probe_note(void) {
@@ -1019,12 +1277,16 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
+        if (!strcmp_probe(arg, "free"))    { gui_probe_free(); return; }
+        if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
+        if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
      * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）；
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
+    int free_dash = 0, free_side = 0, free_float = 0;
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
     int app_open = APP_NONE;
@@ -1038,6 +1300,9 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-reset")) shot_reset = 1;
     else if (!strcmp_probe(word, "shot-crop"))  shot_crop = 1;
     else if (!strcmp_probe(word, "shot-drag"))  shot_drag = 1;
+    else if (!strcmp_probe(word, "shot-free-dash"))  free_dash = 1;
+    else if (!strcmp_probe(word, "shot-free-sidebar")) free_side = 1;
+    else if (!strcmp_probe(word, "shot-free-float")) free_float = 1;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
@@ -1054,13 +1319,17 @@ void gui_shell_cmd(const char *arg) {
         con_write("gui: 进入图形块桌面失败\n");
         return;
     }
+    int free_sample = free_dash || free_side || free_float;
     gui_begin();
-    gui_demo_build();
-    if (shot_reset) { gui_reset(); gui_demo_build(); }
+    if (!free_sample) gui_demo_build();
+    if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
     if (shot_menu) gui_menu_open();
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();
+    if (free_dash)  shot_free_dash_build();
+    if (free_side)  shot_free_side_build();
+    if (free_float) shot_free_float_build();
     if (app_open == APP_NOTEPAD) gui_notepad_open(app_path[0] ? app_path : 0);
     if (app_open == APP_CANVAS)  gui_canvas_demo();
     if (app_open == APP_FILEMGR) gui_filemgr_open(app_path[0] ? app_path : 0);
@@ -1069,7 +1338,7 @@ void gui_shell_cmd(const char *arg) {
         if (app_path[0]) gui_browser_open(app_path);
         else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
     }
-    if (!shot_crop && !shot_drag) gui_frame();
+    if (!shot_crop && !shot_drag && !free_sample) gui_frame();
 
     gui_idle_loop();
 

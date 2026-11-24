@@ -16,6 +16,27 @@ typedef struct { int x0, y0, x1, y1; } clip_rect_t;
 static clip_rect_t clip_stack[CLIP_DEPTH];
 static int clip_depth;
 
+/* 平移栈（OVF_SCROLL 视口偏移；只改绘制落点，不改子块几何）。 */
+#define TRANS_DEPTH 8
+static int tr_stack[TRANS_DEPTH][2];
+static int tr_depth;
+
+static void paint_trans_push(int dx, int dy) {
+    if (tr_depth >= TRANS_DEPTH) return;
+    int px = tr_depth ? tr_stack[tr_depth - 1][0] : 0;
+    int py = tr_depth ? tr_stack[tr_depth - 1][1] : 0;
+    tr_stack[tr_depth][0] = px + dx;
+    tr_stack[tr_depth][1] = py + dy;
+    tr_depth++;
+}
+
+static void paint_trans_pop(void) {
+    if (tr_depth > 0) tr_depth--;
+}
+
+static int trans_x(void) { return tr_depth ? tr_stack[tr_depth - 1][0] : 0; }
+static int trans_y(void) { return tr_depth ? tr_stack[tr_depth - 1][1] : 0; }
+
 void paint_clip_push(int x, int y, int w, int h) {
     if (clip_depth >= CLIP_DEPTH) return;
     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
@@ -51,22 +72,30 @@ static int clip_rect(int *x, int *y, int *w, int *h) {
 }
 
 void gui_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
+    x -= trans_x(); y -= trans_y();
     if (!clip_rect(&x, &y, &w, &h)) return;
     gfx24_rect(x, y, w, h, rgb);
 }
 
-void gui_blit24(const uint8_t *src, int x, int y, int w, int h) {
+void gui_blit24_stride(const uint8_t *src, int x, int y, int w, int h,
+                       int stride) {
     if (!src || w <= 0 || h <= 0) return;
-    int sw = w, sh = h, ox = x, oy = y;
+    x -= trans_x(); y -= trans_y();
+    int ox = x, oy = y;
     if (!clip_rect(&x, &y, &w, &h)) return;
-    /* 裁剪后源指针按原始步进（sw 列）偏移到被保留的子矩形起点。 */
+    /* 裁剪后源指针按原始步进（stride 列）偏移到被保留的子矩形起点。 */
     const uint8_t *s = src +
-        ((uint32_t)(y - oy) * (uint32_t)sw + (uint32_t)(x - ox)) * 3u;
-    gfx24_blit_stride(s, x, y, w, h, sw);
+        ((uint32_t)(y - oy) * (uint32_t)stride + (uint32_t)(x - ox)) * 3u;
+    gfx24_blit_stride(s, x, y, w, h, stride);
+}
+
+void gui_blit24(const uint8_t *src, int x, int y, int w, int h) {
+    gui_blit24_stride(src, x, y, w, h, w);
 }
 
 void gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale) {
     if (!txt) return;
+    x -= trans_x(); y -= trans_y();
     if (scale != 2) scale = 1;
     int step = 8 * scale;
     for (const char *p = txt; *p; p++) {
@@ -169,7 +198,6 @@ void paint_node(block *b) {
     uint32_t fg = resolve_color(b, 0);
     uint32_t bg = resolve_color(b, 1);
     uint32_t accent = resolve_color(b, 2);
-    (void)accent;   /* v1 尚未消费强调色，保留解析链路 */
 
     switch (b->kind) {
     case BLK_RECT:
@@ -189,15 +217,23 @@ void paint_node(block *b) {
     case BLK_SURFACE:
         gui_blit24(b->pix, b->x, b->y, b->pix_w, b->pix_h);
         break;
-    case BLK_CANVAS:
-        gui_blit24(b->buf, b->x, b->y, b->pix_w, b->pix_h);
+    case BLK_CANVAS: {
+        int rx, ry, rw, rh;
+        if (cv_dirty_rect(b, &rx, &ry, &rw, &rh)) {
+            const uint8_t *s = b->buf +
+                ((uint32_t)ry * (uint32_t)b->pix_w + (uint32_t)rx) * 3u;
+            gui_blit24_stride(s, b->x + rx, b->y + ry, rw, rh, b->pix_w);
+            cv_dirty_clear(b);
+        }
         break;
+    }
     case BLK_DIVIDER:
         gui_fill_rect(b->x, b->y, b->w, 1, gui_active_style()->line);
         break;
     case BLK_COLUMN:
     case BLK_ROW:
     case BLK_STACK:
+    case BLK_FREE:
     case BLK_ROOT:
         if (b->st.bg || b->st.role_bg) gui_fill_rect(b->x, b->y, b->w, b->h, bg);
         break;
@@ -208,10 +244,26 @@ void paint_node(block *b) {
     /* 组件自绘：在默认绘制之后、本块裁剪框内回调；回调只打脏位。 */
     if (b->render) b->render(b->id);
 
-    paint_clip_push(b->x, b->y, b->w, b->h);
-    for (block *c = b->first_child; c; c = c->next_sibling)
+    /* hover 高亮：可缩放/整块可拖的块，悬停走令牌 accent 描边，不硬编码配色。 */
+    block *hov = gui_hover_target();
+    if (hov == b && (b->resize_dir || b->drag_mode == DRAG_FULL))
+        gui_draw_border(b->x, b->y, b->w, b->h, accent, 1);
+
+    /* 裁剪口径：OVF_VISIBLE 不压自身框（越界仍绘制）；CLIP/SCROLL 压框。
+     * SCROLL 额外压平移栈，内容按 scroll 偏移平移，子块几何不动。 */
+    int clip_self = (b->overflow != OVF_VISIBLE);
+    if (clip_self) paint_clip_push(b->x, b->y, b->w, b->h);
+    if (b->overflow == OVF_SCROLL)
+        paint_trans_push(b->scroll_x, b->scroll_y);
+    for (block *c = b->first_child; c; c = c->next_sibling) {
+        /* 层高于父级的块（CHROME/OVERLAY/TOAST 浮层）不受父框裁剪。 */
+        int escape = c->layer > b->layer;
+        if (escape && clip_self) paint_clip_pop();
         paint_node(c);
-    paint_clip_pop();
+        if (escape && clip_self) paint_clip_push(b->x, b->y, b->w, b->h);
+    }
+    if (b->overflow == OVF_SCROLL) paint_trans_pop();
+    if (clip_self) paint_clip_pop();
 
     b->dirty_paint = 0;
     b->snap = 0;
@@ -228,8 +280,12 @@ void paint_node_clipped(block *b) {
     for (block *p = b->parent; p && p->parent && n < CLIP_DEPTH - 1;
          p = p->parent)
         chain[n++] = p;
-    for (int k = n - 1; k >= 0; k--)
-        paint_clip_push(chain[k]->x, chain[k]->y, chain[k]->w, chain[k]->h);
+    for (int k = n - 1; k >= 0; k--) {
+        block *p = chain[k];
+        if (p->overflow == OVF_VISIBLE) continue;   /* 显式放开裁剪 */
+        if (b->layer > p->layer) continue;         /* 浮层逃逸父框 */
+        paint_clip_push(p->x, p->y, p->w, p->h);
+    }
     paint_node(b);
     while (clip_depth > depth0)
         paint_clip_pop();

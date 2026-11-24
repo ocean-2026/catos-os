@@ -165,11 +165,16 @@ void gui_frame(void) {
     dmg_reset();
     paint_begin_frame();
 
-    /* 第一遍：收集脏块矩形（v1 记当前矩形），合并成 damage 链表。 */
+    /* 第一遍：收集脏块矩形（v1 记当前矩形），合并成 damage 链表。
+     * OVF_VISIBLE 子块的脏区并入父块脏区：移出父框后旧位置由父底色补齐，
+     * 防止残影；再按裁剪栈只在屏内裁。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
-        if (b->snap)
-            dmg_add(b->x, b->y, b->w, b->h);
+        if (!b->snap) continue;
+        dmg_add(b->x, b->y, b->w, b->h);
+        if (b->overflow == OVF_VISIBLE && b->parent)
+            dmg_add(b->parent->x, b->parent->y,
+                    b->parent->w, b->parent->h);
     }
 
     /* 第二遍：只重绘本帧脏节点。干净节点即使与 damage 相交也不整节点

@@ -9,11 +9,11 @@
 #include "gui_int.h"
 #include "mouse.h"
 #include "keyboard.h"
+#include "gfx24.h"
 
 #define DRAG_NONE   0
 #define DRAG_MOVE   1
 #define DRAG_RESIZE 2
-#define HANDLE      12
 #define TITLE_H     24
 
 static int       exit_requested;
@@ -22,7 +22,11 @@ static block    *focus_stack[4];
 static int       focus_n;
 static block    *drag_block;
 static int       drag_mode;
+static uint8_t   drag_resize_dir;
 static int       drag_off_x, drag_off_y;
+static block    *hover_block;
+
+block *gui_hover_target(void) { return hover_block; }
 
 /* 组件键盘钩子：返回 1 表示消费该键，默认 Esc 退出路径不再触发。 */
 static int       (*key_hook)(int code, void *ud);
@@ -36,6 +40,17 @@ void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
 static int inside(block *b, int x, int y) {
     return x >= b->x && x < b->x + b->w &&
            y >= b->y && y < b->y + b->h;
+}
+
+/* 命中与视觉同真：祖先为 CLIP/SCROLL 且本块层不高于祖先时，点必须落在
+ * 祖先框内；OVF_VISIBLE 放开；层高于父级的浮层逃逸父框。 */
+static int hit_allowed(block *b, int x, int y) {
+    for (block *p = b->parent; p; p = p->parent) {
+        if (b->layer > p->layer) continue;
+        if (p->overflow == OVF_VISIBLE) continue;
+        if (!inside(p, x, y)) return 0;
+    }
+    return 1;
 }
 
 #define HIT_MAX 256
@@ -74,9 +89,58 @@ static block *hit_test(int x, int y) {
             int td = hit_depth[i]; hit_depth[i] = hit_depth[best];
             hit_depth[best] = td;
         }
-        if (inside(hit_list[i], x, y)) return hit_list[i];
+        if (inside(hit_list[i], x, y) && hit_allowed(hit_list[i], x, y))
+            return hit_list[i];
     }
     return 0;
+}
+
+/* ---- v2 声明式手势：resize 边缘带 > 拖拽带 > 子块命中 ------------- */
+
+static uint8_t resize_dir_at(block *b, int x, int y) {
+    uint8_t dir = b->resize_dir ? b->resize_dir : (RESIZE_R | RESIZE_B);
+    int edge = b->resize_edge ? b->resize_edge : 6;
+    uint8_t d = 0;
+    if ((dir & RESIZE_L) && x < b->x + edge)            d |= RESIZE_L;
+    if ((dir & RESIZE_R) && x >= b->x + b->w - edge)    d |= RESIZE_R;
+    if ((dir & RESIZE_T) && y < b->y + edge)            d |= RESIZE_T;
+    if ((dir & RESIZE_B) && y >= b->y + b->h - edge)    d |= RESIZE_B;
+    return d;
+}
+
+static int in_resize_band(block *b, int x, int y) {
+    return resize_dir_at(b, x, y) != 0;
+}
+
+/* 沿父链解析手势归属：先扫所有祖先的 resize 边缘带，再扫拖拽带。
+ * 返回作用块；*mode 为 DRAG_NONE/MOVE/RESIZE，*rdir 填缩放方向位。 */
+static block *resolve_interaction(block *b, int x, int y,
+                                  int *mode, uint8_t *rdir) {
+    *mode = DRAG_NONE; *rdir = 0;
+    for (block *cur = b; cur; cur = cur->parent) {
+        if (in_resize_band(cur, x, y)) {
+            *mode = DRAG_RESIZE;
+            *rdir = resize_dir_at(cur, x, y);
+            return cur;
+        }
+    }
+    for (block *cur = b; cur; cur = cur->parent) {
+        /* drag_mode=0 回落标题带拖拽（v1 兼容默认；v2 可显式声明整块/不可拖）。 */
+        uint8_t dm = cur->drag_mode ? cur->drag_mode : DRAG_TITLE;
+        if (dm == DRAG_FULL) {
+            *mode = DRAG_MOVE; return cur;
+        }
+        if (dm == DRAG_TITLE && y < cur->y + TITLE_H) {
+            *mode = DRAG_MOVE; return cur;
+        }
+    }
+    return b;
+}
+
+static int clamp_step(int v, int step) {
+    if (step <= 0) return v;
+    int r = v % step;
+    return r >= step / 2 ? v - r + step : v - r;
 }
 
 static void focus_set(block *b) {
@@ -102,13 +166,14 @@ static void on_press(int x, int y) {
     }
     if (b->focusable) focus_set(b);
 
-    int rx = b->x + b->w, ry = b->y + b->h;
-    if (x >= rx - HANDLE && y >= ry - HANDLE) {
-        drag_block = b; drag_mode = DRAG_RESIZE;
-        drag_off_x = x - b->x; drag_off_y = y - b->y;
-    } else if (y < b->y + TITLE_H) {
-        drag_block = b; drag_mode = DRAG_MOVE;
-        drag_off_x = x - b->x; drag_off_y = y - b->y;
+    int mode; uint8_t rdir;
+    block *act = resolve_interaction(b, x, y, &mode, &rdir);
+    if (mode == DRAG_RESIZE) {
+        drag_block = act; drag_mode = DRAG_RESIZE; drag_resize_dir = rdir;
+        drag_off_x = x - act->x; drag_off_y = y - act->y;
+    } else if (mode == DRAG_MOVE) {
+        drag_block = act; drag_mode = DRAG_MOVE;
+        drag_off_x = x - act->x; drag_off_y = y - act->y;
     }
     if (b->on_click) b->on_click(b->id, x - b->x, y - b->y);
 }
@@ -117,19 +182,56 @@ static void on_drag_move(int x, int y) {
     if (!drag_block) return;
     block *b = drag_block;
     if (drag_mode == DRAG_MOVE) {
-        b->x = x - drag_off_x;
-        b->y = y - drag_off_y;
-        if (b->on_drag) b->on_drag(b->id, x - b->x, y - b->y, 1);
+        int nx = x - drag_off_x, ny = y - drag_off_y;
+        /* drag_bounds：0 不限 / 1 父框 / 2 屏幕。 */
+        if (b->drag_bounds == BOUND_SCREEN) {
+            if (nx < 0) nx = 0;
+            if (ny < 0) ny = 0;
+            if (nx + b->w > GFX24_W) nx = GFX24_W - b->w;
+            if (ny + b->h > GFX24_H) ny = GFX24_H - b->h;
+        } else if (b->drag_bounds == BOUND_PARENT && b->parent) {
+            block *p = b->parent;
+            int px = p->x + p->pad_l, py = p->y + p->pad_t;
+            int pw = p->w - p->pad_l - p->pad_r;
+            int ph = p->h - p->pad_t - p->pad_b;
+            if (nx < px) nx = px;
+            if (ny < py) ny = py;
+            if (nx + b->w > px + pw) nx = px + pw - b->w;
+            if (ny + b->h > py + ph) ny = py + ph - b->h;
+        }
+        /* 只改声明几何 / 偏移属性，不直接写像素。 */
+        b->x = nx; b->y = ny;
+        b->pos_x = nx; b->pos_y = ny;
+        b->moved = 1;
+        if (b->on_drag) b->on_drag(b->id, 0, 0, 1);
+        /* VISIBLE 子块移动：父块脏区并入，旧位置由父底色补齐防残影。 */
+        if (b->overflow == OVF_VISIBLE && b->parent)
+            b->parent->dirty_paint = 1;
     } else if (drag_mode == DRAG_RESIZE) {
-        int nw = x - b->x, nh = y - b->y;
-        if (nw < 24) nw = 24;
-        if (nh < 24) nh = 24;
+        uint8_t d = drag_resize_dir;
+        int nl = b->x, nt = b->y, nr = b->x + b->w, nb = b->y + b->h;
+        if (d & RESIZE_L) nl = x;
+        if (d & RESIZE_R) nr = x;
+        if (d & RESIZE_T) nt = y;
+        if (d & RESIZE_B) nb = y;
+        int nw = nr - nl, nh = nb - nt;
+        int minw = b->resize_min_w ? b->resize_min_w : 24;
+        int minh = b->resize_min_h ? b->resize_min_h : 24;
+        if (nw < minw) nw = minw;
+        if (nh < minh) nh = minh;
+        if (b->resize_max_w && nw > b->resize_max_w) nw = b->resize_max_w;
+        if (b->resize_max_h && nh > b->resize_max_h) nh = b->resize_max_h;
+        nw = clamp_step(nw, b->resize_step);
+        nh = clamp_step(nh, b->resize_step);
+        if (d & RESIZE_L) nl = nr - nw;
+        if (d & RESIZE_T) nt = nb - nh;
+        b->x = nl; b->y = nt; b->w = nw; b->h = nh;
         b->req_w = nw; b->req_h = nh;
+        b->moved = 1;
         if (b->on_drag) b->on_drag(b->id, nw, nh, 1);
     }
     b->dirty_layout = 1;
     b->dirty_paint = 1;
-    b->moved = 1;
 }
 
 static void on_release(void) {
@@ -145,6 +247,7 @@ void gui_pump_input(void) {
         if (e.down && (e.changed & MOUSE_BTN_LEFT)) on_press(e.x, e.y);
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
             if (drag_mode != DRAG_NONE) on_release();
+            else hover_block = hit_test(e.x, e.y);
         } else if (drag_block) {
             on_drag_move(e.x, e.y);
         }
@@ -179,6 +282,18 @@ void gui_inject_release(void)        { on_release(); }
 block_id gui_hit_test(int x, int y) {
     block *b = hit_test(x, y);
     return b ? b->id : 0;
+}
+
+/* 探针复用：解析某点的手势归属（resize 边缘带 > 拖拽带 > 子块命中）。
+ * 返回内部模式 DRAG_NONE/MOVE/RESIZE；*out 填作用块 id，*rdir 填缩放方向。 */
+int gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir) {
+    block *b = hit_test(x, y);
+    if (!b) { if (out) *out = 0; if (rdir) *rdir = 0; return DRAG_NONE; }
+    int mode; uint8_t d;
+    block *act = resolve_interaction(b, x, y, &mode, &d);
+    if (out) *out = act ? act->id : 0;
+    if (rdir) *rdir = d;
+    return mode;
 }
 
 /* 供探针 / M3 使用：模态块出现时向下层块设 inert。 */
