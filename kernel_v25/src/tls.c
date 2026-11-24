@@ -183,6 +183,7 @@ static int ecdsa_mode;                /* negotiated suite keys ECDSA */
 static uint8_t ecdsa_pub[64];         /* leaf cert ECDSA P-256 point X||Y */
 static int     have_ecdsa_pub;
 static uint8_t c_ckey[32], s_ckey[32]; /* ChaCha write keys */
+static uint8_t c_civ[12], s_civ[12];    /* ChaCha write IVs (RFC 7905 12B fixed IV) */
 static uint8_t c_salt[4], s_salt[4];
 
 static void gf_mul128(uint8_t Y[16], const uint8_t H[16]) {
@@ -276,6 +277,7 @@ static int protect_record(int rec_type, const uint8_t *plain, int plen) {
         uint8_t nonce[12], tag[16];
         for (int i = 0; i < 4; i++) nonce[i] = 0;
         memcpy(nonce + 4, seqbe, 8);
+        for (int i = 0; i < 12; i++) nonce[i] ^= c_civ[i];
         tls_chacha_poly_seal(c_ckey, nonce, mac_hdr, 13, plain, plen,
                              g_enc_out, tag);
         int rn = 0;
@@ -355,6 +357,7 @@ static int app_recv(const uint8_t *payload, int plen, int rec_type,
         for (int i = 0; i < 8; i++) seqbe[i] = (uint8_t)(sseq >> (56 - 8 * i));
         for (int i = 0; i < 4; i++) nonce[i] = 0;
         memcpy(nonce + 4, seqbe, 8);
+        for (int i = 0; i < 12; i++) nonce[i] ^= s_civ[i];
         memcpy(aad, seqbe, 8);
         aad[8] = (uint8_t)rec_type; aad[9] = 0x03; aad[10] = 0x03;
         aad[11] = (uint8_t)(ct_len >> 8); aad[12] = (uint8_t)ct_len;
@@ -607,7 +610,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
      * || extensions: supported_groups(secp256r1).  The groups extension is
      * required: without it OpenSSL 3.0 aborts the ECDHE handshake with a
      * handshake_failure alert. */
-    uint8_t ch[256];
+    uint8_t ch[384];
     int cn = 0;
     ch[cn++] = 0x03; ch[cn++] = 0x03;
     uint8_t crandom[32]; crypto_random(crandom, 32);
@@ -615,26 +618,39 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     ch[cn++] = 0;                              /* session id len */
     /* Offer ECDSA/RSA ChaCha20-Poly1305 first (modern CDNs prefer it),
      * then the AES-GCM and AES-CBC suites from earlier revisions. */
-    ch[cn++] = 0x00; ch[cn++] = 0x08;
+    /* Offer every suite this client can actually complete: ECDSA-first so
+     * ECDSA-only edges (example.com behind its EC cert) find a match, then
+     * the RSA variants, then the legacy CBC fallback. */
+    ch[cn++] = 0x00; ch[cn++] = 0x0A;
     ch[cn++] = 0xCC; ch[cn++] = 0xA9;   /* ECDHE-ECDSA-CHACHA20-POLY1305 */
+    ch[cn++] = 0xC0; ch[cn++] = 0x2B;   /* ECDHE-ECDSA-AES128-GCM-SHA256 */
     ch[cn++] = 0xCC; ch[cn++] = 0xA8;   /* ECDHE-RSA-CHACHA20-POLY1305 */
-    ch[cn++] = 0xC0; ch[cn++] = 0x2F;
-    ch[cn++] = 0xC0; ch[cn++] = 0x27;
+    ch[cn++] = 0xC0; ch[cn++] = 0x2F;   /* ECDHE-RSA-AES128-GCM-SHA256 */
+    ch[cn++] = 0xC0; ch[cn++] = 0x27;   /* ECDHE-RSA-AES128-CBC-SHA256 */
     ch[cn++] = 0x01; ch[cn++] = 0x00;         /* compression: null */
     int ext_len_pos = cn; ch[cn++] = 0x00; ch[cn++] = 0x00;
     /* supported_groups: secp256r1 only. */
     ch[cn++] = 0x00; ch[cn++] = 0x0A;
     ch[cn++] = 0x00; ch[cn++] = 0x04;
-    ch[cn++] = 0x00; ch[cn++] = 0x01;
+    ch[cn++] = 0x00; ch[cn++] = 0x02;      /* list length in bytes = 2 (one group) */
     ch[cn++] = 0x00; ch[cn++] = 0x17;
     /* signature_algorithms: RSA-PKCS1-SHA256, ECDSA-secp256r1-SHA256,
      * RSA-PSS-SHA256. */
+    /* signature_algorithms: the OpenSSL 3 default set (20 algs). A 3-entry
+     * list (rsa_pkcs1_sha256/ecdsa_secp256r1_sha256/rsa_pss_rsae_sha256) is
+     * rejected by Cloudflare-class edges with alert 40: their RSA edge cert
+     * wants SHA-384, which the short list does not advertise. */
     ch[cn++] = 0x00; ch[cn++] = 0x0D;
-    ch[cn++] = 0x00; ch[cn++] = 0x08;
-    ch[cn++] = 0x00; ch[cn++] = 0x03;
-    ch[cn++] = 0x04; ch[cn++] = 0x01;
-    ch[cn++] = 0x03; ch[cn++] = 0x03;
-    ch[cn++] = 0x08; ch[cn++] = 0x04;
+    ch[cn++] = 0x00; ch[cn++] = 0x2A;
+    ch[cn++] = 0x00; ch[cn++] = 0x28;
+    static const uint8_t sigalgs[40] = {
+        0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x07,
+        0x08, 0x08, 0x08, 0x09, 0x08, 0x0A, 0x08, 0x0B,
+        0x08, 0x04, 0x08, 0x05, 0x08, 0x06, 0x04, 0x01,
+        0x05, 0x01, 0x06, 0x01, 0x03, 0x03, 0x03, 0x01,
+        0x03, 0x02, 0x04, 0x02, 0x05, 0x02, 0x06, 0x02
+    };
+    for (int i = 0; i < 40; i++) ch[cn++] = sigalgs[i];
     /* SNI: virtual-host sites (and most CDNs) reject a ClientHello without
      * it, which is why https://baidu.com failed before this. */
     {
@@ -647,6 +663,30 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         ch[cn++] = 0x00; ch[cn++] = (uint8_t)hl;
         for (int i = 0; i < hl; i++) ch[cn++] = (uint8_t)host[i];
     }
+    /* ec_point_formats(0x000B): uncompressed only. Strict edges (Apple/Cloudflare
+     * fronts) reject an ECDHE ClientHello that omits it. */
+    ch[cn++] = 0x00; ch[cn++] = 0x0B;
+    ch[cn++] = 0x00; ch[cn++] = 0x02;
+    ch[cn++] = 0x01; ch[cn++] = 0x00;
+    /* session_ticket(0x0023): empty = "no ticket", but the extension itself
+     * must be present for several CDN edges. */
+    ch[cn++] = 0x00; ch[cn++] = 0x23;
+    ch[cn++] = 0x00; ch[cn++] = 0x00;
+    /* ALPN(0x0010): http/1.1 + http/1.0 so edges that require ALPN negotiate
+     * an HTTP/1.x protocol instead of alerting. */
+    ch[cn++] = 0x00; ch[cn++] = 0x10;
+    ch[cn++] = 0x00; ch[cn++] = 0x14;
+    ch[cn++] = 0x00; ch[cn++] = 0x12;
+    ch[cn++] = 0x08; ch[cn++] = 'h'; ch[cn++] = 't'; ch[cn++] = 't';
+    ch[cn++] = 'p';  ch[cn++] = '/'; ch[cn++] = '1'; ch[cn++] = '.';
+    ch[cn++] = '1';
+    ch[cn++] = 0x08; ch[cn++] = 'h'; ch[cn++] = 't'; ch[cn++] = 't';
+    ch[cn++] = 'p';  ch[cn++] = '/'; ch[cn++] = '1'; ch[cn++] = '.';
+    ch[cn++] = '0';
+    /* renegotiation_info(0xFF01): empty, the safe Secure-Renegotiation answer. */
+    ch[cn++] = 0xFF; ch[cn++] = 0x01;
+    ch[cn++] = 0x00; ch[cn++] = 0x01;
+    ch[cn++] = 0x00;
     {
         int extlen = cn - ext_len_pos - 2;
         ch[ext_len_pos] = (uint8_t)(extlen >> 8);
@@ -665,7 +705,8 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         int off = 35 + sid_len;
         if (off + 1 >= blen) return -6;
         uint16_t suite = ((uint16_t)body[off] << 8) | body[off + 1];
-        if (suite == CS_ECDHE_RSA_AES128_GCM_SHA256) { gcm_on = 1; }
+        if (suite == 0xC02B) { gcm_on = 1; ecdsa_mode = 1; }
+        else if (suite == CS_ECDHE_RSA_AES128_GCM_SHA256) { gcm_on = 1; }
         else if (suite == CS_ECDHE_RSA_AES128_CBC_SHA256) { gcm_on = 0; }
         else if (suite == CS_ECDHE_RSA_CHACHA20_POLY1305_SHA256) { chacha_on = 1; }
         else if (suite == CS_ECDHE_ECDSA_CHACHA20_POLY1305_SHA256) {
@@ -734,9 +775,11 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     uint8_t rand64b[64];
     memcpy(rand64b, srandom, 32); memcpy(rand64b + 32, crandom, 32);
     if (chacha_on) {
-        /* ChaCha20-Poly1305: 32-byte key per direction, no MAC/IV material. */
-        tls_prf(kb, 64, master, 48, "key expansion", rand64b, 64);
+        /* ChaCha20-Poly1305: 32-byte key + 12-byte fixed IV per direction
+         * (RFC 7905: fixed_iv_length = 12, record_iv_length = 0). */
+        tls_prf(kb, 88, master, 48, "key expansion", rand64b, 64);
         memcpy(c_ckey, kb + 0, 32);  memcpy(s_ckey, kb + 32, 32);
+        memcpy(c_civ, kb + 64, 12);  memcpy(s_civ, kb + 76, 12);
     } else if (gcm_on) {
         /* AEAD: 16-byte key + 4-byte implicit IV per direction, no MAC keys. */
         tls_prf(kb, 40, master, 48, "key expansion", rand64b, 64);
