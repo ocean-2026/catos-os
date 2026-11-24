@@ -23,7 +23,8 @@ typedef uint32_t block_id;          /* 0 = 无效；>=1 全局唯一 */
 typedef enum {
     BLK_ROOT = 0, BLK_COLUMN, BLK_ROW, BLK_STACK,   /* 容器 */
     BLK_TEXT, BLK_RECT, BLK_IMAGE, BLK_SURFACE,      /* 叶 */
-    BLK_SPACER, BLK_DIVIDER, BLK_CANVAS
+    BLK_SPACER, BLK_DIVIDER, BLK_CANVAS,
+    BLK_BUTTON, BLK_INPUT
 } blk_kind;
 
 typedef struct block {
@@ -136,6 +137,8 @@ struct style {
 ## 7. 内容协议 v1（应用怎么画进来）
 
 - `BLK_SURFACE`：一块 24bpp、不透明的像素缓冲 + 尺寸；内核合成时 1:1 blit，超出裁剪，不缩放、不做 alpha。
+- `BLK_BUTTON`：单行按钮，绘制底/边/居中文案，聚焦（按压）时反色反馈；点击冒泡到自身 `on_click`。
+- `BLK_INPUT`：单行输入框，聚焦后接管键盘（可打印字符 / Backspace / Left/Right / Home/End），绘制文本与光标竖线，Enter 触发 `on_submit`；v1 单实例，复用现有全局 key_hook 路径。
 - v1 供给方只有内核内模块（任务栏时钟、demo 应用）。CE 侧接入留到 v2：新增 ABI 槽位 `gui_surface_attach(w,h)->ptr` + `gui_surface_dirty(rect)`，由 `gui/compose` 在读帧时检测 dirty 队列；**v1 不实现**，但结构体与 API 预留。
 - 该协议是 v1 唯一的"应用内容"通道；块节点化（应用直接建块）留 v2。
 

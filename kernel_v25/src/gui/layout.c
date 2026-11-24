@@ -18,10 +18,11 @@ static int text_len(const char *s) {
 }
 
 static int leaf_natural_w(block *b) {
-    if (b->kind == BLK_TEXT) {
+    if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
         return 8 * (int)sc * text_len(b->text);
     }
+    if (b->kind == BLK_INPUT) return 80;
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
         b->kind == BLK_CANVAS)
         return b->pix_w;
@@ -31,7 +32,8 @@ static int leaf_natural_w(block *b) {
 }
 
 static int leaf_natural_h(block *b) {
-    if (b->kind == BLK_TEXT) {
+    if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON ||
+        b->kind == BLK_INPUT) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
         return 16 * (int)sc;
     }

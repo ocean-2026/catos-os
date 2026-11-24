@@ -111,6 +111,10 @@ static void on_press(int x, int y) {
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
 
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。 */
+    if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
+    else if (ib_is_active())           gui_set_key_hook(0, 0);
+
     int rx = t->x + t->w, ry = t->y + t->h;
     if (x >= rx - HANDLE && y >= ry - HANDLE) {
         drag_block = t; drag_mode = DRAG_RESIZE;

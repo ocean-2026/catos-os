@@ -109,6 +109,23 @@ block_id b_space(block_id parent, int w, int h) {
     return b ? b->id : 0;
 }
 
+block_id b_button(block_id parent, const blk_spec *s, const char *txt) {
+    blk_spec local = spec_or_inherit(parent, s);
+    local.text = txt;
+    block *b = create_block(BLK_BUTTON, parent, &local);
+    return b ? b->id : 0;
+}
+
+block_id b_input(block_id parent, const blk_spec *s,
+                 void (*on_submit)(block_id id, const char *text)) {
+    blk_spec local = spec_or_inherit(parent, s);
+    if (!local.focusable) local.focusable = 1;   /* 输入框必须可聚焦接管键盘 */
+    block *b = create_block(BLK_INPUT, parent, &local);
+    if (!b) return 0;
+    ib_attach(b->id, on_submit);
+    return b->id;
+}
+
 void b_set_props(block_id id, const blk_spec *s) {
     block *b = btable_get(id);
     if (!b) return;

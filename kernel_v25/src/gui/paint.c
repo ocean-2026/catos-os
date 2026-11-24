@@ -195,6 +195,28 @@ void paint_node(block *b) {
     case BLK_DIVIDER:
         gui_fill_rect(b->x, b->y, b->w, 1, gui_active_style()->line);
         break;
+    case BLK_BUTTON: {
+        uint32_t bgc = bg, fgc = fg;
+        if (b->focused) { fgc = bg; bgc = fg; }   /* 按压/聚焦反色反馈 */
+        gui_fill_rect(b->x, b->y, b->w, b->h, bgc);
+        if (b->st.border_w)
+            gui_draw_border(b->x, b->y, b->w, b->h,
+                            gui_active_style()->border, b->st.border_w);
+        char buf[160];
+        text_trimmed(b->text, b->w, b->st.scale, buf, sizeof(buf));
+        int blen = 0; while (buf[blen]) blen++;
+        uint8_t sc = b->st.scale ? b->st.scale : 1;
+        int tx = b->x + (b->w - 8 * sc * blen) / 2;
+        int ty = b->y + (b->h - 16 * sc) / 2;
+        gui_draw_text(tx, ty, buf, fgc, sc);
+        break;
+    }
+    case BLK_INPUT:
+        gui_fill_rect(b->x, b->y, b->w, b->h, bg);
+        if (b->st.border_w)
+            gui_draw_border(b->x, b->y, b->w, b->h,
+                            gui_active_style()->border, b->st.border_w);
+        break;
     case BLK_COLUMN:
     case BLK_ROW:
     case BLK_STACK:

@@ -13,6 +13,7 @@
 #include "serial_log.h"
 #include "task.h"
 #include "kstring.h"
+#include "fs.h"
 
 static void geom_walk(block *b);
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly);
@@ -194,6 +195,92 @@ static block_id demo_add_sample(void) {
     return sample;
 }
 
+/* ---- /Desktop 图标列 ------------------------------------------------------- */
+
+#define DESK_MAX_ITEMS 6
+static char desk_names[DESK_MAX_ITEMS][FS_NAME_MAX];
+static int  desk_n;
+
+static int desk_xlen(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
+
+static void desk_copy(char *d, int cap, const char *s) {
+    int k = 0;
+    while (s[k] && k < cap - 1) { d[k] = s[k]; k++; }
+    d[k] = 0;
+}
+
+static int desk_ext_is(const char *name, const char *ext) {
+    int dot = -1, n = desk_xlen(name);
+    for (int k = 0; k < n; k++) if (name[k] == '.') dot = k;
+    if (dot < 0) return 0;
+    const char *e = name + dot;
+    for (int i = 0; ext[i]; i++) {
+        char a = e[i], b = ext[i];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b) return 0;
+    }
+    return e[desk_xlen(ext)] == 0;
+}
+
+static void desk_open_entry(int i) {
+    char nm[FS_NAME_MAX];
+    desk_copy(nm, sizeof(nm), desk_names[i]);
+    int n = desk_xlen(nm);
+    int is_dir = n && nm[n - 1] == '/';
+    if (is_dir) nm[--n] = 0;
+    char path[FS_PATH_MAX];
+    desk_copy(path, sizeof(path), "/Desktop/");
+    /* xcat 等价拼接 */
+    { int o = desk_xlen(path); int k = 0;
+      while (nm[k] && o < (int)sizeof(path) - 1) path[o++] = nm[k++];
+      path[o] = 0; }
+
+    if (is_dir)                       { gui_filemgr_open(path); return; }
+    if (desk_ext_is(nm, "txt"))       { gui_notepad_open(path); return; }
+    if (desk_ext_is(nm, "bmp") || desk_ext_is(nm, "ppm"))
+                                      { gui_images_open(path); return; }
+}
+
+static void desk_icon_click(block_id id, int32_t lx, int32_t ly) {
+    (void)lx; (void)ly;
+    block *b = btable_get(id);
+    if (!b) return;
+    int i = (int)b->z;
+    if (i < 0 || i >= desk_n) return;
+    desk_open_entry(i);
+}
+
+static void build_desktop_icons(block_id root_id) {
+    fs_mkdir("/Desktop");   /* 已存在则忽略 */
+    char names[DESK_MAX_ITEMS][FS_NAME_MAX];
+    int n = fs_enum_entries("/Desktop", names, DESK_MAX_ITEMS);
+    if (n < 0) n = 0;
+    desk_n = n;
+
+    blk_spec col = spec_panel(LAYER_WORK, 120, 0, 0);
+    col.gap = 4; col.pad_l = 4; col.pad_r = 4;
+    block_id col_id = b_column(root_id, &col);
+    block *pc = btable_get(col_id);
+    pc->x = GFX24_W - 132; pc->y = 64; pc->moved = 1;
+
+    if (n == 0) {
+        blk_spec t = spec_panel(LAYER_WORK, 112, 16, 0);
+        b_text(col_id, &t, "Desktop folder is empty");
+    } else {
+        for (int i = 0; i < n; i++) {
+            desk_copy(desk_names[i], FS_NAME_MAX, names[i]);
+            blk_spec icon = spec_panel(LAYER_WORK, 112, 32, 1);
+            icon.on_click = desk_icon_click;
+            icon.z = i;
+            icon.align_cross = XALN_CENTER;
+            block_id ic = b_row(col_id, &icon);
+            b_text(ic, 0, desk_names[i]);
+        }
+    }
+    ser_write("GUI:desk items="); ser_dec((uint32_t)n); ser_write("\n");
+}
+
 static void clock_refresh(int force) {
     rtc_time_t t;
     rtc_read(&t);
@@ -251,6 +338,8 @@ void gui_demo_build(void) {
     clk_txt.align_cross = XALN_CENTER;
     clock_text_blk = b_text(clock_row, &clk_txt, "00:00:00");
     clock_refresh(1);
+
+    build_desktop_icons(root_id);
 }
 
 /* ---- 开始菜单（LAYER_OVERLAY，模态） ---------------------------------- */
@@ -309,19 +398,19 @@ void gui_menu_open(void) {
     if (menu_open) return;
     block_id root_id = gui_root_block()->id;
 
-    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 0, 0);
+    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 0, 2);
     menu.pad_l = 4; menu.pad_r = 4; menu.pad_t = 4; menu.pad_b = 4; menu.gap = 2;
     menu_root = b_column(root_id, &menu);
     block *mr = btable_get(menu_root);
-    mr->x = 8;
-    mr->y = 400;
+    mr->x = 12;
+    mr->y = 396;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
 
     block_id menu_ids[32];
     int n = menu_collect(menu_ids, 32);
     static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
     for (int i = 0; i < n; i++) {
-        blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+        blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         row.on_click = on_menu_row;
         row.z = (int32_t)menu_ids[i];
         block_id rid = b_row(menu_root, &row);
@@ -331,14 +420,14 @@ void gui_menu_open(void) {
 
     static const char *app_labels[5] = { "Notepad", "Canvas demo", "Files", "Images", "Browser" };
     for (int a = 0; a < 5; a++) {
-        blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+        blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
         app.z = -(a + 1);
         block_id aid = b_row(menu_root, &app);
         b_text(aid, 0, app_labels[a]);
     }
 
-    blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+    blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 1);
     launch.on_click = on_menu_row;
     launch.z = 0;
     block_id lid = b_row(menu_root, &launch);

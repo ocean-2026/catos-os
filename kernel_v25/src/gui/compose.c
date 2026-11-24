@@ -274,6 +274,7 @@ void gui_begin(void) {
     gui_filemgr_close();
     gui_images_close();
     gui_browser_close();
+    ib_reset();
     gui_input_reset();
     gui_chrome_reset();
     gui_reset();

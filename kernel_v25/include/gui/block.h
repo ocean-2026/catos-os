@@ -27,7 +27,9 @@ typedef enum {
     BLK_SURFACE,
     BLK_SPACER,
     BLK_DIVIDER,
-    BLK_CANVAS
+    BLK_CANVAS,
+    BLK_BUTTON,
+    BLK_INPUT
 } blk_kind;
 
 /* 主轴对齐（COLUMN 纵向 / ROW 横向） */
