@@ -33,6 +33,13 @@ if [ "${BENCH:-0}" = "1" ]; then
     echo "== bench build: -DCATOS_BENCH =="
 fi
 
+# 桌面自启动（GUI_AUTOSTART=1）：盘内无 /etc/autostart 时开机进块桌面。
+# 默认 0：门禁 / 探针镜像必须停在 shell prompt，不能被自动进桌面冻掉。
+if [ "${GUI_AUTOSTART:-0}" = "1" ]; then
+    CFLAGS="$CFLAGS -DGUI_AUTOSTART=1"
+    echo "== autostart build: GUI_AUTOSTART=1 =="
+fi
+
 # find a working python (needed for the built-in ISO generator and for
 # embedding the CE apps into the kernel image)
 PY=""

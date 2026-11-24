@@ -84,6 +84,7 @@ static void env_expand(char *line, int cap);   /* v2.71: fwd decl for the sshd b
 static int  atoi_(const char *s);
 static int  ls_u2a(uint32_t v, char *o);
 static void boot_autostart(void);
+static void cmd_autostart(const char *arg);
 static int  parse_redir(char *arg, char **out_redir, int *append, char **pipe_to);
 static void skip_sp(const char **pp);   /* v2.61: advance past spaces                   */
 /* v2.61: fwd-decl gfx sub-commands referenced from cmd_gfx above */
@@ -323,7 +324,7 @@ static void cmd_help(void) {
     help_row("sndregs",     "raw ES1370/ES1371 register readback");
     help_row("fprobe",      "paint the whole frame + 4 corner marks (coverage probe)");
     help_row("sndmap",      "read-only dump of all ES137x registers 0x00..0x3C");
-    help_row("autostart",   "re-run /etc/autostart scripts");
+    help_row("autostart",   "re-run /etc/autostart; `autostart --install gui` writes the file");
     help_row("uname",       "print OS name");
     help_row("date",        "show RTC date/time");
     help_row("mem",         "show RAM size (multiboot)");
@@ -7389,7 +7390,7 @@ static void shell_exec(char *cmd, char *arg) {
         /* benchmark build only: rdtsc scenario runner (see bench/PERF_SPEC.md) */
         else if (!strcmp_(cmd, "bench"))      bench_cmd(arg);
 #endif
-        else if (!strcmp_(cmd, "autostart"))  boot_autostart();
+        else if (!strcmp_(cmd, "autostart"))  cmd_autostart(arg);
         else if (!strcmp_(cmd, "uname"))      cmd_uname();
         else if (!strcmp_(cmd, "date"))       cmd_date();
         else if (!strcmp_(cmd, "mem"))        cmd_mem();
@@ -7763,6 +7764,62 @@ static void boot_autostart(void) {
         }
         g_script_mode = 0;
     }
+    /* R21 桌面自启动优先级：盘内 /etc/autostart 存在（非空）→ 用它执行；
+     * 否则看编译开关 GUI_AUTOSTART=1 → 内置默认进块桌面；否则停 shell。
+     * 门禁 / 探针镜像默认编译为 0，必须停在 prompt，不能被自动进桌面。 */
+    {
+        static char au[256];
+        int alen = fs_read_text("/etc/autostart", au, (int)sizeof(au) - 1);
+        if (alen > 0) {
+            au[alen] = 0;
+            vga_write("autostart: /etc/autostart\n");
+            g_script_mode = 1;
+            char *p = au;
+            while (*p) {
+                char *line = p;
+                while (*p && *p != '\n') p++;
+                if (*p) *p++ = 0;
+                char *e = line + slen_(line);
+                if (e > line && e[-1] == '\r') e[-1] = 0;
+                while (*line == ' ' || *line == '\t') line++;
+                if (!*line || *line == '#') continue;
+                char *larg = line;
+                while (*larg && *larg != ' ' && *larg != '\t') larg++;
+                if (*larg) {
+                    *larg = 0; larg++;
+                    while (*larg == ' ' || *larg == '\t') larg++;
+                }
+                shell_exec(line, larg);
+            }
+            g_script_mode = 0;
+        } else {
+#if GUI_AUTOSTART
+            ser_write("BOOT:autostart gui\n");
+            cmd_gui((char *)0);
+#endif
+        }
+    }
     net_boot_status();              /* keep the one-line NIC status at boot */
     vga_write("\n");
+}
+
+/* `autostart --install gui`：把运行期选择写进盘内 /etc/autostart；
+ * 下次开机按优先级优先执行盘内文件。无参 `autostart` 重跑启动脚本。 */
+static void cmd_autostart(const char *arg) {
+    if (arg && !strncmp_(arg, "--install", 9)) {
+        const char *what = arg + 9;
+        while (*what == ' ' || *what == '\t') what++;
+        if (!*what) what = "gui";
+        char body[64];
+        int n = 0;
+        const char *w = what;
+        while (*w && n < 62) body[n++] = *w++;
+        body[n++] = '\n';
+        fs_write_raw_mode("/etc/autostart", body, (uint32_t)n, 0);
+        vga_write("autostart: wrote /etc/autostart (");
+        vga_write(what);
+        vga_write(")\n");
+        return;
+    }
+    boot_autostart();
 }
