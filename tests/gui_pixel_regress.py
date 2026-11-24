@@ -56,12 +56,17 @@ def capture(iso, cmd, settle, ppm, png, port=PORT):
         print("FAIL: qemu-system-i386 not found")
         return 2
     serial = os.path.join(ART, "pixel-serial.log")
+    if os.path.exists(serial):
+        os.remove(serial)
     scratch = os.environ.get(
         "SCRATCH_IMG",
         "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
     disk = scratch if os.path.exists(scratch) else None
+    # 与可出帧的 gui_runner/pixprobe 对齐：vmware 显式 VGA 才把 VBE24
+    # LFB 暴露给 monitor screendump；默认 cirrus 下抓不到 PPM。
     proc, sock = boot(qemu, iso, port, disk=disk,
-                      extra_args=["-cpu", "qemu32",
+                      extra_args=["-smp", "1", "-cpu", "qemu32",
+                                  "-vga", "vmware",
                                   "-serial", "file:" + serial])
     try:
         force_text(sock)
