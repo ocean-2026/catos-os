@@ -1,0 +1,7 @@
+﻿版本,内容
+v2.61,新增 theme 命令：theme dark|light|solarized|mono，语义化调色板切换（palette.c/h，PAL_BG/PAL_FG/PAL_ERROR… 等角色槽位）
+v2.62,高对比 vivid 配色；注册表雏形 /etc/reg（reg.c）&#8203;，9 个 /etc 配置文件迁入注册表管理
+v2.63,pager 降级为直通 shim，移除多页输出，长输出靠回卷（PgUp/PgDn/滚轮）
+v2.64,ls 六模式 + 按 size 分级着色、权限位分色（TUI 渲染层）
+v2.66,渲染层大头：命令行软换行（rl_redraw wrap 感知 + con_scroll_up() 归档滚回）、PgDn 逐行回滚动画、修鼠标箭头压字残缺（vbe24_set_mouse_dirty_cb 脏区重画）、滚轮改 IRQ12 顶半缓冲
+v2.67,注册表升级为二叉树 hive（/etc/hive）&#8203;，hive（别名 reg）命令：ls/get/set/mkkey/del/export/import/save；palette 从 hive 读颜色

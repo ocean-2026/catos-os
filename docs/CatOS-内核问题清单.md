@@ -308,15 +308,6 @@ WAV          -> 44100Hz/2ch/16bit, 48355 frames, distinct=36, min=0 max=255 (非
   目前靠 `task_sleep_ticks()` 里 `if (g_in_syscall) return;` 保证 syscall 不被抢占；若将来允许
   长 syscall 让出 CPU，需改成按 tid 分槽（内核栈仅 8 KiB，不能简单挪到栈上）。
 
-> **E3 收口状态（2026-11-23，day-e3 分支）**：上条中会在阻塞路径上持有用户数据快照的缓冲
-> （`SYS_WRITE`/`READLINE`/`FILE_READ`/`FILE_WRITE`/`PIPE_WRITE`/`PIPE_READ`/`NET_UDP_RECV`）
-> 已改为按 tid 分槽的每任务私有缓冲；`u2k_str` 改为经 `copy_from_user` 分页块拷贝；`sys_free`
-> 补了头页面 VMA/页表校验。`HTTP_GET`(b[8192])、`CAT`(b[4096])、`STRLEN/STRCMP`、
-> `NET_UDP_SEND`、`HW_STR`、`SAVE` 等路径不触达 `task_block`/`task_sleep_ticks`（`ata.c`/
-> `net.c` 的 `task_maybe_yield` 在 `g_in_syscall` 期间被抑制），保留 static，取舍见
-> `artifacts/e3-syscall/REPORT.md`。回归：vprobe 8/8、并发管道 8192 B 逐字节一致、恶意指针
-> 返回 `-3` 且内核不挂。
-
 
 ## 十三、v2.12 24bpp 真彩与用户绘图 API（2026-11-10）
 
