@@ -259,6 +259,39 @@ ERR=0 解码：bit0 P=0 页不存在，bit1 W/R=0 读，bit2 U/S=0 ring0。即**
 | 3 | 图片视口块布局不生效 / 自然尺寸错 | 视口块手工 `btable_alloc` 漏置 `dirty_layout=1`；`BLK_CANVAS` 未纳入 layout 叶子自然宽高 | 补脏位置位；`layout.c` 自然宽高计算加入 CANVAS 分支 |
 | 4 | 组件状态行中文在 8×16 字形下渲染成 `?` | 子集字模不含该状态文案汉字 | 状态行改 ASCII：notepad `dirty/saved/full`；filemgr `ready/empty/read failed/unsupported type`；images `unsupported format` |
 
+### 7.6 浏览器 v0（提交 `987d54a`、`9e03834`）
+
+**交付形态**：内核内组件 `browser.c`，自写瘦流式 tokenizer（不建树）；地址栏 +
+Back/Fwd/Refresh/Stop + 状态行（URL/状态码/字节数/耗时）；菜单 Browser 条目、
+`gui browser <url>`、`shot-browser`；探针 `gui br` 与 browser 像素组。
+
+**实测证据**（2026-11-24，slirp 用户网）：
+
+- 离线内嵌样本：`gui br` bytes=287 nodes=12 blocks=12 active=1 result=1，串口零异常；
+  browser 像素组 2/2。
+- 真机 HTTP：`http://example.com/` status=200 bytes=577 1320ms；
+  `http://www.baidu.com/` status=200 bytes=49151 140ms。
+- 静态/门禁：`check_link_layout.py --strict` RC=0；lint 0 violation GREEN；
+  vprobe 10/10（156.9s）、E3 2/2（80.1s）、F11 9/9（162.0s），均在最终 ISO 复跑通过。
+- 指纹（本轮镜像）：ISO **11,995,136 字节**，`build/kernel.bin` **1,267,808 字节**，
+  `_bss_end = 0x020c6b00`；ISO sha256
+  `4a2f307fff0f28cf26eeb034f44f7029ab5145f30fe14556cbadfa809247ce5e`。
+
+**已知限制（如实记录）**：
+
+1. `net_http_get` 复制上限 `max-1`；浏览器 HTML 缓冲走帧分配页（12×4 KiB），
+   不复用 shell `curl [8192]` 静态 buf；超缓冲截断。
+2. TLS 路径收集缓冲 `resp[20480]` 且**不解析 chunked**：即使握手成功，大页也会在
+   TLS 路径截断。
+3. v0 `<img>` 未接 stb_image 解码，先渲染 `[img: src]` 占位；含真实位图的截图列入 v0.1。
+4. 单条阻塞连接，导航中只允许一个请求在飞；无滚动重排、无 CSS 选择器、无表单/书签。
+
+**HTTPS 结论**：`https://example.com/`、`https://www.baidu.com/` 均 `error -6`
+握手失败；宿主同出口 200，本地自签 0xC027 回路通过。定性为**网络线**问题
+（TLS1.2 无 CA 存储 / SNI 落地 / 密码套件路径），非 GUI 线缺陷；B1 验收不以 HTTPS
+野站为阻塞项。网络线单独立项「TLS 真站点握手」；`src/tls.c` / `src/tls_aes.c`
+禁改，根因若落在其中须上交证据与最小改动方案。
+
 ## 8. 交付物指纹
 
 - ISO：`kernel_v25/catos.iso`
