@@ -316,6 +316,18 @@ uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
     return (t[pte] & ~0xFFFu) + (vaddr & 0xFFF);
 }
 
+/* #D11 mirror-aware check: is this VA backed by a *user-accessible* PTE in
+ * this task's private PT?  The supervisor mirror installed for kernel-static
+ * frames in the arena window has P=1 but US=0; a ring3 mapping must not treat
+ * that as already mapped, or the slot stays supervisor-only and the first
+ * ring3 access faults with a protection violation (e=0005/0007). */
+int task_page_is_user(task_space_t *s, uint32_t vaddr) {
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return 0;
+    uint32_t pte = (vaddr >> 12) & 0x3FF;
+    return (t[pte] & 0x005u) == 0x005u;   /* present + user */
+}
+
 void task_space_destroy(task_space_t *s) {
     if (!s->pt) return;
 #ifdef CATOS_BENCH

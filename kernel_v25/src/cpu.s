@@ -293,6 +293,5 @@ _isr_stub_table:
     .long _irq_8,  _irq_9,  _irq_10, _irq_11, _irq_12, _irq_13, _irq_14, _irq_15
     .long _isr_0x80
 
-.section .bss
-.p2align 8
-_tss:      .skip 104            /* tss_t including iomap_base */
+/* _tss slot is reserved at the bottom of .bss by pe.ld (see KEY_TABLES
+ * in tools/check_link_layout.py); storage is not defined here. */

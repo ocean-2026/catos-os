@@ -1071,7 +1071,7 @@ static int heap_ensure_range(task_t *t, uint32_t start, uint32_t len) {
     uint32_t last = (start + len - 1) & ~0xFFFu;
     for (uint32_t a = start & ~0xFFFu; ; a += 0x1000u) {
         if (!heap_vma_has(t, a)) return -1;
-        if (!task_virt_to_phys(&t->space, a)) {
+        if (!task_page_is_user(&t->space, a)) {
             uint32_t f = (uint32_t)kzalloc_frame();
             if (!f) return -1;
             if (task_map_page(&t->space, a, f, 1) != 0) {
@@ -2148,7 +2148,7 @@ void isr_syscall(int_frame_t *f) {
             if (new_brk > old_brk) {
                 uint32_t p = (old_brk + 0xFFF) & ~0xFFFu;
                 while (p < new_brk) {
-                    if (!task_virt_to_phys(&t->space, p)) {
+                    if (!task_page_is_user(&t->space, p)) {
                         uint32_t f = (uint32_t)kzalloc_frame();
                         if (!f) { ret = (uint32_t)-12; break; }   /* ENOMEM */
                         if (task_map_page(&t->space, p, f, 1) != 0) {

@@ -107,8 +107,9 @@ static int vma_map_page_on_fault(task_t *t, uint32_t vaddr) {
      * non-page-aligned CR2 to the NEXT page, so the retried instruction
      * faulted again on the page that was actually requested. */
     vaddr &= ~0xFFFu;
-    /* Already mapped? */
-    if (task_virt_to_phys(&t->space, vaddr)) return 0;
+    /* Already mapped by a user PTE?  A supervisor-only #D11 mirror PTE does
+     * not count: ring3 still cannot reach it, so remap to a user frame. */
+    if (task_page_is_user(&t->space, vaddr)) return 0;
     uint32_t pa = (uint32_t)kzalloc_frame();
     if (!pa) return -1;
     if (task_map_page(&t->space, vaddr, pa, v->writable ? 1 : 0) != 0) {
@@ -159,7 +160,7 @@ int validate_uaddr(task_t *t, uint32_t addr, uint32_t len) {
     /* Walk page by page; map any unmapped page in a writable VMA. */
     uint32_t p = addr & ~0xFFFu;
     while (p <= end) {
-        if (!task_virt_to_phys(&t->space, p)) {
+        if (!task_page_is_user(&t->space, p)) {
             if (vma_map_page_on_fault(t, p) != 0) return -14;
         }
         p += 4096;

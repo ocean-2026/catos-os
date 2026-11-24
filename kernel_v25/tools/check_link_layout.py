@@ -44,6 +44,11 @@ KEY_TABLES = (
     "tasks",
     "pipes",
     "cur_task",
+    # descriptor tables are fetched by the CPU through GDTR/IDTR/TSS even
+    # under a task CR3; they must never land in the remapped user arena.
+    "gdt",
+    "idt",
+    "tss",
 )
 
 
@@ -91,20 +96,30 @@ def main():
 
     fatal = []
     warns = []
+    # #D11 hardening: the whole static .bss must finish below the user arena
+    # floor.  Anything at or above USER_IMAGE_BASE lives in a slice that the
+    # task's private PT remaps; even with the supervisor mirror, a static frame
+    # on a user-mapped slot is shadowed.  The safe line is the arena floor, not
+    # the old 0x2100000 heap-top heuristic.
+    if bss_end >= ARENA_LO:
+        fatal.append(("_bss_end", ARENA_LO, bss_end - ARENA_LO, bss_end))
     for addr, size, typ, name in syms:
-        if typ not in ("b", "B"):
-            continue
         if not intersects(addr, size, ARENA_LO, ARENA_HI):
             continue
         rec = (name, addr, size, addr + size)
         if name in KEY_TABLES:
             fatal.append(rec)
-        else:
+        elif typ in ("b", "B"):
             warns.append(rec)
 
     for name, addr, size, end in fatal:
-        print("[link][RISK] key table `%s` 0x%08x..0x%08x (size 0x%x) "
-              "lands in the user arena window" % (name, addr, end, size))
+        if name == "_bss_end":
+            print("[link][RISK] _bss_end 0x%08x reaches into the user arena "
+                  "window (>= 0x%08x); static .bss must finish below the floor"
+                  % (end, addr))
+        else:
+            print("[link][RISK] key table `%s` 0x%08x..0x%08x (size 0x%x) "
+                  "lands in the user arena window" % (name, addr, end, size))
     for name, addr, size, end in warns:
         print("[link][warn] static `%s` 0x%08x..0x%08x sits in the arena "
               "window; verify it is never dereferenced on a caller CR3"

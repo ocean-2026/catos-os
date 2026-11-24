@@ -26,7 +26,9 @@
 
 /* ---- GDT -------------------------------------------------------------- */
 
-static uint64_t gdt[6];
+/* gdt/idt slots are reserved at the bottom of .bss by pe.ld (see KEY_TABLES
+ * in tools/check_link_layout.py); do not define storage here. */
+extern uint64_t gdt[6];
 
 static void gdt_set(int i, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt[i] =
@@ -51,7 +53,7 @@ typedef struct {
     uint16_t off_hi;
 } __attribute__((packed)) idt_entry_t;
 
-static idt_entry_t idt[256];
+extern idt_entry_t idt[256];
 
 /* cpu.s exports a table of 49 stub addresses: 0..31 exceptions,
  * 32..47 IRQs, 48 = int 0x80 system call */
