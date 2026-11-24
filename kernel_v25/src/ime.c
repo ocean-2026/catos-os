@@ -150,7 +150,9 @@ static int ime_commit(int idx, char out[IME_OUT_MAX]) {
     const py_entry_t *e = py_find(py);
     if (!e || py_len == 0) return IME_PASS;
     int total = py_len_(e->hz) / 3;
+    if (total <= 0) return IME_CONSUME;      /* malformed entry: guard the /3 split */
     int per = page_capacity(con_cols(), total);
+    if (per < 1) per = 1;
     int k = page * per + idx;
     if (k >= total) return IME_CONSUME;      /* empty slot: just consume */
     out[0] = e->hz[k * 3];
@@ -164,6 +166,7 @@ static int ime_commit(int idx, char out[IME_OUT_MAX]) {
 
 /* Enter with an active composition: commit the raw pinyin letters as-is. */
 static int ime_commit_raw(char out[IME_OUT_MAX]) {
+    if (py_len <= 0) { out[0] = 0; ime_clear(); return IME_PASS; }  /* empty: nothing to commit */
     int j = 0;
     while (py[j] && j < IME_OUT_MAX - 1) { out[j] = py[j]; j++; }
     out[j] = 0;
@@ -201,8 +204,6 @@ static int ime_punct(int key, char out[IME_OUT_MAX]) {
         {')', "\xEF\xBC\x89"},
         {'<', "\xE3\x80\x8A"},
         {'>', "\xE3\x80\x8B"},
-        {'[', "\xE3\x80\x90"},
-        {']', "\xE3\x80\x91"},
         {'{', "\xE2\x80\x9C"},
         {'}', "\xE2\x80\x9D"},
         {'/', "\xEF\xBC\x8F"},
@@ -214,10 +215,8 @@ static int ime_punct(int key, char out[IME_OUT_MAX]) {
         {'^', "\xE2\x80\xA6"},
         {'&', "\xEF\xBC\x86"},
         {'*', "\xEF\xBC\x8A"},
-        {'-', "\xEF\xBC\x8D"},
         {'_', "\xEF\xBD\x9E"},
         {'+', "\xEF\xBC\x8B"},
-        {'=', "\xEF\xBC\x9D"},
         {'~', "\xEF\xBD\x9E"},
     };
     for (unsigned i = 0; i < sizeof(P)/sizeof(P[0]); i++)
@@ -287,9 +286,16 @@ int ime_feed(int key, char out[IME_OUT_MAX]) {
         ime_show();
         return IME_CONSUME;
     }
-    if (key == KB_LEFT || key == KB_RIGHT) {
+    if (key == KB_LEFT || key == '-' || key == '[') {
         if (py_len == 0) return IME_PASS;     /* empty: let cursor move */
-        if (key == KB_LEFT) { if (page > 0) page--; } else page++;
+        if (key == KB_LEFT || key == '-' || key == '[') { if (page > 0) page--; }
+        sel = 0;
+        ime_show();
+        return IME_CONSUME;
+    }
+    if (key == KB_RIGHT || key == '=' || key == ']') {
+        if (py_len == 0) return IME_PASS;     /* empty: let cursor move */
+        page++;
         sel = 0;
         ime_show();
         return IME_CONSUME;

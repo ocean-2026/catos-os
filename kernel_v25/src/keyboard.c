@@ -488,6 +488,7 @@ static void rl_screen_pos(int off, int x0, int y0, int cols, int *pcx, int *pcy)
 static void rl_redraw(int x0, int y0, uint8_t base) {
     int cols = con_cols();
     int rows = con_rows();
+    if (cols <= 0) cols = 80;          /* backend not yet entered: never divide by zero */
     if (x0 >= cols) x0 = cols - 1;
     if (rl_y0_adj >= 0 && rl_y0_adj < rows) y0 = rl_y0_adj;
 
