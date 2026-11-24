@@ -32,6 +32,9 @@ block_id  b_image  (block_id parent, const blk_spec *s, const uint8_t *pix, int 
 block_id  b_surface(block_id parent, const blk_spec *s);
 block_id  b_divider(block_id parent, const blk_spec *s);
 block_id  b_space  (block_id parent, int w, int h);
+block_id  b_button(block_id parent, const blk_spec *s, const char *txt);
+block_id  b_input (block_id parent, const blk_spec *s,
+                    void (*on_submit)(block_id id, const char *text));
 void      b_set_props(block_id id, const blk_spec *s);
 void      b_remove(block_id id);           /* 两阶段销毁 */
 
@@ -123,6 +126,18 @@ int       gui_sak_active(void);         /* 安全模式是否占用输入 */
 int       gui_sak_esc(void);            /* Esc 由 SAK 面板消费则返回 1 */
 void      gui_sak_reset(void);         /* 进桌面归零 SAK 静态态 */
 int       gui_sak_probe(void);         /* `gui sak` 自检 */
+
+/* ---- 多会话块内终端 ---- */
+void      gui_term_open(void);
+void      gui_term_close_active(void);
+void      gui_term_reset(void);
+int       gui_term_count(void);
+int       gui_term_active_idx(void);
+const char *gui_term_cwd(int i);
+const char *gui_term_last_line(int i);
+int       gui_term_lines(int i);
+const char *gui_term_line(int i, int idx);
+void      gui_term_run(int i, const char *cmd);
 
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);

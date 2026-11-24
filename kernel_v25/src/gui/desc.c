@@ -132,6 +132,23 @@ block_id b_space(block_id parent, int w, int h) {
     return b ? b->id : 0;
 }
 
+block_id b_button(block_id parent, const blk_spec *s, const char *txt) {
+    blk_spec local = spec_or_inherit(parent, s);
+    local.text = txt;
+    block *b = create_block(BLK_BUTTON, parent, &local);
+    return b ? b->id : 0;
+}
+
+block_id b_input(block_id parent, const blk_spec *s,
+                 void (*on_submit)(block_id id, const char *text)) {
+    blk_spec local = spec_or_inherit(parent, s);
+    if (!local.focusable) local.focusable = 1;   /* 输入框必须可聚焦接管键盘 */
+    block *b = create_block(BLK_INPUT, parent, &local);
+    if (!b) return 0;
+    ib_attach(b->id, on_submit);
+    return b->id;
+}
+
 void b_set_props(block_id id, const blk_spec *s) {
     block *b = btable_get(id);
     if (!b) return;
@@ -150,10 +167,16 @@ static void mark_leaving(block *b) {
 void b_remove(block_id id) {
     block *b = btable_get(id);
     if (!b) return;
+    block *parent = b->parent;
     /* 两阶段销毁：先摘出树并标 leaving，保留句柄一帧；
      * 下一帧由 gui_presence_sweep 回收并归还块表空闲链。 */
     tree_detach(b);
     mark_leaving(b);
+    /* v2.80 hotfix: 摘掉的子树不再参与绘制，但它占过的像素没有任何节点
+     * 负责重绘 -> 关闭菜单/组件后原地留一整块旧像素（看起来像"穿模/关不掉"）。
+     * 把父块整棵标脏，让底层在同帧把该区域重画掉。 */
+    if (parent) gui_mark_dirty(parent->id);
+    else        gui_mark_dirty(gui_root_block()->id);
 }
 
 /* ---- diff 提交 --------------------------------------------------------- */

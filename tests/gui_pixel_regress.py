@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(PROBES_DIR, "gates"))
 sys.path.insert(0, PROBES_DIR)
 
 from qemu_driver import (find_qemu, boot, kill_qemu, force_text,  # noqa: E402
-                         wait_for_prompt, type_text, sendkey)
+                         wait_for_prompt, type_text, sendkey, cmd)
 import gui_pixel_assert as pa  # noqa: E402
 
 ART = os.path.join(REPO, "artifacts", "gui-blocks")
@@ -50,29 +50,37 @@ def convert_png(ppm, png):
     return False
 
 
-def capture(iso, cmd, settle, ppm, png, port=PORT):
+def capture(iso, shell_cmd, settle, ppm, png, port=PORT):
     qemu = find_qemu()
     if not qemu:
         print("FAIL: qemu-system-i386 not found")
         return 2
     serial = os.path.join(ART, "pixel-serial.log")
+    if os.path.exists(serial):
+        os.remove(serial)
     scratch = os.environ.get(
         "SCRATCH_IMG",
         "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
     disk = scratch if os.path.exists(scratch) else None
+    # 与可出帧的 gui_runner/pixprobe 对齐：vmware 显式 VGA 才把 VBE24
+    # LFB 暴露给 monitor screendump；默认 cirrus 下抓不到 PPM。
     proc, sock = boot(qemu, iso, port, disk=disk,
-                      extra_args=["-vga", "std", "-serial", "file:" + serial])
+                      extra_args=["-smp", "1", "-cpu", "qemu32",
+                                  "-vga", "vmware",
+                                  "-serial", "file:" + serial])
     try:
         force_text(sock)
         if not wait_for_prompt(sock, timeout=90.0):
             print("FAIL: shell prompt never appeared")
             return 3
-        type_text(sock, cmd)
+        type_text(sock, shell_cmd)
         sendkey(sock, "ret", 1.0)
         time.sleep(settle)
         if os.path.exists(ppm):
             os.remove(ppm)
-        sock.sendall(("screendump %s\n" % ppm).encode())
+        hmp = cmd(sock, "screendump %s" % ppm, 1.0)
+        if hmp.strip():
+            print("hmp:", hmp.strip()[:200])
         time.sleep(2.0)
         deadline = time.time() + 10.0
         while time.time() < deadline:
@@ -115,6 +123,8 @@ def main():
         "files":   "gui shot-files",
         "images":  "gui shot-images",
         "browser": "gui shot-browser",
+        "style-app":  "gui shot-style-app",
+        "style-calm": "gui shot-style-calm",
     }
     cmd = args.cmd or GROUP_CMD[args.group]
 

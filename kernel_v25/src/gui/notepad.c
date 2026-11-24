@@ -177,9 +177,14 @@ static void np_close_click(block_id id, int32_t lx, int32_t ly) {
 void gui_notepad_close(void) {
     if (!np_active) return;
     gui_set_key_hook(0, 0);
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(np_root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
     if (np_root) { b_remove(np_root); np_root = 0; }
     np_body = 0; np_status_blk = 0;
     np_active = 0;
+    /* 释放矩形 ∪ 与之相交的同层兄弟标脏：补回被面板盖住的旧像素。 */
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
 static int np_key(int code, void *ud);
@@ -214,6 +219,7 @@ void gui_notepad_open(const char *path) {
     np_root = b_column(root_id, &root);
     block *pr = btable_get(np_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
+    pr->z = layer_max_z(LAYER_WORK) + 1;   /* 同层取最大 z+1，不与既有面板同序 */
 
     /* 标题条：标签 + 关闭块。 */
     blk_spec title = np_panel(LAYER_WORK, NP_BODY_W, NP_TITLE_H, 0);
@@ -243,7 +249,9 @@ void gui_notepad_open(const char *path) {
     np_active = 1;
     gui_notepad_attach_keys();
     layout_run();
-    gui_mark_dirty(np_root);
+    gui_raise_to_front(np_root);
+    /* 面板矩形 ∪ 被遮挡的同层兄弟一起标脏，重叠区不得残留示例块像素。 */
+    gui_mark_dirty_union(pr, pr->x, pr->y, pr->w, pr->h);
 }
 
 /* ---- 键盘编辑 ----------------------------------------------------------- */

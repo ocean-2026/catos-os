@@ -229,9 +229,13 @@ void gui_filemgr_close(void) {
     if (!fm_active) return;
     gui_set_key_hook(0, 0);
     fm_clear_rows();
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(fm_root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
     if (fm_root) { b_remove(fm_root); fm_root = 0; }
     fm_pathbar = fm_list = fm_status_blk = 0;
     fm_active = 0;
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
 static int fm_key(int code, void *ud) {
@@ -305,7 +309,7 @@ void gui_filemgr_open(const char *path) {
     fm_refresh();
     fm_active = 1;
     gui_set_key_hook(fm_key, 0);
-    gui_mark_dirty(fm_root);
+    gui_raise_to_front(fm_root);
 }
 
 int gui_filemgr_active(void) { return fm_active; }

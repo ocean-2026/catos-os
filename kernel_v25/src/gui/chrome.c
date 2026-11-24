@@ -13,6 +13,7 @@
 #include "serial_log.h"
 #include "task.h"
 #include "kstring.h"
+#include "fs.h"
 
 static void geom_walk(block *b);
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly);
@@ -325,6 +326,92 @@ static block_id demo_add_sample(void) {
     return sample;
 }
 
+/* ---- /Desktop 图标列 ------------------------------------------------------- */
+
+#define DESK_MAX_ITEMS 6
+static char desk_names[DESK_MAX_ITEMS][FS_NAME_MAX];
+static int  desk_n;
+
+static int desk_xlen(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
+
+static void desk_copy(char *d, int cap, const char *s) {
+    int k = 0;
+    while (s[k] && k < cap - 1) { d[k] = s[k]; k++; }
+    d[k] = 0;
+}
+
+static int desk_ext_is(const char *name, const char *ext) {
+    int dot = -1, n = desk_xlen(name);
+    for (int k = 0; k < n; k++) if (name[k] == '.') dot = k;
+    if (dot < 0) return 0;
+    const char *e = name + dot;
+    for (int i = 0; ext[i]; i++) {
+        char a = e[i], b = ext[i];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b) return 0;
+    }
+    return e[desk_xlen(ext)] == 0;
+}
+
+static void desk_open_entry(int i) {
+    char nm[FS_NAME_MAX];
+    desk_copy(nm, sizeof(nm), desk_names[i]);
+    int n = desk_xlen(nm);
+    int is_dir = n && nm[n - 1] == '/';
+    if (is_dir) nm[--n] = 0;
+    char path[FS_PATH_MAX];
+    desk_copy(path, sizeof(path), "/Desktop/");
+    /* xcat 等价拼接 */
+    { int o = desk_xlen(path); int k = 0;
+      while (nm[k] && o < (int)sizeof(path) - 1) path[o++] = nm[k++];
+      path[o] = 0; }
+
+    if (is_dir)                       { gui_filemgr_open(path); return; }
+    if (desk_ext_is(nm, "txt"))       { gui_notepad_open(path); return; }
+    if (desk_ext_is(nm, "bmp") || desk_ext_is(nm, "ppm"))
+                                      { gui_images_open(path); return; }
+}
+
+static void desk_icon_click(block_id id, int32_t lx, int32_t ly) {
+    (void)lx; (void)ly;
+    block *b = btable_get(id);
+    if (!b) return;
+    int i = (int)b->z;
+    if (i < 0 || i >= desk_n) return;
+    desk_open_entry(i);
+}
+
+static void build_desktop_icons(block_id root_id) {
+    fs_mkdir("/Desktop");   /* 已存在则忽略 */
+    char names[DESK_MAX_ITEMS][FS_NAME_MAX];
+    int n = fs_enum_entries("/Desktop", names, DESK_MAX_ITEMS);
+    if (n < 0) n = 0;
+    desk_n = n;
+
+    blk_spec col = spec_panel(LAYER_WORK, 120, 0, 0);
+    col.gap = 4; col.pad_l = 4; col.pad_r = 4;
+    block_id col_id = b_column(root_id, &col);
+    block *pc = btable_get(col_id);
+    pc->x = GFX24_W - 132; pc->y = 64; pc->moved = 1;
+
+    if (n == 0) {
+        blk_spec t = spec_panel(LAYER_WORK, 112, 16, 0);
+        b_text(col_id, &t, "Desktop folder is empty");
+    } else {
+        for (int i = 0; i < n; i++) {
+            desk_copy(desk_names[i], FS_NAME_MAX, names[i]);
+            blk_spec icon = spec_panel(LAYER_WORK, 112, 32, 1);
+            icon.on_click = desk_icon_click;
+            icon.z = i;
+            icon.align_cross = XALN_CENTER;
+            block_id ic = b_row(col_id, &icon);
+            b_text(ic, 0, desk_names[i]);
+        }
+    }
+    ser_write("GUI:desk items="); ser_dec((uint32_t)n); ser_write("\n");
+}
+
 static void clock_refresh(int force) {
     rtc_time_t t;
     rtc_read(&t);
@@ -346,6 +433,7 @@ static void clock_refresh(int force) {
 }
 
 void gui_demo_build(void) {
+    gui_style_load();   /* 开机 / 进桌面读取 /etc/style 档位，默认 app */
     block *root = gui_root_block();
     root->w = GFX24_W; root->h = GFX24_H;
     root->pad_l = 64; root->pad_r = 64; root->pad_t = 64; root->pad_b = 64;
@@ -382,6 +470,8 @@ void gui_demo_build(void) {
     clk_txt.align_cross = XALN_CENTER;
     clock_text_blk = b_text(clock_row, &clk_txt, "00:00:00");
     clock_refresh(1);
+
+    build_desktop_icons(root_id);
 }
 
 /* ---- 开始菜单（LAYER_OVERLAY，模态） ---------------------------------- */
@@ -431,6 +521,8 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
         case 3: gui_filemgr_open(0); break;
         case 4: gui_images_open(0);  break;
         case 5: gui_browser_open(0); break;
+        case 6: gui_settings_open(); break;
+        case 7: gui_term_open();     break;
         }
     }
     gui_menu_close();
@@ -440,19 +532,19 @@ void gui_menu_open(void) {
     if (menu_open) return;
     block_id root_id = gui_root_block()->id;
 
-    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 0, 0);
+    blk_spec menu = spec_panel(LAYER_OVERLAY, 180, 0, 2);
     menu.pad_l = 4; menu.pad_r = 4; menu.pad_t = 4; menu.pad_b = 4; menu.gap = 2;
     menu_root = b_column(root_id, &menu);
     block *mr = btable_get(menu_root);
-    mr->x = 8;
-    mr->y = 400;
+    mr->x = 12;
+    mr->y = 396;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
 
     block_id menu_ids[32];
     int n = menu_collect(menu_ids, 32);
     static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
     for (int i = 0; i < n; i++) {
-        blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+        blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         row.on_click = on_menu_row;
         row.z = (int32_t)menu_ids[i];
         block_id rid = b_row(menu_root, &row);
@@ -460,16 +552,16 @@ void gui_menu_open(void) {
         b_text(rid, 0, menu_labels[i]);
     }
 
-    static const char *app_labels[5] = { "Notepad", "Canvas demo", "Files", "Images", "Browser" };
-    for (int a = 0; a < 5; a++) {
-        blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+    static const char *app_labels[7] = { "Notepad", "Canvas demo", "Files", "Images", "Browser", "Settings", "Terminal" };
+    for (int a = 0; a < 7; a++) {
+        blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
         app.z = -(a + 1);
         block_id aid = b_row(menu_root, &app);
         b_text(aid, 0, app_labels[a]);
     }
 
-    blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 0);
+    blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 1);
     launch.on_click = on_menu_row;
     launch.z = 0;
     block_id lid = b_row(menu_root, &launch);
@@ -834,6 +926,78 @@ void gui_probe_menu(void) {
     ser_write("\n");
 
     gui_menu_close();
+    gui_end();
+}
+
+/* 菜单条目点击探针：开菜单 → 命中 Notepad 行（复用真实按下/命中路径）→
+ * 断言记事本被激活；菜单随点击关闭后下一帧损伤面积必须 >0（旧菜单像素
+ * 被底层重画掉，不留残影）。 */
+void gui_probe_menuclick(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    int active_before = gui_notepad_active();
+    gui_menu_open();
+    layout_run();
+
+    /* Notepad 条目：应用行 z = -1。 */
+    block *mr = btable_get(menu_root);
+    block *row = 0;
+    if (mr) for (block *c = mr->first_child; c; c = c->next_sibling)
+        if (c->z == -1) { row = c; break; }
+
+    int pressed = 0;
+    if (row) {
+        int cx = row->x + row->w / 2;
+        int cy = row->y + row->h / 2;
+        gui_inject_press(cx, cy);
+        gui_inject_release();
+        pressed = 1;
+    }
+    int active = gui_notepad_active();
+
+    gui_frame();   /* 关菜单后一帧：损伤面积 > 0 才说明旧菜单区域被重画。 */
+    uint32_t area = stat_damage_area();
+
+    /* z>0 行（示例块 focusable）走 focus_raise：摘挂 + z 递增后块必须仍挂在
+     * 根树上（防摘树重挂丢失）、仍可见、仍可命中。菜单关闭会释放菜单行，
+     * 全局块表计数会回落，故这里沿父链验证目标块仍挂到根，不比全局计数。 */
+    int raise_pressed = 0, raise_live = 0, raise_visible = 0, raise_hit = 0;
+    gui_menu_open();
+    layout_run();
+    block *mr2 = btable_get(menu_root);
+    block *srow = 0;
+    if (mr2) for (block *c = mr2->first_child; c; c = c->next_sibling)
+        if (c->z > 0) { srow = c; break; }
+    if (srow) {
+        int cx = srow->x + srow->w / 2;
+        int cy = srow->y + srow->h / 2;
+        gui_inject_press(cx, cy);
+        gui_inject_release();
+        raise_pressed = 1;
+        block *sample = btable_get((block_id)srow->z);
+        if (sample) {
+            block *up = sample;
+            while (up->parent) up = up->parent;
+            raise_live = (up == gui_root_block()) ? 1 : 0;
+            raise_visible = sample->visible ? 1 : 0;
+            int hx = sample->x + sample->w / 2;
+            int hy = sample->y + sample->h / 2;
+            raise_hit = gui_hit_test(hx, hy) != 0 ? 1 : 0;
+        }
+    }
+    gui_frame();
+    int raise_ok = raise_pressed && raise_live && raise_visible && raise_hit;
+
+    int ok = pressed && active_before == 0 && active == 1 && area > 0 && raise_ok;
+    ser_write("GUI:menuclick pressed="); ser_dec(pressed);
+    ser_write(" active="); ser_dec(active);
+    ser_write(" damage_area="); ser_dec(area);
+    ser_write(" raise_live="); ser_dec(raise_live);
+    ser_write(" raise_visible="); ser_dec(raise_visible);
+    ser_write(" raise_hit="); ser_dec(raise_hit);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
 
@@ -1313,6 +1477,174 @@ static void gui_probe_br(void) {
     gui_end();
 }
 
+/* ---- style 档位探针（app / calm） --------------------------------------- */
+
+static int style_contains(const char *s, const char *needle) {
+    if (!s || !needle) return 0;
+    for (; *s; s++) {
+        const char *a = s, *b = needle;
+        while (*b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+static uint32_t probe_read_px(int x, int y) {
+    volatile uint8_t *fb = gfx24_lfb_ptr();
+    if (!fb || x < 0 || y < 0 || x >= GFX24_W || y >= GFX24_H) return 0;
+    uint32_t pitch = gfx24_pitch();
+    uint8_t stride = gfx24_stride();
+    const uint8_t *p = fb + (uint32_t)y * pitch + (uint32_t)x * stride;
+    return ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
+}
+
+static block *probe_find_taskbar(void) {
+    for (uint32_t id = 1; id <= btable_capacity(); id++) {
+        block *b = btable_get(id);
+        if (b && b->layer == LAYER_CHROME && b->bleed) return b;
+    }
+    return 0;
+}
+
+static block *probe_find_panel_body(void) {
+    /* 选面积最小的非标题带 WORK 块：避开含标题行的面板根，落到面板体。 */
+    block *best = 0; int best_area = (1 << 30);
+    for (uint32_t id = 1; id <= btable_capacity(); id++) {
+        block *b = btable_get(id);
+        if (!b || b->layer != LAYER_WORK) continue;
+        if (b->st.role_bg == ROLE_BAR) continue;
+        if (b->w < 40 || b->h < 24) continue;
+        int area = b->w * b->h;
+        if (area < best_area) { best = b; best_area = area; }
+    }
+    return best;
+}
+
+static void gui_probe_style(const char *mode) {
+    int want_calm = mode && style_contains(mode, "calm");
+    /* 像素读数必须在 gfx24 后端上：探针在文本控制台里直跑时 LFB 为空，
+     * 读数恒 0；先进入 VBE24，收尾再强制回文本控制台。 */
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        con_set_gui_mode(0);
+        ser_write("GUI:style mode="); ser_write(want_calm ? "calm" : "app");
+        ser_write(" file=0 taskbar=0 panel_corner=0 residue=0 result=0\n");
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    gui_style_set(want_calm);
+    layout_run();
+    gui_frame();
+
+    char buf[64]; buf[0] = 0;
+    fs_read_text("/etc/style", buf, sizeof(buf) - 1);
+    int file_ok = want_calm ? style_contains(buf, "calm")
+                            : style_contains(buf, "app");
+
+    const struct style *tok = gui_active_style();
+    block *tb = probe_find_taskbar();
+    int tb_ok = 0;
+    if (tb) {
+        uint32_t px = probe_read_px(tb->x + 4, tb->y + 4);
+        tb_ok = (px == tok->bar);   /* full-bleed 任务栏满铺（取内行，避开边缘描边） */
+    }
+
+    block *panel = probe_find_panel_body();
+    int corner_cut = 0;
+    if (panel && want_calm) {
+        uint32_t outer = probe_read_px(panel->x, panel->y);
+        /* calm 外角被超椭圆裁成背景色；app 不圆角，外角不判背景。 */
+        corner_cut = (outer == tok->bg);
+    }
+
+    /* 连切两次回到目标档位：内填不得残留上一档形状。 */
+    gui_style_set(!want_calm);
+    layout_run(); gui_frame();
+    gui_style_set(want_calm);
+    layout_run(); gui_frame();
+    int residue = 1;
+    if (panel) {
+        /* 取面板体中点，避开圆角切口与边缘描边，校验内填未残留上一档。 */
+        uint32_t inner = probe_read_px(panel->x + panel->w / 2, panel->y + panel->h / 2);
+        residue = (inner == tok->panel);
+    }
+
+    int result = file_ok && tb_ok && residue &&
+                 (!want_calm || corner_cut);
+    ser_write("GUI:style mode="); ser_write(want_calm ? "calm" : "app");
+    ser_write(" file="); ser_dec(file_ok);
+    ser_write(" taskbar="); ser_dec(tb_ok);
+    ser_write(" panel_corner="); ser_dec(corner_cut);
+    ser_write(" residue="); ser_dec(residue);
+    ser_write(" result="); ser_dec(result);
+    ser_write("\n");
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+}
+
+static void gui_probe_term(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:term count=0 result=0\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    gui_term_open();
+    gui_term_run(0, "cd /");
+    gui_term_run(0, "ls");
+    gui_term_run(0, "help");
+    gui_term_run(0, "cat /etc/lang");
+    gui_term_open();
+    gui_term_run(1, "mkdir /work");
+    gui_term_run(1, "cd /work");
+    gui_term_run(1, "ls");
+
+    int n = gui_term_count();
+    const char *c0 = gui_term_cwd(0);
+    const char *c1 = gui_term_cwd(1);
+    const char *l0 = gui_term_last_line(0);
+    const char *l1 = gui_term_last_line(1);
+    int two = n >= 2;
+    int cwd_diff = strcmp_probe(c0, c1) != 0;
+    int line_diff = strcmp_probe(l0, l1) != 0;
+
+    /* shell_exec 复用证据：help 首行标题命中命令清单；cat /etc/lang 有回显。 */
+    int help_ok = 0, lang_ok = 0;
+    for (int k = 0; k < gui_term_lines(0); k++) {
+        const char *ln = gui_term_line(0, k);
+        if (style_contains(ln, "command")) help_ok = 1;
+        if (style_contains(ln, "lang") || style_contains(ln, "cat")) lang_ok = 1;
+    }
+    int result = two && cwd_diff && line_diff && help_ok && lang_ok;
+
+    ser_write("GUI:term count="); ser_dec(n);
+    ser_write(" cwd0="); ser_write(c0);
+    ser_write(" cwd1="); ser_write(c1);
+    ser_write(" iso="); ser_dec(cwd_diff && line_diff);
+    ser_write(" help="); ser_dec(help_ok);
+    ser_write(" lang="); ser_dec(lang_ok);
+    ser_write(" result="); ser_dec(result);
+    ser_write("\n");
+
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -1364,6 +1696,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return; }
         if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
         if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
+        if (!strcmp_probe(arg, "menuclick")) { gui_probe_menuclick(); return; }
         if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
         if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return; }
         if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }
@@ -1385,6 +1718,12 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "free"))    { gui_probe_free(); return; }
         if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
+        if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
+        {
+            char w2[24]; const char *r2 = 0;
+            split_word(arg, w2, sizeof(w2), &r2);
+            if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
+        }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
@@ -1393,6 +1732,7 @@ void gui_shell_cmd(const char *arg) {
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
+    int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
     int app_open = APP_NONE;
@@ -1411,6 +1751,8 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-float")) free_float = 1;
     else if (!strcmp_probe(word, "shot-free-overflow")) free_overflow = 1;
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
+    else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
+    else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
@@ -1438,6 +1780,7 @@ void gui_shell_cmd(const char *arg) {
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
+    if (shot_style >= 0) gui_style_set(shot_style);
     if (shot_menu) gui_menu_open();
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();

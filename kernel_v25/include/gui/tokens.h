@@ -26,6 +26,9 @@ struct style {
     uint8_t  radius;           /* v1: 恒 0，直角 */
     uint8_t  elevation;        /* v1: 恒 0，无阴影 */
     uint16_t anim_ms;          /* v1: 恒 0，无动画 */
+    /* ---- 桌面外观档位（calm 模式消费；app 模式下不生效） ---- */
+    uint8_t  corner_radius;    /* 0 = 按块尺寸走阶梯；>0 固定角档 px */
+    uint8_t  corner_mode;      /* 0 继承模式 / 1 强制直角 / 2 强制圆角 */
 };
 
 enum gui_token {

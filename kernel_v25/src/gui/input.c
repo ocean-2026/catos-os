@@ -16,6 +16,7 @@
 #define DRAG_MOVE   1
 #define DRAG_RESIZE 2
 #define TITLE_H     24
+#define HANDLE      12
 
 static int       exit_requested;
 static block    *focused;
@@ -70,18 +71,18 @@ static void hit_collect(block *b, int depth) {
         hit_collect(c, depth + 1);
 }
 
+/* 命中顺序：layer 降序 → 深度降序（子块压过祖先）→ z 降序；选择排序，首个命中即返回。 */
 static block *hit_test(int x, int y) {
     hit_n = 0;
     hit_collect(gui_root_block(), 0);
-    /* layer 降序 → z 降序 → 深度降序；选择排序，首个命中即返回。 */
     for (int i = 0; i < hit_n; i++) {
         int best = i;
         for (int j = i + 1; j < hit_n; j++) {
             block *a = hit_list[best], *b = hit_list[j];
             if (b->layer > a->layer ||
-                (b->layer == a->layer && b->z > a->z) ||
-                (b->layer == a->layer && b->z == a->z &&
-                 hit_depth[j] > hit_depth[best]))
+                (b->layer == a->layer && hit_depth[j] > hit_depth[best]) ||
+                (b->layer == a->layer && hit_depth[j] == hit_depth[best] &&
+                 b->z > a->z))
                 best = j;
         }
         if (best != i) {
@@ -174,18 +175,45 @@ static void on_press(int x, int y) {
         gui_menu_close();
         return;
     }
-    if (b->focusable) focus_set(b);
 
+    /* 点击冒泡：命中的通常是最里层的标签/文本块，而 on_click 声明在
+     * 行/面板上。向上找最近一个带 on_click 的祖先（含自身），否则
+     * Start、菜单条目这类"行 + 文本子块"永远点不动。 */
+    block *act = b;
+    while (act && !act->on_click) act = act->parent;
+
+    if (act && act->focusable) focus_set(act);
+    else if (b->focusable)    focus_set(b);
+
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。 */
+    if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
+    else if (ib_is_active())           gui_set_key_hook(0, 0);
+
+    /* 拖拽：v2 交互解析（resize 边缘带 > 自身拖拽属性 > 祖先拖拽带）。 */
     int mode; uint8_t rdir;
-    block *act = resolve_interaction(b, x, y, &mode, &rdir);
+    block *drag_target = resolve_interaction(b, x, y, &mode, &rdir);
     if (mode == DRAG_RESIZE) {
-        drag_block = act; drag_mode = DRAG_RESIZE; drag_resize_dir = rdir;
-        drag_off_x = x - act->x; drag_off_y = y - act->y;
+        drag_block = drag_target; drag_mode = DRAG_RESIZE; drag_resize_dir = rdir;
+        drag_off_x = x - drag_target->x; drag_off_y = y - drag_target->y;
     } else if (mode == DRAG_MOVE) {
-        drag_block = act; drag_mode = DRAG_MOVE;
-        drag_off_x = x - act->x; drag_off_y = y - act->y;
+        drag_block = drag_target; drag_mode = DRAG_MOVE;
+        drag_off_x = x - drag_target->x; drag_off_y = y - drag_target->y;
+    } else {
+        /* v1 面板兜底：上溯到最近的可聚焦面板——叶子文本 / 行不单独拖。 */
+        block *panel = b;
+        while (panel->parent && panel->parent->kind != BLK_ROOT && !panel->focusable)
+            panel = panel->parent;
+        int rx = panel->x + panel->w, ry = panel->y + panel->h;
+        if (x >= rx - HANDLE && y >= ry - HANDLE) {
+            drag_block = panel; drag_mode = DRAG_RESIZE;
+            drag_off_x = x - panel->x; drag_off_y = y - panel->y;
+        } else if (y < panel->y + TITLE_H) {
+            drag_block = panel; drag_mode = DRAG_MOVE;
+            drag_off_x = x - panel->x; drag_off_y = y - panel->y;
+        }
     }
-    if (b->on_click) b->on_click(b->id, x - b->x, y - b->y);
+
+    if (act && act->on_click) act->on_click(act->id, x - act->x, y - act->y);
     /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
     if (b->owner) decl_post_click(b, x - b->x, y - b->y);
 }
@@ -244,6 +272,9 @@ static void on_drag_move(int x, int y) {
     }
     b->dirty_layout = 1;
     b->dirty_paint = 1;
+    b->moved = 1;
+    /* 旧位置必须由背景/兄弟整树补齐：只标拖动块会在拖出轨迹上留残影。 */
+    gui_mark_dirty(gui_root_block()->id);
 }
 
 static void on_release(void) {
@@ -279,11 +310,9 @@ void gui_focus_raise(block_id id) {
     block *b = btable_get(id);
     if (!b) return;
     focus_set(b);
-    /* 同层兄弟末尾 = 最前绘制/命中；摘树后重新挂到父链末尾。 */
-    if (b->parent) {
-        tree_detach(b);
-        tree_attach(b->parent, b);
-    }
+    /* 摘挂到父链末尾 + 同层 z 递增 + 整树标脏（摘挂后父指针已清空，必须先
+     * 缓存父节点再重挂；z 同步重算，避免点一次"跳层"或摘树后消失）。 */
+    gui_raise_to_front(id);
 }
 
 int gui_should_exit(void) { return exit_requested; }

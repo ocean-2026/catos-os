@@ -192,6 +192,145 @@ static int text_trimmed(const char *txt, int max_w, uint8_t scale,
     return len;
 }
 
+/* ---- Calm & soft：角部离线掩码（超椭圆 n≈5，查表填像素，无逐像素浮点） ---- */
+
+#define CALM_R_N 4
+static const int CALM_RADII[CALM_R_N] = { 8, 12, 16, 24 };
+static uint8_t calm_mask[CALM_R_N][24][24];
+static int     calm_mask_ready;
+
+static uint32_t fifth_pow(int v) { uint32_t x = (uint32_t)v; return x*x*x*x*x; }
+
+static void calm_masks_init(void) {
+    if (calm_mask_ready) return;
+    for (int ri = 0; ri < CALM_R_N; ri++) {
+        int r = CALM_RADII[ri];
+        uint32_t r5 = fifth_pow(r);
+        for (int dy = 0; dy < r; dy++)
+            for (int dx = 0; dx < r; dx++) {
+                /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
+                uint32_t u = (uint32_t)(r - dx), v = (uint32_t)(r - dy);
+                calm_mask[ri][dy][dx] =
+                    (fifth_pow(u) + fifth_pow(v) <= r5) ? 1 : 0;
+            }
+    }
+    calm_mask_ready = 1;
+}
+
+static int calm_on(void) {
+    if (!gui_style_calm()) return 0;
+    return gui_active_style() != gui_token_style(TOK_HIGH_CONTRAST);
+}
+
+/* full-bleed / 根块 / chrome / 桌面底：不圆角、不加外扩边距、不画阴影。 */
+static int calm_shape_eligible(block *b) {
+    if (!calm_on()) return 0;
+    if (b->kind == BLK_ROOT || b->bleed) return 0;
+    if (b->layer == LAYER_CHROME || b->layer == LAYER_BG) return 0;
+    if (b->st.corner_mode == 1) return 0;
+    return 1;
+}
+
+static int calm_r_index(int w, int h) {
+    int s = w < h ? w : h;
+    if (s >= 128) return 3;   /* 24：应用图标 / 大型欢迎卡 */
+    if (s >= 64)  return 2;   /* 16：面板 / 弹出层外框 */
+    if (s >= 32)  return 1;   /* 12：按钮 / 图标卡 */
+    return 0;                 /* 8：小控件 */
+}
+
+static int calm_inset(int ri, int dy) {
+    int r = CALM_RADII[ri];
+    if (dy < 0 || dy >= r) return 0;
+    for (int dx = 0; dx < r; dx++)
+        if (calm_mask[ri][dy][dx]) return dx;
+    return r;
+}
+
+static void fill_round(block *b, int ri, uint32_t color) {
+    int w = b->w, h = b->h, r = CALM_RADII[ri];
+    if (r * 2 > w || r * 2 > h) { gui_fill_rect(b->x, b->y, w, h, color); return; }
+    for (int row = 0; row < h; row++) {
+        int inset = 0;
+        if (row < r)            inset = calm_inset(ri, row);
+        else if (row >= h - r) inset = calm_inset(ri, h - 1 - row);
+        gui_fill_rect(b->x + inset, b->y + row, w - 2 * inset, 1, color);
+    }
+}
+
+static void body_fill(block *b, uint32_t color) {
+    if (calm_shape_eligible(b)) {
+        calm_masks_init();
+        fill_round(b, calm_r_index(b->w, b->h), color);
+    } else {
+        gui_fill_rect(b->x, b->y, b->w, b->h, color);
+    }
+}
+
+static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
+    if (bw < 1) return;
+    if (calm_shape_eligible(b)) {
+        calm_masks_init();
+        int ri = calm_r_index(b->w, b->h);
+        fill_round(b, ri, color);
+        if (bw >= 1) {
+            block inner = *b;
+            inner.x += bw; inner.y += bw;
+            inner.w -= 2 * bw; inner.h -= 2 * bw;
+            if (inner.w > 0 && inner.h > 0) fill_round(&inner, ri, bg);
+        }
+    } else {
+        gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
+    }
+}
+
+static uint32_t mix_black(uint32_t c, int kpermil) {
+    int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, bl = c & 0xFF;
+    r = r * (1000 - kpermil) / 1000;
+    g = g * (1000 - kpermil) / 1000;
+    bl = bl * (1000 - kpermil) / 1000;
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
+}
+
+/* 双层柔和阴影（无 alpha 预混色阶）：WORK 卡片单层接触；OVERLAY/TOAST 双层。 */
+static void paint_halo(block *b) {
+    if (!calm_shape_eligible(b)) return;
+    int el = 0;
+    if (b->layer == LAYER_OVERLAY || b->layer == LAYER_TOAST) el = 2;
+    else if (b->layer == LAYER_WORK) el = 1;
+    if (!el) return;
+
+    uint32_t under = b->parent ? resolve_color(b->parent, 1)
+                               : gui_active_style()->bg;
+    uint32_t contact = mix_black(under, 180);   /* 接触层：黑 18% */
+    gui_draw_border(b->x, b->y + 1, b->w, b->h, contact, 1);
+    if (el == 2) {
+        uint32_t drop = mix_black(under, 100); /* 投影层：黑 10% */
+        gui_draw_border(b->x, b->y + 3, b->w, b->h, drop, 1);
+        gui_draw_border(b->x, b->y + 4, b->w, b->h, drop, 1);
+    }
+}
+
+/* 角部覆写 pass：子树照常画完后，把父块四个角掩码之外的像素用桌面底色
+ * 覆写，盖住子块矩形填进圆角切口的部分；full-bleed / 根块 / chrome / bg
+ * 由 calm_shape_eligible 排除。 */
+static void corner_restore(block *b) {
+    if (!calm_shape_eligible(b)) return;
+    calm_masks_init();
+    int ri = calm_r_index(b->w, b->h);
+    int r = CALM_RADII[ri];
+    if (r * 2 > b->w || r * 2 > b->h) return;
+    uint32_t c = gui_active_style()->bg;
+    for (int row = 0; row < r; row++) {
+        int ins = calm_inset(ri, row);
+        gui_fill_rect(b->x, b->y + row, ins, 1, c);
+        gui_fill_rect(b->x + b->w - ins, b->y + row, ins, 1, c);
+        int rowb = b->h - 1 - row;
+        gui_fill_rect(b->x, b->y + rowb, ins, 1, c);
+        gui_fill_rect(b->x + b->w - ins, b->y + rowb, ins, 1, c);
+    }
+}
+
 void paint_node(block *b) {
     if (!b || !b->visible) return;
 
@@ -199,17 +338,18 @@ void paint_node(block *b) {
     uint32_t bg = resolve_color(b, 1);
     uint32_t accent = resolve_color(b, 2);
 
+    paint_halo(b);
+
     switch (b->kind) {
     case BLK_RECT:
-        gui_fill_rect(b->x, b->y, b->w, b->h, bg);
+        body_fill(b, bg);
         if (b->st.border_w)
-            gui_draw_border(b->x, b->y, b->w, b->h,
-                            gui_active_style()->border, b->st.border_w);
+            body_border(b, gui_active_style()->border, bg, b->st.border_w);
         break;
     case BLK_TEXT: {
         char buf[160];
         text_trimmed(b->text, b->w, b->st.scale, buf, sizeof(buf));
-        if (bg) gui_fill_rect(b->x, b->y, b->w, b->h, bg);
+        if (bg) body_fill(b, bg);
         gui_draw_text(b->x, b->y, buf, fg, b->st.scale);
         break;
     }
@@ -230,12 +370,32 @@ void paint_node(block *b) {
     case BLK_DIVIDER:
         gui_fill_rect(b->x, b->y, b->w, 1, gui_active_style()->line);
         break;
+    case BLK_BUTTON: {
+        uint32_t bgc = bg, fgc = fg;
+        if (b->focused) { fgc = bg; bgc = fg; }   /* 按压/聚焦反色反馈 */
+        body_fill(b, bgc);
+        if (b->st.border_w)
+            body_border(b, gui_active_style()->border, bgc, b->st.border_w);
+        char buf[160];
+        text_trimmed(b->text, b->w, b->st.scale, buf, sizeof(buf));
+        int blen = 0; while (buf[blen]) blen++;
+        uint8_t sc = b->st.scale ? b->st.scale : 1;
+        int tx = b->x + (b->w - 8 * sc * blen) / 2;
+        int ty = b->y + (b->h - 16 * sc) / 2;
+        gui_draw_text(tx, ty, buf, fgc, sc);
+        break;
+    }
+    case BLK_INPUT:
+        body_fill(b, bg);
+        if (b->st.border_w)
+            body_border(b, gui_active_style()->border, bg, b->st.border_w);
+        break;
     case BLK_COLUMN:
     case BLK_ROW:
     case BLK_STACK:
     case BLK_FREE:
     case BLK_ROOT:
-        if (b->st.bg || b->st.role_bg) gui_fill_rect(b->x, b->y, b->w, b->h, bg);
+        if (b->st.bg || b->st.role_bg) body_fill(b, bg);
         break;
     default:
         break;
@@ -266,6 +426,7 @@ void paint_node(block *b) {
     }
     if (b->overflow == OVF_SCROLL) paint_trans_pop();
     if (clip_self) paint_clip_pop();
+    corner_restore(b);
 
     b->dirty_paint = 0;
     b->snap = 0;

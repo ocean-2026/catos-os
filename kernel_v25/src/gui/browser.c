@@ -795,9 +795,13 @@ static int br_fetch(const char *url) {
 /* ---- 子树重建 ------------------------------------------------------------ */
 
 static void br_close_subtree(void) {
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(br_root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
     if (br_root) { b_remove(br_root); br_root = 0; }
     br_addr_blk = br_content = br_status_blk = 0;
     br_free_img();
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
 static void br_click_back(block_id id, int32_t lx, int32_t ly);
@@ -871,7 +875,7 @@ static void br_navigate(const char *url, int push_hist) {
     }
 
     layout_run();
-    gui_mark_dirty(br_root);
+    gui_raise_to_front(br_root);
 }
 
 static void br_click_back(block_id id, int32_t lx, int32_t ly) {

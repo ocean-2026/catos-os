@@ -51,6 +51,7 @@ EXPECT = {
     "diff":  {"latest": {"result": "1"}, "flag": None},
     "home":  {"latest": {"result": "1"}, "flag": None},
     "menu":  {"latest": {"result": "1"}, "flag": None},
+    "menuclick": {"latest": {"result": "1"}, "flag": None},
     "presence": {"latest": {"result": "1"}, "flag": None},
     "theme":  {"latest": {"result": "1"}, "flag": None},
     "reset":  {"latest": {"result": "1"}, "flag": None},
@@ -67,6 +68,8 @@ EXPECT = {
     "free":    {"latest": {"result": "1"}, "flag": None},
     "cvdirty": {"latest": {"result": "1"}, "flag": None},
     "interact": {"latest": {"result": "1"}, "flag": None},
+    "term":   {"latest": {"result": "1"}, "flag": None},
+    "style":  {"latest": {"result": "1"}, "flag": None},
 }
 
 

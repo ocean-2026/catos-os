@@ -234,10 +234,14 @@ static blk_spec im_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
 void gui_images_close(void) {
     if (!im_active) return;
     gui_set_key_hook(0, 0);
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(im_root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
     if (im_root) { b_remove(im_root); im_root = 0; }
     im_img_blk = im_status_blk = 0;
     im_free_buf();
     im_active = 0;
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
 static int im_key(int code, void *ud) {
@@ -316,7 +320,7 @@ void gui_images_open(const char *path) {
     im_active = 1;
     gui_set_key_hook(im_key, 0);
     layout_run();
-    gui_mark_dirty(im_root);
+    gui_raise_to_front(im_root);
 }
 
 int       gui_images_active(void) { return im_active; }

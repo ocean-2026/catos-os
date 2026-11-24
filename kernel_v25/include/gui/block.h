@@ -28,7 +28,10 @@ typedef enum {
     BLK_SPACER,
     BLK_DIVIDER,
     BLK_CANVAS,
-    BLK_FREE                        /* v2 追加在末尾：自由布局容器 */
+    BLK_FREE,                        /* v2 追加在末尾：自由布局容器 */
+    BLK_BUTTON,                      /* desk 追加：按钮 */
+    BLK_INPUT,                       /* desk 追加：单行输入框 */
+    BLK_TERM                         /* desk 追加：块内终端 */
 } blk_kind;
 
 /* 溢出三态（v2，规格 v2 §2）。几何上允许越界；视觉/命中按本字段对齐。 */

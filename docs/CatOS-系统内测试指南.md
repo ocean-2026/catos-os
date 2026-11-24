@@ -464,6 +464,7 @@
 | 2.7 音频 | `tests/snd_regress.py`（4460） |
 | 2.5 24bpp 逐像素（Bochs） | `tests/gfx24_regress.py`（4462） |
 | 2.5 VMware SVGA II 专项 | `tests/svga24_regress.py`（4467，`-vga vmware`） |
+| GUI 桌面像素基线 | `tests/gui_pixel_regress.py` + `gui_pixel_assert.py`；组 `style-app`/`style-calm`，基线帧 `artifacts/gui-blocks/style-app.{ppm,png}`、`style-calm.{ppm,png}`（各 3 断言） |
 | 2.8 vprobe | `tests/vprobe_regress.py`（4461） |
 | 2.2 文件系统 | `tests/disk_regress.py` |
 | 2.3 用户全套 | `tests/user_regress.py` |
