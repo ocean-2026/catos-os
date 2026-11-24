@@ -117,6 +117,25 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
   8259 仍为唯一中断路径，LAPIC/IOAPIC 未重编程。
 - 门禁：E3 2/2、链接布局 strict RC=0；`-smp 1` 起机不回退。
 
+### AHCI（D4，部分落地；IDENTIFY/DMA 未打通）
+
+- 新增 `src/ahci.c` / `include/ahci.h`，shell 接 `ahci` 探针命令；`ata.c` 驱动表加
+  `backend`(0=legacy IDE PIO / 1=AHCI) 与 `ahci_port`，`ata_scan()` 先探 4 个 legacy IDE 槽，
+  再调 `ahci_scan()` 把 AHCI 端口追加进同一张表，`ata_read/ata_write` 按 backend 分派（AHCI 优先）。
+- 已实现：PCI 配置空间扫 class 0x01 / subclass 0x06 / prog-if 0x01，取 BAR5(ABAR) MMIO；
+  ABAR 经 `paging_map_top` 映射；读 `CAP`/`PI`；端口 `PxCLB/PxCLBU/PxFB/PxFBU/PxIS/PxIE/PxCMD`
+  初始化（FRE→ST），PHY up（SSTS.DET）检测；命令头(16B)/命令表(128B)/PRDT/FIS 接收区/IDENTIFY
+  缓冲均来自 `frame_alloc()` 页对齐帧（不入大 `.bss`）；命令路径含 Register H2D FIS 下发、
+  CI 轮询、TFD BSY/DRQ/ERR 等待。
+- **遗留（未打通，🔶 部分）**：QEMU 6.2 上 `-device ahci,... -device ide-hd,...,bus=ahci.0`，
+  HBA/ABAR/PI/PHY 正常（ABAR `0xfebf1000`，PI `0x3f`，端口0 SSTS `0x113`），但
+  `IDENTIFY DEVICE`(0xEC) 下发后 PxTFD 错误字节=0x01(ABRT)、DMA 缓冲全零；READ/WRITE DMA EXT
+  (0x25/0x35) 未验证。命令被 HBA 收走（PxCI 清 0）但设备拒命令；根因未定位，怀疑命令表/PRDT
+  帧落在用户 arena 物理切片(0x28xxxxx) 导致 DMA/别名异常，或 FIS/命令头布局细节有误。
+- 兼容：无 AHCI 控制器时 `ahci` 命令打印 `no AHCI controller`；legacy IDE PIO 路径未回退
+  （`-drive if=ide` 读样本盘 `/samples` 正常列出 4 个文件）。
+- 门禁：当前构建 E3 2/2、F11 9/9、链接布局 `--strict` RC=0；vprobe 环境性 flake（基线同现）。
+
 ---
 
 *本文件随每轮交付滚动更新；历史汇报见 git 历史（`git log -- docs/PROGRESS.md`）。*

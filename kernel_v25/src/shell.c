@@ -30,6 +30,7 @@
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
 #include "acpi.h"       /* platform ACPI table diagnostic (`acpi`)          */
 #include "smp.h"        /* SMP topology diagnostic (`smp`)                   */
+#include "ahci.h"       /* SATA/AHCI storage diagnostic (`ahci`)             */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
 #ifdef CATOS_BENCH
 #include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
@@ -398,6 +399,7 @@ static void cmd_help(void) {
     help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
     help_row("acpi",        "ACPI table diagnostic (RSDP/FADT/MADT CPUs/IOAPIC)");
     help_row("smp",         "SMP topology diagnostic (firmware/online CPUs, APIC IDs)");
+    help_row("ahci",        "SATA/AHCI controller/port/capacity diagnostic");
 
     help_head("audio (SB16 ISA / ES1370-1371 PCI, POSIX options)");
     help_row("sndinfo [OPT]", "audio info: -h -v -l -p -c -d N -w -j -s -q -t (long forms too)");
@@ -1695,7 +1697,7 @@ static const char *BUILTIN_NAMES[] = {
     "rm", "cp", "mv", "format", "edit", "run", "sudo",
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
-    "top", "jobs", "log", "hwinfo", "acpi", "smp", "sndinfo", "sndtest", "netcfg",
+    "top", "jobs", "log", "hwinfo", "acpi", "smp", "ahci", "sndinfo", "sndtest", "netcfg",
     "uptime", "kill", "curl", "ping", "dns", "udp", "netdiag", "sshd",
     "faultinfo", "crashlog", "fsck", "color",
     "bsod", "blue", "panicmode",
@@ -6780,7 +6782,7 @@ static void bar_put_str(char *b, int *n, const char *s) {
 static const char *sh_cmds[] = {
     "about","alias","autostart","bg","cal","caps","cat","cd","chcaps","chmod","chown","clear","cls",
     "color","cowsay","cp","curl","date","df","dir","dns","echo","edit","env",
-    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo","acpi","smp",
+    "export","faultinfo","crashlog","fg","fortune","format","fsck","gfx","hang","help","hwinfo","acpi","smp","ahci",
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
@@ -7508,6 +7510,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
         else if (!strcmp_(cmd, "acpi"))        acpi_dump();
         else if (!strcmp_(cmd, "smp"))         smp_dump();
+        else if (!strcmp_(cmd, "ahci"))        ahci_dump();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
         else if (!strcmp_(cmd, "fprobe"))      cmd_fprobe();    /* v2.72 */

@@ -14,7 +14,7 @@
  */
 
 #define ATA_SECTOR_SIZE 512
-#define ATA_DRIVES      4
+#define ATA_DRIVES      8   /* 4 legacy IDE slots + up to 4 AHCI SATA ports */
 
 /* Probe all four IDE slots; fill the internal drive table.  Returns the
  * number of drives that answered IDENTIFY with a non-zero capacity.

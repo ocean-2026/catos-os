@@ -2,6 +2,7 @@
 #include "task.h"
 #include "io.h"
 #include "hw.h"
+#include "ahci.h"
 
 /* PIO ATA driver with channel/device discovery.
  *
@@ -32,6 +33,8 @@ typedef struct {
     uint8_t  dev;          /* master/slave LBA mode device select */
     uint32_t sectors;
     uint8_t  present;
+    uint8_t  backend;      /* 0 = legacy PIO IDE, 1 = AHCI SATA */
+    uint8_t  ahci_port;    /* index into the AHCI driver when backend=1 */
 } ata_drv_t;
 
 static ata_drv_t g_drv[ATA_DRIVES];
@@ -147,7 +150,7 @@ int ata_scan(void) {
     };
     g_count = 0;
     btime_mark("A0 ata_scan 4 slots");
-    for (int i = 0; i < ATA_DRIVES; i++) {
+    for (int i = 0; i < 4; i++) {
         uint32_t sec = 0;
         uint16_t id[256];
         if (ata_try_identify(slots[i].base, slots[i].ctrl,
@@ -158,6 +161,8 @@ int ata_scan(void) {
             d->dev  = slots[i].lba_dev;
             d->sectors = sec;
             d->present = 1;
+            d->backend = 0;
+            d->ahci_port = 0;
             /* cache descriptive strings for drive 0 only */
             if (g_count == 0) {
                 int o = 0;
@@ -194,6 +199,26 @@ int ata_scan(void) {
             btime_mark(tag);
         }
     }
+    /* AHCI SATA drives follow the legacy IDE slots in the same table. */
+    int nd = ahci_scan();
+    for (int i = 0; i < nd && g_count < ATA_DRIVES; i++) {
+        ata_drv_t *d = &g_drv[g_count];
+        d->base = 0; d->ctrl = 0; d->dev = 0;
+        d->sectors  = ahci_sectors(i);
+        d->present  = 1;
+        d->backend  = 1;
+        d->ahci_port = (uint8_t)i;
+        if (g_count == 0) {
+            const char *m = ahci_model_str(i);
+            int o = 0;
+            while (m[o] && o < 39) g_model[o] = m[o], o++;
+            g_model[o] = 0;
+            g_serial[0] = g_fw[0] = 0;
+            g_lba48 = 1;
+        }
+        g_count++;
+    }
+
     g_scanned = 1;
     btime_mark("A2 ata_scan done");
     return g_count;
@@ -214,6 +239,7 @@ int ata_read(int d, uint32_t lba, uint8_t count, void *buf) {
     const ata_drv_t *drv = ata_bundle(d);
     uint8_t *p = (uint8_t *)buf;
     if (!drv || count == 0) return -1;
+    if (drv->backend == 1) return ahci_read(drv->ahci_port, lba, count, buf);
 
     ata_wait_ready(drv);
     ata_select(drv, lba);
@@ -239,6 +265,7 @@ int ata_write(int d, uint32_t lba, uint8_t count, const void *buf) {
     const ata_drv_t *drv = ata_bundle(d);
     const uint8_t *p = (const uint8_t *)buf;
     if (!drv || count == 0) return -1;
+    if (drv->backend == 1) return ahci_write(drv->ahci_port, lba, count, buf);
 
     ata_wait_ready(drv);
     ata_select(drv, lba);
