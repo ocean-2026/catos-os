@@ -65,6 +65,10 @@ block    *gui_hover_target(void);
 void      gui_focus_raise(block_id id);
 void      gui_modal_inert(block_id overlay_id);
 
+/* v2.80 hotfix: 进桌面时的状态归零（输入态 / chrome 静态句柄） */
+void      gui_input_reset(void);
+void      gui_chrome_reset(void);
+
 /* chrome.c 开始菜单状态 */
 void      gui_menu_open(void);
 void      gui_menu_close(void);

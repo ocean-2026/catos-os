@@ -275,6 +275,21 @@ void gui_focus_raise(block_id id) {
 
 int gui_should_exit(void) { return exit_requested; }
 
+/* v2.80 hotfix: 每次进桌面必须把输入态归零。
+ * `exit_requested` / 拖拽捕获 / 焦点栈都是 static，Esc 退出后不清会把
+ * "上一轮的退出请求"带进下一轮，第二次 `gui` 一进来就立刻退出（看起来像闪退）。 */
+void gui_input_reset(void) {
+    exit_requested = 0;
+    drag_block = 0;
+    drag_mode = DRAG_NONE;
+    drag_off_x = drag_off_y = 0;
+    focused = 0;
+    focus_n = 0;
+    for (int i = 0; i < 4; i++) focus_stack[i] = 0;
+    key_hook = 0;
+    key_ud = 0;
+}
+
 /* ---- 探针注入钩子：复用真实命中 / 拖拽路径，不另起一套模拟。 ---- */
 void gui_inject_press(int x, int y)  { on_press(x, y); }
 void gui_inject_move(int x, int y)   { on_drag_move(x, y); }

@@ -268,6 +268,15 @@ void gui_reset(void) {
 }
 
 void gui_begin(void) {
+    /* v2.80 hotfix: 组件/画布先收摊（画布页池按块持有，不关会跨会话泄漏，
+     * 第二次建画布直接失败），再清输入态与 chrome 静态句柄，最后重建块表。 */
+    gui_canvas_close_all();
+    gui_notepad_close();
+    gui_filemgr_close();
+    gui_images_close();
+    gui_browser_close();
+    gui_input_reset();
+    gui_chrome_reset();
     gui_reset();
     gfx24_clear(gui_active_style()->bg);
     block *root = gui_root_block();
