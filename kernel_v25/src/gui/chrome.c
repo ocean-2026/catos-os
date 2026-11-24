@@ -28,6 +28,13 @@ static int strcmp_probe(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+/* v2.81 isolated canvas channel (src/gui/cvchan.c). */
+extern int  cvchan_self_test(void);
+extern void cvchan_frame_tick(void);
+
+int gui_cvchan_probe(void) { return cvchan_self_test(); }
+void gui_cvchan_frame_tick(void) { cvchan_frame_tick(); }
+
 static void split_word(const char *arg, char *word, int cap, const char **rest) {
     word[0] = 0; *rest = 0;
     if (!arg) return;
@@ -975,6 +982,7 @@ static int gui_idle_step(void) {
         return 0;
     s_idle_frame_tick = timer_ticks;
     gui_frame();
+    gui_cvchan_frame_tick();          /* v2.81: 单帧 present 配额按帧重置 */
     return 1;
 }
 
@@ -1010,6 +1018,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
+        if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /

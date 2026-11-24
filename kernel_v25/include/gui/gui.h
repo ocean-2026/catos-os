@@ -109,6 +109,12 @@ int       gui_browser_bytes(void);
 int       gui_browser_nodes(void);
 int       gui_browser_blocks(void);
 
+/* ---- v2.81 隔离式画布通道（应用唯一合法像素出口） ----
+ * gui_cvchan_probe(): `gui cvchan` 自检一轮（建画布/写棋盘/present/销毁）。
+ * gui_cvchan_frame_tick(): 每帧重置单帧 present 次数配额。 */
+int       gui_cvchan_probe(void);
+void      gui_cvchan_frame_tick(void);
+
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 

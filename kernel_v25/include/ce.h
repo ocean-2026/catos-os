@@ -60,6 +60,31 @@ typedef struct {
 } gfx_blit_t;
 #endif
 
+/* ---- v2.81: isolated canvas channel (mirror of ce_abi.h) ---------------- */
+#ifndef CATOS_CV_TYPES_H
+#define CATOS_CV_TYPES_H
+typedef struct {
+    int32_t  res;
+    int32_t  w, h, stride;
+    void    *buf;
+} ce_canvas_t;
+typedef struct {
+    int32_t  res;
+    int32_t  x, y, w, h;
+} cv_present_t;
+#endif
+
+/* v2.81 shared result codes (mirror of ce_abi.h; guarded for co-inclusion). */
+#ifndef CATOS_CV_ERR_H
+#define CATOS_CV_ERR_H
+#define E_EPERM            (-1)
+#define E_CANVAS_KIND      (-30)
+#define E_CANVAS_QUOTA     (-31)
+#define E_CANVAS_BOUNDS    (-32)
+#define E_PIX_FIELD        (-33)
+#define E_CANVAS_BADH      (-34)
+#endif
+
 typedef struct {
     uint8_t  magic[4];     /* "CE01" */
     uint32_t entry;        /* entry offset inside the image (0 = start) */
@@ -191,6 +216,11 @@ typedef struct catos_api {
     int      (*mouse_x)(void);
     int      (*mouse_y)(void);
     int      (*mouse_buttons)(void);
+
+    /* ---- v2.81: isolated canvas channel (append-only; mirror slots 69-71) */
+    int      (*blk_canvas_create)(int w, int h, ce_canvas_t *out);
+    int      (*blk_canvas_present)(const cv_present_t *r);
+    int      (*blk_canvas_destroy)(int res);
 } catos_api_t;
 
 /* install the API (called once at boot) */

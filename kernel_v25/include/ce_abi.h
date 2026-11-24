@@ -23,8 +23,11 @@
  *   v2.11 slots 57..60   SB16 PCM audio (info / play / stop / tone)
  *   v2.12 slots 61..63   24bpp truecolour drawing (info/rect/blit)
  *   v2.14 slot  64       pollkey (non-blocking key read; games/animations)
+ *   v2.21 slot  65       gotoxy (line addressing for TUI rewrite)
+ *   v2.69 slots 66..68   mouse x / y / buttons
+ *   v2.81 slots 69..71   isolated canvas create / present / destroy
  *
- * Total: 65 slots in v2.14 (the v2.7 header had 52).
+ * Total: 72 slots in v2.81.
  *
  * v2.7/v2.8 deliberately expose NO drawing API: graphics and VBE modes
  * are styled TEXT terminals.  There is no putpixel/fillrect/framebuffer
@@ -57,6 +60,38 @@ typedef struct {
     const uint8_t *src;         /* w*h*3 tightly packed RGB24 bytes */
     int32_t  x, y, w, h;
 } gfx_blit_t;
+#endif
+
+/* ---- v2.81: isolated canvas channel (user-visible mirror) --------------
+ * create() hands the app a writable buffer in its OWN extension arena
+ * (anonymous mmap; stride = w*3 tightly packed RGB24).  The kernel keeps a
+ * private backing copy; present() pushes a dirty sub-rectangle across.
+ * The app never receives a VRAM or compositor surface pointer. */
+#ifndef CATOS_CV_TYPES_H
+#define CATOS_CV_TYPES_H
+typedef struct {
+    int32_t  res;               /* >=0 kernel resource handle; <0 on failure */
+    int32_t  w, h, stride;      /* stride = w*3 RGB24 bytes per row          */
+    void    *buf;                /* app-arena mmap buffer (ring3 writable)    */
+} ce_canvas_t;
+
+typedef struct {
+    int32_t  res;
+    int32_t  x, y, w, h;         /* dirty sub-rectangle inside the canvas    */
+} cv_present_t;
+#endif
+
+/* ---- v2.81: shared result codes (kernel + probes read the same table) ----
+ * Legacy negatives stay: -8 ENOSYS, -12 ENOMEM, -14 EFAULT, -16 EBUSY,
+ * -22 EINVAL.  The canvas/permission codes below are stable append-only. */
+#ifndef CATOS_CV_ERR_H
+#define CATOS_CV_ERR_H
+#define E_EPERM            (-1)   /* command drawing gated off for CE       */
+#define E_CANVAS_KIND      (-30)  /* bad canvas object / kind                */
+#define E_CANVAS_QUOTA     (-31)  /* per-task / size / rate quota exceeded   */
+#define E_CANVAS_BOUNDS    (-32)  /* rect or dimensions out of range         */
+#define E_PIX_FIELD        (-33)  /* commit record carries inline pixel field*/
+#define E_CANVAS_BADH      (-34)  /* unknown / foreign resource handle       */
 #endif
 
 /* gfx_info() selectors (user-visible mirror of gfx24.h). */
@@ -248,6 +283,16 @@ typedef struct catos_api {
     int     (*mouse_x)(void);                      /* 66 absolute px */
     int     (*mouse_y)(void);                      /* 67 absolute px */
     int     (*mouse_buttons)(void);                /* 68 bitmask */
+
+    /* ---- v2.81: isolated canvas channel (append-only) ------------------
+     * The ONLY legal pixel exit for a CE desktop app.  The app draws into
+     * its own extension-arena buffer (anonymous mmap, NOT VRAM, NOT a
+     * compositor surface); present() copies the dirty sub-rectangle into
+     * the kernel-owned backing buffer.  Old binaries see NULL: check before
+     * calling.  Slots 69/70/71. */
+    int     (*blk_canvas_create)(int w, int h, ce_canvas_t *out); /* 69 */
+    int     (*blk_canvas_present)(const cv_present_t *r);         /* 70 */
+    int     (*blk_canvas_destroy)(int res);                        /* 71 */
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
