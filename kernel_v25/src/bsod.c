@@ -259,6 +259,42 @@ static void draw_stack_page(const snap_t *s) {
     if (!s->nframes) vga_write_at(2, 11, "no stack frames captured");
 }
 
+/* G-PTE: 2-level walk of the ACTIVE root for the faulting address.
+ * Page directory / table frames live in the kernel identity slice, so the
+ * physical base dereferences as a flat pointer (same invariant the per-task
+ * table code relies on).  An absent PDE stops the walk instead of touching a
+ * zero table.  Returns PDE/PTE raw values and their present bits. */
+static void pte_walk(uint32_t cr3, uint32_t va,
+                     uint32_t *pde, uint32_t *pte,
+                     int *pde_present, int *pte_present) {
+    *pde = 0; *pte = 0; *pde_present = 0; *pte_present = 0;
+    if (!cr3) return;
+    uint32_t pde_i = va >> 22;
+    uint32_t pte_i = (va >> 12) & 0x3FFu;
+    (void)pte_i;
+    uint32_t *pd = (uint32_t *)(cr3 & ~0xFFFu);
+    *pde = pd[pde_i];
+    *pde_present = (*pde & 1u) != 0;
+    if (*pde_present) {
+        uint32_t *pt = (uint32_t *)(*pde & ~0xFFFu);
+        *pte = pt[(va >> 12) & 0x3FFu];
+        *pte_present = (*pte & 1u) != 0;
+    }
+}
+
+static void pte_serial_dump(const snap_t *s) {
+    uint32_t cr3 = cpu_cr3_read();
+    uint32_t pde, pte; int pde_p, pte_p;
+    pte_walk(cr3, s->cr2, &pde, &pte, &pde_p, &pte_p);
+    ser_write("[pte] CR3="); ser_hex("", cr3);
+    ser_write(" VA=");      ser_hex("", s->cr2);
+    ser_write(" PDE=");     ser_hex("", pde);
+    ser_write(pde_p ? " P" : " -");
+    ser_write(" PTE=");     ser_hex("", pte);
+    ser_write(pte_p ? " P" : " -");
+    ser_write("\n");
+}
+
 static void draw_map_page(const snap_t *s) {
     uint32_t cr3 = cpu_cr3_read();
     vga_write_at(2, 10, "--- memory mapping / page tables ---");
@@ -267,8 +303,21 @@ static void draw_map_page(const snap_t *s) {
     vga_write_at(2, 12, "task ");
     vga_write_at(8, 12, s->task[0] ? s->task : "?");
     vga_write_at(30, 12, "tid "); w_int(34, 12, s->tid);
-    vga_write_at(2, 14, "page-table summary: CR3 holds the current root");
-    vga_write_at(2, 15, "directory physical base; full walk deferred.");
+
+    /* G-PTE: walk the active root for the faulting address; show PDE/PTE
+     * raw entries and present bits on the map page. */
+    uint32_t va = s->cr2;
+    uint32_t pde_i = va >> 22;
+    uint32_t pte_i = (va >> 12) & 0x3FFu;
+    uint32_t pde, pte; int pde_present, pte_present;
+    pte_walk(cr3, va, &pde, &pte, &pde_present, &pte_present);
+    vga_write_at(2, 14, "PDE["); w_int(6, 14, (int)pde_i);
+    vga_write_at(10, 14, "]="); w_hex(13, 14, pde);
+    vga_write_at(30, 14, pde_present ? "P" : "-");
+    vga_write_at(34, 14, "PTE["); w_int(39, 14, (int)pte_i);
+    vga_write_at(44, 14, "]="); w_hex(47, 14, pte);
+    vga_write_at(64, 14, pte_present ? "P" : "-");
+    pte_serial_dump(s);
 }
 
 static void draw_cpus_page(const snap_t *s) {
@@ -518,6 +567,11 @@ void bsod_enter(const char *msg, const int_frame_t *f, int soft_return) {
 
     /* Persist the fixed-area record before painting (no FS write). */
     panic_record_save(&s, msg);
+
+    /* G-PTE: auto-dump the PDE/PTE for the faulting address to COM1 at
+     * entry, so a headless capture retains the present-bit evidence even if
+     * the operator never opens the M map page. */
+    pte_serial_dump(&s);
 
     /* P0-1 dual output: breadcrumb the summary to COM1 as well.
      * P2-9 SMP placeholder: line prefix "[CPU n]". */
