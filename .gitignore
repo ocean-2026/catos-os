@@ -38,6 +38,11 @@ kernel_v25/extapp/build/*
 # tracked; everything else produced there is not.
 !kernel_v25/build/*.py
 
+# Baseline delivery disk (64 MiB) is tracked as the rollback baseline for
+# disk/code cross-checking.  Scratch/regression images (test_disk.img,
+# qemu_disk_*.img, scratch/*.img) stay ignored.
+!kernel_v25/catos_disk.img
+
 # ---- archives of earlier drops ----
 *.zip
 
