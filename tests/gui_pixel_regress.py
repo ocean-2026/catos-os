@@ -114,6 +114,7 @@ def main():
         "canvas":  "gui shot-canvas",
         "files":   "gui shot-files",
         "images":  "gui shot-images",
+        "browser": "gui shot-browser",
     }
     cmd = args.cmd or GROUP_CMD[args.group]
 

@@ -129,6 +129,13 @@ IMAGES_CHECKS = [
     {"kind": "ne_bg", "pt": (500, 350)},
 ]
 
+# 浏览器 v0：内容区 (120,96,560,300) 为面板底色，且存在真实文本前景像素。
+BROWSER_CHECKS = [
+    {"kind": "ne_bg", "pt": (300, 200)},
+    {"kind": "region_count", "rect": (120, 96, 560, 300),
+     "color": DARK_FG, "min": 20, "label": "browser text fg"},
+]
+
 CHECK_GROUPS = {
     "dark": DEFAULT_CHECKS,
     "light": THEME_LIGHT_CHECKS,
@@ -140,6 +147,7 @@ CHECK_GROUPS = {
     "canvas": CANVAS_CHECKS,
     "files": FILES_CHECKS,
     "images": IMAGES_CHECKS,
+    "browser": BROWSER_CHECKS,
 }
 
 GROUP_BG = {
@@ -153,6 +161,7 @@ GROUP_BG = {
     "canvas": DARK_BG,
     "files": DARK_BG,
     "images": DARK_BG,
+    "browser": DARK_BG,
 }
 
 

@@ -99,6 +99,16 @@ int       gui_images_w(void);
 int       gui_images_h(void);
 const char *gui_images_name(void);
 
+/* ---- 浏览器 v0（块子树，自写瘦流式 tokenizer） ---- */
+void      gui_browser_open(const char *url);
+void      gui_browser_close(void);
+void      gui_browser_probe_sample(void);
+int       gui_browser_active(void);
+int       gui_browser_ok(void);
+int       gui_browser_bytes(void);
+int       gui_browser_nodes(void);
+int       gui_browser_blocks(void);
+
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 

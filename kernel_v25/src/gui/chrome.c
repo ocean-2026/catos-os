@@ -292,6 +292,7 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
         case 2: gui_canvas_demo();   break;
         case 3: gui_filemgr_open(0); break;
         case 4: gui_images_open(0);  break;
+        case 5: gui_browser_open(0); break;
         }
     }
     gui_menu_close();
@@ -321,8 +322,8 @@ void gui_menu_open(void) {
         b_text(rid, 0, menu_labels[i]);
     }
 
-    static const char *app_labels[4] = { "Notepad", "Canvas demo", "Files", "Images" };
-    for (int a = 0; a < 4; a++) {
+    static const char *app_labels[5] = { "Notepad", "Canvas demo", "Files", "Images", "Browser" };
+    for (int a = 0; a < 5; a++) {
         blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 0);
         app.on_click = on_menu_row;
         app.z = -(a + 1);
@@ -949,6 +950,20 @@ static void gui_probe_img(void) {
     gui_end();
 }
 
+static void gui_probe_br(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_browser_probe_sample();
+    gui_frame();
+    ser_write("GUI:br bytes="); ser_dec(gui_browser_bytes());
+    ser_write(" nodes="); ser_dec(gui_browser_nodes());
+    ser_write(" blocks="); ser_dec(gui_browser_blocks());
+    ser_write(" active="); ser_dec(gui_browser_active());
+    ser_write(" result="); ser_dec(gui_browser_active() ? 1 : 0);
+    ser_write("\n");
+    gui_end();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -994,6 +1009,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return; }
         if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
+        if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
@@ -1001,7 +1017,7 @@ void gui_shell_cmd(const char *arg) {
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     enum gui_token shot_tok = TOK_DARK;
-    enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES };
+    enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
     int app_open = APP_NONE;
     char app_path[160]; app_path[0] = 0;
     const char *rest = 0;
@@ -1017,10 +1033,12 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-images"))  { app_open = APP_IMAGES; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "shot-browser")) { app_open = APP_BROWSER; app_path[0] = 0; }
     else if (!strcmp_probe(word, "notepad")) { app_open = APP_NOTEPAD; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "canvas"))   { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "files"))    { app_open = APP_FILEMGR; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
+    else if (!strcmp_probe(word, "browser"))   { app_open = APP_BROWSER; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
 
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {
@@ -1038,6 +1056,10 @@ void gui_shell_cmd(const char *arg) {
     if (app_open == APP_CANVAS)  gui_canvas_demo();
     if (app_open == APP_FILEMGR) gui_filemgr_open(app_path[0] ? app_path : 0);
     if (app_open == APP_IMAGES)  gui_images_open(app_path[0] ? app_path : 0);
+    if (app_open == APP_BROWSER) {
+        if (app_path[0]) gui_browser_open(app_path);
+        else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
+    }
     if (!shot_crop && !shot_drag) gui_frame();
 
     gui_idle_loop();
