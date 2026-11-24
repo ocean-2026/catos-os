@@ -23,8 +23,9 @@ extern uint32_t uptime_ms(void);
 #include <stdint.h>
 #include <stddef.h>
 
-#define BR_PAGES     12                      /* HTML 缓冲 12×4 KiB = 48 KiB */
-#define BR_HTML_SIZE (BR_PAGES * 4096)
+/* HTML 缓冲动态扩容：按需帧分配，上限 72×4 KiB = 288 KiB，不入 .bss 大数组。 */
+#define BR_MAX_PAGES 72
+#define BR_HTML_CAP  (BR_MAX_PAGES * 4096)
 #define BR_POOL      4096                    /* 持久文本池（块文本引用） */
 #define BR_URL_MAX   160
 #define BR_STATUS_MAX 160
@@ -51,7 +52,7 @@ static block_id    br_content;
 static block_id    br_status_blk;
 
 /* HTML 帧缓冲（运行时页分配，不入 .bss 静态数组）。 */
-static uint32_t    br_phys[BR_PAGES];
+static uint32_t    br_phys[BR_MAX_PAGES];
 static int         br_pages;
 static uint8_t    *br_html;
 
@@ -104,13 +105,30 @@ static void br_free_html(void) {
 
 static int br_alloc_html(void) {
     br_free_html();
-    for (int p = 0; p < BR_PAGES; p++) {
-        uint32_t pa = frame_alloc();
-        if (!pa) { br_free_html(); return -1; }
-        br_phys[p] = pa;
+    uint32_t pa = frame_alloc();
+    if (!pa) return -1;
+    br_phys[0] = pa;
+    br_pages = 1;
+    br_html = (uint8_t *)pa;
+    return 0;
+}
+
+/* 流式接收器：把响应体追加进动态 HTML 缓冲，跨页按需增长。 */
+static int br_stream_sink(void *ud, const uint8_t *p, int len) {
+    (void)ud;
+    for (int i = 0; i < len; i++) {
+        int off = br_bytes + i;
+        if (off >= BR_HTML_CAP) return -1;
+        int pg = off >> 12;
+        if (pg >= br_pages) {
+            uint32_t pa = frame_alloc();
+            if (!pa) return -1;
+            br_phys[pg] = pa;
+            br_pages = pg + 1;
+        }
+        br_html[off] = p[i];
     }
-    br_pages = BR_PAGES;
-    br_html = (uint8_t *)br_phys[0];
+    br_bytes += len;
     return 0;
 }
 
@@ -309,7 +327,7 @@ static int   br_pos;
 static int   br_accent;
 static block_id br_cur_row;
 
-static int br_hlen(void) { return br_pages ? BR_HTML_SIZE : 0; }
+static int br_hlen(void) { return br_pages ? br_pages * 4096 : 0; }
 
 static int tk_name(const char *n) {
     struct { const char *k; int v; } map[] = {
@@ -545,7 +563,9 @@ static int br_fetch(const char *url) {
     if (!net_up()) { br_set_status("network not ready"); return -1; }
 
     uint32_t t0 = uptime_ms();
-    int n = net_http_get(url, (char *)br_html, BR_HTML_SIZE);
+    int status = 0; long total = 0;
+    int n = net_http_download_stream(url, 0, br_stream_sink, 0,
+                                     &status, &total);
     uint32_t t1 = uptime_ms();
     br_elapsed_ms = t1 > t0 ? t1 - t0 : 0;
 
@@ -554,13 +574,15 @@ static int br_fetch(const char *url) {
         char msg[BR_STATUS_MAX];
         const char *why;
         switch (n) {
-        case -7: why = "redirect https blocked"; break;
-        case -2: why = "dns failed"; break;
-        case -3: why = "connect failed"; break;
-        case -4: why = "http status error"; break;
-        case -5: why = "no reply"; break;
-        case -8: why = "redirect loop"; break;
-        default: why = "fetch error"; break;
+        case -7:  why = "redirect https blocked"; break;
+        case -2:  why = "dns failed"; break;
+        case -3:  why = "connect failed"; break;
+        case -4:  why = "http status error"; break;
+        case -5:  why = "no reply"; break;
+        case -8:  why = "redirect loop"; break;
+        case -11: why = "truncated body"; break;
+        case -13: why = "body needs resume"; break;
+        default:  why = "fetch error"; break;
         }
         xcopy(msg, sizeof(msg), why);
         xcat(msg, sizeof(msg), " (");
@@ -569,8 +591,8 @@ static int br_fetch(const char *url) {
         br_set_status(msg);
         return n;
     }
-    br_bytes = n;
-    br_status_code = net_http_last_status();
+    br_bytes = (int)total;
+    br_status_code = status;
     br_ok = 1;
     return 0;
 }
@@ -723,7 +745,7 @@ void gui_browser_probe_sample(void) {
     xcopy(br_url, sizeof(br_url), "sample://local");
     br_alloc_html();
     int len = xlen(sample);
-    for (int i = 0; i < len && i < BR_HTML_SIZE - 1; i++) br_html[i] = (uint8_t)sample[i];
+    for (int i = 0; i < len && i < BR_HTML_CAP - 1; i++) br_html[i] = (uint8_t)sample[i];
     br_bytes = len; br_status_code = 0; br_elapsed_ms = 0; br_ok = 1;
 
     br_close_subtree();
