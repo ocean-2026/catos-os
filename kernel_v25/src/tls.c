@@ -817,16 +817,23 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     }
     /* The server Finished verify_data is PRF over the transcript that
      * includes our own client Finished message (RFC 5246 7.4.9). */
-    uint8_t srvhash[32];
-    sha256(srvhash, transcript, tlen);
-
     /* ---- server CCS then encrypted server Finished ---- */
+    int srv_ccs = 0;
     for (;;) {
         uint8_t type; const uint8_t *p; int len;
         if (recv_record(&type, &p, &len) != 0) return -6;
-        if (type == 20) continue;              /* server CCS */
+        if (type == 20) { srv_ccs = 1; continue; }   /* server CCS */
         if (type != 22) return -6;
+        if (!srv_ccs) {
+            /* Plaintext handshake before CCS (OpenSSL sends NewSessionTicket
+             * here).  It belongs to the transcript the server hashed over,
+             * so feed it in rather than trying to decrypt it. */
+            transcript_add(p, len);
+            continue;
+        }
         /* encrypted handshake record: decrypt then parse Finished */
+        uint8_t srvhash[32];
+        sha256(srvhash, transcript, tlen);
         static uint8_t inner[16384]; int ilen;
         if (app_recv(p, len, 22, inner, &ilen) != 0) return -6;
         if (ilen < 4 || inner[0] != 20) return -6;
