@@ -975,6 +975,17 @@ static void gui_probe_br(void) {
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
  * 同 tick 内的重复提交仍由合成层去重（stat_double_commit）。 */
+/* v2.80 hotfix: 上一轮 gui 留下的 chrome 静态句柄/菜单态必须清掉，
+ * 否则第二次进桌面会拿着已销毁的 block_id（菜单仍"开着"、时钟块指空）。 */
+void gui_chrome_reset(void) {
+    menu_root = 0;
+    menu_open = 0;
+    clock_row = 0;
+    clock_text_blk = 0;
+    clock_last[0] = 0;
+    s_idle_frame_tick = 0;
+}
+
 static int gui_idle_step(void) {
     gui_pump_input();
     clock_refresh(0);
@@ -1049,8 +1060,13 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "browser"))   { app_open = APP_BROWSER; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
 
+    /* v2.80 hotfix: 进桌面先清空控制台文本并冻结控制台侧绘制/选中，
+     * 否则底下的 shell 内容会在鼠标/时钟等路径上被重绘进帧缓冲。 */
+    con_clear();
+    con_set_gui_mode(1);
     int r = con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE);
     if (r != 0) {
+        con_set_gui_mode(0);
         con_write("gui: 进入图形块桌面失败\n");
         return;
     }
@@ -1074,6 +1090,7 @@ void gui_shell_cmd(const char *arg) {
     gui_idle_loop();
 
     gui_end();
+    con_set_gui_mode(0);
     con_force_text();
     con_clear();
 }
