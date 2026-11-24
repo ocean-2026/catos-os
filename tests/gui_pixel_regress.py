@@ -115,6 +115,8 @@ def main():
         "files":   "gui shot-files",
         "images":  "gui shot-images",
         "browser": "gui shot-browser",
+        "style-app":  "gui shot-style-app",
+        "style-calm": "gui shot-style-calm",
     }
     cmd = args.cmd or GROUP_CMD[args.group]
 

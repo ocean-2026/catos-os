@@ -1375,6 +1375,7 @@ void gui_shell_cmd(const char *arg) {
      * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）；
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
+    int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
     int app_open = APP_NONE;
@@ -1388,6 +1389,8 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-reset")) shot_reset = 1;
     else if (!strcmp_probe(word, "shot-crop"))  shot_crop = 1;
     else if (!strcmp_probe(word, "shot-drag"))  shot_drag = 1;
+    else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
+    else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
@@ -1413,6 +1416,7 @@ void gui_shell_cmd(const char *arg) {
     gui_demo_build();
     if (shot_reset) { gui_reset(); gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
+    if (shot_style >= 0) gui_style_set(shot_style);
     if (shot_menu) gui_menu_open();
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();

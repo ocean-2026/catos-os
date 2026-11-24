@@ -136,6 +136,20 @@ BROWSER_CHECKS = [
      "color": DARK_FG, "min": 20, "label": "browser text fg"},
 ]
 
+# App custom 档位：面板内角为面板色，任务栏为 bar 色，外角不裁成底色。
+STYLE_APP_CHECKS = [
+    {"kind": "ne_bg", "pt": (65, 65)},
+    {"kind": "color", "pt": (224, 164), "color": DARK_PANEL},
+    {"kind": "color", "pt": (400, 585), "color": DARK_BAR},
+]
+
+# Calm & soft 档位：面板外角裁成桌面底色，内角仍为面板色，任务栏满铺 bar。
+STYLE_CALM_CHECKS = [
+    {"kind": "color", "pt": (64, 64), "color": DARK_BG},
+    {"kind": "color", "pt": (224, 164), "color": DARK_PANEL},
+    {"kind": "color", "pt": (400, 585), "color": DARK_BAR},
+]
+
 CHECK_GROUPS = {
     "dark": DEFAULT_CHECKS,
     "light": THEME_LIGHT_CHECKS,
@@ -148,6 +162,8 @@ CHECK_GROUPS = {
     "files": FILES_CHECKS,
     "images": IMAGES_CHECKS,
     "browser": BROWSER_CHECKS,
+    "style-app": STYLE_APP_CHECKS,
+    "style-calm": STYLE_CALM_CHECKS,
 }
 
 GROUP_BG = {
@@ -162,6 +178,8 @@ GROUP_BG = {
     "files": DARK_BG,
     "images": DARK_BG,
     "browser": DARK_BG,
+    "style-app": DARK_BG,
+    "style-calm": DARK_BG,
 }
 
 
