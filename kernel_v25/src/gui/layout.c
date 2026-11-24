@@ -224,9 +224,11 @@ static void layout_free_child(block *c, int fx, int fy, int fw, int fh) {
         if (c->pct_y > 0) y = ay + ah * (int)c->pct_y / 1000;
     }
 
-    /* 拖拽收敛为 pos 偏移属性：布局不重置，跨帧保持。 */
-    c->x = x + c->pos_x;
-    c->y = y + c->pos_y;
+    /* 拖拽收敛为 pos 偏移属性；moved 后布局保留绝对几何，跨帧不重置。 */
+    if (!c->moved) {
+        c->x = x + c->pos_x;
+        c->y = y + c->pos_y;
+    }
 }
 
 static void layout_free(block *b,
@@ -263,7 +265,8 @@ void layout_node(block *b, int ax, int ay, int aw, int ah) {
         b->kind != BLK_FREE) {
         int lx = b->x + pad_l, ly = b->y + pad_t;
         for (block *c = b->first_child; c; c = c->next_sibling) {
-            c->x = lx; c->y = ly;
+            /* 拖拽/缩放收敛为 moved 几何：跨帧保留绝对位置，不被父内容框重置。 */
+            if (!c->moved) { c->x = lx; c->y = ly; }
             layout_node(c, c->x, c->y, c->w, c->h);
         }
     }
