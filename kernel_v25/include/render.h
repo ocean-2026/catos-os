@@ -241,6 +241,9 @@ int         con_screen_pop(void);
  * paste.  Text and gfx back-ends both consume wheel events; only the
  * drawable gfx24 back-end paints a software pixel cursor. */
 void        con_mouse_poll(void);
+/* v2.80 hotfix: GUI 独占屏幕期间冻结控制台绘制/选区（0 = 恢复控制台）。 */
+void        con_set_gui_mode(int on);
+int         con_gui_mode(void);
 /* Consume the pending middle-click paste request (1 when armed). */
 int         con_mouse_paste_taken(void);
 /* Snapshot driver pixel position + button mask for diagnostics/tests. */

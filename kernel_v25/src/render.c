@@ -96,6 +96,17 @@ static int paste_pending;          /* middle-click arms a paste          */
 static con_paste_fn paste_hook;
 static int sel_at(int x, int y);
 
+/* v2.80 hotfix: GUI 持有屏幕期间冻结控制台侧一切绘制/选中。
+ * 现象：块桌面下点鼠标会走 con_mouse_poll 的选区重绘，把底层 shell 文本
+ * 逐单元格画进 VBE24 帧缓冲，看起来像"露出 bash"。GUI 期间鼠标事件由
+ * gui_pump_input 独占消费，控制台既不看也不画。 */
+static int con_gui_owned;
+void con_set_gui_mode(int on) {
+    con_gui_owned = on ? 1 : 0;
+    if (on) { sel_valid = 0; sel_dragging = 0; paste_pending = 0; }
+}
+int con_gui_mode(void) { return con_gui_owned; }
+
 /* v2.58: two-row fixed IME candidate area -- separator row (rows-2) and
  * candidate row (rows-1).  Both rows' original cells are saved verbatim
  * and restored on `con_status_bar_off()`, so leaving the IME never
@@ -201,6 +212,7 @@ static void cell_set(con_cell_t *c, uint32_t cp, uint8_t flags) {
 /* A WIDE_R is never painted on its own; its glyph comes from WIDE_L.
  * render_busy fences the PIT IRQ out of a half-drawn cell. */
 static void paint(int x, int y) {
+    if (con_gui_owned) return;          /* GUI 持有屏幕，控制台不许落像素 */
     if (x < 0 || x >= cols || y < 0 || y >= rows) return;
     con_cell_t *c = &cells[y][x];
     if (c->flags == CELL_F_WIDE_R) return;
@@ -305,6 +317,7 @@ static void hz_rebuild_map(void) {
 }
 
 static void redraw_all(void) {
+    if (con_gui_owned) return;
     if (be->mode == CON_MODE_TEXT) hz_rebuild_map();
     clear_bg = s_bg_rgb;
     painted_invalidate_all();
@@ -752,6 +765,7 @@ void con_set_out_indent(int on) {
 }
 
 void con_write_n(const char *s, int n, int final) {
+    if (con_gui_owned) return;
     if (!s || n <= 0) {
         if (final) con_flush_utf8();
         render_flush();
@@ -1526,6 +1540,7 @@ static void sel_serialize(void) {
 }
 
 void con_mouse_poll(void) {
+    if (con_gui_owned) return;   /* 事件留给 gui_pump_input */
     mouse_event_t e;
     while (mouse_poll_event(&e)) {
         /* Software pixel cursor: only the drawable gfx24 back-end hooks
