@@ -16,6 +16,7 @@
 #include "net.h"
 #include "paging.h"
 #include "serial_log.h"
+#include "fs.h"
 
 extern uint32_t uptime_ms(void);
 #include "keyboard.h"
@@ -23,8 +24,9 @@ extern uint32_t uptime_ms(void);
 #include <stdint.h>
 #include <stddef.h>
 
-#define BR_PAGES     12                      /* HTML 缓冲 12×4 KiB = 48 KiB */
-#define BR_HTML_SIZE (BR_PAGES * 4096)
+/* HTML 缓冲动态扩容：按需帧分配，上限 72×4 KiB = 288 KiB，不入 .bss 大数组。 */
+#define BR_MAX_PAGES 72
+#define BR_HTML_CAP  (BR_MAX_PAGES * 4096)
 #define BR_POOL      4096                    /* 持久文本池（块文本引用） */
 #define BR_URL_MAX   160
 #define BR_STATUS_MAX 160
@@ -51,9 +53,16 @@ static block_id    br_content;
 static block_id    br_status_blk;
 
 /* HTML 帧缓冲（运行时页分配，不入 .bss 静态数组）。 */
-static uint32_t    br_phys[BR_PAGES];
+static uint32_t    br_phys[BR_MAX_PAGES];
 static int         br_pages;
 static uint8_t    *br_html;
+
+/* 解码图片帧缓冲（24bpp RGB，运行时页分配；PNG/JPEG 浮点路径不在本内核支持范围）。 */
+#define BR_IMG_MAX_PAGES 400
+static uint32_t    br_img_phys[BR_IMG_MAX_PAGES];
+static int         br_img_pages;
+static uint8_t    *br_img_buf;
+static int         br_img_w, br_img_h;
 
 /* 持久文本池：块文本按引用保存，不能指向栈/run 临时缓冲。 */
 static char        br_pool[BR_POOL];
@@ -104,13 +113,30 @@ static void br_free_html(void) {
 
 static int br_alloc_html(void) {
     br_free_html();
-    for (int p = 0; p < BR_PAGES; p++) {
-        uint32_t pa = frame_alloc();
-        if (!pa) { br_free_html(); return -1; }
-        br_phys[p] = pa;
+    uint32_t pa = frame_alloc();
+    if (!pa) return -1;
+    br_phys[0] = pa;
+    br_pages = 1;
+    br_html = (uint8_t *)pa;
+    return 0;
+}
+
+/* 流式接收器：把响应体追加进动态 HTML 缓冲，跨页按需增长。 */
+static int br_stream_sink(void *ud, const uint8_t *p, int len) {
+    (void)ud;
+    for (int i = 0; i < len; i++) {
+        int off = br_bytes + i;
+        if (off >= BR_HTML_CAP) return -1;
+        int pg = off >> 12;
+        if (pg >= br_pages) {
+            uint32_t pa = frame_alloc();
+            if (!pa) return -1;
+            br_phys[pg] = pa;
+            br_pages = pg + 1;
+        }
+        br_html[off] = p[i];
     }
-    br_pages = BR_PAGES;
-    br_html = (uint8_t *)br_phys[0];
+    br_bytes += len;
     return 0;
 }
 
@@ -149,7 +175,9 @@ struct br_css {
     int32_t  pad_l, pad_r, pad_t, pad_b;
     uint8_t  border_w;
     uint8_t  align;
-    int32_t  req_w, req_h;
+    int32_t  req_w, req_h;          /* px；0 = auto */
+    int32_t  req_w_pct, req_h_pct;  /* 相对父宽/高的百分比；0 = 未声明 */
+    int32_t  max_w;                 /* px 上限；0 = 不限 */
 };
 static struct br_css br_css_cur;
 
@@ -201,12 +229,23 @@ static int css_px(const char *v) {
     return n;
 }
 
+/* 解析尺寸值：返回数值；*pct 置 1 表示单位是 '%'。 */
+static int css_size(const char *v, int *pct) {
+    v = css_trim(v);
+    int n = 0;
+    while (*v >= '0' && *v <= '9') { n = n*10 + (*v-'0'); v++; }
+    *pct = (*v == '%') ? 1 : 0;
+    return n;
+}
+
 static void css_reset(void) {
     br_css_cur.fg = INHERIT_COLOR; br_css_cur.bg = INHERIT_COLOR;
     br_css_cur.pad_l = br_css_cur.pad_r = 0;
     br_css_cur.pad_t = br_css_cur.pad_b = 0;
     br_css_cur.border_w = 0; br_css_cur.align = 0;
     br_css_cur.req_w = 0; br_css_cur.req_h = 0;
+    br_css_cur.req_w_pct = 0; br_css_cur.req_h_pct = 0;
+    br_css_cur.max_w = 0;
 }
 
 static void css_set_prop(const char *p, const char *v) {
@@ -229,9 +268,18 @@ static void css_set_prop(const char *p, const char *v) {
         else if (css_eq(v, "right") || css_eq(v, "end")) br_css_cur.align = ALN_END;
         else br_css_cur.align = ALN_START;
     }
-    else if (css_eq(p, "width"))  { int q = css_px(v); if (q > 0) br_css_cur.req_w = q; }
-    else if (css_eq(p, "height")) { int q = css_px(v); if (q > 0) br_css_cur.req_h = q; }
-    /* max-width: v0.1 由布局裁剪兜底；font-weight:bold 由 <b>/<strong> 承担。 */
+    else if (css_eq(p, "width")) {
+        int pct = 0; int q = css_size(v, &pct);
+        if (pct) br_css_cur.req_w_pct = q;
+        else if (q > 0) br_css_cur.req_w = q;
+    }
+    else if (css_eq(p, "height")) {
+        int pct = 0; int q = css_size(v, &pct);
+        if (pct) br_css_cur.req_h_pct = q;
+        else if (q > 0) br_css_cur.req_h = q;
+    }
+    else if (css_eq(p, "max-width")) { int q = css_px(v); if (q > 0) br_css_cur.max_w = q; }
+    /* font-weight:bold 由 <b>/<strong> 承担；display 折行见标签块级/行内判定。 */
 }
 
 static void css_parse(const char *style) {
@@ -309,7 +357,7 @@ static int   br_pos;
 static int   br_accent;
 static block_id br_cur_row;
 
-static int br_hlen(void) { return br_pages ? BR_HTML_SIZE : 0; }
+static int br_hlen(void) { return br_pages ? br_pages * 4096 : 0; }
 
 static int tk_name(const char *n) {
     struct { const char *k; int v; } map[] = {
@@ -368,7 +416,13 @@ static void run_flush(int scale) {
     if (br_css_cur.border_w) t.border_w = br_css_cur.border_w;
     if (br_css_cur.align) t.align_main = br_css_cur.align;
     if (br_css_cur.req_w > 0) t.req_w = br_css_cur.req_w;
+    else if (br_css_cur.req_w_pct > 0)
+        t.req_w = (BR_VP_W - 16) * br_css_cur.req_w_pct / 100;
     if (br_css_cur.req_h > 0) t.req_h = br_css_cur.req_h;
+    else if (br_css_cur.req_h_pct > 0)
+        t.req_h = BR_VP_H * br_css_cur.req_h_pct / 100;
+    if (br_css_cur.max_w > 0 && t.req_w > br_css_cur.max_w)
+        t.req_w = br_css_cur.max_w;
     block_id parent = br_cur_row ? br_cur_row : br_content;
     b_text(parent, &t, txt);
     br_blocks++;
@@ -391,6 +445,167 @@ static void br_add_text_block(const char *txt, int scale, int accent) {
     br_blocks++;
 }
 
+/* ---- 图片解码（BMP/PPM 内存/FS 路径；PNG/JPEG 浮点路径本内核不支持） ------ */
+
+static uint16_t br_rd_u16(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+static int32_t br_rd_i32(const uint8_t *p) {
+    return (int32_t)(p[0] | (p[1] << 8) | (p[2] << 16) |
+                     ((uint32_t)p[3] << 24));
+}
+
+static void br_free_img(void) {
+    for (int p = 0; p < br_img_pages; p++) frame_free(br_img_phys[p]);
+    br_img_pages = 0; br_img_buf = 0; br_img_w = br_img_h = 0;
+}
+
+static int br_img_alloc(int w, int h) {
+    int bytes = w * h * 3;
+    int pages = (bytes + 4095) / 4096;
+    if (pages > BR_IMG_MAX_PAGES) return -1;
+    for (int p = 0; p < pages; p++) {
+        uint32_t pa = frame_alloc();
+        if (!pa) { br_free_img(); return -1; }
+        br_img_phys[p] = pa;
+    }
+    br_img_pages = pages;
+    br_img_buf = (uint8_t *)br_img_phys[0];
+    memset(br_img_buf, 0, bytes);
+    br_img_w = w; br_img_h = h;
+    return 0;
+}
+
+static int br_decode_bmp_path(const char *path) {
+    uint8_t hdr[64];
+    int n = fs_read_at(path, (char *)hdr, 0, sizeof(hdr));
+    if (n < 34) return -1;
+    if (hdr[0] != 'B' || hdr[1] != 'M') return -1;
+    uint32_t data_off = br_rd_u16(hdr + 10);
+    int32_t info = br_rd_i32(hdr + 14);
+    if (info < 40) return -1;
+    int32_t wh = br_rd_i32(hdr + 22);
+    int32_t w = br_rd_i32(hdr + 18);
+    int bpp = br_rd_u16(hdr + 28);
+    uint32_t comp = (uint32_t)br_rd_i32(hdr + 30);
+    if (comp != 0) return -1;                      /* RLE/压缩：不支持 */
+    if (bpp != 24 && bpp != 32) return -1;         /* 调色板：不支持 */
+    if (w <= 0 || w > 800) return -1;
+    int topdown = wh < 0;
+    int h = topdown ? -wh : wh;
+    if (h <= 0 || h > 600) return -1;
+
+    int bpc = bpp / 8;
+    int stride = ((w * bpc + 3) & ~3);
+    if (br_img_alloc(w, h) < 0) return -1;
+    static uint8_t row[3204];
+    for (int y = 0; y < h; y++) {
+        int got = fs_read_at(path, (char *)row, data_off + y * stride, stride);
+        if (got < bpc * w) return -1;
+        int dst = topdown ? y : (h - 1 - y);
+        for (int x = 0; x < w; x++) {
+            uint8_t B = row[x * bpc];
+            uint8_t G = row[x * bpc + 1];
+            uint8_t R = row[x * bpc + 2];
+            uint8_t *d = br_img_buf + (dst * w + x) * 3;
+            d[0] = R; d[1] = G; d[2] = B;
+        }
+    }
+    return 0;
+}
+
+static int br_decode_ppm_path(const char *path) {
+    char hdr[256];
+    int n = fs_read_at(path, hdr, 0, sizeof(hdr) - 1);
+    if (n < 5) return -1;
+    hdr[n] = 0;
+    if (hdr[0] != 'P' || hdr[1] != '6') return -1;
+    int p = 2;
+    int vals[3] = { 0, 0, 0 };
+    for (int v = 0; v < 3; v++) {
+        while (hdr[p] == ' ' || hdr[p] == '\t' || hdr[p] == '\n' ||
+               hdr[p] == '\r' || hdr[p] == '#') {
+            if (hdr[p] == '#') while (hdr[p] && hdr[p] != '\n') p++;
+            else p++;
+        }
+        while (hdr[p] >= '0' && hdr[p] <= '9') {
+            vals[v] = vals[v] * 10 + (hdr[p] - '0'); p++;
+        }
+    }
+    int w = vals[0], h = vals[1];
+    if (w <= 0 || h <= 0 || w > 800 || h > 600) return -1;
+    int data_off = p;
+    if (br_img_alloc(w, h) < 0) return -1;
+    static uint8_t row[3204];
+    for (int y = 0; y < h; y++) {
+        int got = fs_read_at(path, (char *)row, data_off + y * w * 3, w * 3);
+        if (got < w * 3) return -1;
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = br_img_buf + (y * w + x) * 3;
+            d[0] = row[x * 3]; d[1] = row[x * 3 + 1]; d[2] = row[x * 3 + 2];
+        }
+    }
+    return 0;
+}
+
+static void br_img_embed(const char *src) {
+    block *b = btable_alloc(BLK_CANVAS);
+    if (!b) return;
+    block_id parent = br_cur_row ? br_cur_row : br_content;
+    tree_attach(btable_get(parent), b);
+    int dw = br_img_w, dh = br_img_h;
+    if (dw > BR_VP_W - 16) { dh = dh * (BR_VP_W - 16) / dw; dw = BR_VP_W - 16; }
+    b->req_w = dw; b->req_h = dh;
+    b->pix_w = br_img_w; b->pix_h = br_img_h;
+    b->buf = br_img_buf;
+    b->layer = LAYER_CONTENT; b->visible = 1; b->dirty_layout = 1;
+    br_blocks++;
+    ser_write("GUI:br img "); ser_write(src);
+    ser_write(" w="); br_dec((uint32_t)br_img_w);
+    ser_write(" h="); br_dec((uint32_t)br_img_h);
+    ser_write("\n");
+}
+
+static int br_ext_is(const char *src, const char *ext) {
+    int n = xlen(src), en = xlen(ext);
+    if (n < en) return 0;
+    const char *s = src + n - en;
+    for (int i = 0; i < en; i++) {
+        char a = s[i], b = ext[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static void br_img_handle(const char *src) {
+    if (!src || !*src) { br_add_text_block("[img: ?]", 1, 0); return; }
+    int is_bmp = br_ext_is(src, ".bmp");
+    int is_ppm = br_ext_is(src, ".ppm");
+    int is_png = br_ext_is(src, ".png");
+    int is_jpg = br_ext_is(src, ".jpg") || br_ext_is(src, ".jpeg");
+
+    if (is_png || is_jpg) {
+        ser_write("GUI:br img unsupported "); ser_write(src); ser_write("\n");
+        char ph[BR_URL_MAX + 16];
+        xcopy(ph, sizeof(ph), "[img: unsupported ");
+        xcat(ph, sizeof(ph), src); xcat(ph, sizeof(ph), "]");
+        br_add_text_block(ph, 1, 0);
+        return;
+    }
+    /* 本地 FS 路径：直接解码 BMP/PPM。 */
+    if (src[0] == '/' && (is_bmp || is_ppm)) {
+        int rc = is_bmp ? br_decode_bmp_path(src) : br_decode_ppm_path(src);
+        if (rc == 0) { br_img_embed(src); return; }
+    }
+    /* http(s) 同源图片本轮未接入内存解码；占位保留。 */
+    char ph[BR_URL_MAX + 12];
+    xcopy(ph, sizeof(ph), "[img: ");
+    xcat(ph, sizeof(ph), src); xcat(ph, sizeof(ph), "]");
+    br_add_text_block(ph, 1, 0);
+}
+
 /* 解析一个标签；返回 1 表示消费到 '>'。 */
 static int br_parse_tag(void) {
     /* br_pos 指向 '<' */
@@ -411,6 +626,8 @@ static int br_parse_tag(void) {
     char src[BR_URL_MAX]; src[0] = 0;
     char style[BR_URL_MAX]; style[0] = 0;
     while (i < br_hlen() && br_html[i] != '>') {
+        while (i < br_hlen() && (br_html[i] == ' ' || br_html[i] == '/')) i++;
+        if (i >= br_hlen() || br_html[i] == '>') break;
         char key[24]; int nk = 0;
         while (i < br_hlen() && br_html[i] != '=' &&
                br_html[i] != ' ' && br_html[i] != '/' && br_html[i] != '>' && nk < 23) {
@@ -457,11 +674,7 @@ static int br_parse_tag(void) {
     case TK_A: br_accent = 1; break;
     case TK_IMG: {
         run_flush(1);
-        char ph[BR_URL_MAX + 12];
-        xcopy(ph, sizeof(ph), "[img: ");
-        xcat(ph, sizeof(ph), src[0] ? src : "?");
-        xcat(ph, sizeof(ph), "]");
-        br_add_text_block(ph, 1, 0);
+        br_img_handle(src);
         break;
     }
     case TK_SCRIPT: case TK_STYLE: {
@@ -545,7 +758,9 @@ static int br_fetch(const char *url) {
     if (!net_up()) { br_set_status("network not ready"); return -1; }
 
     uint32_t t0 = uptime_ms();
-    int n = net_http_get(url, (char *)br_html, BR_HTML_SIZE);
+    int status = 0; long total = 0;
+    int n = net_http_download_stream(url, 0, br_stream_sink, 0,
+                                     &status, &total);
     uint32_t t1 = uptime_ms();
     br_elapsed_ms = t1 > t0 ? t1 - t0 : 0;
 
@@ -554,13 +769,15 @@ static int br_fetch(const char *url) {
         char msg[BR_STATUS_MAX];
         const char *why;
         switch (n) {
-        case -7: why = "redirect https blocked"; break;
-        case -2: why = "dns failed"; break;
-        case -3: why = "connect failed"; break;
-        case -4: why = "http status error"; break;
-        case -5: why = "no reply"; break;
-        case -8: why = "redirect loop"; break;
-        default: why = "fetch error"; break;
+        case -7:  why = "redirect https blocked"; break;
+        case -2:  why = "dns failed"; break;
+        case -3:  why = "connect failed"; break;
+        case -4:  why = "http status error"; break;
+        case -5:  why = "no reply"; break;
+        case -8:  why = "redirect loop"; break;
+        case -11: why = "truncated body"; break;
+        case -13: why = "body needs resume"; break;
+        default:  why = "fetch error"; break;
         }
         xcopy(msg, sizeof(msg), why);
         xcat(msg, sizeof(msg), " (");
@@ -569,8 +786,8 @@ static int br_fetch(const char *url) {
         br_set_status(msg);
         return n;
     }
-    br_bytes = n;
-    br_status_code = net_http_last_status();
+    br_bytes = (int)total;
+    br_status_code = status;
     br_ok = 1;
     return 0;
 }
@@ -580,6 +797,7 @@ static int br_fetch(const char *url) {
 static void br_close_subtree(void) {
     if (br_root) { b_remove(br_root); br_root = 0; }
     br_addr_blk = br_content = br_status_blk = 0;
+    br_free_img();
 }
 
 static void br_click_back(block_id id, int32_t lx, int32_t ly);
@@ -715,7 +933,7 @@ void gui_browser_probe_sample(void) {
         "<p>v0 offline sample page rendered from an embedded document.</p>"
         "<ul><li>text block</li><li>link <a href=\"http://example/\">example</a></li></ul>"
         "<p>Second paragraph with <b>bold</b> words and a <a href=\"#\">anchor</a>.</p>"
-        "<img src=\"pic.png\">"
+        "<img src=\"/samples/desktop.bmp\">"
         "</body></html>";
 
     gui_browser_close();
@@ -723,7 +941,7 @@ void gui_browser_probe_sample(void) {
     xcopy(br_url, sizeof(br_url), "sample://local");
     br_alloc_html();
     int len = xlen(sample);
-    for (int i = 0; i < len && i < BR_HTML_SIZE - 1; i++) br_html[i] = (uint8_t)sample[i];
+    for (int i = 0; i < len && i < BR_HTML_CAP - 1; i++) br_html[i] = (uint8_t)sample[i];
     br_bytes = len; br_status_code = 0; br_elapsed_ms = 0; br_ok = 1;
 
     br_close_subtree();
