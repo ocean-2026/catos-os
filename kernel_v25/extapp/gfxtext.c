@@ -1,3 +1,10 @@
+/*
+ * LEGACY REFERENCE ONLY, NOT SHIPPED.
+ *
+ * 旧命令式位图文本原型（gfx_blit / display_mode(3) 路径）；块化桌面只认
+ * 声明式块树，此路径退役。源码保留作学习参考，不打包。
+ */
+
 /* gfxtext.c -- PROTOTYPE (v2.73): CE-side gfx text rendering.
  *
  * Goal: prove a ring3 CE app can draw crisp 24bpp text using ONLY the

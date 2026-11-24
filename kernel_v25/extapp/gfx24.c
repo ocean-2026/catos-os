@@ -1,3 +1,11 @@
+/*
+ * LEGACY REFERENCE ONLY, NOT SHIPPED.
+ *
+ * 旧命令式位图原型（gfx_rect / gfx_blit / display_mode(3) 路径）；块化桌面
+ * 只认声明式块树，此路径退役。源码保留作学习参考，已从 build/apps.list
+ * 摘除，不再打包进镜像。
+ */
+
 /* gfx24.c -- CE probe for the v2.12 24bpp drawing ABI (slots 61..63).
  *
  * This is the ring3 counterpart of the shell's `gfx24` command.  It is

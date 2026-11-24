@@ -1,3 +1,10 @@
+/*
+ * LEGACY REFERENCE ONLY, NOT SHIPPED.
+ *
+ * 旧命令式位图桌面原型（gfx_rect / gfx_blit / display_mode(3) 路径）；
+ * 块化桌面只认声明式块树，此路径退役。源码保留作学习参考，不打包。
+ */
+
 /* gfxdesk.c -- PROTOTYPE (v2.73): gfx24 true-colour desktop environment.
  *
  * A proof-of-concept CDE desktop that runs entirely in ring3 on the
