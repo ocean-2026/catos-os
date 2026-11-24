@@ -1046,7 +1046,7 @@ static void cmd_about(void) {
     vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n", "  输入         : PS/2 键盘（中断驱动）\n"));
     vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n", "  文件系统     : IDE 上的 FAT32（持久化）\n"));
     vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n", "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
-    vga_write("  Version      : CatOS v2.78\n");
+    vga_write("  Version      : CatOS v2.80\n");
     /* v2.78: boot now runs `about`, which clears the screen, so the net
      * adapter line printed during net_init would otherwise be lost -- restate
      * it here so the first screen still answers "what am I running on". */
