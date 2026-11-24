@@ -391,6 +391,7 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
         case 4: gui_images_open(0);  break;
         case 5: gui_browser_open(0); break;
         case 6: gui_settings_open(); break;
+        case 7: gui_term_open();     break;
         }
     }
     gui_menu_close();
@@ -420,8 +421,8 @@ void gui_menu_open(void) {
         b_text(rid, 0, menu_labels[i]);
     }
 
-    static const char *app_labels[6] = { "Notepad", "Canvas demo", "Files", "Images", "Browser", "Settings" };
-    for (int a = 0; a < 6; a++) {
+    static const char *app_labels[7] = { "Notepad", "Canvas demo", "Files", "Images", "Browser", "Settings", "Terminal" };
+    for (int a = 0; a < 7; a++) {
         blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
         app.z = -(a + 1);
@@ -1245,6 +1246,50 @@ static void gui_probe_style(const char *mode) {
     con_clear();
 }
 
+static void gui_probe_term(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:term count=0 result=0\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    gui_term_open();
+    gui_term_run(0, "cd /");
+    gui_term_run(0, "ls");
+    gui_term_open();
+    gui_term_run(1, "mkdir /work");
+    gui_term_run(1, "cd /work");
+    gui_term_run(1, "ls");
+
+    int n = gui_term_count();
+    const char *c0 = gui_term_cwd(0);
+    const char *c1 = gui_term_cwd(1);
+    const char *l0 = gui_term_last_line(0);
+    const char *l1 = gui_term_last_line(1);
+    int two = n >= 2;
+    int cwd_diff = strcmp_probe(c0, c1) != 0;
+    int line_diff = strcmp_probe(l0, l1) != 0;
+    int result = two && cwd_diff && line_diff;
+
+    ser_write("GUI:term count="); ser_dec(n);
+    ser_write(" cwd0="); ser_write(c0);
+    ser_write(" cwd1="); ser_write(c1);
+    ser_write(" iso="); ser_dec(cwd_diff && line_diff);
+    ser_write(" result="); ser_dec(result);
+    ser_write("\n");
+
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -1305,6 +1350,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
+        if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
         {
             char w2[24]; const char *r2 = 0;
             split_word(arg, w2, sizeof(w2), &r2);

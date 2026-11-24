@@ -118,6 +118,16 @@ int       gui_browser_blocks(void);
 int       gui_cvchan_probe(void);
 void      gui_cvchan_frame_tick(void);
 
+/* ---- 多会话块内终端 ---- */
+void      gui_term_open(void);
+void      gui_term_close_active(void);
+void      gui_term_reset(void);
+int       gui_term_count(void);
+int       gui_term_active_idx(void);
+const char *gui_term_cwd(int i);
+const char *gui_term_last_line(int i);
+void      gui_term_run(int i, const char *cmd);
+
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 

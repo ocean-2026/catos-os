@@ -332,6 +332,7 @@ void gui_begin(void) {
     gui_images_close();
     gui_browser_close();
     gui_settings_close();
+    gui_term_reset();
     ib_reset();
     gui_input_reset();
     gui_chrome_reset();
