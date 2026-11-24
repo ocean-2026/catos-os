@@ -949,41 +949,6 @@ static void gui_probe_img(void) {
     gui_end();
 }
 
-static const char *dbg_kind[] = {
-    "ROOT", "COL", "ROW", "STK", "TXT", "RECT", "IMG", "SURF",
-    "SPR", "DIV", "CV"
-};
-
-static void dbg_walk(block *b, int d) {
-    if (!b) return;
-    ser_write("D ");
-    for (int i = 0; i < d; i++) ser_write("  ");
-    ser_dec(b->id); ser_write(" ");
-    ser_write(dbg_kind[b->kind < 11 ? b->kind : 0]);
-    ser_write(" x="); ser_dec((uint32_t)b->x);
-    ser_write(" y="); ser_dec((uint32_t)b->y);
-    ser_write(" w="); ser_dec((uint32_t)b->w);
-    ser_write(" h="); ser_dec((uint32_t)b->h);
-    ser_write(" vis="); ser_dec(b->visible);
-    ser_write(" rb="); ser_dec(b->st.role_bg);
-    ser_write(" rw="); ser_dec((uint32_t)b->req_w);
-    ser_write(" rh="); ser_dec((uint32_t)b->req_h);
-    ser_write(" pw="); ser_dec((uint32_t)b->pix_w);
-    ser_write(" ph="); ser_dec((uint32_t)b->pix_h);
-    ser_write(" buf="); ser_dec((uint32_t)(uintptr_t)b->buf);
-    ser_write("\n");
-    for (block *c = b->first_child; c; c = c->next_sibling) dbg_walk(c, d + 1);
-}
-
-static void gui_probe_dbg(void) {
-    gui_begin();
-    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
-    gui_images_open("/samples/desktop.bmp");
-    layout_run();
-    dbg_walk(gui_root_block(), 0);
-    gui_end();
-}
-
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -1029,7 +994,6 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return; }
         if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
-        if (!strcmp_probe(arg, "dbg"))    { gui_probe_dbg(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /
