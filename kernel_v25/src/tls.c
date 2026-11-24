@@ -32,6 +32,8 @@ static int uecc_rng(uint8_t *dest, unsigned size) {
 #define TLS_VERSION_0303 0x0303
 #define CS_ECDHE_RSA_AES128_CBC_SHA256 0xC027
 #define CS_ECDHE_RSA_AES128_GCM_SHA256 0xC02F   /* v2.78: modern-site suite */
+#define CS_ECDHE_RSA_CHACHA20_POLY1305_SHA256   0xCCA8
+#define CS_ECDHE_ECDSA_CHACHA20_POLY1305_SHA256 0xCCA9
 
 /* ------------------------------------------------------------------ */
 /* raw reader buffering                                                */
@@ -176,6 +178,11 @@ static uint8_t g_enc_in[16384], g_enc_out[16384];
  * AES-128 block primitive reuses tiny-AES's CBC path with a zero IV, which
  * is exactly one ECB block encrypt. */
 static int gcm_on;
+static int chacha_on;                 /* 0xCCA8/0xCCA9 record protection */
+static int ecdsa_mode;                /* negotiated suite keys ECDSA */
+static uint8_t ecdsa_pub[64];         /* leaf cert ECDSA P-256 point X||Y */
+static int     have_ecdsa_pub;
+static uint8_t c_ckey[32], s_ckey[32]; /* ChaCha write keys */
 static uint8_t c_salt[4], s_salt[4];
 
 static void gf_mul128(uint8_t Y[16], const uint8_t H[16]) {
@@ -263,6 +270,26 @@ static int protect_record(int rec_type, const uint8_t *plain, int plen) {
     uint16_t l16 = (uint16_t)plen;
     mac_hdr[11] = (uint8_t)(l16 >> 8); mac_hdr[12] = (uint8_t)l16;
 
+    if (chacha_on) {
+        /* RFC 7905: nonce = 4 zero bytes || 8-byte record sequence number;
+         * no explicit nonce on the wire, 16-byte Poly1305 tag appended. */
+        uint8_t nonce[12], tag[16];
+        for (int i = 0; i < 4; i++) nonce[i] = 0;
+        memcpy(nonce + 4, seqbe, 8);
+        tls_chacha_poly_seal(c_ckey, nonce, mac_hdr, 13, plain, plen,
+                             g_enc_out, tag);
+        int rn = 0;
+        g_recbuf[rn++] = (uint8_t)rec_type;
+        g_recbuf[rn++] = 0x03; g_recbuf[rn++] = 0x03;
+        uint16_t rl = (uint16_t)(plen + 16);
+        g_recbuf[rn++] = (uint8_t)(rl >> 8); g_recbuf[rn++] = (uint8_t)rl;
+        memcpy(g_recbuf + rn, g_enc_out, plen); rn += plen;
+        memcpy(g_recbuf + rn, tag, 16); rn += 16;
+        if (net_tcp_send(g_recbuf, rn) < 0) return -1;
+        cseq++;
+        return 0;
+    }
+
     if (gcm_on) {
         /* RFC 5288: explicit 8-byte nonce goes in the clear, tag appended. */
         static uint8_t gcm_ct[16384];
@@ -321,6 +348,22 @@ static int app_send(const uint8_t *plain, int plen) {
 
 static int app_recv(const uint8_t *payload, int plen, int rec_type,
                     uint8_t *out, int *outlen) {
+    if (chacha_on) {
+        if (plen < 16) return -1;
+        int ct_len = plen - 16;
+        uint8_t nonce[12], aad[13], seqbe[8];
+        for (int i = 0; i < 8; i++) seqbe[i] = (uint8_t)(sseq >> (56 - 8 * i));
+        for (int i = 0; i < 4; i++) nonce[i] = 0;
+        memcpy(nonce + 4, seqbe, 8);
+        memcpy(aad, seqbe, 8);
+        aad[8] = (uint8_t)rec_type; aad[9] = 0x03; aad[10] = 0x03;
+        aad[11] = (uint8_t)(ct_len >> 8); aad[12] = (uint8_t)ct_len;
+        if (tls_chacha_poly_open(s_ckey, nonce, aad, 13, payload, ct_len,
+                                 payload + ct_len, out) != 0) return -1;
+        *outlen = ct_len;
+        sseq++;
+        return 0;
+    }
     if (gcm_on) {
         if (plen < 8 + 16) return -1;
         int ct_len = plen - 8 - 16;
@@ -380,6 +423,89 @@ static int app_recv(const uint8_t *payload, int plen, int rec_type,
     *outlen = plain_len;
     sseq++;
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* minimal DER walker (X.509 leaf cert -> ECDSA P-256 public point)  */
+/* ------------------------------------------------------------------ */
+
+static int der_child(const uint8_t *d, int len, int *off,
+                     uint8_t *tag, int *voff, int *vlen) {
+    int p = *off;
+    if (p + 2 > len) return -1;
+    *tag = d[p];
+    int l = d[p + 1], h = 2;
+    if (l & 0x80) {
+        int n = l & 0x7f;
+        if (n > 4 || p + 2 + n > len) return -1;
+        l = 0;
+        for (int i = 0; i < n; i++) l = (l << 8) | d[p + 2 + i];
+        h = 2 + n;
+    }
+    if (p + h + l > len) return -1;
+    *voff = p + h; *vlen = l; *off = p + h + l;
+    return 0;
+}
+
+/* Pull one INTEGER from `d`, right-justified into 32 big-endian bytes. */
+static int der_read_int(const uint8_t *d, int len, int *off, uint8_t out[32]) {
+    uint8_t tag; int vo, vl;
+    if (der_child(d, len, off, &tag, &vo, &vl) != 0 || tag != 0x02) return -1;
+    int p = vo;
+    while (vl > 1 && d[p] == 0) { p++; vl--; }
+    if (vl > 32) return -1;
+    for (int i = 0; i < 32; i++) out[i] = 0;
+    memcpy(out + 32 - vl, d + p, vl);
+    return 0;
+}
+
+/* Walk the leaf certificate DER and cache its ECDSA P-256 public point.
+ * Tolerant: any structural mismatch leaves have_ecdsa_pub == 0. */
+static void cert_extract_ecdsa(const uint8_t *cert, int certlen) {
+    int off = 0, vo, vl;
+    uint8_t tag;
+    if (der_child(cert, certlen, &off, &tag, &vo, &vl) != 0 || tag != 0x30) return;
+    int tbs_off = vo;
+    if (der_child(cert, vo + vl, &tbs_off, &tag, &vo, &vl) != 0 || tag != 0x30) return;
+    /* skip version[0], serial, sigAlg, issuer, validity, subject (6 kids) */
+    for (int i = 0; i < 6; i++) {
+        if (der_child(cert, tbs_off + vl, &tbs_off, &tag, &vo, &vl) != 0) return;
+    }
+    int spki_off, spki_len;
+    if (der_child(cert, tbs_off + vl, &tbs_off, &tag, &spki_off, &spki_len) != 0 ||
+        tag != 0x30) return;
+    int aoff = spki_off;
+    if (der_child(cert, spki_off + spki_len, &aoff, &tag, &vo, &vl) != 0 || tag != 0x30) return;
+    int bit_off, bit_len;
+    if (der_child(cert, spki_off + spki_len, &aoff, &tag, &bit_off, &bit_len) != 0 ||
+        tag != 0x03) return;
+    if (bit_len < 1 + 65 || cert[bit_off] != 0 || cert[bit_off + 1] != 0x04) return;
+    memcpy(ecdsa_pub, cert + bit_off + 2, 64);
+    have_ecdsa_pub = 1;
+}
+
+/* Certificate handshake message: 3-byte certs length, then 3-byte cert len + DER. */
+static void cert_parse_message(const uint8_t *body, int blen) {
+    if (blen < 6) return;
+    int off = 3;
+    int clen = ((int)body[off] << 16) | ((int)body[off + 1] << 8) | body[off + 2];
+    off += 3;
+    if (clen <= 0 || off + clen > blen) return;
+    cert_extract_ecdsa(body + off, clen);
+}
+
+/* Verify the ServerKeyExchange ECDSA signature (P-256, SHA-256). */
+static int ske_verify_ecdsa(const uint8_t *params, int paramslen,
+                            const uint8_t *sig, int siglen) {
+    if (!have_ecdsa_pub) return 0;
+    uint8_t rs[64];
+    int off = 0; uint8_t tag; int vo, vl;
+    if (der_child(sig, siglen, &off, &tag, &vo, &vl) != 0 || tag != 0x30) return 0;
+    if (der_read_int(sig, siglen, &off, rs) != 0) return 0;
+    if (der_read_int(sig, siglen, &off, rs + 32) != 0) return 0;
+    uint8_t h[32];
+    sha256(h, params, paramslen);
+    return uECC_verify(ecdsa_pub, h, 32, rs, uECC_secp256r1());
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,6 +585,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
 
     uECC_set_rng(uecc_rng);
     tlen = 0; cseq = 0; sseq = 0; gcm_on = 0;
+    chacha_on = 0; ecdsa_mode = 0; have_ecdsa_pub = 0;
     hs_rec_len = 0; hs_rec_off = 0;
     hs_port = port;
     {
@@ -486,24 +613,28 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     uint8_t crandom[32]; crypto_random(crandom, 32);
     memcpy(ch + cn, crandom, 32); cn += 32;
     ch[cn++] = 0;                              /* session id len */
-    /* v2.78: prefer AEAD 0xC02F, fall back to the original CBC suite. */
-    ch[cn++] = 0x00; ch[cn++] = 0x04;
+    /* Offer ECDSA/RSA ChaCha20-Poly1305 first (modern CDNs prefer it),
+     * then the AES-GCM and AES-CBC suites from earlier revisions. */
+    ch[cn++] = 0x00; ch[cn++] = 0x08;
+    ch[cn++] = 0xCC; ch[cn++] = 0xA9;   /* ECDHE-ECDSA-CHACHA20-POLY1305 */
+    ch[cn++] = 0xCC; ch[cn++] = 0xA8;   /* ECDHE-RSA-CHACHA20-POLY1305 */
     ch[cn++] = 0xC0; ch[cn++] = 0x2F;
     ch[cn++] = 0xC0; ch[cn++] = 0x27;
     ch[cn++] = 0x01; ch[cn++] = 0x00;         /* compression: null */
     int ext_len_pos = cn; ch[cn++] = 0x00; ch[cn++] = 0x00;
-    /* supported_groups(secp256r1) + signature_algorithms (OpenSSL 3.0
-     * aborts without either) */
+    /* supported_groups: secp256r1 only. */
     ch[cn++] = 0x00; ch[cn++] = 0x0A;
     ch[cn++] = 0x00; ch[cn++] = 0x04;
-    ch[cn++] = 0x00; ch[cn++] = 0x02;
+    ch[cn++] = 0x00; ch[cn++] = 0x01;
     ch[cn++] = 0x00; ch[cn++] = 0x17;
+    /* signature_algorithms: RSA-PKCS1-SHA256, ECDSA-secp256r1-SHA256,
+     * RSA-PSS-SHA256. */
     ch[cn++] = 0x00; ch[cn++] = 0x0D;
     ch[cn++] = 0x00; ch[cn++] = 0x08;
-    ch[cn++] = 0x00; ch[cn++] = 0x06;
-    ch[cn++] = 0x04; ch[cn++] = 0x01;         /* rsa_pkcs1_sha256 */
-    ch[cn++] = 0x03; ch[cn++] = 0x03;         /* ecdsa_secp256r1_sha256 */
-    ch[cn++] = 0x08; ch[cn++] = 0x04;         /* rsa_pss_rsae_sha256 */
+    ch[cn++] = 0x00; ch[cn++] = 0x03;
+    ch[cn++] = 0x04; ch[cn++] = 0x01;
+    ch[cn++] = 0x03; ch[cn++] = 0x03;
+    ch[cn++] = 0x08; ch[cn++] = 0x04;
     /* SNI: virtual-host sites (and most CDNs) reject a ClientHello without
      * it, which is why https://baidu.com failed before this. */
     {
@@ -534,14 +665,19 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
         int off = 35 + sid_len;
         if (off + 1 >= blen) return -6;
         uint16_t suite = ((uint16_t)body[off] << 8) | body[off + 1];
-        if (suite == CS_ECDHE_RSA_AES128_GCM_SHA256) gcm_on = 1;
-        else if (suite == CS_ECDHE_RSA_AES128_CBC_SHA256) gcm_on = 0;
+        if (suite == CS_ECDHE_RSA_AES128_GCM_SHA256) { gcm_on = 1; }
+        else if (suite == CS_ECDHE_RSA_AES128_CBC_SHA256) { gcm_on = 0; }
+        else if (suite == CS_ECDHE_RSA_CHACHA20_POLY1305_SHA256) { chacha_on = 1; }
+        else if (suite == CS_ECDHE_ECDSA_CHACHA20_POLY1305_SHA256) {
+            chacha_on = 1; ecdsa_mode = 1;
+        }
         else return -6;                        /* no shared suite */
     }
 
-    /* ---- Certificate: skip ---- */
+    /* ---- Certificate: skip chain validation; cache ECDSA leaf pubkey ---- */
     if (hs_read(&mtype, &body, &blen) != 0) return -6;
     if (mtype != 11) return -6;
+    cert_parse_message(body, blen);
 
     /* ---- ServerKeyExchange: parse curve + peer pub, skip signature ---- */
     if (hs_read(&mtype, &body, &blen) != 0) return -6;
@@ -555,6 +691,30 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     /* ECDHE point: 1-byte 0x04 (uncompressed) + 64-byte X||Y = 65 bytes. */
     if (plen_pub != 65 || body[4] != 0x04 || blen < 5 + 64) return -6;
     memcpy(peer_pub, body + 5, 64);
+
+    /* ECDSA suites: verify the SKE signature over client_random ||
+     * server_random || ECDHE params.  This client already skips certificate
+     * chain/hostname validation, so a signature-verify failure is logged
+     * and the handshake continues (warn-only) rather than aborted. */
+    if (ecdsa_mode) {
+        int off = 5 + 64;                       /* = 69 */
+        if (blen < off + 2) return -6;
+        off += 2;                               /* signature_algorithm */
+        if (off + 2 > blen) return -6;
+        int siglen = ((int)body[off] << 8) | body[off + 1];
+        off += 2;
+        if (siglen <= 0 || off + siglen > blen) return -6;
+        /* SignedParams = ClientRandom(32) || ServerRandom(32) ||
+         * ServerECDHParams(69: curve_type 1 + curve 2 + pubkey-len 1 + point 65). */
+        uint8_t sparam[32 + 32 + 69];
+        memcpy(sparam, crandom, 32);
+        memcpy(sparam + 32, srandom, 32);
+        memcpy(sparam + 64, body, 69);
+        if (!ske_verify_ecdsa(sparam, (int)sizeof(sparam), body + off, siglen)) {
+            ser_write("TLS:warn ske_sig skip host=");
+            ser_write(hs_host); ser_write("\n");
+        }
+    }
 
     /* ---- ServerHelloDone ---- */
     if (hs_read(&mtype, &body, &blen) != 0) return -6;
@@ -573,7 +733,11 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     uint8_t kb[128];
     uint8_t rand64b[64];
     memcpy(rand64b, srandom, 32); memcpy(rand64b + 32, crandom, 32);
-    if (gcm_on) {
+    if (chacha_on) {
+        /* ChaCha20-Poly1305: 32-byte key per direction, no MAC/IV material. */
+        tls_prf(kb, 64, master, 48, "key expansion", rand64b, 64);
+        memcpy(c_ckey, kb + 0, 32);  memcpy(s_ckey, kb + 32, 32);
+    } else if (gcm_on) {
         /* AEAD: 16-byte key + 4-byte implicit IV per direction, no MAC keys. */
         tls_prf(kb, 40, master, 48, "key expansion", rand64b, 64);
         memcpy(c_key, kb + 0, 16);  memcpy(s_key, kb + 16, 16);

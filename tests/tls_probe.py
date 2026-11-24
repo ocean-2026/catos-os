@@ -131,7 +131,7 @@ def main():
     iso_i = _stage_image(iso)
     cmdline = [
         qemu, "-m", "256", "-no-reboot", "-display", "none",
-        "-netdev", "user,id=n0", "-device", "pcnet,netdev=n0",
+        "-netdev", "user,id=n0", "-device", "e1000,netdev=n0",
         "-monitor", "tcp:127.0.0.1:%d,server,nowait" % MONITOR_PORT,
         "-cdrom", iso_i, "-boot", "order=d",
     ]
