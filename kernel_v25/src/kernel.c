@@ -7,6 +7,7 @@
 #include "paging.h"
 #include "task.h"
 #include "hw.h"
+#include "smp.h"
 #include "snd.h"
 #include "usb.h"
 #include "mouse.h"
@@ -60,6 +61,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     btime_mark("K3 intr+tasks+sti");
     hw_mem_boot(lo, hi);
     hw_calibrate_cpu();      /* 100 ms: TSC vs PIT -> hw_num(HW_CPU_MHZ) */
+    smp_init();              /* observe MADT/CPUID topology; AP stay deferred */
     btime_mark("K4 mem+cpu calibrate");
 
     /* Sound Blaster 16 (ISA, IRQ5).  Must come after intr_enable() --

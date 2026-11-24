@@ -103,6 +103,20 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 - 门禁：E3 2/2、F11 9/9、链接布局 `--strict` RC=0。vprobe 在本环境基线即出现 post-`fr` 用例
   超时空屏（基线同复现，判为环境性 flake，非本次回归）。
 
+### SMP 拓扑观测（部分落地，AP/多核调度 deferred）
+
+- 新增 `src/smp.c` / `include/smp.h` + shell `smp` 诊断命令。只读观测：MADT CPU 列表、
+  CPUID leaf1 BSP APIC ID、IA32_APIC_BASE MSR(0x1B) 基址/使能位、CPUID APIC 特征位；
+  每核状态（BSP online / AP deferred），附 UP 调度器存活任务数与 idle ticks。
+- 实测 QEMU：`-smp 1` → 1 CPU；`-smp 2` → 2 firmware / online 1（CPU1 deferred）；
+  `-smp 4` → 4 firmware / online 1（CPU1/2/3 deferred）。LAPIC `0xFEE00000` enabled=yes。
+- **不做 + 理由**：INIT-SIPI-SIPI 起 AP、IOAPIC 重定向表接管中断、多核任务调度均未接入。
+  本内核为深度 UP 假设：单 `cur_task`、单 `idle_stack`、单 GDT/TSS、协作式调度；
+  AP 上线需低内存 trampoline + 每核 GDT/TSS/栈 + IPI + 可抢占调度器，属问题清单 E4
+  重写级（12+ 文件 / 147 处全局状态）。AP 留在 parked，不进调度器，避免破门禁。
+  8259 仍为唯一中断路径，LAPIC/IOAPIC 未重编程。
+- 门禁：E3 2/2、链接布局 strict RC=0；`-smp 1` 起机不回退。
+
 ---
 
 *本文件随每轮交付滚动更新；历史汇报见 git 历史（`git log -- docs/PROGRESS.md`）。*
