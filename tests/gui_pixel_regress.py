@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(PROBES_DIR, "gates"))
 sys.path.insert(0, PROBES_DIR)
 
 from qemu_driver import (find_qemu, boot, kill_qemu, force_text,  # noqa: E402
-                         wait_for_prompt, type_text, sendkey)
+                         wait_for_prompt, type_text, sendkey, cmd)
 import gui_pixel_assert as pa  # noqa: E402
 
 ART = os.path.join(REPO, "artifacts", "gui-blocks")
@@ -61,7 +61,8 @@ def capture(iso, cmd, settle, ppm, png, port=PORT):
         "/home/user/work/artifacts/gui-blocks/samples/gui-samples.img")
     disk = scratch if os.path.exists(scratch) else None
     proc, sock = boot(qemu, iso, port, disk=disk,
-                      extra_args=["-vga", "std", "-serial", "file:" + serial])
+                      extra_args=["-cpu", "qemu32",
+                                  "-serial", "file:" + serial])
     try:
         force_text(sock)
         if not wait_for_prompt(sock, timeout=90.0):
@@ -72,7 +73,9 @@ def capture(iso, cmd, settle, ppm, png, port=PORT):
         time.sleep(settle)
         if os.path.exists(ppm):
             os.remove(ppm)
-        sock.sendall(("screendump %s\n" % ppm).encode())
+        hmp = cmd(sock, "screendump %s" % ppm, 1.0)
+        if hmp.strip():
+            print("hmp:", hmp.strip()[:200])
         time.sleep(2.0)
         deadline = time.time() + 10.0
         while time.time() < deadline:
