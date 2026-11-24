@@ -37,6 +37,7 @@
 #include "posix.h"
 #include "sec.h"
 #include "dash.h"    /* v2.67 `hive` command front-end                   */
+#include "serial_log.h" /* SAK 安全模式串口打点 */
 #include "ssh.h"     /* v2.71 SSH-2 server session serving               */
 
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid);
@@ -1755,6 +1756,40 @@ static void cmd_reboot(void) {
     vga_write("Rebooting...\n");
     outb(0x64, 0xFE);
     while (1) __asm__ volatile ("hlt");
+}
+
+/* TEXT 模式 SAK：安全模式提示 + 锁定 / 重启两动作（不画 GUI）。
+ * 锁定态阻塞等待第二次 SAK，再走 root 口令校验。 */
+static void shell_sak_text(void) {
+    ser_write("GUI:sak enter pid="); print_int(g_uid); ser_write("\n");
+    vga_write("\n--- 安全模式 (SAK) ---\n");
+    vga_write("  [l] 锁定   [r] 重新启动\n");
+    char ans[16];
+    kb_readline(ans, sizeof(ans));
+    if (ans[0] == 'r' || ans[0] == 'R') {
+        ser_write("GUI:sak reboot\n");
+        vga_write("Rebooting...\n");
+        outb(0x64, 0xFE);
+        while (1) __asm__ volatile ("hlt");
+    }
+    if (ans[0] == 'l' || ans[0] == 'L') {
+        ser_write("GUI:sak lock\n");
+        vga_write("已锁定。再按 SAK 解锁。\n");
+        for (;;) {
+            while (!sak_requested()) task_sleep_ticks(1);
+            char pw[64];
+            vga_write("SAK unlock: password: ");
+            if (kb_readline_masked(pw, sizeof(pw)) != 1) continue;
+            user_rec_t *u = user_by_name("root");
+            if (u && user_check_pw(u, pw) == 0) {
+                ser_write("GUI:sak unlock\n");
+                vga_write("解锁\n");
+                return;
+            }
+            ser_write("GUI:sak deny_app pid="); print_int(g_uid); ser_write("\n");
+            vga_write("口令错误，已锁定\n");
+        }
+    }
 }
 
 /* v2.67.1: `hang` used to be an unconditional cli/hlt -- one keystroke and
@@ -6999,6 +7034,7 @@ void shell_run(void) {
     btime_mark("S9 shell prompt ready");
 
     while (1) {
+        if (sak_requested()) { shell_sak_text(); continue; }
 #ifdef CATOS_BENCH
         uint64_t _bidle = perf_now();   /* light axis: prompt + readline segment */
 #endif

@@ -57,6 +57,10 @@ int  kb_getkey_timed(uint32_t ticks);  /* real key within N ticks, else -1 */
 /* Blocking: returns one key as either an ASCII code (0..255, Ctrl+letter
  * comes back as ^A..^Z i.e. 0x01..0x1A) or one of the KB_* special codes. */
 int  kb_getkey(void);
+/* SAK (Ctrl+Alt+Del) request flag, raised at the scancode layer and
+ * swallowed there.  `sak_requested()` consumes and clears the flag. */
+int  sak_requested(void);
+void sak_request_clear(void);
 /* v2.28: TAB completion hook.  The shell registers a completer; the line
  * editor calls it on TAB with the full draft line and the cursor offset.
  * Return 1 when `out` holds a replacement line (cursor follows the new

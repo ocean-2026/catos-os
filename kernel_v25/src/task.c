@@ -34,13 +34,14 @@
 #include "perf.h"    /* perf_now(): bench-only rdtsc split timing */
 #endif
 
-extern void net_poll(void);
-extern int  net_http_get(const char *url, char *out, int max);
+extern void net_poll(void);extern int  net_http_get(const char *url, char *out, int max);
 extern int  net_dns_lookup(const char *host, uint8_t ip[4]);
 extern int  net_udp_send(const char *ipstr, uint16_t port, const uint8_t *data, uint32_t len);
 extern int  net_udp_recv(char *ipstr, int *port, uint8_t *buf, int max);
 extern int  net_ping(const char *ipstr);
 extern int  net_init(void);
+/* SAK 安全模式：活动期间 CE 事件轮询过滤按键（src/gui/sak.c）。 */
+extern int  gui_sak_active(void);
 extern int  net_up(void);
 extern uint8_t net_our_ip[4];
 extern volatile uint32_t timer_ticks;
@@ -1713,6 +1714,12 @@ void isr_syscall(int_frame_t *f) {
         break;
     }
     case SYS_POLLKEY: {
+        /* SAK 安全模式占用输入：CE 事件轮询双保险过滤，按键不下发给应用。 */
+        if (gui_sak_active()) {
+            ser_write("GUI:sak deny_app pid="); sd_dec((int)t->tid); ser_write("\n");
+            ret = (uint32_t)-1;
+            break;
+        }
         /* v2.14: strictly non-blocking key read for games/animations.
          * kb_getkey_timed(0) decodes any pending scancodes and returns
          * -1 the moment the queue runs dry; with 0 ticks it can never

@@ -154,6 +154,7 @@ void gui_pump_input(void) {
         if (key_hook(k, key_ud)) k = -1;          /* 组件消费，不走默认路径 */
     }
     if (k == 27) {
+        if (gui_sak_esc()) return;             /* SAK 面板优先消费 Esc */
         if (gui_menu_is_open()) gui_menu_close();  /* Esc 先关菜单 */
         else exit_requested = 1;                   /* Esc 退回文本控制台 */
     }

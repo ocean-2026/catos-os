@@ -31,8 +31,12 @@ static const char sc_shift[128] = {
 
 static char line[KB_BUF];
 static int  line_len = 0, line_cur = 0;   /* bytes: total length / cursor */
-static int  shift = 0, caps = 0, ctrl = 0;
+static int  shift = 0, caps = 0, ctrl = 0, alt = 0;
 static int  got_e0 = 0;          /* an 0xE0 prefix was just seen */
+/* SAK (Secure Attention Key): Ctrl+Alt+Del at the lowest scancode layer.
+ * The combo is swallowed here -- neither the modifiers nor Del reach any
+ * app / input box; it only raises a request flag the GUI / shell polls. */
+static volatile int sak_flag;
 
 /* ---- v2.62: double-tap Shift toggles the pinyin IME --------------------
  * A "tap" = Shift pressed and released WITHOUT any other key in between.
@@ -92,6 +96,10 @@ static int scq_pop(void) {
 /* non-blocking: 1 when at least one scancode is pending (for `top`) */
 int kb_peek(void) { return scq_tail != scq_head; }
 
+/* SAK request: consumed by the GUI / shell on poll; clears on read. */
+int  sak_requested(void) { int f = sak_flag; sak_flag = 0; return f; }
+void sak_request_clear(void) { sak_flag = 0; }
+
 /* v2.76: is a real KEY PRESS waiting?  kb_peek() also counts key-release
  * bytes and the 0xE0/0xE1 escape prefixes that the decoder leaves in the ring,
  * so a caller that merely asks "did the user type something" aborts on the
@@ -118,7 +126,8 @@ void kb_usb_feed(uint8_t sc) {
 
 void kb_init(void) {
     line_len = line_cur = 0;
-    shift = 0; caps = 0; ctrl = 0; got_e0 = 0;
+    shift = 0; caps = 0; ctrl = 0; alt = 0; got_e0 = 0;
+    sak_flag = 0;
     scq_head = scq_tail = 0;
     /* Flush any pending data */
     while (inb(0x64) & 1) inb(0x60);
@@ -212,6 +221,8 @@ int kb_getkey_timed(uint32_t ticks) {
             got_e0 = 0;
             if (sc == 0x1D) { ctrl = 1; continue; }   /* right ctrl down */
             if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
+            if (sc == 0x38) { alt = 1; continue; }    /* right alt down  */
+            if (sc == 0xB8) { alt = 0; continue; }      /* right alt up    */
             if (sc & 0x80) continue;                   /* other E0 breaks */
             int k = sc_to_key(sc);
             if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
@@ -226,8 +237,12 @@ int kb_getkey_timed(uint32_t ticks) {
         }
         if (sc == 0x1D) { ctrl = 1; continue; }
         if (sc == 0x9D) { ctrl = 0; continue; }
+        if (sc == 0x38) { alt = 1; continue; }
+        if (sc == 0xB8) { alt = 0; continue; }
         if (sc == 0x3A) { caps = !caps; continue; }
         if (sc & 0x80) continue;
+
+        if (sc == 0x53 && ctrl && alt) { sak_flag = 1; continue; }  /* SAK */
 
         int k = sc_to_key(sc);
         /* v2.80: Shift held + any key is a COMBO, never an isolated tap --
@@ -263,6 +278,8 @@ int kb_getkey(void) {
             got_e0 = 0;
             if (sc == 0x1D) { ctrl = 1; continue; }   /* right ctrl down */
             if (sc == 0x9D) { ctrl = 0; continue; }   /* right ctrl up   */
+            if (sc == 0x38) { alt = 1; continue; }    /* right alt down  */
+            if (sc == 0xB8) { alt = 0; continue; }      /* right alt up    */
             if (sc & 0x80) continue;           /* E0 break codes: ignore */
             int k = sc_to_key(sc);
             if (k) { SHIFT_MARK_COMBO(); return e0_map(k, ctrl); }
@@ -278,8 +295,12 @@ int kb_getkey(void) {
         }
         if (sc == 0x1D) { ctrl = 1; continue; }
         if (sc == 0x9D) { ctrl = 0; continue; }
+        if (sc == 0x38) { alt = 1; continue; }
+        if (sc == 0xB8) { alt = 0; continue; }
         if (sc == 0x3A) { caps = !caps; continue; }
         if (sc & 0x80) continue;               /* plain break codes: ignore */
+
+        if (sc == 0x53 && ctrl && alt) { sak_flag = 1; continue; }  /* SAK */
 
         /* cursor / function keys (rare on PS/2 without E0, keep both) */
         int k = sc_to_key(sc);

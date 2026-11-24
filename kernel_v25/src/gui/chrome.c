@@ -35,6 +35,11 @@ extern void cvchan_frame_tick(void);
 int gui_cvchan_probe(void) { return cvchan_self_test(); }
 void gui_cvchan_frame_tick(void) { cvchan_frame_tick(); }
 
+/* SAK 安全模式（src/gui/sak.c）。 */
+extern void gui_sak_poll(void);
+extern int  gui_sak_probe(void);
+extern void gui_sak_reset(void);
+
 static void split_word(const char *arg, char *word, int cap, const char **rest) {
     word[0] = 0; *rest = 0;
     if (!arg) return;
@@ -984,9 +989,11 @@ void gui_chrome_reset(void) {
     clock_text_blk = 0;
     clock_last[0] = 0;
     s_idle_frame_tick = 0;
+    gui_sak_reset();
 }
 
 static int gui_idle_step(void) {
+    gui_sak_poll();
     gui_pump_input();
     clock_refresh(0);
     if (timer_ticks - s_idle_frame_tick < 3)
@@ -1030,6 +1037,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
+        if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return; }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /

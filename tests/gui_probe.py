@@ -62,6 +62,7 @@ EXPECT = {
     "img":    {"latest": {"ok": "1"}, "flag": None},
     "br":     {"latest": {"result": "1"}, "flag": None},
     "cvchan": {"latest": {"result": "1"}, "flag": None},
+    "sak":    {"latest": {"result": "1"}, "flag": None},
 }
 
 

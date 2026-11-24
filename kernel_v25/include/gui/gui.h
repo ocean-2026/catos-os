@@ -115,6 +115,13 @@ int       gui_browser_blocks(void);
 int       gui_cvchan_probe(void);
 void      gui_cvchan_frame_tick(void);
 
+/* ---- SAK 安全模式（系统覆盖层，pid=0） ---- */
+void      gui_sak_poll(void);          /* 空闲节拍轮询 SAK 请求 */
+int       gui_sak_active(void);         /* 安全模式是否占用输入 */
+int       gui_sak_esc(void);            /* Esc 由 SAK 面板消费则返回 1 */
+void      gui_sak_reset(void);         /* 进桌面归零 SAK 静态态 */
+int       gui_sak_probe(void);         /* `gui sak` 自检 */
+
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);
 
