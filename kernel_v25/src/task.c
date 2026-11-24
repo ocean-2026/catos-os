@@ -29,6 +29,7 @@
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
+#include "serial_log.h" /* v2.81: GUI:deny / cv_* breadcrumbs on COM1 */
 #ifdef CATOS_BENCH
 #include "perf.h"    /* perf_now(): bench-only rdtsc split timing */
 #endif
@@ -43,6 +44,31 @@ extern int  net_init(void);
 extern int  net_up(void);
 extern uint8_t net_our_ip[4];
 extern volatile uint32_t timer_ticks;
+
+/* v2.81 isolated canvas channel (src/gui/cvchan.c). */
+extern int  cvchan_create(task_t *t, int w, int h, ce_canvas_t *out);
+extern int  cvchan_present(task_t *t, const cv_present_t *r);
+extern int  cvchan_destroy(task_t *t, int res);
+extern void cvchan_task_cleanup(task_t *t);
+
+/* Command-drawing gate: a CE-origin call to a banned pixel entry is logged
+ * on COM1 as `GUI:deny <slot> pid=<tid>` and answered E_EPERM.  Kernel-
+ * internal pixel paths (be_vbe24, compositor blit, image/browser decode)
+ * never pass through this dispatcher, and the CON_ORIGIN_KERNEL crash screen
+ * switches mode directly in the render layer, so neither is gated here. */
+static void sd_dec(int v) {
+    char tmp[12]; int n = 0; unsigned int u;
+    if (v < 0) { ser_putc('-'); u = (unsigned int)(-(int)v); }
+    else u = (unsigned int)v;
+    if (u == 0) { ser_putc('0'); return; }
+    while (u) { tmp[n++] = (char)('0' + u % 10); u /= 10; }
+    while (n) ser_putc(tmp[--n]);
+}
+
+static void sys_deny(const char *slot, int tid) {
+    ser_write("GUI:deny "); ser_write(slot);
+    ser_write(" pid="); sd_dec(tid); ser_write("\n");
+}
 
 /* ---- tiny helpers ------------------------------------------------------ */
 
@@ -443,6 +469,7 @@ static void task_cleanup(task_t *t) {
     uint64_t _cd = perf_now(); g_sp.vma += _cd - _cc;
 #endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
+    cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
 #ifdef CATOS_BENCH
     uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
 #endif
@@ -775,6 +802,9 @@ enum {
      * The reference CDE needed mouse_x/y/buttons; CatOS CE ABI had none.
      * These are pure snapshots of the existing PS/2 driver state. */
     SYS_MOUSE_X, SYS_MOUSE_Y, SYS_MOUSE_BUTTONS,
+    /* v2.81: isolated canvas channel.  Append-only: old binaries keep their
+     * slot indices.  The ONLY legal pixel exit for a CE desktop app. */
+    SYS_CV_CREATE, SYS_CV_PRESENT, SYS_CV_DESTROY,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -847,6 +877,7 @@ static void build_vsyscall_page(uint8_t *page) {
              * implicitly 0: thunk never forwarded ebx/ecx so gotoxy saw
              * stale args.  Fixed v2.69. */
         /*66*/0, /*67*/0, /*68*/0,               /* mouse_x/y/buttons: no args */
+        /*69*/3, /*70*/1, /*71*/1,               /* canvas create/present/destroy */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -2121,6 +2152,14 @@ void isr_syscall(int_frame_t *f) {
     case SYS_DISPLAY_MODE: {
         int mode = (int)a1;
         if (mode == CON_MODE_QUERY) { ret = (uint32_t)con_get_mode(); break; }
+        /* v2.81 gate: CE apps may not switch to the 24bpp truecolour mode.
+         * Text / legacy 8/16bpp console front-ends stay allowed; only the
+         * VBE24 pixel surface is closed to ring3. */
+        if (mode == CON_MODE_VBE24) {
+            sys_deny("display_mode", t->tid);
+            ret = (uint32_t)E_EPERM;
+            break;
+        }
         int r = con_request_mode(mode, CON_ORIGIN_TASK);
         ret = (r == 0) ? (uint32_t)con_get_mode() : (uint32_t)r;
         break;
@@ -2202,55 +2241,49 @@ void isr_syscall(int_frame_t *f) {
      * before the kernel writes VRAM.  A ring3 task therefore cannot make
      * the kernel read arbitrary physical memory or scribble outside the
      * 800x600 surface (issue #78's lesson, applied to the new surface). */
+    /* v2.81 gate: the 24bpp truecolour drawing trio is closed to CE apps.
+     * The only legal pixel exit is the isolated canvas channel (slots
+     * 69..71).  Kernel-internal decode/blit paths do not enter here. */
     case SYS_GFX_INFO:
-        ret = (uint32_t)gfx24_info((int)a1);
+        sys_deny("gfx_info", t->tid);
+        ret = (uint32_t)E_EPERM;
         break;
-    case SYS_GFX_RECT: {
-        if (!gfx24_active()) { ret = (uint32_t)-8; break; }
-        gfx_rect_t r;
-        if (a1 == 0 ||
-            copy_from_user(t, &r, (const void *)a1, (uint32_t)sizeof(r)) != 0) {
-            ret = (uint32_t)-14;                /* EFAULT */
-            break;
-        }
-        if (r.w <= 0 || r.h <= 0 || r.w > GFX24_W || r.h > GFX24_H) {
-            ret = (uint32_t)-22;                /* EINVAL */
-            break;
-        }
-        gfx24_rect(r.x, r.y, r.w, r.h, r.rgb);
-        ret = 0;
+    case SYS_GFX_RECT:
+        sys_deny("gfx_rect", t->tid);
+        ret = (uint32_t)E_EPERM;
         break;
-    }
-    case SYS_GFX_BLIT: {
-        if (!gfx24_active()) { ret = (uint32_t)-8; break; }
-        gfx_blit_t b;
-        if (a1 == 0 ||
-            copy_from_user(t, &b, (const void *)a1, (uint32_t)sizeof(b)) != 0) {
-            ret = (uint32_t)-14;                /* EFAULT */
-            break;
+    case SYS_GFX_BLIT:
+        sys_deny("gfx_blit", t->tid);
+        ret = (uint32_t)E_EPERM;
+        break;
+
+    /* ---- v2.81: isolated canvas channel ---------------------------- */
+    case SYS_CV_CREATE: {
+        ce_canvas_t out;
+        if (a3 == 0) { ret = (uint32_t)E_PIX_FIELD; break; }
+        if (copy_from_user(t, &out, (const void *)a3, sizeof(out)) != 0) {
+            ret = (uint32_t)E_CANVAS_BADH; break;
         }
-        if (b.src == 0 || b.w <= 0 || b.h <= 0 ||
-            b.w > GFX24_W || b.h > GFX24_H) {
-            ret = (uint32_t)-22;                /* EINVAL */
-            break;
-        }
-        /* One row at a time: no 1.44 MB kernel staging buffer, and every
-         * user page in the bitmap is validated before it is read. */
-        static uint8_t row[GFX24_W * 3];
-        uint32_t rowbytes = (uint32_t)b.w * 3u;
-        int rc = 0;
-        for (int j = 0; j < b.h; j++) {
-            const uint8_t *u = (const uint8_t *)b.src +
-                               (uint32_t)j * rowbytes;
-            if (copy_from_user(t, row, u, rowbytes) != 0) {
-                rc = -14;                       /* EFAULT */
-                break;
-            }
-            gfx24_blit(row, b.x, b.y + j, b.w, 1);
+        int rc = cvchan_create(t, (int)a1, (int)a2, &out);
+        if (rc == 0 && copy_to_user(t, (void *)a3, &out, sizeof(out)) != 0) {
+            cvchan_destroy(t, out.res);
+            ret = (uint32_t)E_CANVAS_BADH; break;
         }
         ret = (uint32_t)rc;
         break;
     }
+    case SYS_CV_PRESENT: {
+        cv_present_t r;
+        if (a1 == 0 ||
+            copy_from_user(t, &r, (const void *)a1, sizeof(r)) != 0) {
+            ret = (uint32_t)E_PIX_FIELD; break;
+        }
+        ret = (uint32_t)cvchan_present(t, &r);
+        break;
+    }
+    case SYS_CV_DESTROY:
+        ret = (uint32_t)cvchan_destroy(t, (int)a1);
+        break;
     default: ret = (uint32_t)-8; break;
     }
 #ifdef CATOS_BENCH
