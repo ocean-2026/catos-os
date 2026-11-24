@@ -2340,7 +2340,7 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)decl_image_free(t, (int)a1);
         break;
     case SYS_DECL_TEXT_WIDTH: {
-        char buf[DECL_MAX_TEXT];
+        char buf[256];
         if (a1 == 0) { ret = 0; break; }
         if (copy_from_user(t, buf, (const void *)a1, sizeof(buf) - 1) != 0) {
             ret = (uint32_t)E_DECL_BADREC; break;
