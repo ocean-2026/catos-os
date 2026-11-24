@@ -21,6 +21,7 @@
 
 | 时间 | 轮次 | 做了什么 | 提交 | 探针结果 | 下一步 |
 |---|---|---|---|---|---|
+| 2026-11-24 19:44 | R17 基准盘入库 | 盘解禁后的第 0 步：`catos_disk.img`（64 MiB）从 `catos-os` 主线基线拷入 GUI 工作树并单独提交；`.gitignore` exceptions 小节加 `!kernel_v25/catos_disk.img`，`*.img` 规则保留，scratch/回归镜像继续忽略。提交只含 `.gitignore` 与盘，无代码改动；§3.1 登记盘/代码分提交、回退对照、两版上限口径 | 本次提交 | 工作树 `git status --porcelain` 为空；盘 sha256 `7a1b1aa5…02ecd10` 与主线基线一致；后续改盘必须单独 `feat(disk)` 提交并记新旧指纹 |
 | 2026-11-24 19:25 | R16 隔离式画布通道（应用唯一合法像素出口） | 新 CE 槽 69/70/71：`blk_canvas_create(w,h,&out)` / `blk_canvas_present(&desc)` / `blk_canvas_destroy(res)`；应用缓冲走自身扩展 arena 匿名 mmap（非 VRAM、非合成器 surface、非内核 backing 指针），present 只拷脏子矩形进内核私有 backing 并标脏；`task_cleanup` 强制回收；`gui_surface_attach/dirty` 仍空桩。配额：单应用 ≤2 块、单块 ≤320×240、总面积 ≤384 KiB、单次 present ≤全屏 1/4、单帧 present ≤8 次（帧末重置）。错误码稳定编号：`E_EPERM` -1、`E_CANVAS_KIND` -30、`E_CANVAS_QUOTA` -31、`E_CANVAS_BOUNDS` -32、`E_PIX_FIELD` -33、`E_CANVAS_BADH` -34；打点 `GUI:cv_create/cv_present/cv_destroy/cv_reject`。自检子命令 `gui cvchan`（建画布→写棋盘 backing→present→销毁，负路径校验未知句柄 BADH） | 本次提交 | `gui cvchan` PASS：create=0 present=0 destroy=0 result=1，`cv_reject code=-34 pid=0`，零异常；`check_link_layout.py --strict` RC=0；lint 0 violation GREEN；vprobe 8 verdict PASS（内部 steps=10 ok=10 fail=0，157.6s）、E3 2/2、F11 9/9。未接线：`blk_commit` 的 CANVAS 记录必须带 `res`、禁内联像素指针/`pix_w/pix_h`（#32 整批拒绝不 deref）；backing→块树脏区合并上屏随声明式提交通道落地；CE 侧 arena 缓冲往返真机用例待 CE ABI 测试程序补齐 |
 | 2026-11-24 19:20 | R15 CE 命令式绘制门禁 | CE 分派器收口：`display_mode(3)`（CON_MODE_VBE24）、`gfx_info`、`gfx_rect`、`gfx_blit` 一律 `-E_EPERM` 并打 `GUI:deny <slot> pid=<tid>`；文本/旧 8/16bpp 控制台前台模式保留。内核内部像素路径（`be_vbe24`、合成层 blit、图片查看器/浏览器解码贴图）与 `CON_ORIGIN_KERNEL` 崩溃屏不经 ring3 分派器，不受限。legacy `gfx24/gfxdesk/gfxtext` 已带 LEGACY 标记且不在 `apps.list`/`pkg.list`；`cc.c`/`cc_self.c` 仅 ABI 名表字符串、`atk_gfx` 属 `attacks/` 非打包，留 advisory-pending | `c41497a` | 门禁回归：三门禁 vprobe 10/10 口径、E3 2/2、F11 9/9 仍全绿；lint C8 0 violation；打包 CE 应用审计无一处调禁用 trio/模式 3。待探针线回填 `deny gfx` / `cvdeny` / `cvleak` 断言 |
 | 2026-11-24 18:55 | R14 浏览器 v0 落地 | `browser.c` 自写瘦流式 HTML tokenizer（不建树）→ 极简样式映射 COLUMN/ROW/TEXT，链接 accent，列表/表格逐行 ROW 摊平；地址栏 + 前进/后退/刷新/停止 + 状态行（URL/状态码/字节数/耗时）；HTML 缓冲走帧分配页，不复用 shell 8 KiB 静态 buf；菜单/命令/探针/像素组接线。同步退役旧命令式位图原型 gfx24/gfxdesk/gfxtext（补 LEGACY 标记、gfx24 摘出 apps.list，源码保留） | `987d54a`、`9e03834` | 探针 `gui br` PASS：bytes=287 nodes=12 blocks=12 active=1 result=1，零异常；browser 像素组 2/2；真机 HTTP：`http://example.com/` 200/577B/1320ms、`http://www.baidu.com/` 200/49151B/140ms，离线内嵌样本页作确定性用例；`check_link_layout.py --strict` RC=0；lint 0 violation GREEN。vprobe 10/10、E3 2/2、F11 9/9（上一镜像口径，最终 ISO 复跑待补记） | 待办：stb_image 解码接线（v0 `<img>` 暂占位、未出图）；HTTPS 真站点握手归网络线单独立项；命令式绘制门禁 / 隔离式画布通道 / SAK 安全模式 / 桌面自启动 / CE 声明式接入按后续规划排队 |
@@ -41,6 +42,22 @@
 | — | — | 初始建表 | — | — | M0 |
 
 ## 3. 阻塞与取舍记录
+
+### 3.1 交付盘基线与回退口径（v2.81 起）
+
+- 基准盘入库：`kernel_v25/catos_disk.img`（64 MiB，67,108,864 B，sha256
+  `7a1b1aa5b6b711379729fb6c10b85fd98e9fadb13cfa91e6b61783f8a02ecd10`），
+  独立提交 `chore(disk)`，不带任何代码改动。
+- **盘改动与代码改动绝不混提交**：每次改盘（重新生成 / 往 `/etc` 塞 autostart /
+  换种子）前先确认工作树干净 → 改盘 → `git add kernel_v25/catos_disk.img`
+  单独 `feat(disk): …` 提交（写清盘内改动 + 新旧 sha256）→ 再改代码。这是
+  "新盘+旧代码 / 旧盘+新代码"两两对照定位的前提。
+- 回退对照：`git checkout <旧提交> -- kernel_v25/catos_disk.img` 后
+  `qemu -cdrom <同一 ISO> -hda kernel_v25/catos_disk.img` 复跑。
+- 盘最多保留两版（基准 + 当前）；旧版靠 tag/分支定位，不叠第三份。注意
+  GitHub 单文件 100 MiB 上限。
+- 门禁继续用各自 scratch 盘（`qemu_disk_e3.img` / `qemu_disk_f11.img` /
+  vprobe 盘），不受交付盘影响。
 
 | 时间 | 问题 | 处理 | 结论 |
 |---|---|---|---|
