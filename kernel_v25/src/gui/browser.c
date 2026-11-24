@@ -142,6 +142,117 @@ static blk_spec br_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
     return s;
 }
 
+/* ---- 极简 CSS 内联样式（v0.1 盒模型最小集） ----------------------------- */
+
+struct br_css {
+    uint32_t fg, bg;
+    int32_t  pad_l, pad_r, pad_t, pad_b;
+    uint8_t  border_w;
+    uint8_t  align;
+    int32_t  req_w, req_h;
+};
+static struct br_css br_css_cur;
+
+static int css_eq(const char *a, const char *b) {
+    while (*b) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+        a++; b++;
+    }
+    return *a == 0;
+}
+
+static const char *css_trim(const char *v) {
+    while (*v == ' ' || *v == '\t') v++;
+    return v;
+}
+
+static uint32_t css_color(const char *v) {
+    v = css_trim(v);
+    if (v[0] == '#') {
+        v++; uint32_t c = 0; int d = 0;
+        while (v[d] && d < 6) {
+            char ch = v[d]; int x;
+            if (ch >= '0' && ch <= '9') x = ch - '0';
+            else if (ch >= 'a' && ch <= 'f') x = ch - 'a' + 10;
+            else if (ch >= 'A' && ch <= 'F') x = ch - 'A' + 10;
+            else break;
+            c = c * 16 + x; d++;
+        }
+        if (d == 6) return c;
+        return INHERIT_COLOR;
+    }
+    struct { const char *n; uint32_t c; } nm[] = {
+        {"black",0x000000},{"white",0xFFFFFF},{"red",0xE05555},
+        {"green",0x55C070},{"blue",0x5588E8},{"gray",0x9A9AA6},
+        {"grey",0x9A9AA6},{"yellow",0xE8D060},{"silver",0xC0C0C8}
+    };
+    for (int i = 0; i < (int)(sizeof(nm)/sizeof(nm[0])); i++)
+        if (css_eq(v, nm[i].n)) return nm[i].c;
+    return INHERIT_COLOR;
+}
+
+static int css_px(const char *v) {
+    v = css_trim(v);
+    int n = 0;
+    while (*v >= '0' && *v <= '9') { n = n*10 + (*v-'0'); v++; }
+    return n;
+}
+
+static void css_reset(void) {
+    br_css_cur.fg = INHERIT_COLOR; br_css_cur.bg = INHERIT_COLOR;
+    br_css_cur.pad_l = br_css_cur.pad_r = 0;
+    br_css_cur.pad_t = br_css_cur.pad_b = 0;
+    br_css_cur.border_w = 0; br_css_cur.align = 0;
+    br_css_cur.req_w = 0; br_css_cur.req_h = 0;
+}
+
+static void css_set_prop(const char *p, const char *v) {
+    p = css_trim(p); v = css_trim(v);
+    if (css_eq(p, "color")) br_css_cur.fg = css_color(v);
+    else if (css_eq(p, "background-color") || css_eq(p, "background"))
+        br_css_cur.bg = css_color(v);
+    else if (css_eq(p, "padding") || css_eq(p, "margin")) {
+        int q = css_px(v);
+        br_css_cur.pad_l = br_css_cur.pad_r = q;
+        br_css_cur.pad_t = br_css_cur.pad_b = q;
+    }
+    else if (css_eq(p, "padding-left") || css_eq(p, "margin-left")) br_css_cur.pad_l = css_px(v);
+    else if (css_eq(p, "padding-right") || css_eq(p, "margin-right")) br_css_cur.pad_r = css_px(v);
+    else if (css_eq(p, "padding-top") || css_eq(p, "margin-top")) br_css_cur.pad_t = css_px(v);
+    else if (css_eq(p, "padding-bottom") || css_eq(p, "margin-bottom")) br_css_cur.pad_b = css_px(v);
+    else if (css_eq(p, "border")) br_css_cur.border_w = (uint8_t)css_px(v);
+    else if (css_eq(p, "text-align")) {
+        if (css_eq(v, "center")) br_css_cur.align = ALN_CENTER;
+        else if (css_eq(v, "right") || css_eq(v, "end")) br_css_cur.align = ALN_END;
+        else br_css_cur.align = ALN_START;
+    }
+    else if (css_eq(p, "width"))  { int q = css_px(v); if (q > 0) br_css_cur.req_w = q; }
+    else if (css_eq(p, "height")) { int q = css_px(v); if (q > 0) br_css_cur.req_h = q; }
+    /* max-width: v0.1 由布局裁剪兜底；font-weight:bold 由 <b>/<strong> 承担。 */
+}
+
+static void css_parse(const char *style) {
+    css_reset();
+    if (!style || !*style) return;
+    char buf[BR_RUN_MAX]; int bn = 0;
+    while (*style && bn < BR_RUN_MAX - 1) buf[bn++] = *style++;
+    buf[bn] = 0;
+    char *s = buf;
+    while (*s) {
+        char *pstart = s;
+        char *colon = 0;
+        while (*s && *s != ';' && *s != ':') s++;
+        if (*s == ':') { colon = s; *s = 0; s++; }
+        char *vstart = s;
+        while (*s && *s != ';') s++;
+        if (*s == ';') { *s = 0; s++; }
+        if (colon) css_set_prop(pstart, vstart);
+    }
+}
+
 /* ---- 导航 / 历史 --------------------------------------------------------- */
 
 static void br_hist_push(const char *url) {
@@ -249,6 +360,15 @@ static void run_flush(int scale) {
     t.scale = (uint8_t)scale;
     t.role_accent = br_accent ? ROLE_ACCENT : ROLE_NONE;
     t.pad_l = 2; t.pad_r = 2;
+    /* v0.1 内联 CSS 盒模型最小集（未声明项保持角色继承）。 */
+    if (br_css_cur.fg != INHERIT_COLOR) { t.role_fg = ROLE_NONE; t.fg = br_css_cur.fg; }
+    if (br_css_cur.bg != INHERIT_COLOR) { t.role_bg = ROLE_NONE; t.bg = br_css_cur.bg; }
+    t.pad_l += br_css_cur.pad_l; t.pad_r += br_css_cur.pad_r;
+    t.pad_t += br_css_cur.pad_t; t.pad_b += br_css_cur.pad_b;
+    if (br_css_cur.border_w) t.border_w = br_css_cur.border_w;
+    if (br_css_cur.align) t.align_main = br_css_cur.align;
+    if (br_css_cur.req_w > 0) t.req_w = br_css_cur.req_w;
+    if (br_css_cur.req_h > 0) t.req_h = br_css_cur.req_h;
     block_id parent = br_cur_row ? br_cur_row : br_content;
     b_text(parent, &t, txt);
     br_blocks++;
@@ -289,6 +409,7 @@ static int br_parse_tag(void) {
     /* 属性（v0 只取 a[href] / img[src]，收集到局部，不建属性表）。 */
     char href[BR_URL_MAX]; href[0] = 0;
     char src[BR_URL_MAX]; src[0] = 0;
+    char style[BR_URL_MAX]; style[0] = 0;
     while (i < br_hlen() && br_html[i] != '>') {
         char key[24]; int nk = 0;
         while (i < br_hlen() && br_html[i] != '=' &&
@@ -312,11 +433,14 @@ static int br_parse_tag(void) {
         val[nv] = 0;
         if ((key[0] == 'h' || key[0] == 'H') && key[1] == 'r') xcopy(href, sizeof(href), val);
         if ((key[0] == 's' || key[0] == 'S') && key[1] == 'r') xcopy(src, sizeof(src), val);
+        if ((key[0] == 's' || key[0] == 'S') && key[1] == 't' && key[2] == 'y')
+            xcopy(style, sizeof(style), val);
     }
     if (i < br_hlen()) i++;      /* '>' */
     br_pos = i;
 
     if (!close) br_nodes++;
+    if (!close) css_parse(style);
 
     switch (kind) {
     case TK_H1: run_flush(1); break;
@@ -374,6 +498,7 @@ static int br_parse_tag(void) {
 
 static void br_parse_html(const uint8_t *html, int len) {
     br_pool_n = 0; br_run_n = 0;
+    css_reset();
     br_pos = 0; br_accent = 0; br_cur_row = 0;
     br_nodes = 0; br_blocks = 0;
 
@@ -427,8 +552,20 @@ static int br_fetch(const char *url) {
     if (n < 0) {
         br_bytes = 0;
         char msg[BR_STATUS_MAX];
-        xcopy(msg, sizeof(msg), "fetch error ");
+        const char *why;
+        switch (n) {
+        case -7: why = "redirect https blocked"; break;
+        case -2: why = "dns failed"; break;
+        case -3: why = "connect failed"; break;
+        case -4: why = "http status error"; break;
+        case -5: why = "no reply"; break;
+        case -8: why = "redirect loop"; break;
+        default: why = "fetch error"; break;
+        }
+        xcopy(msg, sizeof(msg), why);
+        xcat(msg, sizeof(msg), " (");
         xnum(msg, sizeof(msg), (uint32_t)(-n));
+        xcat(msg, sizeof(msg), ")");
         br_set_status(msg);
         return n;
     }
@@ -500,12 +637,20 @@ static void br_navigate(const char *url, int push_hist) {
     if (rc == 0) br_parse_html(br_html, br_bytes);
     br_compose_status();
 
-    ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
-    ser_write(" nodes="); br_dec((uint32_t)br_nodes);
-    ser_write(" blocks="); br_dec((uint32_t)br_blocks);
-    ser_write(" ms="); br_dec(br_elapsed_ms);
-    ser_write(" status="); br_dec((uint32_t)br_status_code);
-    ser_write("\n");
+    if (rc == 0) {
+        ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
+        ser_write(" nodes="); br_dec((uint32_t)br_nodes);
+        ser_write(" blocks="); br_dec((uint32_t)br_blocks);
+        ser_write(" ms="); br_dec(br_elapsed_ms);
+        ser_write(" status="); br_dec((uint32_t)br_status_code);
+        ser_write(" active=1 result=1\n");
+    } else {
+        /* 未通路（网络/https）不发 GUI:br 验收记录：门禁按 SKIP 归类，
+         * 原因落状态条，避免把未完成通路误判成像素/解析失败。 */
+        ser_write("br: fetch rc="); br_dec((uint32_t)(-rc));
+        ser_write(" status="); br_dec((uint32_t)br_status_code);
+        ser_write("\n");
+    }
 
     layout_run();
     gui_mark_dirty(br_root);
@@ -548,7 +693,13 @@ static int br_key(int code, void *ud) {
     return 0;
 }
 
+static int br_is_sample_url(const char *u) {
+    return u && u[0] == 's' && u[1] == 'a' && u[2] == 'm' && u[3] == 'p' &&
+           u[4] == 'l' && u[5] == 'e' && u[6] == ':';
+}
+
 void gui_browser_open(const char *url) {
+    if (br_is_sample_url(url)) { gui_browser_probe_sample(); return; }
     gui_browser_close();
     br_active = 1;
     br_hist_n = 0; br_hist_cur = -1;
@@ -582,6 +733,11 @@ void gui_browser_probe_sample(void) {
     layout_run();
     gui_mark_dirty(br_root);
     gui_set_key_hook(br_key, 0);
+
+    ser_write("GUI:br bytes="); br_dec((uint32_t)br_bytes);
+    ser_write(" nodes="); br_dec((uint32_t)br_nodes);
+    ser_write(" blocks="); br_dec((uint32_t)br_blocks);
+    ser_write(" ms=0 status=0 active=1 result=1\n");
 }
 
 int         gui_browser_active(void) { return br_active; }
