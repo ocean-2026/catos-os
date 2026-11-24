@@ -13,6 +13,7 @@
 | M2 | damage 合成、拖拽/resize、命中、焦点、层/z | 探针通过，待 M4 全量回归 | `gui drag` 两块互不干扰 b_same=1、measured=2/subtree=2、damage_rects=1、damage_area=9600（2.0% 屏）；`gui hit` 同层 z 高者命中；`gui rate` frames=33、double_commit=0；零异常 |
 | M3 | 任务栏、开始菜单、Presence | 探针通过，待 M4 全量回归 | `gui menu` open=1、items=1、overlay=5、launched=2、result=1；`gui presence` base=11、added=12、leaving=1、live_after=11、leaked=0、result=1；`gui leak` 1000 次开关 live=0/tree=1/leaked=0；时钟秒级自刷只打自身脏位 |
 | M4 | 令牌主题、`gui_reset` 重建、demo 块树、全量回归 | 完成，三门禁全绿；R11 加固轮收尾 | `gui theme` 三套令牌 bg/fg/accent 互异、result=1；`gui reset` nodes=15、hash 前后一致、orphan=0、match=1；light/hc 分组像素断言 6/6 PASS；vprobe 10/10、F11 9/9、E3 2/2；17 串口探针全 PASS；静态槽守卫自检 result=1（见 §3 R11） |
+| 收口（08:15 后） | 汇总轮：提交列表/探针/像素断言/门禁/帧基线/截图/指纹/残留全部归档 | 完成并已推送 | `artifacts/gui-blocks/REPORT.md`（28.9 KB，§1–§9）；分支 tip `5660da3` 与 origin 一致；冻结 ISO sha256 `e80f5f5e…c890cbc`、11,960,320 B；三门禁 vprobe 10/10、E3 2/2、F11 9/9；残留 D5/D6、探针后端统一(11a)、PTE 取证、F11 驱动起机竞争见 REPORT §9 |
 | 旧 desktop 退役 | `build/pkg.list` 摘掉 desktop 包，源文件保留作学习参考 | 已完成 | pkg.list 摘包；desktop.c 加 LEGACY 注释；gfxdesk.c 仍不打包 |
 
 ## 2. 推进日志（追加，倒序在最上面）
@@ -54,6 +55,8 @@
 | 2026-11-24 04:15 | 进度正常未停滞：M0–M3 完成且已提交（M3=4f39fb8、M4 修复 6e32624/2916717、收口 7e81168），工作树干净，REPORT.md 已出（04:11）；当时唯一门禁缺口 E3 conc FAIL（acl_lookup+0x5D、CR2=0x02001050，基线 ISO 2/2 PASS）；另有一个 geom3 探针 qemu 残留进程（pid 28395, monitor 4602）；§3 行时间顺序错乱（04:10/04:25 排在 02:15 之前） | 本线程只读，不改代码不提交 | （历史记录）E3 缺口已由 R10 闭环，见 §3 05:10 行；残留 qemu 进程已随后续探针结束清理 |
 
 | 2026-11-24 06:15 | 进度正常且进入加固轮：M0–M4 全部完成（E3 conc 已闭环，三门禁 vprobe 10/10、E3 2/2、F11 9/9 全绿），最新提交 cc7b8b1（D2 改名/D1 生产三 tick 节流/D3 两阶段销毁），此前 95aacc9 裁剪、67ad3ea 链接布局、9bfa10f 报告收口；工作树有 paging.h/paging.c 两个未提交改动，06:11–06:12 像素与洁净度证据持续产出 | 本线程只读，不改代码不提交 | 继续加固修复并跑回归，随后更新 REPORT.md/§1 终态并 push feat/gui-blocks |
+
+| 2026-11-24 08:15（实际巡检 08:54） | 收口轮已完成、无进程在跑（末次产出 08:12）：M0–M4 全绿，tip `5660da3` 已与 origin/feat/gui-blocks 一致，REPORT.md 九节齐备；本线程按 08:15 后口径只做汇总核对，不新开功能 | 补写 §1 收口行与本节结论，随后提交并推送 | 任务进入交付态：等 10:00 截止，仅剩 REPORT §9 残留项（D5/D6、11a 探针后端、PTE 取证、F11 驱动起机竞争） |
 
 ## 4. 性能打点基线（每次合成/布局跑完填）
 
