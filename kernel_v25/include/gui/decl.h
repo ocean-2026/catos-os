@@ -36,6 +36,7 @@ enum {
 };
 
 struct task;
+struct block;
 
 /* 内核侧接线（task.c 调用）。 */
 int  decl_commit(struct task *t, const void *recs, int n,
@@ -45,6 +46,18 @@ int  decl_image_load(struct task *t, const char *path);
 int  decl_image_free(struct task *t, int res);
 int  decl_text_width(const char *s);
 void decl_task_cleanup(struct task *t);
+void decl_frame_tick(void);
+
+/* 事件实泵：输入/焦点/尺寸路径回投到所属应用的事件队列。 */
+void decl_post_click(struct block *b, int lx, int ly);
+void decl_post_key(int code, int mods);
+void decl_post_focus(struct block *b, int in);
+void decl_post_resize(struct block *b, int w, int h);
+void decl_post_close(struct block *b);
+
+/* 诊断与统计。 */
+void decl_dump_pid(int tid);
+int  decl_pid_blocks(int tid);
 
 /* 探针：`gui decl` 自检一轮。 */
 int  decl_self_test(void);

@@ -42,6 +42,7 @@ extern void gui_sak_reset(void);
 
 /* P3 声明式 ABI（src/gui/decl.c）。 */
 extern int  decl_self_test(void);
+extern void decl_dump_pid(int tid);
 
 static void split_word(const char *arg, char *word, int cap, const char **rest) {
     word[0] = 0; *rest = 0;
@@ -1004,6 +1005,8 @@ static int gui_idle_step(void) {
     s_idle_frame_tick = timer_ticks;
     gui_frame();
     gui_cvchan_frame_tick();          /* v2.81: 单帧 present 配额按帧重置 */
+    extern void decl_frame_tick(void);
+    decl_frame_tick();                 /* P3: 单帧提交配额按帧重置 */
     return 1;
 }
 
@@ -1042,6 +1045,10 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
         if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return; }
         if (!strcmp_probe(arg, "decl"))    { decl_self_test(); return; }
+        if (!strcmp_probe(arg, "blkdbg")) {
+            for (int i = 0; i < 16; i++) decl_dump_pid(i);
+            return;
+        }
     }
 
     /* 截图专用状态：shot-menu / shot-light / shot-hc / shot-reset /

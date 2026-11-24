@@ -70,6 +70,11 @@ static int           scratch_ready;
 
 extern int cvchan_owner(int res, int tid);
 
+#define DECL_COMMIT_FRAME_MAX 4     /* 单帧提交上限，超出节流 */
+static uint8_t commit_frame_cnt;
+
+void decl_frame_tick(void) { commit_frame_cnt = 0; }
+
 /* ---- 串口小工具 ---------------------------------------------------------- */
 
 static void decl_dec(int v) {
@@ -296,6 +301,7 @@ int decl_commit(struct task *t, const void *recs, int n,
     int tid = t ? t->tid : -1;
     struct pid_meta *p = ps_get(tid);
     if (!p) return E_EPERM;
+    p->tid = tid;
 
     if (n < 0 || n > DECL_MAX_BLOCKS) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
     if (slen < 0 || slen > DECL_MAX_POOL) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
@@ -317,6 +323,13 @@ int decl_commit(struct task *t, const void *recs, int n,
     int rc = validate(rec_scratch, n, pool_scratch, slen, tid);
     if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
 
+    if (commit_frame_cnt >= DECL_COMMIT_FRAME_MAX) {
+        ser_write("GUI:decl throttle pid="); decl_dec(tid); ser_putc('\n');
+        decl_reject(E_DECL_QUOTA, tid);
+        return E_DECL_QUOTA;
+    }
+    commit_frame_cnt++;
+
     if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
 
     rc = decl_apply(p, rec_scratch, n, pool_scratch, slen);
@@ -330,31 +343,105 @@ int decl_commit(struct task *t, const void *recs, int n,
 
 /* ---- 事件轮询 ------------------------------------------------------------ */
 
+static void enqueue(struct pid_meta *p, const ce_blk_event_t *e) {
+    int next = (p->evt + 1) % DECL_EVQ;
+    if (next == p->evh) return;
+    p->evq[p->evt] = *e;
+    p->evt = next;
+}
+
+static int block_local_id(block *b) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return 0;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used || !p->mem) return 0;
+    uint16_t *gm = pgmap(p);
+    int16_t  *lm = plmap(p);
+    for (int i = 0; i < p->count; i++)
+        if (gm[i] == b->id) return lm[i];
+    return 0;
+}
+
 void decl_post_click(block *b, int lx, int ly) {
     if (!b) return;
     if (b->owner == 0 || b->owner >= MAX_TASKS) return;
     struct pid_meta *p = &ps[b->owner];
-    if (!p->used || !p->mem) return;
+    if (!p->used) return;
 
-    int lid = 0;
-    uint16_t *gm = pgmap(p);
-    int16_t  *lm = plmap(p);
-    for (int i = 0; i < p->count; i++) {
-        if (gm[i] == b->id) { lid = lm[i]; break; }
-    }
-    int next = (p->evt + 1) % DECL_EVQ;
-    if (next == p->evh) return;
-    ce_blk_event_t *ev = &p->evq[p->evt];
-    ev->type = DECL_EV_CLICK;
-    ev->code = 0;
-    ev->id = lid;
-    ev->x = lx; ev->y = ly;
-    ev->w = 0; ev->h = 0;
-    p->evt = next;
+    int lid = block_local_id(b);
+    ce_blk_event_t ev;
+    ev.type = DECL_EV_CLICK; ev.code = 0; ev.id = lid;
+    ev.x = lx; ev.y = ly; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
 
     ser_write("GUI:ev click id="); decl_dec(lid);
     ser_write(" x="); decl_dec(lx);
     ser_write(" y="); decl_dec(ly); ser_putc('\n');
+}
+
+void decl_post_key(int code, int mods) {
+    /* 投给最近活动的声明式应用；焦点链跨应用回收在 #33 后续细化。 */
+    for (int t = MAX_TASKS - 1; t >= 0; t--) {
+        struct pid_meta *p = &ps[t];
+        if (p->used) {
+            ce_blk_event_t ev;
+            ev.type = DECL_EV_KEY; ev.code = (int16_t)mods; ev.id = 0;
+            ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+            enqueue(p, &ev);
+            ser_write("GUI:ev key code="); decl_dec(code);
+            ser_write(" mods="); decl_dec(mods); ser_putc('\n');
+            return;
+        }
+    }
+}
+
+void decl_post_focus(block *b, int in) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event_t ev;
+    ev.type = in ? DECL_EV_FOCUS_IN : DECL_EV_FOCUS_OUT;
+    ev.code = 0; ev.id = block_local_id(b);
+    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
+    ser_write(in ? "GUI:ev focus_in id=" : "GUI:ev focus_out id=");
+    decl_dec(ev.id); ser_putc('\n');
+}
+
+void decl_post_resize(block *b, int w, int h) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event_t ev;
+    ev.type = DECL_EV_RESIZE; ev.code = 0; ev.id = block_local_id(b);
+    ev.x = 0; ev.y = 0; ev.w = w; ev.h = h;
+    enqueue(p, &ev);
+    ser_write("GUI:ev resize id="); decl_dec(ev.id);
+    ser_write(" w="); decl_dec(w); ser_write(" h="); decl_dec(h); ser_putc('\n');
+}
+
+void decl_post_close(block *b) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event_t ev;
+    ev.type = DECL_EV_CLOSE; ev.code = 0; ev.id = block_local_id(b);
+    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
+    ser_write("GUI:ev close id="); decl_dec(ev.id); ser_putc('\n');
+}
+
+int decl_pid_blocks(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    return p ? p->count : 0;
+}
+
+void decl_dump_pid(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return;
+    ser_write("GUI:blkdbg pid="); decl_dec(tid);
+    ser_write(" blocks="); decl_dec(p->count);
+    ser_write(" quota="); decl_dec(DECL_MAX_BLOCKS);
+    ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 
 int decl_event_poll(struct task *t, ce_blk_event_t *ev, int timeout_ms) {
@@ -513,6 +600,7 @@ static int decl_test_commit(int tid, const ce_blk_rec_t *r, int n,
                             const char *pool, int slen) {
     struct pid_meta *p = ps_get(tid);
     if (!p) return -1;
+    p->tid = tid;
     int rc = validate(r, n, pool, slen, tid);
     if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
     if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
@@ -574,6 +662,34 @@ int decl_self_test(void) {
         }
         rc = decl_test_commit(tid, deep, DECL_MAX_DEPTH + 1, "", 0);
         if (rc != E_DECL_QUOTA) { decl_cleanup_tid(tid); return 1; }
+    }
+
+    /* 事件实泵：合成一次点击 + 焦点/缩放/关闭，回读队列断言。 */
+    {
+        block *tb = btable_get(pgmap(p)[1]);   /* 文本块 local id 2 */
+        decl_post_click(tb, 5, 7);
+        decl_post_focus(tb, 1);
+        decl_post_resize(tb, 40, 12);
+        decl_post_close(tb);
+
+        int16_t types[4]; int n = 0;
+        ce_blk_event_t click;
+        memset(&click, 0, sizeof(click));
+        int have_click = 0;
+        while (p->evh != p->evt && n < 4) {
+            ce_blk_event_t e = p->evq[p->evh];
+            if (e.type == DECL_EV_CLICK && !have_click) { click = e; have_click = 1; }
+            types[n++] = e.type;
+            p->evh = (p->evh + 1) % DECL_EVQ;
+        }
+        if (n != 4 || types[0] != DECL_EV_CLICK ||
+            types[1] != DECL_EV_FOCUS_IN || types[2] != DECL_EV_RESIZE ||
+            types[3] != DECL_EV_CLOSE) {
+            decl_cleanup_tid(tid); return 1;
+        }
+        if (!have_click || click.id != 2 || click.x != 5 || click.y != 7) {
+            decl_cleanup_tid(tid); return 1;
+        }
     }
 
     /* 退出回收：整棵子树清空，泄露 0。 */

@@ -7,6 +7,7 @@
  */
 #include "gui/gui.h"
 #include "gui_int.h"
+#include "gui/decl.h"
 #include "mouse.h"
 #include "keyboard.h"
 
@@ -111,6 +112,8 @@ static void on_press(int x, int y) {
         drag_off_x = x - b->x; drag_off_y = y - b->y;
     }
     if (b->on_click) b->on_click(b->id, x - b->x, y - b->y);
+    /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
+    if (b->owner) decl_post_click(b, x - b->x, y - b->y);
 }
 
 static void on_drag_move(int x, int y) {
