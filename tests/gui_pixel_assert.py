@@ -144,8 +144,10 @@ STYLE_APP_CHECKS = [
 ]
 
 # Calm & soft 档位：面板外角裁成桌面底色，内角仍为面板色，任务栏满铺 bar。
+# 实测 calm 示例块矩形约 (26,26)–(342,222)；取右上角外侧 (344,26) 作为
+# 圆角切口外的桌面底色像素（原 (64,64) 落在 app 档几何上，calm 帧内已在块内）。
 STYLE_CALM_CHECKS = [
-    {"kind": "color", "pt": (64, 64), "color": DARK_BG},
+    {"kind": "color", "pt": (344, 26), "color": DARK_BG},
     {"kind": "color", "pt": (224, 164), "color": DARK_PANEL},
     {"kind": "color", "pt": (400, 585), "color": DARK_BAR},
 ]
