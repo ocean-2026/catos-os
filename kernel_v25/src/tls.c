@@ -16,6 +16,7 @@
 #include "../include/tls_aes.h"
 #include "../include/crypto.h"
 #include "../include/kstring.h"
+#include "serial_log.h"
 #include "third_party/uecc/uECC.h"
 
 /* ---- transport hooks provided by netstack.c ---- */
@@ -97,6 +98,62 @@ static int recv_record(uint8_t *type, const uint8_t **payload, int *plen) {
     if (reader_read(pbuf, len) != 0) return -1;
     *payload = pbuf; *plen = len;
     return 0;
+}
+
+/* ---- handshake-message cursor over records -----------------------------
+ * Real servers pack several handshake messages (Certificate +
+ * ServerKeyExchange + ServerHelloDone) into ONE record.  hs_read used to
+ * assume one message per record, so its second call re-framed the next
+ * record (CCS / encrypted Finished) and mis-parsed it as a handshake body.
+ * The cursor keeps the current record payload + offset and slices messages
+ * out of it; a record holding N messages yields N successive hs_read calls
+ * before the next recv_record(). */
+static uint8_t  hs_rec_buf[16384];
+static int      hs_rec_len, hs_rec_off;
+static uint8_t  hs_scratch[16384];      /* reassembly for a split body */
+static char     hs_host[96];
+static uint16_t hs_port;
+
+static void tls_dec(int v) {
+    char tmp[12]; int n = 0; unsigned int u;
+    if (v < 0) { ser_putc('-'); u = (unsigned int)(-(int)v); }
+    else u = (unsigned int)v;
+    if (u == 0) { ser_putc('0'); return; }
+    while (u) { tmp[n++] = (char)('0' + u % 10); u /= 10; }
+    while (n) ser_putc(tmp[--n]);
+}
+
+/* Count complete handshake messages framed inside one record payload. */
+static int hs_record_msg_count(const uint8_t *p, int len) {
+    int o = 0, cnt = 0;
+    while (o + 4 <= len) {
+        int m = ((int)p[o + 1] << 16) | ((int)p[o + 2] << 8) | p[o + 3];
+        if (o + 4 + m > len) break;
+        cnt++; o += 4 + m;
+    }
+    return cnt;
+}
+
+/* Pull the next record into hs_rec_buf.  Returns 1 = handshake record ready,
+ * 0 = CCS skipped (caller loops), negative = alert / framing failure. */
+static int hs_pull_record(void) {
+    uint8_t type; const uint8_t *p; int len;
+    if (recv_record(&type, &p, &len) != 0) return -1;
+    if (type == 21) {
+        ser_write("TLS:alert level="); tls_dec(len > 0 ? p[0] : -1);
+        ser_write(" desc="); tls_dec(len > 1 ? p[1] : -1);
+        ser_write(" host="); ser_write(hs_host); ser_write("\n");
+        return -2;                 /* alert */
+    }
+    if (type == 20) return 0;                   /* CCS, plaintext */
+    if (type != 22) return -1;
+    if (len > (int)sizeof(hs_rec_buf)) return -1;
+    memcpy(hs_rec_buf, p, len);
+    hs_rec_len = len; hs_rec_off = 0;
+    ser_write("TLS:rec msgs="); tls_dec(hs_record_msg_count(p, len));
+    ser_write(" port="); tls_dec(hs_port);
+    ser_write(" host="); ser_write(hs_host); ser_write("\n");
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,19 +397,53 @@ static int hs_send(uint8_t type, const uint8_t *body, int blen) {
 }
 
 /* Read the next handshake message; skips CCS/alert as directed.
- * Returns msg type, fills body/len.  */
+ * Returns msg type, fills body/len.  Messages are sliced from the current
+ * record cursor; a message body split across records is reassembled into
+ * hs_msg.  A header split across records (or an oversize message) returns
+ * -7 with a serial diagnostic instead of a silent generic -6. */
 static int hs_read(uint8_t *msg_type, const uint8_t **body, int *blen) {
     for (;;) {
-        uint8_t type; const uint8_t *p; int len;
-        if (recv_record(&type, &p, &len) != 0) return -1;
-        if (type == 21) return -2;                 /* alert */
-        if (type == 20) continue;                  /* CCS, plaintext */
-        if (type != 22) return -1;
-        if (len < 4) return -1;
-        *msg_type = p[0];
-        *blen = ((int)p[1] << 16) | ((int)p[2] << 8) | p[3];
-        *body = p + 4;
-        transcript_add(p, len);
+        if (hs_rec_off >= hs_rec_len) {
+            int r;
+            do { r = hs_pull_record(); if (r < 0) return r; } while (r == 0);
+        }
+        int rem = hs_rec_len - hs_rec_off;
+        if (rem < 4) {
+            ser_write("TLS:rec fragmented-header host="); ser_write(hs_host);
+            ser_write(" port="); tls_dec(hs_port); ser_write("\n");
+            return -7;
+        }
+        uint8_t mt = hs_rec_buf[hs_rec_off];
+        int n = ((int)hs_rec_buf[hs_rec_off + 1] << 16) |
+                ((int)hs_rec_buf[hs_rec_off + 2] << 8) |
+                hs_rec_buf[hs_rec_off + 3];
+        int need = 4 + n;
+        if (n < 0 || need > (int)sizeof(hs_scratch)) {
+            ser_write("TLS:rec oversize host="); ser_write(hs_host);
+            ser_write(" msglen="); tls_dec(n); ser_write("\n");
+            return -7;
+        }
+        if (rem >= need) {
+            const uint8_t *m = hs_rec_buf + hs_rec_off;
+            transcript_add(m, need);
+            hs_rec_off += need;
+            *msg_type = mt; *blen = n; *body = m + 4;
+            return 0;
+        }
+        /* body spans records: copy what fits, then reassemble the rest. */
+        memcpy(hs_scratch, hs_rec_buf + hs_rec_off, rem);
+        int done = rem;
+        hs_rec_off = hs_rec_len;
+        while (done < need) {
+            int r;
+            do { r = hs_pull_record(); if (r < 0) return r; } while (r == 0);
+            int take = need - done;
+            if (take > hs_rec_len) take = hs_rec_len;
+            memcpy(hs_scratch + done, hs_rec_buf, take);
+            done += take; hs_rec_off = take;
+        }
+        transcript_add(hs_scratch, need);
+        *msg_type = mt; *blen = n; *body = hs_scratch + 4;
         return 0;
     }
 }
@@ -368,6 +459,13 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
 
     uECC_set_rng(uecc_rng);
     tlen = 0; cseq = 0; sseq = 0; gcm_on = 0;
+    hs_rec_len = 0; hs_rec_off = 0;
+    hs_port = port;
+    {
+        int i = 0;
+        while (host[i] && i < (int)sizeof(hs_host) - 1) { hs_host[i] = host[i]; i++; }
+        hs_host[i] = 0;
+    }
 
     /* ---- TCP connect ---- */
     if (net_tcp_connect(peer, port) != 0) return -3;

@@ -21,6 +21,7 @@
 
 | 时间 | 轮次 | 做了什么 | 提交 | 探针结果 | 下一步 |
 |---|---|---|---|---|---|
+| 2026-11-24 20:30 | R18 TLS 握手记录游标 | `hs_read()` 改为按游标切分握手消息：文件作用域静态量记当前 record payload/长度/偏移（`hs_rec_buf`/`hs_rec_len`/`hs_rec_off`），一条 record 装多条握手消息时连续供多次 `hs_read`，游标消费完才 `recv_record()`；消息体跨 record 时进 `hs_scratch` 续接；握手头跨 record / 超长消息返回可诊断错误 `-7` 并打串口，不再静默 `-6`。状态机、密钥派生、AES/GCM 路径未动；`tls_aes.c` 未改。串口打点 `TLS:rec msgs=<n> port=<port> host=<host>`；alert 打 `TLS:alert level=<l> desc=<d> host=<host>` | 本次提交 | 本地自签回路 0xC027(CBC) 与 0xC02F(GCM) 均 200（`CATOS_TLS_OK_278`，16 B）；三门禁 vprobe 10/10、E3 2/2、F11 9/9 全绿；`--strict` RC=0；lint 0 violation GREEN。野站 example.com / www.baidu.com 仍在 ClientHello 后收 alert 40（见 §3.2，套件口径问题，非本游标缺陷） | 野站套件扩展（ECDSA/ChaCha20 方向）另立网络线任务；本段不扩范围 |
 | 2026-11-24 19:44 | R17 基准盘入库 | 盘解禁后的第 0 步：`catos_disk.img`（64 MiB）从 `catos-os` 主线基线拷入 GUI 工作树并单独提交；`.gitignore` exceptions 小节加 `!kernel_v25/catos_disk.img`，`*.img` 规则保留，scratch/回归镜像继续忽略。提交只含 `.gitignore` 与盘，无代码改动；§3.1 登记盘/代码分提交、回退对照、两版上限口径 | 本次提交 | 工作树 `git status --porcelain` 为空；盘 sha256 `7a1b1aa5…02ecd10` 与主线基线一致；后续改盘必须单独 `feat(disk)` 提交并记新旧指纹 |
 | 2026-11-24 19:25 | R16 隔离式画布通道（应用唯一合法像素出口） | 新 CE 槽 69/70/71：`blk_canvas_create(w,h,&out)` / `blk_canvas_present(&desc)` / `blk_canvas_destroy(res)`；应用缓冲走自身扩展 arena 匿名 mmap（非 VRAM、非合成器 surface、非内核 backing 指针），present 只拷脏子矩形进内核私有 backing 并标脏；`task_cleanup` 强制回收；`gui_surface_attach/dirty` 仍空桩。配额：单应用 ≤2 块、单块 ≤320×240、总面积 ≤384 KiB、单次 present ≤全屏 1/4、单帧 present ≤8 次（帧末重置）。错误码稳定编号：`E_EPERM` -1、`E_CANVAS_KIND` -30、`E_CANVAS_QUOTA` -31、`E_CANVAS_BOUNDS` -32、`E_PIX_FIELD` -33、`E_CANVAS_BADH` -34；打点 `GUI:cv_create/cv_present/cv_destroy/cv_reject`。自检子命令 `gui cvchan`（建画布→写棋盘 backing→present→销毁，负路径校验未知句柄 BADH） | 本次提交 | `gui cvchan` PASS：create=0 present=0 destroy=0 result=1，`cv_reject code=-34 pid=0`，零异常；`check_link_layout.py --strict` RC=0；lint 0 violation GREEN；vprobe 8 verdict PASS（内部 steps=10 ok=10 fail=0，157.6s）、E3 2/2、F11 9/9。未接线：`blk_commit` 的 CANVAS 记录必须带 `res`、禁内联像素指针/`pix_w/pix_h`（#32 整批拒绝不 deref）；backing→块树脏区合并上屏随声明式提交通道落地；CE 侧 arena 缓冲往返真机用例待 CE ABI 测试程序补齐 |
 | 2026-11-24 19:20 | R15 CE 命令式绘制门禁 | CE 分派器收口：`display_mode(3)`（CON_MODE_VBE24）、`gfx_info`、`gfx_rect`、`gfx_blit` 一律 `-E_EPERM` 并打 `GUI:deny <slot> pid=<tid>`；文本/旧 8/16bpp 控制台前台模式保留。内核内部像素路径（`be_vbe24`、合成层 blit、图片查看器/浏览器解码贴图）与 `CON_ORIGIN_KERNEL` 崩溃屏不经 ring3 分派器，不受限。legacy `gfx24/gfxdesk/gfxtext` 已带 LEGACY 标记且不在 `apps.list`/`pkg.list`；`cc.c`/`cc_self.c` 仅 ABI 名表字符串、`atk_gfx` 属 `attacks/` 非打包，留 advisory-pending | `c41497a` | 门禁回归：三门禁 vprobe 10/10 口径、E3 2/2、F11 9/9 仍全绿；lint C8 0 violation；打包 CE 应用审计无一处调禁用 trio/模式 3。待探针线回填 `deny gfx` / `cvdeny` / `cvleak` 断言 |
@@ -58,6 +59,23 @@
   GitHub 单文件 100 MiB 上限。
 - 门禁继续用各自 scratch 盘（`qemu_disk_e3.img` / `qemu_disk_f11.img` /
   vprobe 盘），不受交付盘影响。
+
+### 3.2 野站 HTTPS 仍 alert 40：客户端套件口径缺口（非握手记录游标缺陷）
+
+- 现象：`curl https://example.com/`、`curl https://www.baidu.com/` 在
+  ClientHello 发出后立即收到 TLS alert（`level=2 fatal, desc=40
+  handshake_failure`），串口 `TLS:alert …` 留证；本地自签回路
+  0xC027(CBC) 与 0xC02F(GCM) 均 200。
+- 取证：宿主 `openssl s_client` 以同样的 RSA-AES128 套件（`ECDHE-RSA-AES128-GCM-SHA256`
+  / `ECDHE-RSA-AES128-SHA256`）连 baidu 同样收 alert 40；宿主默认套件可
+  与 baidu 协商 `ECDHE-ECDSA-CHACHA20-POLY1305`。即野站边缘当前优先
+  ECDSA / ChaCha20-Poly1305，本客户端只Offer RSA-AES128-GCM/CBC，被对端
+  在 CH 阶段拒掉——属密码套件覆盖缺口，不是"一条 record 多条握手消息"的
+  解析问题（该游标问题已由 R18 修复并在本地回路验证）。
+- 边界：本段未扩范围加套件（ChaCha20/Poly1305、ECDSA 签名链路均属新增
+  密码学实现，需另立网络线任务）；`tls_aes.c` 未改。遗留待办：证书链/主机名
+  校验 → v2.81「TLS 证书校验」；20 KiB 缓冲 / 不解析 chunked / 跨 scheme
+  重定向不支持 → 浏览器 v0.1。
 
 | 时间 | 问题 | 处理 | 结论 |
 |---|---|---|---|
