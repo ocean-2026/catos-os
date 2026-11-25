@@ -307,13 +307,29 @@ void gui_frame(void) {
     }
     dmg_coalesce();
 
-    /* 第二遍：只重绘本帧脏节点。干净节点即使与 damage 相交也不整节点
-     * 重绘——背景/容器的命中重绘会把尚未重绘的干净前景整片擦掉（§4
-     * 损伤合成的擦旧位置应由背景在损伤条带内补齐，而不是整节点重绘）。 */
+    /* 第二遍：按 damage 矩形重合成。对每条损伤矩形，重置裁剪栈后以该矩形
+     * 为裁剪口，按 layer→z→树先序（paint_list 已排好）逐节点重画 body；
+     * 矩形内的背景节点先画，旧窗口像素被真背景覆盖补齐。dirty/snap 只用于
+     * 算损伤矩形，不在矩形循环内跳过或清节点；脏位统一在帧末清理。 */
+    for (int r = 0; r < dmg_n; r++) {
+        int rx0 = dmg[r].x, ry0 = dmg[r].y;
+        int rx1 = rx0 + dmg[r].w, ry1 = ry0 + dmg[r].h;
+        paint_begin_frame();
+        paint_clip_push_rect(rx0, ry0, dmg[r].w, dmg[r].h);
+        for (int i = 0; i < paint_count; i++) {
+            block *b = paint_list[i];
+            if (b->x >= rx1 || b->x + b->w <= rx0 ||
+                b->y >= ry1 || b->y + b->h <= ry0) continue;
+            paint_node_body_clipped(b);
+        }
+        paint_begin_frame();
+    }
+
+    /* 帧末统一清本帧绘制过节点的脏位；矩形循环内不清，避免后续矩形/节点
+     * 被自己的过滤条件误跳过。 */
     for (int i = 0; i < paint_count; i++) {
-        block *b = paint_list[i];
-        if (!b->snap) continue;
-        paint_node_clipped(b);
+        paint_list[i]->dirty_paint = 0;
+        paint_list[i]->snap = 0;
     }
 
     /* 光标：合成结束后统一画，使用后端已有的 save/restore 精灵机制。 */

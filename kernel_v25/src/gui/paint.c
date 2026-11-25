@@ -426,7 +426,9 @@ static void paint_halo(block *b) {
     }
 }
 
-void paint_node(block *b) {
+/* 只画本块自身：颜色解析 / 阴影 / 组件种类绘制 / 自绘回调 / hover 描边。
+ * 不含子节点递归，不清 dirty/snap——子树遍历与脏位清理由合成层帧末统一处理。 */
+void paint_node_body(block *b) {
     if (!b || !b->visible) return;
 
     uint32_t fg = resolve_color(b, 0);
@@ -504,6 +506,13 @@ void paint_node(block *b) {
     if (hov == b && (b->resize_dir || b->drag_mode == DRAG_FULL))
         gui_draw_border(b->x, b->y, b->w, b->h, accent, 1);
 
+}
+
+void paint_node(block *b) {
+    if (!b || !b->visible) return;
+
+    paint_node_body(b);
+
     /* 裁剪口径：OVF_VISIBLE 不压自身框（越界仍绘制）；CLIP/SCROLL 压框。
      * SCROLL 额外压平移栈，内容按 scroll 偏移平移，子块几何不动。 */
     int clip_self = (b->overflow != OVF_VISIBLE);
@@ -522,9 +531,6 @@ void paint_node(block *b) {
     if (b->overflow == OVF_SCROLL) paint_trans_pop();
     if (clip_self) paint_clip_pop();
     /* 角外像素由覆盖率合成保留父表面原值，不再用全局桌面底色覆写（漏底根因）。 */
-
-    b->dirty_paint = 0;
-    b->snap = 0;
 }
 
 /* 平面遍历入口：脏叶子可能挂在未脏的祖先容器下（祖先本帧 snap=0，未走
@@ -549,6 +555,32 @@ void paint_node_clipped(block *b) {
         paint_clip_pop();
 }
 
+/* 平面遍历入口（只画自身 body）：祖先链裁剪框压栈后调用 paint_node_body，
+ * 不清 dirty/snap；供 damage 矩形重合成按层序逐节点调用。 */
+void paint_node_body_clipped(block *b) {
+    if (!b || !b->visible) return;
+    int depth0 = clip_depth;
+    block *chain[CLIP_DEPTH];
+    int n = 0;
+    for (block *p = b->parent; p && p->parent && n < CLIP_DEPTH - 1;
+         p = p->parent)
+        chain[n++] = p;
+    for (int k = n - 1; k >= 0; k--) {
+        block *p = chain[k];
+        if (b->overflow == OVF_VISIBLE || p->overflow == OVF_VISIBLE) continue;
+        if (b->layer > p->layer) continue;         /* 浮层逃逸父框 */
+        paint_clip_push(p->x, p->y, p->w, p->h);
+    }
+    paint_node_body(b);
+    while (clip_depth > depth0)
+        paint_clip_pop();
+}
+
 void paint_begin_frame(void) {
     clip_depth = 0;
+    tr_depth = 0;
+}
+
+void paint_clip_push_rect(int x, int y, int w, int h) {
+    paint_clip_push(x, y, w, h);
 }

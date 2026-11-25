@@ -41,7 +41,10 @@ void      gui_force_next_frame(void);
 /* paint.c */
 void      paint_begin_frame(void);
 void      paint_node(block *b);
+void      paint_node_body(block *b);
 void      paint_node_clipped(block *b);
+void      paint_node_body_clipped(block *b);
+void      paint_clip_push_rect(int x, int y, int w, int h);
 void      gui_fill_rect(int x, int y, int w, int h, uint32_t rgb);
 void      gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale);
 void      gui_blit24(const uint8_t *src, int x, int y, int w, int h);
