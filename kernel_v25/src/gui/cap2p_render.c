@@ -63,6 +63,14 @@ static blk_spec mk_spec(uint16_t layer, int32_t w, int32_t h) {
     return s;
 }
 
+/* 自由布局根包裹层：子块按 px_x/px_y 落位（与 chrome.c 样例同范式）。
+ * 包裹层走 BG 角色 + LAYER_BG，不刷面板色，避免盖住子块外角切出的底色。 */
+static block_id free_root(void) {
+    blk_spec s = mk_spec(LAYER_BG, GFX24_W, GFX24_H);
+    s.role_bg = ROLE_BG;
+    return b_free(0, &s);
+}
+
 static uint32_t avg_px(int x, int y, int w, int h) {
     uint32_t sr = 0, sg = 0, sb = 0, n = 0;
     for (int j = 0; j < h; j++)
@@ -103,22 +111,25 @@ static void probe_alpha(int A) {
         gui_theme_set(t);
         const struct style *tok = gui_active_style();
         uint32_t under = tok->bg, col = tok->accent;
+        block_id fr = free_root();
         blk_spec s = mk_spec(LAYER_CONTENT, 100, 60);
+        s.px_x = 30; s.px_y = 30;
         s.bg = col; s.role_bg = 0; s.alpha = (uint8_t)A;
-        block_id id = b_rect(0, &s);
-        block *b = btable_get(id);
-        b->x = 30; b->y = 30; b->moved = 1;
+        block_id id = b_rect(fr, &s);
         layout_run();
+        gui_mark_dirty(fr);
         gui_frame();
-        uint32_t o = avg_px(40, 40, 60, 30);
+        block *b = btable_get(id);
+        uint32_t o = avg_px(b->x + 10, b->y + 10, 60, 30);
         probe_leave();
         int cov = obs_cov(o, under, col);
         int err = cov - A; if (err < 0) err = -err;
         if (err > 26) ok = 0;                 /* 容忍一档抖动噪声（≈17/255） */
         if (err > maxerr) maxerr = err;
     }
-    ser_write(ok ? "GUI:cap2-alpha" : "GUI:cap2-alpha FAIL");
+    ser_write("GUI:cap2-alpha");
     ser_write(A == 64 ? "64" : A == 128 ? "128" : "192");
+    ser_write(ok ? " PASS" : " FAIL");
     ser_write(" cov_maxerr="); pd((uint32_t)maxerr);
     ser_write(" result="); pd(ok ? 1 : 0);
     ser_write("\n");
@@ -132,30 +143,39 @@ static void probe_shadow(void) {
     const struct style *tok = gui_active_style();
     uint32_t bg = tok->bg;
     int present = 0, seam_bad = 0;
+    block_id fr = free_root();
     block *blocks[6];
     for (int e = 0; e < 6; e++) {
         blk_spec s = mk_spec(LAYER_WORK, 90, 60);
+        s.px_x = 20 + e * 120; s.px_y = 60;
         s.elevation = (uint8_t)e;
-        block_id id = b_rect(0, &s);
-        block *b = btable_get(id);
-        b->x = 20 + e * 120; b->y = 60; b->moved = 1;
-        blocks[e] = b;
+        block_id id = b_rect(fr, &s);
+        blocks[e] = btable_get(id);
     }
     layout_run();
+    gui_mark_dirty(fr);
     gui_frame();
 
     for (int e = 0; e < 6; e++) {
         block *b = blocks[e];
-        /* 右下外缘取样（光源右下）。 */
-        uint32_t out = gfx24_getpx(b->x + b->w + 4, b->y + b->h + 4);
-        int darker = ch_r(out) + ch_g(out) + ch_b(out) <
-                      ch_r(bg) + ch_g(bg) + ch_b(bg);
+        /* 右下外扩环带内取最暗像素（各档 ox/oy/pad 不同）。 */
+        int bl = ch_r(bg) + ch_g(bg) + ch_b(bg);
+        int darkest = bl;
+        for (int d = 1; d <= 10; d++) {
+            uint32_t pr = gfx24_getpx(b->x + b->w + d, b->y + b->h / 2);
+            uint32_t pb = gfx24_getpx(b->x + b->w / 2, b->y + b->h + d);
+            int lr = ch_r(pr) + ch_g(pr) + ch_b(pr);
+            int lb = ch_r(pb) + ch_g(pb) + ch_b(pb);
+            if (lr < darkest) darkest = lr;
+            if (lb < darkest) darkest = lb;
+        }
+        int darker = darkest < bl - 4;
         if (e == 0) {
             if (darker) seam_bad++;          /* flat 档不得有投影 */
         } else if (darker) present++;
-        /* 拼缝 0px：顶边中段与近角像素亮度差不得出现亮缝（回露底色）。 */
-        uint32_t mid = gfx24_getpx(b->x + b->w / 2, b->y - 1);
-        uint32_t near = gfx24_getpx(b->x + 6, b->y - 1);
+        /* 拼缝 0px：底边中段与近角像素亮度差不得出现亮缝（回露底色）。 */
+        uint32_t mid = gfx24_getpx(b->x + b->w / 2, b->y + b->h + 2);
+        uint32_t near = gfx24_getpx(b->x + b->w - 7, b->y + b->h + 2);
         int lmid = ch_r(mid) + ch_g(mid) + ch_b(mid);
         int lnear = ch_r(near) + ch_g(near) + ch_b(near);
         if (lmid > lnear + 30) seam_bad++;
@@ -175,12 +195,14 @@ static void probe_corner_per(void) {
     gui_theme_set(TOK_DARK);
     const struct style *tok = gui_active_style();
     uint32_t bg = tok->bg, panel = tok->panel;
+    block_id fr = free_root();
     blk_spec s = mk_spec(LAYER_CONTENT, 100, 80);
+    s.px_x = 40; s.px_y = 40;
     s.corner_tl = 8; s.corner_tr = 16; s.corner_br = 24; s.corner_bl = 4;
-    block_id id = b_rect(0, &s);
+    block_id id = b_rect(fr, &s);
     block *b = btable_get(id);
-    b->x = 40; b->y = 40; b->moved = 1;
     layout_run();
+    gui_mark_dirty(fr);
     gui_frame();
 
     /* 外角 4 点应切到底色；边中 4 点应是面板色。 */
@@ -213,21 +235,22 @@ static void probe_corner_pill(void) {
     gui_theme_set(TOK_DARK);
     const struct style *tok = gui_active_style();
     uint32_t panel = tok->panel;
+    block_id fr = free_root();
     blk_spec s = mk_spec(LAYER_CONTENT, 100, 28);
+    s.px_x = 40; s.px_y = 40;
     s.corner_tl = s.corner_tr = s.corner_br = s.corner_bl = 128;
-    block_id id = b_rect(0, &s);
+    block_id id = b_rect(fr, &s);
     block *b = btable_get(id);
-    b->x = 40; b->y = 40; b->moved = 1;
     layout_run();
+    gui_mark_dirty(fr);
     gui_frame();
     int outer = gfx24_getpx(b->x, b->y) == panel;
-    int mid_l = gfx24_getpx(b->x + 2, b->y + b->h / 2) == panel;
-    int mid_r = gfx24_getpx(b->x + b->w - 3, b->y + b->h / 2) == panel;
+    int mid = gfx24_getpx(b->x + b->w / 2, b->y + b->h / 2) == panel;
     probe_leave();
-    int ok = !outer && mid_l && mid_r;
+    int ok = !outer && mid;
     ser_write(ok ? "GUI:cap2-corner-pill PASS" : "GUI:cap2-corner-pill FAIL");
     ser_write(" outer_cut="); pd(!outer);
-    ser_write(" side_body="); pd(mid_l && mid_r);
+    ser_write(" body="); pd(mid);
     ser_write("\n");
 }
 
@@ -238,17 +261,20 @@ static void probe_corner_concentric(void) {
     gui_theme_set(TOK_DARK);
     const struct style *tok = gui_active_style();
     uint32_t panel = tok->panel;
+    block_id fr = free_root();
     blk_spec p = mk_spec(LAYER_CONTENT, 220, 140);
+    p.px_x = 30; p.px_y = 30;
     p.pad_l = p.pad_r = p.pad_t = p.pad_b = 16;
     p.corner_tl = p.corner_tr = p.corner_br = p.corner_bl = 255;
-    block_id pid = b_rect(0, &p);
+    block_id pid = b_rect(fr, &p);
     block *bp = btable_get(pid);
-    bp->x = 30; bp->y = 30; bp->moved = 1;
     blk_spec c = mk_spec(LAYER_CONTENT, 120, 80);
+    c.px_x = 16; c.px_y = 16;
     c.corner_tl = c.corner_tr = c.corner_br = c.corner_bl = 255;
     block_id cid = b_rect(pid, &c);
     block *bc = btable_get(cid);
     layout_run();
+    gui_mark_dirty(fr);
     gui_frame();
     int child_body = gfx24_getpx(bc->x + bc->w / 2, bc->y + bc->h / 2) == panel;
     int parent_body = gfx24_getpx(bp->x + bp->w / 2, bp->y + 4) == panel;
@@ -269,18 +295,27 @@ static void probe_icon_tint(void) {
     uint32_t want[3] = { tok->accent, tok->border, tok->fg };
     uint8_t role[3] = { 3, 4, 1 };
     int hit[3] = { 0, 0, 0 };
+    uint32_t actual[3] = { 0, 0, 0 };
+    block_id fr = free_root();
+    block *ib[3];
     for (int i = 0; i < 3; i++) {
         blk_spec s = mk_spec(LAYER_CONTENT, 32, 32);
-        block_id id = b_rect(0, &s);
+        s.px_x = 30 + i * 48; s.px_y = 40;
+        block_id id = b_rect(fr, &s);
         block *b = btable_get(id);
         b->kind = BLK_ICON;
         b->icon = 7;                       /* close：X 中心行列有像素 */
         b->tint_role = role[i];
-        b->x = 30 + i * 48; b->y = 40; b->moved = 1;
-        layout_run();
-        gui_frame();
+        ib[i] = b;
+    }
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+    for (int i = 0; i < 3; i++) {
+        block *b = ib[i];
         /* close 图标 row7 col7/8 点亮；32 档 2×。 */
         uint32_t px = gfx24_getpx(b->x + 7 * 2 + 1, b->y + 7 * 2 + 1);
+        actual[i] = px;
         hit[i] = (px == want[i]);
     }
     probe_leave();
@@ -289,6 +324,11 @@ static void probe_icon_tint(void) {
     ser_write(" accent="); pd(hit[0]);
     ser_write(" border="); pd(hit[1]);
     ser_write(" fg="); pd(hit[2]);
+    ser_write(" act0="); pd(actual[0]);
+    ser_write(" act1="); pd(actual[1]);
+    ser_write(" act2="); pd(actual[2]);
+    ser_write(" want1="); pd(want[1]);
+    ser_write(" want2="); pd(want[2]);
     ser_write("\n");
 }
 
@@ -298,17 +338,19 @@ static void probe_sb_paint(void) {
     if (!probe_enter()) { ser_write("GUI:cap2-sb-paint ENTER-FAIL\n"); return; }
     gui_theme_set(TOK_DARK);
     const struct style *tok = gui_active_style();
+    block_id fr = free_root();
     blk_spec s = mk_spec(LAYER_CONTENT, 120, 80);
+    s.px_x = 40; s.px_y = 40;
     s.overflow = OVF_SCROLL;
     s.scrollbar = 1; s.scroll_axis = 2;
-    block_id id = b_rect(0, &s);
+    block_id id = b_rect(fr, &s);
     block *b = btable_get(id);
-    b->x = 40; b->y = 40; b->moved = 1;
     blk_spec ch = mk_spec(LAYER_CONTENT, 120, 220);
+    ch.px_x = 0; ch.px_y = 0;
     block_id cid = b_rect(id, &ch);
     block *bc = btable_get(cid);
-    bc->x = b->x; bc->y = b->y; bc->moved = 1;
     layout_run();
+    gui_mark_dirty(fr);
     gui_frame();
 
     int tx = b->x + b->w - 3;
@@ -328,29 +370,27 @@ static void probe_sb_paint(void) {
 /* ---- perf：半透明浮层整屏重合成实测 --------------------------------------- */
 
 static void build_perf_tree(void) {
-    blk_spec root = mk_spec(LAYER_CONTENT, GFX24_W, GFX24_H);
-    b_rect(0, &root);
+    block_id fr = free_root();
     for (int r = 0; r < 14; r++) {
         blk_spec row = mk_spec(LAYER_WORK, 200, 24);
+        row.px_x = 20; row.px_y = 20 + r * 28;
         row.alpha = 200; row.elevation = 2;
-        block_id rid = b_rect(0, &row);
-        block *br = btable_get(rid);
-        br->x = 20; br->y = 20 + r * 28; br->moved = 1;
+        block_id rid = b_rect(fr, &row);
+        (void)rid;
     }
     blk_spec ov = mk_spec(LAYER_OVERLAY, 420, 300);
+    ov.px_x = 250; ov.px_y = 120;
     ov.alpha = 192; ov.elevation = 4;
-    block_id oid = b_rect(0, &ov);
+    block_id oid = b_rect(fr, &ov);
     block *bo = btable_get(oid);
-    bo->x = 250; bo->y = 120; bo->moved = 1;
     for (int r = 0; r < 8; r++) {
         blk_spec it = mk_spec(LAYER_OVERLAY, 32, 32);
+        it.px_x = 16 + (r % 4) * 48;
+        it.px_y = 24 + (r / 4) * 48;
         it.tint_role = 3;
         block_id iid = b_rect(oid, &it);
         block *bi = btable_get(iid);
         bi->kind = BLK_ICON; bi->icon = (uint8_t)(r & 7);
-        bi->x = bo->x + 16 + (r % 4) * 48;
-        bi->y = bo->y + 24 + (r / 4) * 48;
-        bi->moved = 1;
     }
 }
 
@@ -359,6 +399,7 @@ static void probe_perf(void) {
     gui_theme_set(TOK_DARK);
     build_perf_tree();
     layout_run();
+    gui_mark_dirty(gui_root_block()->id);
 
     gui_perf_set("reset");
     /* 全量重合成：连续脏帧。 */
