@@ -2,7 +2,7 @@
  * compose.c -- 帧调度、damage 合并、统计打点（规格 §4 / §5 / §9）。
  *
  * 节拍：PIT 100Hz，同一 tick 内重复 gui_frame() 只算一次提交
- * （stat_double_commit）。damage 矩形上限 8 个，超出退化为包围盒；
+ * （stat_double_commit）。damage 矩形上限 16 个，超出退化为包围盒；
  * 只合成脏区，禁止整帧重绘。
  */
 #include "gui/gui.h"
@@ -18,10 +18,18 @@ extern volatile uint32_t timer_ticks;
 extern uint64_t perf_now(void);
 extern uint32_t perf_mhz(void);
 
-#define DMG_MAX 8
+#define DMG_MAX 16
 static struct { int x, y, w, h; } dmg[DMG_MAX];
 static int dmg_n;
 static int dmg_full;
+
+/* 2b 阴影外扩保守量：halo 接触层 y+1、投影层 y+3/y+4，左右/上 1px。
+ * 贴边/成组紧贴的块本就不投影（paint.c flush_edges），这里按最大外扩留边，
+ * 宁多纳一条窄边，不把阴影像素留在损伤区外。 */
+#define HALO_PAD_L 1
+#define HALO_PAD_T 1
+#define HALO_PAD_R 1
+#define HALO_PAD_B 4
 
 static uint32_t s_frames, s_layout_nodes, s_double_commit;
 static uint32_t s_damage_rects, s_damage_area;
@@ -69,6 +77,52 @@ static void dmg_add(int x, int y, int w, int h) {
     dmg[0].x = x0; dmg[0].y = y0; dmg[0].w = x1 - x0; dmg[0].h = y1 - y0;
     dmg_n = 1;
     dmg_full = 1;
+}
+
+/* 带阴影外扩地纳入损伤，并裁到屏内。 */
+static void dmg_add_pad(int x, int y, int w, int h) {
+    int x0 = x - HALO_PAD_L, y0 = y - HALO_PAD_T;
+    int x1 = x + w + HALO_PAD_R, y1 = y + h + HALO_PAD_B;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > GFX24_W) x1 = GFX24_W;
+    if (y1 > GFX24_H) y1 = GFX24_H;
+    dmg_add(x0, y0, x1 - x0, y1 - y0);
+}
+
+/* 两矩形是否重叠或 1px 邻接（可并成一条带）。 */
+static int dmg_touch(int i, int j) {
+    int ax = dmg[i].x, ay = dmg[i].y, aw = dmg[i].w, ah = dmg[i].h;
+    int bx = dmg[j].x, by = dmg[j].y, bw = dmg[j].w, bh = dmg[j].h;
+    int xov = ax < bx + bw + 1 && bx < ax + aw + 1;
+    int yov = ay < by + bh + 1 && by < ay + ah + 1;
+    return xov && yov;
+}
+
+static void dmg_merge_into(int i, int j) {
+    int x0 = dmg[i].x < dmg[j].x ? dmg[i].x : dmg[j].x;
+    int y0 = dmg[i].y < dmg[j].y ? dmg[i].y : dmg[j].y;
+    int x1 = dmg[i].x + dmg[i].w > dmg[j].x + dmg[j].w
+             ? dmg[i].x + dmg[i].w : dmg[j].x + dmg[j].w;
+    int y1 = dmg[i].y + dmg[i].h > dmg[j].y + dmg[j].h
+             ? dmg[i].y + dmg[i].h : dmg[j].y + dmg[j].h;
+    dmg[i].x = x0; dmg[i].y = y0; dmg[i].w = x1 - x0; dmg[i].h = y1 - y0;
+    dmg[j] = dmg[dmg_n - 1];
+    dmg_n--;
+}
+
+/* 区域合并：先两两 union 收敛，再做水平扫描带（同带内 y 交叠的相邻
+ * 条带并成一条），减少上报给 perf 的小矩形数。 */
+static void dmg_coalesce(void) {
+    int changed = 1;
+    while (changed && dmg_n > 1) {
+        changed = 0;
+        for (int i = 0; i < dmg_n && !changed; i++) {
+            for (int j = i + 1; j < dmg_n; j++) {
+                if (dmg_touch(i, j)) { dmg_merge_into(i, j); changed = 1; break; }
+            }
+        }
+    }
 }
 
 /* ---- 绘制顺序收集：layer 升序 → z 升序 → 树先序（稳定） --------------- */
@@ -235,17 +289,23 @@ void gui_frame(void) {
     dmg_reset();
     paint_begin_frame();
 
-    /* 第一遍：收集脏块矩形（v1 记当前矩形），合并成 damage 链表。
-     * OVF_VISIBLE 子块的脏区并入父块脏区：移出父框后旧位置由父底色补齐，
-     * 防止残影；再按裁剪栈只在屏内裁。 */
+    /* 第一遍：收集脏块矩形，合并成 damage 链表。
+     * 窗口移动损伤 = 旧矩形 ∪ 新矩形（均含阴影外扩边）；旧位置的背景补齐
+     * 只发生在这条并集条带内，不整节点重填。OVF_VISIBLE 子块脏区并入父块，
+     * 移出父框后旧位置由父底色补齐防残影。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
         if (!b->snap) continue;
-        dmg_add(b->x, b->y, b->w, b->h);
+        if (b->has_old) {
+            dmg_add_pad(b->old_x, b->old_y, b->old_w, b->old_h);
+            b->has_old = 0;
+        }
+        dmg_add_pad(b->x, b->y, b->w, b->h);
         if (b->overflow == OVF_VISIBLE && b->parent)
-            dmg_add(b->parent->x, b->parent->y,
-                    b->parent->w, b->parent->h);
+            dmg_add_pad(b->parent->x, b->parent->y,
+                        b->parent->w, b->parent->h);
     }
+    dmg_coalesce();
 
     /* 第二遍：只重绘本帧脏节点。干净节点即使与 damage 相交也不整节点
      * 重绘——背景/容器的命中重绘会把尚未重绘的干净前景整片擦掉（§4

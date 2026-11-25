@@ -200,6 +200,11 @@ typedef struct block {
     struct block *free_next;             /* 空闲链 */
     uint8_t  desc_seen;                  /* commit diff 本轮是否见过 */
     uint8_t  owner;                      /* 预留：0=内核，>0=pid；v1 恒 0 */
+
+    /* 脏矩形旧矩形缓存：几何变更前记下旧矩形，供损伤收集算「旧 ∪ 新」。
+     * has_old=0 时以下四个值无效。收集进 damage 后即清零。 */
+    int32_t  old_x, old_y, old_w, old_h;
+    uint8_t  has_old;
 } block;
 
 #endif /* CATOS_GUI_BLOCK_H */

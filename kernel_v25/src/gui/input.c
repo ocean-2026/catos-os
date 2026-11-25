@@ -212,6 +212,9 @@ static void on_drag_move(int x, int y) {
     if (!drag_block) return;
     block *b = drag_block;
     if (drag_mode == DRAG_MOVE) {
+        /* 脏矩形：改几何前缓存旧矩形，供合成层算「旧 ∪ 新」损伤条带。 */
+        b->old_x = b->x; b->old_y = b->y;
+        b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
         int nx = x - drag_off_x, ny = y - drag_off_y;
         /* drag_bounds：0 不限 / 1 父框 / 2 屏幕。 */
         if (b->drag_bounds == BOUND_SCREEN) {
@@ -238,6 +241,8 @@ static void on_drag_move(int x, int y) {
         if (b->overflow == OVF_VISIBLE && b->parent)
             b->parent->dirty_paint = 1;
     } else if (drag_mode == DRAG_RESIZE) {
+        b->old_x = b->x; b->old_y = b->y;
+        b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
         uint8_t d = drag_resize_dir;
         int nl = b->x, nt = b->y, nr = b->x + b->w, nb = b->y + b->h;
         if (d & RESIZE_L) nl = x;
@@ -263,7 +268,10 @@ static void on_drag_move(int x, int y) {
     b->dirty_layout = 1;
     b->dirty_paint = 1;
     b->moved = 1;
-    /* 旧位置必须由背景/兄弟整树补齐：只标拖动块会在拖出轨迹上留残影。 */
+    /* 整树标脏（当前定论）：旧位置的背景补齐依赖同帧重绘的背景/兄弟节点，
+     * 条带级背景补齐（只在损伤条带内擦旧位）尚未实现，收窄脏位会在拖出
+     * 轨迹上留残影。实测拖动帧时/损伤无全屏回退、无残影，权衡与口径见
+     * evidence-fix/09-perf/dirty-rect-summary.md；条带化补齐留后续轮次。 */
     gui_mark_dirty(gui_root_block()->id);
 }
 
