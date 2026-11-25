@@ -14,12 +14,18 @@ CE 程序运行时用 `dlopen()` 装载一个不在自身镜像中的共享库�
 
 | 槽位 | 成员 | 状态 |
 |---|---|---|
-| 77 | `file_mmap(fd, len, prot, flags)` | Stage 2B 预留，本轮 `ENOSYS (-8)` |
-| 78 | `mprotect(addr, len, prot)` | Stage 2B 预留，本轮 `ENOSYS (-8)` |
-| 79 | `munmap_shared(addr, len)` | Stage 2B 预留，本轮 `ENOSYS (-8)` |
+| 77 | `file_mmap(fd, len, prot, flags)` | Stage 2B 已接线：只读文件映射，返回用户 VA / 负 errno |
+| 78 | `mprotect(addr, len, prot)` | Stage 2B 已接线：仅允许降权（RW→RO），升权 `EPERM (-11)` |
+| 79 | `munmap_shared(addr, len)` | Stage 2B 已接线：减缓存引用，归零释放帧 |
 | 80 | `dlopen(path)` → handle / 负 errno | Stage 2A 已接线 |
 | 81 | `dlsym(handle, name)` → 函数指针 / NULL | Stage 2A 已接线 |
 | 82 | `dlclose(handle)` → 0 / 负 errno | Stage 2A 已接线 |
+| 87 | `fd_open(path, flags)` → fd ≥ 3 / 负 errno | Stage 2B 已接线（只读打开） |
+| 88 | `fd_close(fd)` → 0 / 负 errno | Stage 2B 已接线：回收句柄槽 |
+| 89 | `fd_read(fd, buf, len)` → 字节数 / 0 EOF / 负 errno | Stage 2B 已接线 |
+| 90 | `fd_write(fd, buf, len)` → 字节数 / 负 errno | Stage 2B 占位：只读打开，写返回 `EACCES (-13)` |
+| 91 | `fd_lseek(fd, off, whence)` → 新偏移 / 负 errno | Stage 2B 已接线（SET/CUR/END） |
+| 92 | `fcache_stat(what, arg)` → 计数 | Stage 2B 诊断：0=驻留页数，1=累计命中，2=某 VA 页引用计数 |
 
 ## 用户区 VMA 布局（未抬 `USER_IMAGE_BASE` / `CE_LOAD_BASE`）
 
@@ -118,14 +124,59 @@ QEMU 实机（文本模式）运行 `dltest.ce`：
 - 内核 `dl.c` 接入构建与 syscall 分发；`task_cleanup` 回收库元数据帧；
 - 示例 `libmath.so` 与演示客户端 `dltest.ce` 内置到 `/bin`。
 
-### Deferred（2B：文件映射新槽）
+### 本轮已落地（2B：fd 句柄表 + 只读文件页缓存 + 槽 77/78/79 真实现）
 
-- CE 层目前只有路径式文件访问，**没有 fd 句柄表**；`file_mmap(fd, ...)` 依赖一层
-  fd 抽象（打开句柄表、引用计数、文件页缓存）。槽 77/78/79 已 append-only 预留，
-  分发本轮统一返回 `ENOSYS (-8)`，不重排既有槽位。
-- 待前置：fd 句柄表 → 文件页缓存（共享/私有、可懒装入）→ `mprotect` 改 PTE 权限
-  → `munmap_shared` 引用计数卸载。红线不变：不给应用可写像素出口，不新增 `.bss`
-  大数组（页表/描述符用现有帧池或按需分配）。
+**fd 句柄表（每进程一份，槽 87–91）**
+
+- 每任务固定一张 `fdtab[MAX_TASKS][MAX_OPEN_FILES]`，`MAX_OPEN_FILES = 8`；
+  用户 fd 从 `FD_FIRST = 3` 起，`0/1/2` 保留 stdin/stdout/stderr。
+- `fd_open(path, flags)`：`fs_resolve_file` 解析首簇+大小，`PERM_READ` ACL 校验，
+  分配空闲槽；本轮一律按**只读**打开（`flags` 暂未解析）。
+- `fd_close(fd)`：置槽空闲、回收；非法 fd 返回 `EBADF (-22)`。
+- `fd_read(fd, buf, len)`：从当前偏移读，推进偏移；`fd_lseek` 支持 SET/CUR/END，
+  越界裁剪到文件大小。`fd_write` 为占位：只读打开下写返回 `EACCES (-13)`，
+  偏移写（offset-write）未实现。
+- **路径式既有接口完全保留兼容**：槽 39 `file_read(path,...)`、40 `file_write`、
+  41 `file_delete` 一行未改，老 CE 程序零改动可用。
+
+**最小只读文件页缓存（全局固定池）**
+
+- 池 `cache[FCACHE_MAX_PAGES]`，`FCACHE_MAX_PAGES = 64`，即 **64 × 4 KiB = 256 KiB
+  帧预算**；键 =（首簇号, 块号），每页带引用计数 `refcnt`。
+- 帧**按需分配**（`kzalloc_frame`），不设大静态暂存；某页引用计数归零即
+  `frame_free` 并卸载。任务退出由 `fcache_cleanup_task` 先摘除本任务文件 PTE 并
+  减引用，避免共享帧被任务空间销毁路径误释放（新增 `task_scrub_page`：只清 PTE
+  不释放帧）。
+- **淘汰策略：硬上限，不做 LRU。** 未命中且池满时该次 mmap 直接失败 `ENOMEM (-12)`，
+  不淘汰既有页（本阶段文件均小于单页，LRU 收益不足；如需换页再在 2C 评估）。
+
+**映射区布局与权限**
+
+- 文件映射复用扩展 arena 的首配扫描，区间与匿名 mmap 同一片间隙
+  `0x2400000 .. 0x2700000`（`USER_EXT_BASE .. USER_LIB_BASE`），CSO1 库区
+  `0x2700000 .. 0x2780000` 排除在外；新 VMA kind `VMA_MMAP`。缺页路径按
+  `VMA_MMAP` 分支回调 `fcache_fault_page` 取缓存帧，以**只读** PTE 映射。
+- 映射只读（`PROT_READ`）。`PROT_WRITE` 请求直接返回 `EACCES (-13)`——本轮**不做
+  写时复制**，不复制私有可写帧。`mprotect` 只允许降权（RW→RO），升权
+  RO→RW 返回 `EPERM (-11)`。`munmap_shared` 递减引用，归零释放。
+- 错误码沿用既有约定：`ENOENT -1 / EINVAL -3 / FULL -4 / ENOMEM -12 /
+  EACCES -13 / EPERM -11 / EBADF -22 / ENOSYS -8`。
+- vsyscall thunk 页布局：前段 thunk 占 `0x000..0x7FF`；本段填满后，87 起的新 thunk
+  落到固定 API 表（`0x800`，`CATOS_VS_TABLE` 常量不可挪）之后、ls thunk `0xC00`
+  之前的空闲间隙；守卫分别校验前段 `< 0x800`、溢出段 `< 0xC00`。
+
+**实机探针 `mmapfd.ce`（`/bin/mmapfd.ce`）**
+
+打开 `/bin/hello.ce` → `file_mmap` 后与路径式 `file_read` 逐字节比对；再并发第二次
+映射同一文件证明共享缓存命中；经槽 92 读取 `cache_hit / pages / refcnt`。错误路径：
+非法 fd → `-22`；`PROT_WRITE` → `-13`。
+
+### 2B 残留 deferred / 降级项
+
+- `fd_write` 偏移写、读写打开模式未实现（当前只读，写返回 `EACCES`）；
+- 页缓存无 LRU 淘汰，池满即 `ENOMEM`；超容量（>64 页）错误路径本轮未在探针中触发：
+  磁盘内置文件均 < 4 KiB，无法在 CE 侧填满 64 页，该分支仅经代码走查确认；
+- 多页/大文件映射、跨任务只读物理页共享属 2C 范畴。
 
 ### Deferred（2C：用户态 `ld.so` 与共享文本）
 

@@ -316,6 +316,19 @@ int task_unmap_page(task_space_t *s, uint32_t vaddr) {
     return 0;
 }
 
+/* Stage 2B: drop the user PTE for vaddr WITHOUT freeing the frame.  Used
+ * for shared read-only file-cache pages: the frame stays resident in the
+ * global page cache and is released only when its cache refcount hits zero.
+ * No-op if the page is not present. */
+void task_scrub_page(task_space_t *s, uint32_t vaddr) {
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return;
+    uint32_t pte = (vaddr >> 12) & 0x3FF;
+    if (!(t[pte] & 1)) return;
+    t[pte] = 0;
+    cpu_invlpg(vaddr);
+}
+
 uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
     uint32_t *t = pt_for(s, vaddr);
     if (!t) return 0;

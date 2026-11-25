@@ -270,6 +270,14 @@ typedef struct catos_api {
     void     (*thread_exit)(void *retval);             /* 84 */
     void *   (*thread_join)(int tid);                  /* 85 */
     int      (*thread_detach)(int tid);                /* 86 */
+
+    /* ---- Stage 2B: CE fd handle table (append-only; mirror 87-91) ---- */
+    int      (*fd_open)(const char *path, int flags);  /* 87 */
+    int      (*fd_close)(int fd);                       /* 88 */
+    int      (*fd_read)(int fd, void *buf, int len);    /* 89 */
+    int      (*fd_write)(int fd, const void *buf, int len);/* 90 */
+    int      (*fd_lseek)(int fd, int off, int whence); /* 91 */
+    uint32_t (*fcache_stat)(int what, uint32_t arg);   /* 92 */
 } catos_api_t;
 
 /* install the API (called once at boot) */

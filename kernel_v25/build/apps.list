@@ -19,6 +19,7 @@ hw
 gfxdemo
 zhdemo
 mmaptest
+mmapfd
 allocprobe
 heaptest
 go

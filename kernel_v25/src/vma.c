@@ -15,6 +15,7 @@
 #include "vma.h"
 #include "task.h"
 #include "vga.h"
+#include "fcache.h"
 
 /* ---- VMA list ops ---------------------------------------------------- */
 
@@ -110,7 +111,15 @@ static int vma_map_page_on_fault(task_t *t, uint32_t vaddr) {
     /* Already mapped by a user PTE?  A supervisor-only #D11 mirror PTE does
      * not count: ring3 still cannot reach it, so remap to a user frame. */
     if (task_page_is_user(&t->space, vaddr)) return 0;
-    uint32_t pa = (uint32_t)kzalloc_frame();
+    uint32_t pa;
+    if (v->kind == VMA_MMAP) {
+        /* Stage 2B: file-backed mapping -- serve the cached read-only page. */
+        pa = fcache_fault_page(t, vaddr);
+        if (!pa) return -1;
+        if (task_map_page(&t->space, vaddr, pa, 0) != 0) return -1;
+        return 0;
+    }
+    pa = (uint32_t)kzalloc_frame();
     if (!pa) return -1;
     if (task_map_page(&t->space, vaddr, pa, v->writable ? 1 : 0) != 0) {
         frame_free(pa);

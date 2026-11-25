@@ -29,6 +29,7 @@
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
 #include "dl.h"      /* Stage 2A: CSO1 fixed-base shared object */
+#include "fcache.h"  /* Stage 2B: fd table + read-only file page cache */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
@@ -488,6 +489,10 @@ static void task_cleanup(task_t *t) {
 #ifdef CATOS_BENCH
     uint64_t _cb = perf_now(); g_sp.cr3 += _cb - _ca;
 #endif
+    /* Stage 2B: drop this task's file-cache refs and scrub its shared file
+     * PTEs BEFORE task_space_destroy walks the PT, so a cached shared frame
+     * is not freed out from under the cache. */
+    fcache_cleanup_task(t);
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
@@ -786,6 +791,11 @@ void console_wake_release(int tid) {
 #define VS_EXIT_STUB    (VSYSCALL_BASE + 0xF00)
 #define VS_LS_THUNK     (VSYSCALL_BASE + 0xC00)
 #define VS_TABLE        (VSYSCALL_BASE + 0x800)
+/* Segment A generic thunks occupy 0x000..0x7FF.  Once that fills, the
+ * remaining thunks are laid in the gap right after the API table, before the
+ * ls thunk at 0xC00.  VS_TABLE offset 0x800 is a fixed ABI constant
+ * (CATOS_VS_TABLE) and must NOT move; only the trailing thunks relocate. */
+#define VS_THUNK_A_END  0x800u
 #define VS_LS_H         (VSYSCALL_BASE + 0xD00)
 #define VS_LS_NAME      (VSYSCALL_BASE + 0xD20)
 #define VS_LS_SIZE      (VSYSCALL_BASE + 0xD40)
@@ -858,6 +868,9 @@ enum {
      * needs the process/thread ownership split (see docs/threading.md), so
      * the dispatch returns -8 ENOSYS for now. */
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_DETACH,
+    /* Stage 2B: CE fd handle table (append-only, slots 87..91). */
+    SYS_FD_OPEN, SYS_FD_CLOSE, SYS_FD_READ, SYS_FD_WRITE, SYS_FD_LSEEK,
+    SYS_FCACHE_STAT,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -935,18 +948,26 @@ static void build_vsyscall_page(uint8_t *page) {
         /*77*/4, /*78*/3, /*79*/2,                 /* file_mmap / mprotect / munmap_shared */
         /*80*/1, /*81*/2, /*82*/1,                 /* dlopen / dlsym / dlclose */
         /*83*/2, /*84*/1, /*85*/1, /*86*/1,       /* thread_create/exit/join/detach */
+        /*87*/2, /*88*/1, /*89*/3, /*90*/3, /*91*/3, /* open/close/read/write/lseek */
+        /*92*/2,                                    /* fcache_stat(what,arg) */
     };
     uint32_t taddr[SYS_COUNT];
+    /* Overflow segment: thunks that do not fit segment A go into the gap
+     * right after the API table (16-byte aligned), before the ls thunk. */
+    uint32_t overflow_base = VS_THUNK_A_END +
+            (((uint32_t)SYS_COUNT * 4u + 0xFu) & ~0xFu);
+    uint32_t segA_end = 0;
     e.p = page;
     for (uint32_t i = 0; i < SYS_COUNT; i++) {
+        if (i == (uint32_t)SYS_FD_OPEN) e.p = page + overflow_base;
         taddr[i] = VSYSCALL_BASE + (uint32_t)(e.p - page);
         generic_thunk(&e, i, nargs[i]);
+        if (i + 1 == (uint32_t)SYS_FD_OPEN) segA_end = (uint32_t)(e.p - page);
     }
-    /* Guard the hand-packed page layout: the generic thunks must never
-     * reach the API pointer table at +0x800.  Without this check a future
-     * syscall would silently corrupt the table and every api->fn() call
-     * from a CE program would jump into thunk code. */
-    if ((uint32_t)(e.p - page) > 0x800u) {
+    /* Guard: segment A must stay clear of the fixed table at 0x800; the
+     * overflow segment must stay clear of the ls thunk at 0xC00. */
+    if (segA_end > VS_THUNK_A_END ||
+        (uint32_t)(e.p - page) > 0xC00u) {
         con_write("vsyscall: thunk overflow - system halted\n");
         for (;;) __asm__ volatile("hlt");
     }
@@ -2395,14 +2416,18 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)decl_text_width(buf);
         break;
     }
-    /* ---- Stage 2B: file-backed mapping (deferred, ENOSYS) ------------- */
-    /* The CE layer exposes path-based file access, not an fd handle table.
-     * A file_mmap(fd, ...) needs that handle layer first; the slots are
-     * reserved append-only and return -8 ENOSYS until it lands. */
-    case SYS_FILE_MMAP:
+    /* ---- Stage 2B: file-backed mapping via the fd table + page cache -- */
+    case SYS_FILE_MMAP: {
+        uint32_t va = 0;
+        int r = fcache_mmap(t, (int)a1, a2, (int)a3, &va);
+        ret = r == 0 ? va : (uint32_t)r;
+        break;
+    }
     case SYS_MPROTECT:
+        ret = (uint32_t)fcache_mprotect(t, a1, a2, (int)a3);
+        break;
     case SYS_MUNMAP_SHARED:
-        ret = (uint32_t)-8;                 /* ENOSYS */
+        ret = (uint32_t)fcache_munmap(t, a1, a2);
         break;
     /* ---- Stage 2A: CSO1 fixed-base shared object --------------------- */
     case SYS_DLOPEN: {
@@ -2434,6 +2459,34 @@ void isr_syscall(int_frame_t *f) {
     case SYS_THREAD_JOIN:
     case SYS_THREAD_DETACH:
         ret = (uint32_t)-8;                 /* ENOSYS */
+        break;
+    /* ---- Stage 2B: CE fd handle table -------------------------------- */
+    case SYS_FD_OPEN: {
+        char p[FS_PATH_MAX];
+        if (a1 == 0 || copy_from_user(t, p, (const void *)a1,
+                                       FS_PATH_MAX - 1) != 0) {
+            ret = (uint32_t)-14; break;
+        }
+        p[FS_PATH_MAX - 1] = 0;
+        ret = (uint32_t)fd_open(t, p, (int)a2);
+        break;
+    }
+    case SYS_FD_CLOSE:
+        ret = (uint32_t)fd_close(t, (int)a1);
+        break;
+    case SYS_FD_READ:
+        ret = (uint32_t)fd_read(t, (int)a1, (void *)a2, (int)a3);
+        break;
+    case SYS_FD_WRITE:
+        ret = (uint32_t)fd_write(t, (int)a1, (const void *)a2, (int)a3);
+        break;
+    case SYS_FD_LSEEK:
+        ret = (uint32_t)fd_lseek(t, (int)a1, (int)a2, (int)a3);
+        break;
+    case SYS_FCACHE_STAT:
+        if (a1 == 0) ret = fcache_stat_pages();
+        else if (a1 == 1) ret = fcache_stat_hits();
+        else ret = (uint32_t)fcache_refcnt_at(a2);
         break;
     default: ret = (uint32_t)-8; break;
     }

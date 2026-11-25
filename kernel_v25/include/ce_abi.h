@@ -349,6 +349,18 @@ typedef struct catos_api {
     void     (*thread_exit)(void *retval);                                        /*84*/
     void *   (*thread_join)(int tid);                                             /*85*/
     int      (*thread_detach)(int tid);                                          /*86*/
+    /* Stage 2B: CE fd handle table (append-only, slots 87..91).  fd 0/1/2
+     * are reserved stdin/stdout/stderr; user fds start at 3.  The legacy
+     * path-based file_read/file_write/file_delete slots are unchanged. */
+    int      (*fd_open)(const char *path, int flags);                            /*87*/
+    int      (*fd_close)(int fd);                                                  /*88*/
+    int      (*fd_read)(int fd, void *buf, int len);                               /*89*/
+    int      (*fd_write)(int fd, const void *buf, int len);                       /*90*/
+    int      (*fd_lseek)(int fd, int off, int whence);                            /*91*/
+    /* Stage 2B diagnostics: what=0 resident cached pages, what=1 cumulative
+     * cache hits, what=2 refcnt of the cached page covering arg (a user VA;
+     * -1 if none).  Returns the requested value as an unsigned word. */
+    uint32_t (*fcache_stat)(int what, uint32_t arg);                              /*92*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

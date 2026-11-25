@@ -35,6 +35,8 @@ typedef struct task_space {
 int      task_space_create(task_space_t *s);
 int      task_map_page(task_space_t *s, uint32_t vaddr, uint32_t pa, int user_writable);
 int      task_unmap_page(task_space_t *s, uint32_t vaddr);   /* frees the frame */
+/* Stage 2B: clear the user PTE without freeing the frame (shared file cache). */
+void     task_scrub_page(task_space_t *s, uint32_t vaddr);
 uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr);
 int      task_page_is_user(task_space_t *s, uint32_t vaddr);
 void     task_space_destroy(task_space_t *s);
