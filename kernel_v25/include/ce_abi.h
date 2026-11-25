@@ -103,6 +103,53 @@ typedef struct {
     int32_t  x, y;
     int32_t  w, h;
 } ce_blk_event_t;
+
+/* cap2：声明记录扩展（append-only；前 40B 与 ce_blk_rec_t 完全一致）。
+ * 旧应用仍按 40B 记录提交；应用以 rec2 提交时先探测能力（decl_caps），
+ * 内核按 base 之后的扩展段取新字段。缺省全 0 = 旧行为。 */
+typedef struct {
+    ce_blk_rec_t base;      /* 40B，语义不变 */
+    uint8_t  cap_ver;       /* 1 = rec2；其它由内核拒绝 */
+    uint8_t  alpha;         /* 0=未声明(≡255)；1..255 */
+    uint8_t  alpha_mode;    /* 0=ordered16 1=none */
+    uint8_t  elevation;     /* 0..5 */
+    uint8_t  corner_tl, corner_tr, corner_br, corner_bl; /* 0..63/128=pill/255=auto */
+    uint8_t  wrap_lines;    /* 0/1..6/255 */
+    uint8_t  ellipsis;      /* 0/1/2 */
+    uint8_t  font_size;     /* 0/1/2/3/4 */
+    uint8_t  font_bold;
+    uint8_t  font_tabular;
+    uint8_t  line_h;
+    uint8_t  anim_ease;     /* 0..7 */
+    uint8_t  anim_mask;     /* bit0..5 */
+    uint8_t  scrollbar;     /* 0/1/2 */
+    uint8_t  scroll_axis;   /* 0/1/2/3 */
+    uint8_t  border_sides;  /* bit0 l..bit3 b */
+    uint8_t  icon;
+    uint8_t  tint_role;
+    uint16_t anim_ms;
+    uint16_t pop_max_h;
+    uint32_t anchor_id;
+    uint8_t  pop_prefer;
+    uint8_t  corner_shape;
+    uint8_t  pad_[2];
+} ce_blk_rec2_t;
+#define CE_BLK_REC2_VER 1
+
+/* cap2：事件结构 append-only 扩展（前 20B 与 ce_blk_event_t 一致）。 */
+typedef struct {
+    int16_t  type;
+    int16_t  code;
+    int32_t  id;
+    int32_t  x, y;
+    int32_t  w, h;
+    int32_t  target_id;
+    uint8_t  ev_kind;       /* 0=click 1=focus 2=blur 3=input 4=wheel 5=key 6=dismiss */
+    uint8_t  mods;
+    int16_t  wheel_dx, wheel_dy;
+    uint8_t  utext[24];     /* UTF-8，NUL 结尾 */
+    uint32_t seq;
+} ce_blk_event2_t;
 #endif
 
 /* ---- v2.81: shared result codes (kernel + probes read the same table) ----
@@ -323,6 +370,11 @@ typedef struct catos_api {
     int     (*blk_image_load)(const char *path);                                  /*74*/
     int     (*blk_image_free)(int res);                                            /*75*/
     int     (*blk_text_width)(const char *s);                                     /*76*/
+    /* cap2 decl channel v2, slots 77..79 (append-only). */
+    uint32_t (*decl_caps)(void);                                                  /*77*/
+    int     (*blk_commit2)(const void *recs, int n, const char *strings,
+                           int slen, uint32_t rec_size);                          /*78*/
+    int     (*blk_event_poll2)(ce_blk_event2_t *ev, int timeout_ms);              /*79*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
