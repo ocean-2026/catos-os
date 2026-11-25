@@ -239,8 +239,11 @@ static void on_press(int x, int y) {
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
 
-    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。 */
-    if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。
+     * act 上溯到无 on_click 的祖先可能为 null，故按命中块 b 回退判 BLK_INPUT。 */
+    block *ib_target = (act && act->kind == BLK_INPUT) ? act
+                     : (b->kind == BLK_INPUT) ? b : 0;
+    if (ib_target) gui_set_key_hook(ib_key, (void *)ib_target->id);
     else if (ib_is_active())           gui_set_key_hook(0, 0);
 
     /* 拖拽/缩放：解析到可聚焦面板（resize 边缘带 > 标题/整块拖拽带）。 */
@@ -391,6 +394,7 @@ void gui_inject_release(void)        { on_release(); }
 void gui_inject_hover(int x, int y) { hover_block = hit_test(x, y); }
 void gui_inject_press_block(block_id id) { pressed_block = btable_get(id); }
 void gui_inject_hover_block(block_id id) { hover_block = btable_get(id); }
+void gui_inject_key(int code) { if (key_hook) key_hook(code, key_ud); }
 block_id gui_hit_test(int x, int y) {
     block *b = hit_test(x, y);
     return b ? b->id : 0;

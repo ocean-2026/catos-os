@@ -419,6 +419,33 @@ static void shot_e1_residue_build(const char *state) {
     ser_write("\n");
 }
 
+/* E3-④ 输入框光标/键入：idle 聚焦空框；typed 聚焦后键入 abc。串口上报矩形 + len/pos。 */
+static block_id e3_input_id;
+static void shot_e3_input_build(const char *state) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec in = spec_panel(LAYER_WORK, 240, 28, 1);
+    e3_input_id = b_input(F, &in, 0);
+    block *ip = btable_get(e3_input_id); ip->x = 200; ip->y = 200; ip->moved = 1;
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+
+    gui_inject_press(ip->x + ip->w / 2, ip->y + ip->h / 2);   /* 聚焦接管键盘 */
+    if (state && !strcmp_probe(state, "typed")) {
+        gui_inject_key(0x61); gui_inject_key(0x62); gui_inject_key(0x63);  /* a b c */
+    }
+    gui_inject_release();
+
+    int len = 0, pos = 0; ib_get_state(&len, &pos);
+    ser_write("GUI:e3-input state="); ser_write(state ? state : "idle");
+    ser_write(" rect ");
+    if (ip) { ser_dec(ip->x); ser_write(","); ser_dec(ip->y); ser_write(",");
+              ser_dec(ip->w); ser_write(","); ser_dec(ip->h); }
+    ser_write(" len="); ser_dec(len); ser_write(" pos="); ser_dec(pos); ser_write("\n");
+}
+
 /* C 轮组 1：父卡 r16 内嵌两子块——C1 贴左+贴顶，C2 贴右+贴底（对照）。
  * 自由层绝对定位，8pt 网格；父卡 pad=0，内容框即整框。 */
 static void shot_flush_inset_build(void) {
@@ -2269,6 +2296,8 @@ void gui_shell_cmd(const char *arg) {
     const char *e1_state = 0;
     int e1_residue = 0;
     const char *e1_res_state = 0;
+    int e3_input = 0;
+    const char *e3_input_state = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
@@ -2286,6 +2315,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-e1-btn")) { e1_btn = 1; probe_no_sample = 1; e1_state = rest ? rest : "idle"; }
     else if (!strcmp_probe(word, "shot-e1-outline")) { e1_outline = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-e1-residue")) { e1_residue = 1; probe_no_sample = 1; e1_res_state = rest ? rest : "idle"; }
+    else if (!strcmp_probe(word, "shot-e3-input")) { e3_input = 1; probe_no_sample = 1; e3_input_state = rest ? rest : "idle"; }
     else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-hpair"))  { probe_flush_hpair = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-vgroup")) { probe_flush_vgroup = 1; probe_no_sample = 1; }
@@ -2353,6 +2383,7 @@ void gui_shell_cmd(const char *arg) {
     if (e1_btn)       { shot_e1_btn_build(e1_state); gui_frame(); }
     if (e1_outline)   { shot_e1_outline_build(); gui_frame(); }
     if (e1_residue)   { shot_e1_residue_build(e1_res_state); gui_frame(); }
+    if (e3_input)     { shot_e3_input_build(e3_input_state); gui_frame(); }
     if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
     if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }
     if (probe_flush_vgroup) { shot_flush_vgroup_build(); gui_frame(); }

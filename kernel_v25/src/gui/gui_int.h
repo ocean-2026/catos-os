@@ -66,6 +66,7 @@ void      gui_inject_release(void);
 void      gui_inject_hover(int x, int y);
 void      gui_inject_press_block(block_id id);
 void      gui_inject_hover_block(block_id id);
+void      gui_inject_key(int code);
 block_id  gui_hit_test(int x, int y);
 int       gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir);
 #define GUI_IT_NONE   0
@@ -89,6 +90,7 @@ int       gui_menu_is_open(void);
 void      ib_attach(block_id id, void (*on_submit)(block_id id, const char *text));
 void      ib_reset(void);
 int       ib_is_active(void);
+void      ib_get_state(int *len, int *pos);
 int       ib_key(int code, void *ud);
 void      ib_render(block_id id);
 
