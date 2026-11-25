@@ -56,6 +56,7 @@ struct pid_meta {
     int      stat_damage;           /* 落地置脏布局标记数 */
     int      stat_frames;            /* 成功落地提交批次数 */
     int      toast_hints;           /* 系统侧非法声明提示次数 */
+    uint32_t dropped;               /* 事件队列满队累计丢弃条数（#B 可观测） */
 };
 
 /* 当前焦点所属声明式应用；-1 = 焦点归还内核。跨应用焦点链 #33。 */
@@ -250,6 +251,14 @@ static int validate2(const ce_blk_rec2_t *r, int n, const char *pool, int slen,
 
         if (d->cap_ver != CE_BLK_REC2_VER) return E_DECL_BADREC;
         if (!kind_allowed_rec2(b->kind)) return E_DECL_BADREC;
+
+        /* elevation 值域 0..5（阴影/SH_PAD/SH_OX 均为 6 元表）：越界明确
+         * 拒绝，不做静默钳制；整批不落树，旧子树不受影响。 */
+        if (d->elevation > 5) {
+            ser_write("GUI:decl bad elevation el="); decl_dec(d->elevation);
+            ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+            return E_DECL_BADREC;
+        }
 
         /* 越层：只允许 WORK。 */
         if (b->layer != LAYER_WORK) return E_DECL_LAYER;
@@ -480,6 +489,12 @@ static int decl_apply2(struct pid_meta *p, const ce_blk_rec2_t *r, int n,
         blk->pop_max_h    = d->pop_max_h;
         blk->corner_shape = d->corner_shape;
 
+        /* 生产路径建档点：声明了动画（anim_ms>0 且 anim_mask!=0）即按声明值
+         * kick。anim_kick 内部对 ease==0 / reduced_motion 自洽空转；已在途的
+         * 同 id 槽按可中断接管语义续跑（起点=当前帧值）。这里只在建档/整批
+         * 重建时触发一次，帧循环（compose.c）不重复 kick。 */
+        if (blk->anim_ms > 0 && blk->anim_mask != 0) anim_kick(blk);
+
         /* 锚点：同批 local id 解析为全局块 id；既有子树锚点保留全局 id。 */
         uint32_t anchor = d->anchor_id;
         if (anchor != 0) {
@@ -672,6 +687,12 @@ int decl_ce_probe_count(int tid) {
     return p ? p->count : 0;
 }
 
+/* 探针/诊断可读：本 pid 事件队列累计丢弃条数（满队丢最旧策略，见 enqueue2）。 */
+int decl_ce_probe_dropped(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    return p ? (int)p->dropped : -1;
+}
+
 /* ---- 事件轮询 ------------------------------------------------------------ */
 
 /* 旧 type → cap2 ev_kind 映射（未映射的旧类型 ev_kind 留 0）。 */
@@ -686,9 +707,18 @@ static uint8_t ev_kind_from_type(int16_t type) {
     }
 }
 
+/* 满队策略：丢最旧腾位（overwrite head），新事件优先入队；被淘汰的队头
+ * 最旧事件不再回传。丢弃累计到 p->dropped 并串口打点，绝不静默丢失。
+ * （备选“保留丢新”语义等价于计数后直接 return，本包选定丢最旧：新事件
+ * 不被背积压的旧事件堵在门外。） */
 static void enqueue2(struct pid_meta *p, ce_blk_event2_t *e) {
     int next = (p->evt + 1) % DECL_EVQ;
-    if (next == p->evh) return;
+    if (next == p->evh) {
+        p->evh = (p->evh + 1) % DECL_EVQ;   /* 淘汰队头最旧事件 */
+        p->dropped++;
+        ser_write("GUI:ev overflow pid="); decl_dec(p->tid);
+        ser_write(" dropped="); decl_dec(p->dropped); ser_putc('\n');
+    }
     e->seq = ++p->seq;
     p->evq[p->evt] = *e;
     p->evt = next;
@@ -911,6 +941,7 @@ void decl_dump_pid(int tid) {
     ser_write(" events="); decl_dec(p->stat_events);
     ser_write(" damage="); decl_dec(p->stat_damage);
     ser_write(" toast="); decl_dec(p->toast_hints);
+    ser_write(" dropped="); decl_dec(p->dropped);
     ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 

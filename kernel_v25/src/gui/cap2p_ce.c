@@ -8,11 +8,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "gui/block.h"
+#include "gui/gui.h"
 #include "gui_int.h"
 #include "gui/decl.h"
 #include "ce.h"
 #include "serial_log.h"
 #include "kstring.h"
+#include "render.h"
+#include "gfx24.h"
 
 extern int memcmp(const void *a, const void *b, unsigned int n);
 
@@ -29,6 +32,7 @@ extern int      decl_ce_probe_poll2(int tid, ce_blk_event2_t *ev);
 extern void     decl_ce_probe_cleanup(int tid);
 extern block_id decl_ce_probe_local_to_global(int tid, int lid);
 extern int      decl_ce_probe_count(int tid);
+extern int      decl_ce_probe_dropped(int tid);
 
 /* ---- 串口小工具 ---------------------------------------------------------- */
 
@@ -296,6 +300,175 @@ static int case_rec1_compat(void) {
     return 1;
 }
 
+/* ---- elev-reject：elevation 6 / 255 越界整批拒绝，旧子树不受影响 ---------- */
+
+static int case_elev_reject(void) {
+    int tid = 6;
+    decl_ce_probe_cleanup(tid);
+
+    /* 基线：一棵合法子树（2 块，elevation=3）；后续拒绝不得触碰它。 */
+    ce_blk_rec2_t base[2];
+    rec2_init(&base[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&base[1], 2, 1, BLK_RECT, -1);
+    base[1].elevation = 3;
+    int rc = decl_ce_probe_commit(tid, base, 2, "", 0,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        ser_write("GUI:cap2-elev-reject FAIL baseline rc="); p_dec(rc);
+        ser_putc('\n');
+        return 1;
+    }
+    int base_count = decl_ce_probe_count(tid);
+
+    /* 非法①：elevation=6（越出 0..5 值域）。 */
+    ce_blk_rec2_t bad[2];
+    rec2_init(&bad[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&bad[1], 2, 1, BLK_RECT, -1);
+    bad[1].elevation = 6;
+    rc = decl_ce_probe_commit(tid, bad, 2, "", 0,
+                              (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != E_DECL_BADREC) {
+        ser_write("GUI:cap2-elev-reject FAIL el=6 rc="); p_dec(rc); ser_putc('\n');
+        return 1;
+    }
+
+    /* 非法②：elevation=255。 */
+    bad[1].elevation = 255;
+    rc = decl_ce_probe_commit(tid, bad, 2, "", 0,
+                              (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != E_DECL_BADREC) {
+        ser_write("GUI:cap2-elev-reject FAIL el=255 rc="); p_dec(rc); ser_putc('\n');
+        return 1;
+    }
+
+    /* 拒绝后：块数不变、旧块仍在且档位未被改写；未落地即不渲染新块。 */
+    int after = decl_ce_probe_count(tid);
+    block *old = btable_get(decl_ce_probe_local_to_global(tid, 2));
+    int ok = (after == base_count) && old && old->elevation == 3;
+    ser_write("GUI:cap2-elev-reject ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" base="); p_dec(base_count);
+    ser_write(" after="); p_dec(after);
+    ser_write(" old_el="); p_dec(old ? old->elevation : -1);
+    ser_putc('\n');
+    return 1;
+}
+
+/* ---- evq-overflow：满队丢最旧，dropped 计数可读，第 9 条去向可观测 ------ */
+
+static int case_evq_overflow(void) {
+    int tid = 7;
+    decl_ce_probe_cleanup(tid);
+
+    ce_blk_rec2_t recs[2];
+    rec2_init(&recs[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&recs[1], 2, 1, BLK_BUTTON, -1);
+    int rc = decl_ce_probe_commit(tid, recs, 2, "", 0,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        verdict("evq-overflow", 0, "commit failed");
+        return 1;
+    }
+    block *b = btable_get(decl_ce_probe_local_to_global(tid, 2));
+    if (!b) {
+        verdict("evq-overflow", 0, "block missing");
+        return 1;
+    }
+
+    /* 同一 pid 连造 9 条事件、全程不 poll：队列深 8，第 9 条必须触发溢出。 */
+    for (int i = 0; i < 9; i++) decl_post_click(b, i, 0);
+
+    int dropped = decl_ce_probe_dropped(tid);
+
+    /* 回读剩余事件：收到条数 + 丢弃条数必须等于 9，第 9 条去向可观测。 */
+    int received = 0;
+    ce_blk_event2_t ev;
+    while (decl_ce_probe_poll2(tid, &ev) == 1) received++;
+
+    int ok = dropped >= 1 && received + dropped == 9;
+    ser_write("GUI:cap2-evq-overflow ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" dropped="); p_dec(dropped);
+    ser_write(" received="); p_dec(received);
+    ser_write(" total=9");
+    ser_putc('\n');
+    return 1;
+}
+
+/* ---- anim-prod：走 CE rec2 提交建档，生产路径 kick，x 真的在动 ---------- */
+
+static int case_anim_prod(void) {
+    /* 进 GUI 模式：需要真实布局把目标几何算出来（建档 kick 在 apply2 内）。 */
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        con_set_gui_mode(0);
+        verdict("anim-prod", 0, "mode enter failed");
+        return 1;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W;
+    gui_root_block()->h = GFX24_H;
+
+    int tid = 8;
+    decl_ce_probe_cleanup(tid);
+
+    /* ROW：60px 静态 spacer + 40px 动画块，动画块目标 x=60。动画声明完全
+     * 走 CE rec2 提交，探针不直接调 anim_kick。 */
+    ce_blk_rec2_t recs[3];
+    rec2_init(&recs[0], 1, 0, BLK_ROW, -1);
+    rec2_init(&recs[1], 2, 1, BLK_RECT, -1);
+    recs[1].base.req_w = 60; recs[1].base.req_h = 40;
+    rec2_init(&recs[2], 3, 1, BLK_RECT, -1);
+    recs[2].base.req_w = 40; recs[2].base.req_h = 40;
+    recs[2].anim_ms = 192; recs[2].anim_ease = 1; recs[2].anim_mask = 1;
+
+    int rc = decl_ce_probe_commit(tid, recs, 3, "", 0,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        ser_write("GUI:cap2-anim-prod FAIL commit rc="); p_dec(rc); ser_putc('\n');
+        decl_ce_probe_cleanup(tid);
+        gui_end(); con_set_gui_mode(0); con_force_text(); con_clear();
+        return 1;
+    }
+    block *b = btable_get(decl_ce_probe_local_to_global(tid, 3));
+    if (!b) {
+        verdict("anim-prod", 0, "anim block missing");
+        decl_ce_probe_cleanup(tid);
+        gui_end(); con_set_gui_mode(0); con_force_text(); con_clear();
+        return 1;
+    }
+
+    layout_run();
+    int target = b->x;
+
+    int frames[12];
+    int distinct = 1;
+    for (int f = 0; f < 12; f++) {
+        anim_tick(16);
+        anim_apply(b);
+        frames[f] = b->x;
+        int seen = 0;
+        for (int k = 0; k < f; k++) if (frames[k] == b->x) seen = 1;
+        if (!seen) distinct++;
+    }
+    int ok = distinct >= 3 && b->x == target;
+    ser_write("GUI:cap2-anim-prod ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" target="); p_dec(target);
+    ser_write(" distinct="); p_dec(distinct);
+    ser_write(" last="); p_dec(b->x);
+    ser_write(" frames=");
+    for (int f = 0; f < 12; f++) { if (f) ser_putc(','); p_dec(frames[f]); }
+    ser_putc('\n');
+
+    decl_ce_probe_cleanup(tid);
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+    return 1;
+}
+
 int cap2_probe_ce(const char *arg) {
     if (!arg) return 0;
     if (streq(arg, "ce-caps"))          return case_caps();
@@ -303,5 +476,8 @@ int cap2_probe_ce(const char *arg) {
     if (streq(arg, "ce-input"))         return case_input();
     if (streq(arg, "ce-popover-anchor")) return case_popover();
     if (streq(arg, "ce-rec1-compat"))   return case_rec1_compat();
+    if (streq(arg, "elev-reject"))       return case_elev_reject();
+    if (streq(arg, "evq-overflow"))     return case_evq_overflow();
+    if (streq(arg, "anim-prod"))        return case_anim_prod();
     return 0;
 }
