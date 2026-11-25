@@ -33,7 +33,7 @@
 ## 2. 三门禁结果（当前 HEAD `605ea25`，test 镜像实测）
 
 测试镜像：`kernel_v25/catos-v2.80-test.iso`（`GUI_AUTOSTART=0`，停 prompt），
-sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
+sha256 `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add`。
 2 核 TCG，严格串行一次一个 qemu。
 
 | 门禁 | 结果 | 耗时 | stdout 证据（artifacts/gui-blocks/） |
@@ -47,6 +47,9 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 - 历史基线（旧提交树，供对照）：vprobe `6df891d` 10/10（155.0s）、`d797fee` 10/10（157.1s）、
   `c15bccf` 10/10（156.9s）；E3 2/2 约 80.1–80.3s；F11 9/9 约 161.8–161.9s。
 - lint：本轮未重跑静态分析器；历史基线为 0 violation（advisory/review 不计致命），沿用旧记录，不据此判本轮。
+
+**0850 复跑（HTTPS 状态码透传新构建，test 镜像 `6ce35635…021add`）**：vprobe **10/10** 154.5s `gate-vprobe-full-0850.log`；E3 **2/2** 80.2s `gate-e3-full-0850.log`；
+F11 **9/9** 161.8s `gate-f11-full-0850.log`；`check_link_layout.py --strict` **RC=0**。本次源码 delta 仅 TLS 状态码透传（§4.2），GUI/console/ring3 路径未改。
 
 ## 3. 串口探针（合并树实测 PASS）
 
@@ -79,9 +82,9 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 | `gui term` | **PASS**（anomalies 0） | `count=2 cwd0=/ cwd1=/work result=1`，帧 1613 µs |
 | `gui style` | **PASS**（anomalies 0） | `mode=app residue=1 taskbar=1 result=1`，帧 1406 µs |
 
-### 3.2 像素组（v2.80 test 镜像复跑，4 组 × 3/3 = 12/12 PASS）
-日志 `artifacts/gui-blocks/`：`gate-pixel-style-app-0625.log`、`gate-pixel-style-calm-0625.log`、
-`gate-pixel-free-0625.log`、`gate-pixel-interact-0625.log`。
+### 3.2 像素组（0850 新构建复跑，4 组 × 3/3 = 12/12 PASS）
+日志 `artifacts/gui-blocks/`：`gate-pixel-style-app-0850.log`、`gate-pixel-style-calm-0850.log`、
+`gate-pixel-free-0850.log`、`gate-pixel-interact-0850.log`（各 `RESULT=PASS`）。
 
 | 组别 | 入口命令 | 判定 | 要点 |
 |---|---|---|---|
@@ -93,6 +96,11 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 - 桌面默认组（M0 三条）与 browser 截图组：browser 组见 §5.2（example/sample 像素 PASS）；M0 默认组本轮未单独跑，`PENDING`。
 - v2 基线参考：idem 哈希 `0x88751F07 match=1`；drag 帧 1.54 ms ≤ 4 ms；damage ≈ 2.0% ≤ 25%。
 
+### 3.3 真鼠标 mouse_smoke（0850 新构建，7/7 PASS）
+日志 `artifacts/gui-blocks/gate-mouse-smoke-0850.log`；截图目录 `mouse-smoke-0850/`。
+menu_open / menu_row_click / block1_titlebar（三点标题栏色 `(72,58,58)`）/ block2_alive（块存活）/ drag / resize / second_run_ok 七条全 PASS。
+resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`。
+
 ## 4. TLS 野站
 
 ### 4.1 能力（合并入 `c15bccf`）
@@ -100,18 +108,21 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
   ECDHE secp256r1（vendored micro-ecc），ECDSA P-256 叶公点 + SHA-256 签名校验；sig_algs 20 项；ChaCha20 写 IV。
 - 串口打点：握手记录 `TLS:rec msgs=<n> port=<p>`；curl HTTPS 成功 `TLS:wild status=<st> bytes=<n>`。
 
-### 4.2 真站结果（v2.80 test 镜像 `8533f41e…31e88`，`tests/tls_wild.py` 复跑）
-日志 `artifacts/gui-blocks/gate-tls-wild-0625.log`；产物 `artifacts/d2-tls/wild_result.json`、`wild_serial.log`、`wild_<host>.ppm`。
+### 4.2 真站结果（0850 新构建 test 镜像 `6ce35635…021add`，`tests/tls_wild.py` 复跑）
+日志 `artifacts/gui-blocks/gate-tls-wild-0845.log`；产物 `artifacts/d2-tls/wild_result.json`、`wild_serial.log`、`wild_<host>.ppm`。
 
-| 站点 | 基线（用户线） | 本轮字节 | 串口打点 | 状态码 | 判定（判据：status=200 + 字节数） |
+| 站点 | 基线（用户线） | 本轮字节 | 串口打点 | 串口状态码 | JSON 逐站判定 |
 |---|---|---|---|---|---|
-| `https://example.com` | 200 / 577 B | **577 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=0`（非 200） | **FAIL**（状态码未达 200；body 已取回） |
-| `https://www.baidu.com` | 200 / 227 B | **227 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=0`（非 200） | **FAIL**（状态码未达 200；body 已取回） |
+| `https://example.com` | 200 / 577 B | **577 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=200 bytes=577` | **PASS**（必需门，200 + 非空 body） |
+| `https://www.baidu.com` | 200 / 227 B | **227 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=200 bytes=227` | **FAIL**（次级站，见下） |
 | 本地强制握手 `0xCCA8` | PASS（用户线） | 本轮未跑 | — | — | `PENDING` |
 
-- **定性（未改源码）**：TLS 握手与 body 抓取成功（字节数与基线一致、`TLS:rec msgs=` 在场），但 HTTPS 路径未把 HTTP 状态码透传到 `net_http_last_status()`。
-  源码：`tls_https_get()`（`tls.c:878`）内部已解析 `code` 却未回传；`http_fetch_once()` 的 https 分支（`netstack.c:1209`）直接 `return tls_https_get(...)`，未接 `status_out`，故 `s_http_status` 保持 0，串口 `TLS:wild status=0`。
-  HTTP 明文路径状态码解析正常（见 §5.2 example `status=200`），缺口仅限 HTTPS 回传。与本轮 ring3/GDT/paging 修复无关，列为后续修。
+- **透传修复（本轮源码 delta）**：`tls_https_get()` 新增出参 `int *status_out`，解析到 HTTP `code` 后回传（`tls.c`）；
+  `http_fetch_once()` https 分支把 `status_out` 接入（`netstack.c:1210`），`s_http_status` / `net_http_last_status()` 遂为 200。
+  头文件 `include/tls.h` 签名同步。串口两站均 `TLS:wild status=200`；整体 `wild_result.json` verdict=**PASS**（`tls_wild_status_200=true`、`rec_msgs=true`）。
+- **baidu 逐站 FAIL 如实记录**：`wild_result.json` 中 baidu `status=null`、verdict=FAIL。串口已证实 `net_http_last_status=200`、body 227 B 取回；
+  缺口在**探针屏幕抓取**而非 TLS 通路：baidu 返回的是一段 `https→http` 跳转 HTML，body 占满文本屏把顶栏 `(HTTP 200)` 状态行挤出 80×25 视口，
+  `parse_screen` 正则 `HTTP\s+(\d+)` 在残留 body 文本里匹配不到状态码 → 记 null。非证书链 / SNI / 套件 / 非 200 问题；次级站，不阻塞 example 必需门。
 - 回归探针：`tests/tls_wild.py`（必需门 example.com 200 + 非空 body；baidu 次级记录）；判据未放宽。
 - 本地强制套件探针 `tests/tls_probe.py`（`0xC027`）语义未改。
 
@@ -188,17 +199,21 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 
 | 变体 | 编译开关 | 用途 | 文件名 | sha256 | 字节数 |
 |---|---|---|---|---|---|
-| 调试/门禁版 | `GUI_AUTOSTART=0`（默认），开机停 prompt | vprobe/E3/F11 与探针目标 | `catos-v2.80-test.iso` | `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88` | 12,079,104 |
-| 桌面自启动版 | `GUI_AUTOSTART=1`，盘内无 `/etc/autostart` 时内置默认进块桌面 | 交付盘（配对种子盘） | `catos-v2.80.iso` | `c6c2d19f0f5258695668956cf2be1b748488615847b97b9efba991ecc126db1f` | 12,079,104 |
+| 调试/门禁版 | `GUI_AUTOSTART=0`（默认），开机停 prompt | vprobe/E3/F11 与探针目标 | `catos-v2.80-test.iso` | `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add` | 12,079,104 |
+| 桌面自启动版 | `GUI_AUTOSTART=1`，盘内无 `/etc/autostart` 时内置默认进块桌面 | 交付盘（配对种子盘） | `catos-v2.80.iso` | `37c3f11ce9b0cabcfd3f67525c29ab6f150bff32b4fec9fbb27a16f5b3847009` | 12,079,104 |
 
+- **源码基线对照（历史留档）**：上一批双 ISO（test `8533f41e…31e88` / release `c6c2d19f…26db1f`）对应内核源码 == `605ea25` 的 `kernel_v25/`；
+  其后 `444b413`、`504f3ba` 仅改 REPORT 文档，源码未动。本轮 HTTPS 状态码透传在 `605ea25` 之后新增一处源码 delta（§4.2），双 ISO 已据此重出，sha 见上表。
 - 构建：`cd kernel_v25 && sh build.sh iso`；自启动变体 `GUI_AUTOSTART=1 sh build.sh iso`。
 - 自启动优先级（`shell.c:7784` 起）：盘内 `/etc/autostart` 存在（非空）→ 执行它；否则编译开关
   `GUI_AUTOSTART=1` → 进块桌面；否则停 shell。门禁/探针镜像必须停 prompt，故固定 `GUI_AUTOSTART=0`。
 - release 变体未跑三门禁（自启动会直接进桌面，会冻掉探针）；与 test 变体仅 shell 自启动分支不同，
   paging/GDT 修复与门禁版同盘同源。
-- **旧坏盘处置**：06:11 修因前的两张带 ring3 三重故障的老构建已改名加 `-stale` 后缀，原名不再保留：
-  - `catos-v2.80-stale.iso`（sha `087caa0ff61d1d11cb12675b0c0e3d8e33c76cbf31e078e54b9de3213936093a`）
-  - `catos-v2.80-test-stale.iso`（sha `c3447bfb34977b59f902b31a70906a81d5d02b7386b230a194371e3756f957ee`）
+- **旧盘处置**：
+  - `-stale`：06:11 修因前两张带 ring3 三重故障的老构建（`catos-v2.80-stale.iso` `087caa0f…93a` /
+    `catos-v2.80-test-stale.iso` `c3447bfb…7ee`）。
+  - `-stale2`：上一批 `605ea25` 源码基线的交付盘（`catos-v2.80-stale2.iso` `c6c2d19f…26db1f` /
+    `catos-v2.80-test-stale2.iso` `8533f41e…31e88`），被本轮新构建替换后改名，原名不再保留。
   - artifacts 归档目录下同名旧盘已被新 ISO 覆盖，无残留同名旧盘。
 - 交付盘现场 `--seed-autostart` 生成；`kernel_v25/catos_disk.img` 已 checkout 回 HEAD，sha256
   `8ac9d54b6b2f482a7b8753177d8714567c0af2a2e4208bb6d03e4f68abfa08a1`（67,108,864 B），未改动。
@@ -210,34 +225,33 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 
 ## 8. 未决 / 已知限制 / 实测清单
 
-> 本轮（2026-11-25 08:05–08:22）全部跑在 `catos-v2.80-test.iso`（`8533f41e…31e88`），串行、独立 /tmp 与端口 448x/449x；日志均在 `artifacts/gui-blocks/`。
+> 0850 复跑（2026-11-25 08:27–08:44）跑在新构建 test 镜像 `catos-v2.80-test.iso`（`6ce35635…021add`），
+> 串行、独立 /tmp 与端口 448x/449x；日志均在 `artifacts/gui-blocks/`。0625 一轮跑在旧基线 `8533f41e…31e88`，数字见各节留档。
 
-1. desk 线合并：`BLK_BUTTON/BLK_INPUT/BLK_TERM`、Settings `gui style` corner 圆角、`gui term` 走
-   `shell_exec`；Settings `-6` 菜单动作与 v2 探针分发并集；`con_gui_owned` 闸门与 hotfix `gui_begin`
-   收摊顺序保持不丢。**仍 PENDING（本轮未涉及）。**
+1. **desk 线 — 已并入 `7aeaa2c`**：`BLK_BUTTON/BLK_INPUT/BLK_TERM`、Settings、`gui style`/`gui term` 探针随桌面线合并；
+   `gui term`/`gui style` 已在 §3.1 探针 10/10 内 PASS。本条不再列为 PENDING。
 2. **GUI 探针全量 — PASS 10/10**：free/interact/cvdirty/decl/sak/cvchan/cv/br/term/style 逐条 `RESULT=PASS`、`anomalies=0`；
-   日志 `gate-gui-probes-0625.log`（详见 §3.1）。
+   日志 `gate-gui-probes-0625.log`（§3.1）。0850 新构建源码 delta 仅 TLS 状态码透传，GUI/console 路径未改，该结论沿用。
 3. **像素组全量 — PASS 12/12**：style-app / style-calm / free / interact 各 3/3；日志
-   `gate-pixel-{style-app,style-calm,free,interact}-0625.log`（详见 §3.2）。桌面默认 M0 组本轮未单独跑，仍 `PENDING`。
-4. **console_clean — PASS**：`diff_px=2338/256000 ratio=0.0091`（0.91%，tol=6）；日志 `gate-console-clean-0625.log`。
-5. **mouse_smoke（真鼠标）— PASS 7/7**：menu_open / menu_row_click / block1_titlebar（三点标题栏色）/
-   block2_alive（块存活）/ drag / resize / second_run_ok；日志 `gate-mouse-smoke-0625.log`。
-6. **TLS 野站回归 — FAIL（状态码判据未达）**：example.com 577 B、baidu 227 B 字节数与基线一致、`TLS:rec msgs=` 在场，
-   但 `TLS:wild status=0`（未到 200）；定性为 HTTPS 状态码未透传（§4.2），未改源码。`0xCCA8` 本地强制握手本轮未跑，`PENDING`。
+   `gate-pixel-{style-app,style-calm,free,interact}-0850.log`（§3.2）。桌面默认 M0 组未单独跑，仍 `PENDING`。
+4. **console_clean — PASS**：`diff_px=2338/256000 ratio=0.0091`（0.91%，tol=6）；日志 `gate-console-clean-0850.log`。
+5. **mouse_smoke（真鼠标）— PASS 7/7**：menu_open / menu_row_click / block1_titlebar / block2_alive / drag / resize / second_run_ok；
+   resize 三采样 `bottom/right=(52,42,42)`、`desk=(38,30,30)`；日志 `gate-mouse-smoke-0850.log`（§3.3）。
+6. **TLS 野站回归 — example PASS，baidu 次级 FAIL**：example.com **200 / 577 B** PASS；baidu.com 串口 **200 / 227 B**、body 取回，
+   但探针屏幕抓取把状态行挤出视口记 `status=null` → JSON 逐站 FAIL（§4.2，非 TLS 通路/证书/套件问题）。`0xCCA8` 本地强制握手本轮未跑，`PENDING`。
 7. **浏览器 — PASS（HTTP/离线/解码），HTTPS `PENDING`**：`http://example.com` 577 B status=200 像素 PASS；
    `sample://local` 300 B PASS；chunked 28,739 B 无残留 3/3；BMP 800×600 2/2（§5.2/§5.3）。`https://example.com/` 无 marker，SKIP/`PENDING`。
-8. calm 档：style-calm 像素组 3/3 PASS（§3.2）；`/etc/style` 重启读回与 `GUI:style mode=calm` 串口行本轮未单独留证，`PENDING`。
+8. calm 档：style-calm 像素组 3/3 PASS（§3.2）；`/etc/style` 重启读回与 `GUI:style mode=calm` 串口行未单独留证，`PENDING`。
 9. stb PNG/JPEG：待 32 位软浮点助手或定点替代；74/75 当前仅 BMP/PPM。
 10. **已知限制（写实）**：
     - PNG/JPEG 软浮点阻塞；
     - SMP AP / 多核调度 deferred；
     - AHCI IDENTIFY ABRT 未通；
     - calm 示例块几何左偏约 40 px；
-    - CBC `0xC027` Finished 首条 decode_error（不影响 AEAD 野站通路）；
-    - HTTPS 状态码未透传到 `net_http_last_status`（§4.2，待修）。
+    - CBC `0xC027` Finished 首条 decode_error（不影响 AEAD 野站通路）。
 11. **未做**：`D:\CatOs` 本地同步：主机下线，未做。
 
-> 仍保持 `PENDING` 的项：desk 线合并、桌面默认 M0 像素组、`0xCCA8` 本地握手、浏览器 HTTPS 站、
+> 仍保持 `PENDING` 的项：桌面默认 M0 像素组、`0xCCA8` 本地强制握手、浏览器 HTTPS 站、
 > `/etc/style` 重启读回、stb PNG/JPEG。本次合并 main 不视为这些项已复验通过。
 
 ## 9. 环境与口径备注

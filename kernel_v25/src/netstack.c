@@ -1207,7 +1207,7 @@ static int http_fetch_once(const char *url, uint8_t *out, int max,
     /* D2 HTTPS: hand the whole exchange to the TLS client.  The plaintext
      * HTTP receive/body-extraction loop below is untouched. */
     if (is_https) {
-        return tls_https_get(peer, port, host, path, out, max);
+        return tls_https_get(peer, port, host, path, out, max, status_out);
     }
 
     tcp.active = 0;

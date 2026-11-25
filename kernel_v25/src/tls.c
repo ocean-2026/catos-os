@@ -583,8 +583,9 @@ static int hs_read(uint8_t *msg_type, const uint8_t **body, int *blen) {
 
 int tls_https_get(const uint8_t peer[4], uint16_t port,
                   const char *host, const char *path,
-                  uint8_t *out, int max) {
+                  uint8_t *out, int max, int *status_out) {
     if (!peer || !host || !path || !out || max <= 0) return -1;
+    if (status_out) *status_out = 0;
 
     uECC_set_rng(uecc_rng);
     tlen = 0; cseq = 0; sseq = 0; gcm_on = 0;
@@ -878,6 +879,7 @@ int tls_https_get(const uint8_t peer[4], uint16_t port,
     int code = 0;
     if (resp_len >= 12 && resp[0] == 'H' && resp[4] == '/')
         code = (resp[9] - '0') * 100 + (resp[10] - '0') * 10 + (resp[11] - '0');
+    if (status_out) *status_out = code;
     if (code < 200 || code >= 400) return -4;
 
     int body_start = -1;

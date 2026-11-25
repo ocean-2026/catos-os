@@ -26,6 +26,6 @@
  */
 int tls_https_get(const uint8_t peer[4], uint16_t port,
                   const char *host, const char *path,
-                  uint8_t *out, int max);
+                  uint8_t *out, int max, int *status_out);
 
 #endif /* TLS_H */
