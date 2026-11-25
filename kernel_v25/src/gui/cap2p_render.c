@@ -627,6 +627,146 @@ static void probe_shape_clamp(void) {
     ser_write("\n");
 }
 
+/* ---- border-sides：按位声明的边才描边，未声明边保留块体底色 ---------------
+ * sides 位：bit0 L / bit1 R / bit2 T / bit3 B。同一块跑 1/2/4/8/3/15 六种，
+ * 四边中点各取 1 点：声明边 == 令牌 border；未声明边 == 块体 panel。 */
+
+static void probe_border_sides(void) {
+    if (!probe_enter()) { ser_write("GUI:cap2-border-sides ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    const struct style *tok = gui_active_style();
+    uint32_t border = tok->border, panel = tok->panel;
+    static const uint8_t SIDES[6] = { 1, 2, 4, 8, 3, 15 };
+    block *blks[6];
+    block_id fr = free_root();
+    for (int i = 0; i < 6; i++) {
+        blk_spec s = mk_spec(LAYER_CONTENT, 72, 52);
+        s.px_x = 16 + i * 84; s.px_y = 50;
+        s.border_w = 1; s.border_sides = SIDES[i];
+        block_id id = b_rect(fr, &s);
+        blks[i] = btable_get(id);
+    }
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+
+    int ok = 1;
+    for (int i = 0; i < 6; i++) {
+        block *b = blks[i];
+        uint32_t px[4];
+        px[0] = gfx24_getpx(b->x,             b->y + b->h / 2);  /* L */
+        px[1] = gfx24_getpx(b->x + b->w - 1,  b->y + b->h / 2);  /* R */
+        px[2] = gfx24_getpx(b->x + b->w / 2,  b->y);             /* T */
+        px[3] = gfx24_getpx(b->x + b->w / 2,  b->y + b->h - 1);  /* B */
+        int want[4] = { SIDES[i] & 1, SIDES[i] & 2,
+                        SIDES[i] & 4, SIDES[i] & 8 };
+        for (int k = 0; k < 4; k++) {
+            if (want[k]) { if (px[k] != border) ok = 0; }
+            else         { if (px[k] != panel)  ok = 0; }
+        }
+        ser_write(" sides="); pd(SIDES[i]);
+        ser_write(" L="); pd(px[0]);
+        ser_write(" R="); pd(px[1]);
+        ser_write(" T="); pd(px[2]);
+        ser_write(" B="); pd(px[3]);
+    }
+    probe_leave();
+    ser_write(ok ? "GUI:cap2-border-sides PASS" : "GUI:cap2-border-sides FAIL");
+    ser_write("\n");
+}
+
+/* ---- border-corner：全边 + radius=16，圆角外角四点不得出现边色 ---------- */
+
+static void probe_border_corner(void) {
+    if (!probe_enter()) { ser_write("GUI:cap2-border-corner ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    const struct style *tok = gui_active_style();
+    uint32_t border = tok->border;
+    block_id fr = free_root();
+    blk_spec s = mk_spec(LAYER_CONTENT, 120, 80);
+    s.px_x = 40; s.px_y = 40;
+    s.border_w = 1; s.border_sides = 15;
+    s.corner_tl = s.corner_tr = s.corner_br = s.corner_bl = 16;
+    block_id id = b_rect(fr, &s);
+    block *b = btable_get(id);
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+
+    uint32_t c[4];
+    c[0] = gfx24_getpx(b->x,             b->y);              /* TL */
+    c[1] = gfx24_getpx(b->x + b->w - 1, b->y);              /* TR */
+    c[2] = gfx24_getpx(b->x,             b->y + b->h - 1);   /* BL */
+    c[3] = gfx24_getpx(b->x + b->w - 1, b->y + b->h - 1);   /* BR */
+    int ok = 1;
+    for (int i = 0; i < 4; i++) if (c[i] == border) ok = 0;
+    probe_leave();
+    ser_write(ok ? "GUI:cap2-border-corner PASS" : "GUI:cap2-border-corner FAIL");
+    ser_write(" tl="); pd(c[0]);
+    ser_write(" tr="); pd(c[1]);
+    ser_write(" bl="); pd(c[2]);
+    ser_write(" br="); pd(c[3]);
+    ser_write("\n");
+}
+
+/* ---- hc-override：父 hc_force=1 子树继承 HC（直角 / border_w_hc / 体素零漂移） */
+
+static void hc_override_tree(int force, uint32_t *corner, uint32_t *edge,
+                             uint32_t *edge2, uint32_t *body) {
+    block_id fr = free_root();
+    blk_spec p = mk_spec(LAYER_CONTENT, 200, 140);
+    p.px_x = 30; p.px_y = 30;
+    p.border_w = 1; p.hc_force = (uint8_t)force;
+    block_id pid = b_free(fr, &p);
+    (void)pid;
+    blk_spec c = mk_spec(LAYER_CONTENT, 120, 80);
+    c.px_x = 16; c.px_y = 16;
+    c.border_w = 1;
+    c.corner_tl = c.corner_tr = c.corner_br = c.corner_bl = 16;
+    block_id cid = b_rect(pid, &c);
+    block *bc = btable_get(cid);
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+    *corner = gfx24_getpx(bc->x, bc->y);
+    *edge   = gfx24_getpx(bc->x + bc->w / 2, bc->y);
+    *edge2  = gfx24_getpx(bc->x + bc->w / 2, bc->y + 1);
+    *body   = gfx24_getpx(bc->x + bc->w / 2, bc->y + bc->h / 2);
+}
+
+static void probe_hc_override(void) {
+    uint32_t a_corner, a_edge, a_edge2, a_body;
+    uint32_t b_corner, b_edge, b_edge2, b_body;
+
+    if (!probe_enter()) { ser_write("GUI:cap2-hc-override ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    hc_override_tree(0, &a_corner, &a_edge, &a_edge2, &a_body);
+    probe_leave();
+
+    if (!probe_enter()) { ser_write("GUI:cap2-hc-override ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    const struct style *tok = gui_active_style();
+    uint32_t border = tok->border;
+    hc_override_tree(1, &b_corner, &b_edge, &b_edge2, &b_body);
+    probe_leave();
+
+    /* 基线：圆角切角，角点不得是边色。HC 继承：直角（角点被 2px 边框包住）、
+     * 边框两行均为边色；非边框体素与基线零漂移。 */
+    int base_cut = a_corner != border;
+    int corner_ok = b_corner == border;
+    int edge_ok = b_edge == border && b_edge2 == border;
+    int drift_ok = b_body == a_body;
+    int ok = base_cut && corner_ok && edge_ok && drift_ok;
+    ser_write(ok ? "GUI:cap2-hc-override PASS" : "GUI:cap2-hc-override FAIL");
+    ser_write(" base_corner="); pd(a_corner);
+    ser_write(" hc_corner="); pd(b_corner);
+    ser_write(" hc_edge="); pd(b_edge);
+    ser_write(" hc_edge2="); pd(b_edge2);
+    ser_write(" base_body="); pd(a_body);
+    ser_write(" hc_body="); pd(b_body);
+    ser_write("\n");
+}
+
 int cap2_probe_render(const char *arg) {
     if (!arg) return 0;
     if (eq_str(arg, "alpha64"))       { probe_alpha(64);  return 1; }
@@ -647,5 +787,8 @@ int cap2_probe_render(const char *arg) {
     if (eq_str(arg, "shape-seam"))     { probe_shape_seam();  return 1; }
     if (eq_str(arg, "shape-lazy"))     { probe_shape_lazy();  return 1; }
     if (eq_str(arg, "shape-clamp"))    { probe_shape_clamp(); return 1; }
+    if (eq_str(arg, "border-sides"))   { probe_border_sides(); return 1; }
+    if (eq_str(arg, "border-corner"))  { probe_border_corner(); return 1; }
+    if (eq_str(arg, "hc-override"))    { probe_hc_override();  return 1; }
     return 0;
 }
