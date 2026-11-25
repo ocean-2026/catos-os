@@ -79,6 +79,17 @@ static void dmg_add(int x, int y, int w, int h) {
     dmg_full = 1;
 }
 
+/* 子树绝对坐标包围盒（含 OVF_VISIBLE 逃逸子块；阴影外扩由 dmg_add_pad 加）。 */
+static void subtree_bbox(block *b, int *x0, int *y0, int *x1, int *y1) {
+    if (!b) return;
+    if (b->x < *x0) *x0 = b->x;
+    if (b->y < *y0) *y0 = b->y;
+    if (b->x + b->w > *x1) *x1 = b->x + b->w;
+    if (b->y + b->h > *y1) *y1 = b->y + b->h;
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        subtree_bbox(c, x0, y0, x1, y1);
+}
+
 /* 带阴影外扩地纳入损伤，并裁到屏内。 */
 static void dmg_add_pad(int x, int y, int w, int h) {
     int x0 = x - HALO_PAD_L, y0 = y - HALO_PAD_T;
@@ -289,18 +300,21 @@ void gui_frame(void) {
     dmg_reset();
     paint_begin_frame();
 
-    /* 第一遍：收集脏块矩形，合并成 damage 链表。
-     * 窗口移动损伤 = 旧矩形 ∪ 新矩形（均含阴影外扩边）；旧位置的背景补齐
-     * 只发生在这条并集条带内，不整节点重填。OVF_VISIBLE 子块脏区并入父块，
-     * 移出父框后旧位置由父底色补齐防残影。 */
+    /* 第一遍：收集脏块子树包围盒，合并成 damage 链表。
+     * 移动损伤 = 旧子树包围盒 ∪ 新子树包围盒（遍历子树取绝对坐标并集，
+     * 含逃逸子块与阴影外扩边）；子树随父刚性平移，旧包围盒由新包围盒按
+     * 父块位移回推。OVF_VISIBLE 子块脏区并入父块，旧位置由父底色补齐。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
         if (!b->snap) continue;
+        int x0 = GFX24_W, y0 = GFX24_H, x1 = 0, y1 = 0;
+        subtree_bbox(b, &x0, &y0, &x1, &y1);
         if (b->has_old) {
-            dmg_add_pad(b->old_x, b->old_y, b->old_w, b->old_h);
+            int dx = b->old_x - b->x, dy = b->old_y - b->y;
+            dmg_add_pad(x0 + dx, y0 + dy, x1 - x0, y1 - y0);
             b->has_old = 0;
         }
-        dmg_add_pad(b->x, b->y, b->w, b->h);
+        dmg_add_pad(x0, y0, x1 - x0, y1 - y0);
         if (b->overflow == OVF_VISIBLE && b->parent)
             dmg_add_pad(b->parent->x, b->parent->y,
                         b->parent->w, b->parent->h);
@@ -316,6 +330,9 @@ void gui_frame(void) {
         int rx1 = rx0 + dmg[r].w, ry1 = ry0 + dmg[r].h;
         paint_begin_frame();
         paint_clip_push_rect(rx0, ry0, dmg[r].w, dmg[r].h);
+        /* 覆盖兜底：重合成前先以 bg 角色色填实整条损伤矩形；即使某块
+         * 生命周期出错、某片无人画，屏上也只剩纯底色，不烙上一帧残影。 */
+        gui_fill_rect(rx0, ry0, dmg[r].w, dmg[r].h, gui_active_style()->bg);
         for (int i = 0; i < paint_count; i++) {
             block *b = paint_list[i];
             if (b->x >= rx1 || b->x + b->w <= rx0 ||
