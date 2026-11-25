@@ -269,6 +269,7 @@ static void shot_free_float_build(void) {
 /* 探针场景标志（仅 shot-* 开屏档使用，不进产品默认桌面）。 */
 static int probe_no_sample;     /* 不建示例面板，避免压住待测窗口顶角 */
 static int probe_menu_raise;    /* 菜单上移，避开任务栏裁切 BL/BR */
+static int probe_card_only;     /* 控件卡参照帧：只建卡片，不放按钮/输入栏 */
 
 /* 探针控件卡：一张卡片内放一个按钮与一个输入框，供 r12 / r8 档角部采样。
  * 自由层绝对定位，对齐 shot_free_interact_build 范式，不依赖 column 布局。 */
@@ -281,15 +282,17 @@ static void shot_controls_build(void) {
     block *cp = btable_get(C);
     cp->x = 140; cp->y = 120; cp->moved = 1;
 
-    blk_spec btn = spec_panel(LAYER_WORK, 120, 24, 1);
-    block_id B = b_button(F, &btn, "Button");
-    block *bp = btable_get(B);
-    bp->x = 156; bp->y = 140; bp->moved = 1;
+    if (!probe_card_only) {
+        blk_spec btn = spec_panel(LAYER_WORK, 120, 24, 1);
+        block_id B = b_button(F, &btn, "Button");
+        block *bp = btable_get(B);
+        bp->x = 156; bp->y = 140; bp->moved = 1;
 
-    blk_spec inp = spec_panel(LAYER_WORK, 180, 24, 1);
-    block_id I = b_input(F, &inp, 0);
-    block *ip = btable_get(I);
-    ip->x = 156; ip->y = 184; ip->moved = 1;
+        blk_spec inp = spec_panel(LAYER_WORK, 180, 24, 1);
+        block_id I = b_input(F, &inp, 0);
+        block *ip = btable_get(I);
+        ip->x = 156; ip->y = 184; ip->moved = 1;
+    }
     layout_run();
 }
 
@@ -567,6 +570,7 @@ void gui_menu_open(void) {
     mr->x = 12;
     mr->y = probe_menu_raise ? 80 : 396;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
+    mr->st.corner_radius = 16;   /* §16.1 菜单外框 r16 */
 
     block_id menu_ids[32];
     int n = menu_collect(menu_ids, 32);
@@ -1855,8 +1859,9 @@ void gui_shell_cmd(const char *arg) {
     const char *rest = 0;
     char word[24];
     split_word(arg, word, sizeof(word), &rest);
-    if (!strcmp_probe(word, "shot-menu"))  { shot_menu = 1; probe_menu_raise = 1; }
+    if (!strcmp_probe(word, "shot-menu"))  { shot_menu = 1; probe_menu_raise = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls")) { shot_controls = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-controls-card")) { shot_controls = 1; probe_no_sample = 1; probe_card_only = 1; }
     else if (!strcmp_probe(word, "shot-empty")) { probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-light")) shot_tok = TOK_LIGHT;
     else if (!strcmp_probe(word, "shot-hc"))    shot_tok = TOK_HIGH_CONTRAST;

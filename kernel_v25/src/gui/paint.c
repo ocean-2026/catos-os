@@ -294,12 +294,32 @@ static int calm_shape_eligible(block *b) {
     return 1;
 }
 
-static int calm_r_index(int w, int h) {
-    int s = w < h ? w : h;
-    if (s >= 128) return 3;   /* 24：应用图标 / 大型欢迎卡 */
-    if (s >= 64)  return 2;   /* 16：面板 / 弹出层外框 */
-    if (s >= 32)  return 1;   /* 12：按钮 / 图标卡 */
-    return 0;                 /* 8：小控件 */
+/* §16.1 固定半径档：按钮 r12（24 高即胶囊 h/2）、输入栏 r8；外框经
+ * st.corner_radius 显式置 16；其余按短边走阶梯。半径再取 min(r, w/2, h/2)。 */
+static int base_radius_px(block *b) {
+    if (b->kind == BLK_BUTTON) return 12;
+    if (b->kind == BLK_INPUT)  return 8;
+    if (b->st.corner_radius > 0) return b->st.corner_radius;
+    int s = b->w < b->h ? b->w : b->h;
+    if (s >= 128) return 24;
+    if (s >= 64)  return 16;
+    if (s >= 32)  return 12;
+    return 8;
+}
+
+static int radius_ri(int r) {
+    if (r >= 24) return 3;
+    if (r >= 16) return 2;
+    if (r >= 12) return 1;
+    return 0;
+}
+
+static int base_rad_ri(block *b) {
+    int r = base_radius_px(b);
+    int half = b->h / 2;
+    if (r > half) r = half;
+    if (b->w / 2 < r) r = b->w / 2;
+    return radius_ri(r);
 }
 
 /* 取某角掩码在 (col,row) 处的覆盖率；ri=-1（方角）返回 255。 */
@@ -330,6 +350,10 @@ static void fill_round(block *b, int ri_tl, int ri_tr, int ri_bl, int ri_br,
     if (rtr * 2 > w) rtr = w / 2;
     if (rbl * 2 > w) rbl = w / 2;
     if (rbr * 2 > w) rbr = w / 2;
+    if (rtl * 2 > h) rtl = h / 2;
+    if (rtr * 2 > h) rtr = h / 2;
+    if (rbl * 2 > h) rbl = h / 2;
+    if (rbr * 2 > h) rbr = h / 2;
 
     for (int row = 0; row < h; row++) {
         int rL = row < rtl ? rtl : (row >= h - rbl ? rbl : 0);
@@ -367,7 +391,7 @@ static void body_fill(block *b, uint32_t color) {
     if (calm_shape_eligible(b)) {
         calm_masks_init();
         int tl, tr, bl, br;
-        corner_ris(b, calm_r_index(b->w, b->h), &tl, &tr, &bl, &br);
+        corner_ris(b, base_rad_ri(b), &tl, &tr, &bl, &br);
         fill_round(b, tl, tr, bl, br, color);
     } else {
         gui_fill_rect(b->x, b->y, b->w, b->h, color);
@@ -379,7 +403,7 @@ static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
     if (calm_shape_eligible(b)) {
         calm_masks_init();
         int tl, tr, bl, br;
-        corner_ris(b, calm_r_index(b->w, b->h), &tl, &tr, &bl, &br);
+        corner_ris(b, base_rad_ri(b), &tl, &tr, &bl, &br);
         fill_round(b, tl, tr, bl, br, color);
         if (bw >= 1) {
             block inner = *b;

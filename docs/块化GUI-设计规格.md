@@ -326,3 +326,17 @@ diff = 0（时钟区除外）；整屏触碰像素相对 480000 显著小于整�
 - 嵌套 flush 正文体（Settings/Notepad 正文卡片）按 16.2 规则方角，几何角点=填充色，
   属规则结果；圆角证据取外框根块，填充色证据取正文体，分两份 JSON 留存。
 
+### 16.5 （新增规格 · B 轮圆角修复后实测，dark / calm 档探针场景）
+
+- **半径落地规则（新增实现口径）**：`paint.c base_radius_px()` 按块类型取固定档——
+  BLK_BUTTON r12、BLK_INPUT r8；外框根块（Settings/Notepad/浏览器/菜单）经
+  `st.corner_radius=16` 显式收档；其余仍按短边阶梯。`base_rad_ri()` 统一取
+  `min(r, w/2, h/2)` 后映射掩码档。
+- **资格复核结论**：按钮/输入栏在 calm 档**未被** `calm_shape_eligible()` 排除
+  （`paint.c:289`：非 ROOT/bleed、layer=LAYER_WORK、corner_mode=0）；上一轮方角观感
+  源于短边阶梯落 r8 + 父卡同色掩盖角部，非绘制路径绕过圆角掩码。
+- **实测半径（dark / calm）**：Settings/Notepad/浏览器/菜单 r16；按钮 r12（24 高胶囊）；
+  输入栏 r8。`body_border` 沿同一 cov 掩码 `fill_round` 走，不允许方角边框盖圆角。
+- 探针口径补充：同色父表面上的控件，角点=父色也算圆角切出；标题/行前景字形覆盖在
+  表面色之上不计填充不符；兄弟控件矩形可在父层 diff 中 `--exclude`。
+

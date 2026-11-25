@@ -219,6 +219,7 @@ void gui_notepad_open(const char *path) {
     np_root = b_column(root_id, &root);
     block *pr = btable_get(np_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
+    pr->st.corner_radius = 16;   /* §16.1 外框 r16 */
     pr->z = layer_max_z(LAYER_WORK) + 1;   /* 同层取最大 z+1，不与既有面板同序 */
 
     /* 标题条：标签 + 关闭块。 */

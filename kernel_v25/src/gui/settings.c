@@ -140,6 +140,7 @@ void gui_settings_open(void) {
     st_root = b_column(root_id, &root);
     block *pr = btable_get(st_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
+    pr->st.corner_radius = 16;   /* §16.1 外框 r16 */
 
     /* 标题条：标签 + 关闭块。 */
     blk_spec title = st_panel(LAYER_WORK, ST_PANEL_W - ST_PAD * 2, ST_TITLE_H, 0);
