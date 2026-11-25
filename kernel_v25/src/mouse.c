@@ -35,6 +35,9 @@
 #define MOUSE_MAX_Y  599
 
 #define EVQ_SZ 32
+/* 半帧停滞上限（毫秒）：中断流在半包中途停下时，超过该间隔即丢弃残缺包，
+ * 回到 byte0 重新同步。PS/2 正常逐字节间隔在毫秒级，30ms 留足余量。 */
+#define PS2_PKT_GAP_MS 30u
 static mouse_event_t evq[EVQ_SZ];
 static volatile uint32_t evq_head, evq_tail;
 
@@ -47,6 +50,7 @@ static volatile uint32_t irq_count;    /* IRQ12 entries (diagnostics) */
 static volatile uint32_t aux_bytes;    /* aux bytes drained (diagnostics) */
 static volatile uint32_t kbd_bytes_irq12; /* kbd-routed bytes on line 12 */
 static volatile int      g_wheel_pending; /* v2.62: notches awaiting scroll  */
+static uint32_t          last_byte_ms;   /* 最近一个被接受 aux 字节的时刻     */
 
 int mouse_take_wheel(void) {
     int w = g_wheel_pending;
@@ -183,6 +187,14 @@ uint32_t mouse_aux_bytes(void)    { return aux_bytes; }
 uint32_t mouse_kbd_bytes_irq12(void) { return kbd_bytes_irq12; }
 
 static void mouse_feed(uint8_t b) {
+    uint32_t now = uptime_ms();
+    /* 半帧停滞看门狗：grab 释放 / 控制器复位 / 字节丢失都可能让中断流在半包
+     * 中途停下。旧实现 phase 永久卡在中间态，且 phase!=0 后不再做 byte0 掩码
+     * 重同步，后续字节被错位解释直到重启。间隔超过 PS2_PKT_GAP_MS 即丢弃
+     * 残缺包，回到 byte0 重新同步。 */
+    if (phase != 0 && now - last_byte_ms > PS2_PKT_GAP_MS) {
+        phase = 0;
+    }
     /* Byte 0 sanity: bit3 must be 1.  A desynchronised stream resyncs on
      * the next plausible byte0 instead of sliding the packet window. */
     /* Byte 0 must have bit3 set and bits 6-7 clear (0x08/0xC8 mask).  The old
@@ -190,10 +202,11 @@ static void mouse_feed(uint8_t b) {
      * a packet and every delta came out as a 200+ pixel jump. */
     if (phase == 0) {
         if ((b & 0xC8) != 0x08) return;
-        pkt[0] = b; phase = 1; return;
+        pkt[0] = b; phase = 1; last_byte_ms = now; return;
     }
     pkt[phase] = b;
     phase++;
+    last_byte_ms = now;
     if (phase >= pkt_size) {
         assemble_packet();
         phase = 0;
@@ -213,6 +226,16 @@ void mouse_get_state(int *x, int *y, uint8_t *buttons) {
     if (x) *x = abs_x;
     if (y) *y = abs_y;
     if (buttons) *buttons = last_buttons;
+}
+
+/* 进出桌面边界清理：排空事件环、清按键位图与残缺半包、清积压滚轮；保留
+ * 维护的绝对落点。不做按住按钮的超时自动释放——合法拖拽可持续数秒。 */
+void mouse_state_reset(void) {
+    evq_head = evq_tail = 0;
+    last_buttons = 0;
+    phase = 0;
+    g_wheel_pending = 0;
+    last_byte_ms = uptime_ms();
 }
 
 /* v2.73: expose what the device actually negotiated so `mouse` can show it:
@@ -256,6 +279,7 @@ void mouse_init(void) {
     evq_head = evq_tail = 0;
     last_buttons = 0;
     phase = 0;
+    last_byte_ms = 0;
     wheel_mode = 0;
     pkt_size = 3;
 
