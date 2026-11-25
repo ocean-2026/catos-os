@@ -42,6 +42,7 @@ KIND_FROM_NAME = {
     "root": 0, "column": 1, "row": 2, "stack": 3, "text": 4, "rect": 5,
     "image": 6, "surface": 7, "spacer": 8, "divider": 9, "canvas": 10,
     "free": 11, "button": 12, "input": 13, "term": 14,
+    "popover": 15, "icon": 16,
 }
 
 KIND_FROM_ID = {v: k for k, v in KIND_FROM_NAME.items()}
@@ -58,6 +59,187 @@ OVF_FROM_NAME = {"clip": 0, "visible": 1, "scroll": 2}
 # 配额（schema.json :: quotas，对应 kernel decl.h）
 QUOTAS = {"max_blocks": 256, "max_depth": 16,
           "max_text_bytes": 4096, "max_pool_bytes": 32768}
+
+# ---------------------------------------------------------------------------
+# cap2 能力扩展（规范 v0.3）：HTML 属性（《HTML 原型开发规范 v3》命名权威）
+# ↔ 内核冻结字段（block.h / tokens.h 冻结表，禁改）唯一映射表。
+#
+# 纪律：HTML 属性名以 v3 清单为准，内核字段名以本表冻结值为准；两者映射
+# 唯一，转换器 / 校验器 / schema.json / 规范 md 四处必须逐字一致（A-9-05..10）。
+# 内核消费点符号随 feat/blk-cap2 线落地；基线源码未含这些消费者，本表字段名
+# 已冻结，文档只照抄、不在工具线侧改名。
+# ---------------------------------------------------------------------------
+
+# 枚举映射：v3 属性值 → 内核 u8/u16 取值
+CAP2_ALPHA_MODE = {"ordered16": 0, "none": 1}
+
+CAP2_ELEVATION = {"flat": 0, "raised": 1, "hover": 2, "float": 3,
+                  "overlay": 4, "modal": 5}
+
+CAP2_EASE = {"none": 0, "linear": 1, "in": 2, "out": 3, "inout": 4,
+             "out-back": 5, "in-back": 6, "step": 7}
+
+CAP2_FONT_SIZE = {"8": 1, "caption": 1,
+                   "16": 2, "body": 2,
+                   "24": 3, "title": 3,
+                   "32": 4, "display": 4}
+
+CAP2_ELLIPSIS = {"none": 0, "char": 1, "word": 2}
+
+CAP2_TINT = {"fg": 1, "bg": 2, "accent": 3, "border": 4}
+
+CAP2_SCROLLBAR = {"auto": 0, "always": 1, "never": 2}
+
+CAP2_SCROLL_AXIS = {"x": 1, "y": 2, "both": 3}
+
+# data-anim 允许时长档（ms）；0 = 无动画（缺省）
+CAP2_ANIM_MS = [0, 48, 96, 144, 192, 288]
+
+# data-anim-props 位掩码：bit0 x / bit1 y / bit2 w / bit3 h /
+# bit4 alpha / bit5 elevation
+CAP2_ANIM_PROPS = {"x": 0, "y": 1, "w": 2, "h": 3,
+                   "alpha": 4, "elevation": 5}
+
+# data-prefer 位掩码：up1 / down2 / left4 / right8（可组合）
+CAP2_POP_PREFER = {"up": 1, "down": 2, "left": 4, "right": 8}
+
+# data-border-sides 位掩码：bit0 l / bit1 r / bit2 t / bit3 b；省略 = 0 = 全边
+CAP2_BORDER_SIDES = {"l": 0, "r": 1, "t": 2, "b": 3}
+
+# data-radius 命名哨兵：pill=128 / auto=255 / inherit=0（不显式，等价省略）
+CAP2_RADIUS_SENTINEL = {"pill": 128, "auto": 255, "inherit": 0}
+
+# data-wrap：0→0；1..6→同值；auto→255
+CAP2_WRAP_AUTO = 255
+
+# 逐角半径合法值域：0..63 px，外加哨兵 128 / 255；inherit 落 0。
+CAP2_RADIUS_MAX_PX = 63
+
+# cap2 冻结映射总账（审计 A-9-05..10 逐行核对 md / schema / 转换器三处一致）。
+# field = 内核冻结字段名；default = 缺省（未声明）取值；rule = 诊断规则 ID；
+# consume = 内核侧消费点（冻结文档口径，基线符号待 cap2 线回填）；
+# assert = 内核侧验收断言 ID。
+CAP2_FIELDS = [
+    {"attr": "data-alpha", "field": "alpha", "ctype": "u8", "default": 0,
+     "rule": "M-CAP2-01",
+     "consume": "渲染包 blk_alpha_of / blk_cov",
+     "assert": "cap2-alpha64/128/192"},
+    {"attr": "data-alpha-mode", "field": "alpha_mode", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-02",
+     "consume": "渲染包 present 量化",
+     "assert": "cap2-alpha64/128/192"},
+    {"attr": "data-elevation", "field": "elevation", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-03",
+     "consume": "渲染包 9-slice 阴影",
+     "assert": "cap2-shadow-slices"},
+    {"attr": "data-radius", "field": "corner_tl/tr/br/bl", "ctype": "u8×4",
+     "default": 0, "rule": "M-CAP2-04",
+     "consume": "渲染包逐角掩码",
+     "assert": "cap2-corner-per/pill/concentric"},
+    {"attr": "data-radius-tl", "field": "corner_tl", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-05",
+     "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+    {"attr": "data-radius-tr", "field": "corner_tr", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-05",
+     "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+    {"attr": "data-radius-br", "field": "corner_br", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-05",
+     "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+    {"attr": "data-radius-bl", "field": "corner_bl", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-05",
+     "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+    {"attr": "data-border-sides", "field": "border_sides", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-06",
+     "consume": "渲染包 body_border",
+     "assert": "cap2-border-sides"},
+    {"attr": "data-wrap", "field": "wrap_lines", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-07",
+     "consume": "文本包 txt_wrap_lines",
+     "assert": "cap2-wrap1/wrap2/wrapauto"},
+    {"attr": "data-ellipsis", "field": "ellipsis", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-08",
+     "consume": "文本包", "assert": "cap2-ellipsis-char/word"},
+    {"attr": "data-font", "field": "font_size", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-09",
+     "consume": "文本包 txt_font_h",
+     "assert": "cap2-font8/16/24/32"},
+    {"attr": "data-bold", "field": "font_bold", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-10",
+     "consume": "文本包", "assert": "cap2-bold"},
+    {"attr": "data-tabular", "field": "font_tabular", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-11",
+     "consume": "文本包等宽数字", "assert": "cap2-tabular"},
+    {"attr": "data-line-h", "field": "line_h", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-12",
+     "consume": "文本包", "assert": "cap2-wrap* 行高"},
+    {"attr": "data-anim", "field": "anim_ms", "ctype": "u16",
+     "default": 0, "rule": "M-CAP2-13",
+     "consume": "动画包预生成帧表",
+     "assert": "cap2-anim-outback"},
+    {"attr": "data-ease", "field": "anim_ease", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-14",
+     "consume": "动画包", "assert": "cap2-anim-outback"},
+    {"attr": "data-anim-props", "field": "anim_mask", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-15",
+     "consume": "动画包", "assert": "cap2-anim-interrupt"},
+    {"attr": "data-anchor", "field": "anchor_id", "ctype": "u32",
+     "default": 0, "rule": "M-CAP2-16",
+     "consume": "浮层包 pop_layout", "assert": "cap2-pop-*"},
+    {"attr": "data-prefer", "field": "pop_prefer", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-17",
+     "consume": "浮层包", "assert": "cap2-pop-down/up/left/right"},
+    {"attr": "data-max-h", "field": "pop_max_h", "ctype": "u16",
+     "default": 0, "rule": "M-CAP2-18",
+     "consume": "浮层包内部滚动", "assert": "cap2-pop-scroll"},
+    {"attr": "data-icon", "field": "icon", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-19",
+     "consume": "icon_draw", "assert": "cap2-icon-tint"},
+    {"attr": "data-tint", "field": "tint_role", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-20",
+     "consume": "icon_draw", "assert": "cap2-icon-tint"},
+    {"attr": "data-scrollbar", "field": "scrollbar", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-21",
+     "consume": "渲染包 sb_visible/sb_paint",
+     "assert": "cap2-sb-paint"},
+    {"attr": "data-scroll", "field": "scroll_axis", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-22",
+     "consume": "滚动条", "assert": "cap2-sb-wheel"},
+    {"attr": "data-theme", "field": "hc_force", "ctype": "u8",
+     "default": 0, "rule": "M-CAP2-23",
+     "consume": "令牌/渲染", "assert": "cap2-hc-override"},
+]
+
+# cap2 自定义标签：标签 → kind 枚举值（与 kind_enum 同步）
+CAP2_TAGS = {"c-popover": "popover", "c-icon": "icon"}
+
+# ---------------------------------------------------------------------------
+# cap3 命名增量（v0.3，已评审定稿，append-only 冻结）。
+# 形态（corner_shape / corner_n）是整块级别，与 cap2 逐角
+# corner_tl/tr/br/bl 正交：形态整块统一，半径仍可逐角。
+# ---------------------------------------------------------------------------
+
+# data-radius-shape：arc=0（默认）/ squircle=1；g2 为 squircle 别名。
+# 禁止用 data-radius="g2 16" 这类关键字塞数值属性（R-7.5-01）。
+CAP3_RADIUS_SHAPE = {"arc": 0, "squircle": 1, "g2": 1}
+
+# corner_n:u8，单位 0.1；0 = 默认 50（5.0）；有效区间 10..50（1.0..5.0），
+# 越界钳到 50 并报 WARN_RADIUS_N_RANGE；非数值指数 → E_RADIUS_N_BAD。
+CAP3_CORNER_N_MIN = 10
+CAP3_CORNER_N_MAX = 50
+CAP3_CORNER_N_DEFAULT = 0
+
+# cap3 冻结映射总账（审计 A-9-05..10 同样覆盖）。
+# CE 侧 ce_blk_rec2_t 只下发 corner_shape，不下发 corner_n。
+CAP3_FIELDS = [
+    {"attr": "data-radius-shape", "field": "corner_shape", "ctype": "u8",
+     "default": 0, "rule": "E_RADIUS_SHAPE_BAD",
+     "consume": "渲染包逐角掩码 / 形态采样",
+     "assert": "cap2-corner-per; R-7.5-01/02/03"},
+    {"attr": "data-squircle-n", "field": "corner_n", "ctype": "u8",
+     "default": 0, "rule": "E_RADIUS_N_BAD",
+     "consume": "渲染包 squircle 指数（仅 SQUIRCLE 有效）",
+     "assert": "R-7.5-02/03"},
+]
 
 # ---------------------------------------------------------------------------
 # CE 线上记录布局（40 字节/条，schema :: ce_blk_rec_t.byte_layout）

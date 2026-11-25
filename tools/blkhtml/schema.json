@@ -43,7 +43,8 @@
   "kind_enum": {
     "root": 0, "column": 1, "row": 2, "stack": 3, "text": 4, "rect": 5,
     "image": 6, "surface": 7, "spacer": 8, "divider": 9, "canvas": 10,
-    "free": 11, "button": 12, "input": 13, "term": 14
+    "free": 11, "button": 12, "input": 13, "term": 14,
+    "popover": 15, "icon": 16
   },
 
   "layer_enum": { "bg": 0, "content": 100, "work": 200, "chrome": 3000, "overlay": 4000, "toast": 5000 },
@@ -54,6 +55,75 @@
 
   "align_main_enum": ["start", "center", "end", "space_between"],
   "align_cross_enum": ["start", "center", "end", "stretch"],
+
+  "cap2": {
+    "note": "v0.3 能力扩展。HTML 属性名以《HTML 原型开发规范 v3》为准（命名权威），内核字段名以冻结表为准；两者映射唯一，转换器 / 校验器 / 本 schema / 规范 md 四处逐字一致（审计 A-9-05..10）。",
+    "tags": {
+      "c-popover": "popover（BLK_POPOVER=15）浮层容器；data-anchor 锚元素 id，data-prefer 朝向位掩码，data-max-h 最大高",
+      "c-icon": "icon（BLK_ICON=16）单色图标叶子；data-icon 图标号，data-tint 着色角色"
+    },
+    "fields": {
+      "data-alpha": {"field": "alpha", "ctype": "u8", "default": 0, "rule": "M-CAP2-01", "consume": "渲染包 blk_alpha_of / blk_cov", "assert": "cap2-alpha64/128/192"},
+      "data-alpha-mode": {"field": "alpha_mode", "ctype": "u8", "default": 0, "rule": "M-CAP2-02", "consume": "渲染包 present 量化", "assert": "cap2-alpha64/128/192"},
+      "data-elevation": {"field": "elevation", "ctype": "u8", "default": 0, "rule": "M-CAP2-03", "consume": "渲染包 9-slice 阴影", "assert": "cap2-shadow-slices"},
+      "data-radius": {"field": "corner_tl/tr/br/bl", "ctype": "u8×4", "default": 0, "rule": "M-CAP2-04", "consume": "渲染包逐角掩码", "assert": "cap2-corner-per/pill/concentric"},
+      "data-radius-tl": {"field": "corner_tl", "ctype": "u8", "default": 0, "rule": "M-CAP2-05", "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+      "data-radius-tr": {"field": "corner_tr", "ctype": "u8", "default": 0, "rule": "M-CAP2-05", "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+      "data-radius-br": {"field": "corner_br", "ctype": "u8", "default": 0, "rule": "M-CAP2-05", "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+      "data-radius-bl": {"field": "corner_bl", "ctype": "u8", "default": 0, "rule": "M-CAP2-05", "consume": "渲染包逐角掩码", "assert": "cap2-corner-per"},
+      "data-border-sides": {"field": "border_sides", "ctype": "u8", "default": 0, "rule": "M-CAP2-06", "consume": "渲染包 body_border", "assert": "cap2-border-sides"},
+      "data-wrap": {"field": "wrap_lines", "ctype": "u8", "default": 0, "rule": "M-CAP2-07", "consume": "文本包 txt_wrap_lines", "assert": "cap2-wrap1/wrap2/wrapauto"},
+      "data-ellipsis": {"field": "ellipsis", "ctype": "u8", "default": 0, "rule": "M-CAP2-08", "consume": "文本包", "assert": "cap2-ellipsis-char/word"},
+      "data-font": {"field": "font_size", "ctype": "u8", "default": 0, "rule": "M-CAP2-09", "consume": "文本包 txt_font_h", "assert": "cap2-font8/16/24/32"},
+      "data-bold": {"field": "font_bold", "ctype": "u8", "default": 0, "rule": "M-CAP2-10", "consume": "文本包", "assert": "cap2-bold"},
+      "data-tabular": {"field": "font_tabular", "ctype": "u8", "default": 0, "rule": "M-CAP2-11", "consume": "文本包等宽数字", "assert": "cap2-tabular"},
+      "data-line-h": {"field": "line_h", "ctype": "u8", "default": 0, "rule": "M-CAP2-12", "consume": "文本包", "assert": "cap2-wrap* 行高"},
+      "data-anim": {"field": "anim_ms", "ctype": "u16", "default": 0, "rule": "M-CAP2-13", "consume": "动画包预生成帧表", "assert": "cap2-anim-outback"},
+      "data-ease": {"field": "anim_ease", "ctype": "u8", "default": 0, "rule": "M-CAP2-14", "consume": "动画包", "assert": "cap2-anim-outback"},
+      "data-anim-props": {"field": "anim_mask", "ctype": "u8", "default": 0, "rule": "M-CAP2-15", "consume": "动画包", "assert": "cap2-anim-interrupt"},
+      "data-anchor": {"field": "anchor_id", "ctype": "u32", "default": 0, "rule": "M-CAP2-16", "consume": "浮层包 pop_layout", "assert": "cap2-pop-*"},
+      "data-prefer": {"field": "pop_prefer", "ctype": "u8", "default": 0, "rule": "M-CAP2-17", "consume": "浮层包", "assert": "cap2-pop-down/up/left/right"},
+      "data-max-h": {"field": "pop_max_h", "ctype": "u16", "default": 0, "rule": "M-CAP2-18", "consume": "浮层包内部滚动", "assert": "cap2-pop-scroll"},
+      "data-icon": {"field": "icon", "ctype": "u8", "default": 0, "rule": "M-CAP2-19", "consume": "icon_draw", "assert": "cap2-icon-tint"},
+      "data-tint": {"field": "tint_role", "ctype": "u8", "default": 0, "rule": "M-CAP2-20", "consume": "icon_draw", "assert": "cap2-icon-tint"},
+      "data-scrollbar": {"field": "scrollbar", "ctype": "u8", "default": 0, "rule": "M-CAP2-21", "consume": "渲染包 sb_visible/sb_paint", "assert": "cap2-sb-paint"},
+      "data-scroll": {"field": "scroll_axis", "ctype": "u8", "default": 0, "rule": "M-CAP2-22", "consume": "滚动条", "assert": "cap2-sb-wheel"},
+      "data-theme": {"field": "hc_force", "ctype": "u8", "default": 0, "rule": "M-CAP2-23", "consume": "令牌/渲染", "assert": "cap2-hc-override"}
+    },
+    "enums": {
+      "alpha_mode": {"ordered16": 0, "none": 1},
+      "elevation": {"flat": 0, "raised": 1, "hover": 2, "float": 3, "overlay": 4, "modal": 5},
+      "ease": {"none": 0, "linear": 1, "in": 2, "out": 3, "inout": 4, "out-back": 5, "in-back": 6, "step": 7},
+      "font_size": {"8": 1, "caption": 1, "16": 2, "body": 2, "24": 3, "title": 3, "32": 4, "display": 4},
+      "ellipsis": {"none": 0, "char": 1, "word": 2},
+      "tint": {"fg": 1, "bg": 2, "accent": 3, "border": 4},
+      "scrollbar": {"auto": 0, "always": 1, "never": 2},
+      "scroll_axis": {"x": 1, "y": 2, "both": 3},
+      "anim_props": {"x": 0, "y": 1, "w": 2, "h": 3, "alpha": 4, "elevation": 5},
+      "pop_prefer": {"up": 1, "down": 2, "left": 4, "right": 8},
+      "border_sides": {"l": 0, "r": 1, "t": 2, "b": 3}
+    },
+    "anim_ms_ladder": [0, 48, 96, 144, 192, 288],
+    "radius_sentinel": {"pill": 128, "auto": 255, "inherit": 0},
+    "wrap_auto": 255
+  },
+
+  "cap3": {
+    "note": "v0.3 命名增量（已评审定稿，append-only 冻结）。形态是整块级别，与 cap2 逐角 corner_tl/tr/br/bl 正交：形态整块统一，半径仍可逐角。CE 侧 ce_blk_rec2_t 只下发 corner_shape，不下发 corner_n。",
+    "fields": {
+      "data-radius-shape": {"field": "corner_shape", "ctype": "u8", "default": 0, "rule": "E_RADIUS_SHAPE_BAD", "consume": "渲染包逐角掩码 / 形态采样", "assert": "R-7.5-01/02/03"},
+      "data-squircle-n": {"field": "corner_n", "ctype": "u8", "default": 0, "rule": "E_RADIUS_N_BAD", "consume": "渲染包 squircle 指数（仅 SQUIRCLE 有效）", "assert": "R-7.5-02/03"}
+    },
+    "enums": {
+      "radius_shape": {"arc": 0, "squircle": 1, "g2": 1}
+    },
+    "corner_n": {"unit": 0.1, "default": 0, "default_value": 50, "min": 10, "max": 50, "clamp_to": 50, "warn": "WARN_RADIUS_N_RANGE", "bad": "E_RADIUS_N_BAD"},
+    "rules": {
+      "R-7.5-01": "形态整块统一：同一棵子树内 corner_shape 不得逐角混用 arc/squircle；禁止 data-radius=\"g2 16\" 这类关键字塞数值属性",
+      "R-7.5-02": "squircle 面积采样覆盖率与解析指数误差 ≤ 1/255",
+      "R-7.5-03": "ARC 与 SQ5 角中间段差 ≥ 3/255，证明几何确实不同"
+    }
+  },
 
   "token_palette": {
     "note": "取自 kernel_v25/src/gui/tokens.c，预览必须逐字使用，禁止自拟配色。",
@@ -102,13 +172,36 @@
     "fg": "同上，文本/前景色角色，默认 fg",
     "accent": "同上，默认 accent",
     "stroke": "{w:0|1|2, sides:[L,R,T,B], color:角色名} 可选",
-    "radius": "{tl,tr,br,bl} 可选（px，档 0/8/12/16/24），设计态逐角声明",
+    "radius": "{tl,tr,br,bl} 可选；v0.3 cap2 值域 0..63px / 128=pill / 255=auto / 0=inherit(不显式)；旧设计态档 0/8/12/16/24 仍兼容",
     "radius_mode": "per_corner|size_ladder 可选，默认 size_ladder；per_corner 只在 design 预览生效，内核无此能力",
     "shadow": "{mode:none|contact|dual, sides:[L,R,T,B]} 可选；内核实际按 layer 决定 contact/dual，sides 仅 design 态生效",
     "text": "string 可选，单行",
     "font": "{scale:1|2} 可选，默认 1",
     "text_overflow": "ellipsis|clip 可选，默认 ellipsis（超宽截断加 ...）",
     "pix": "{path,w,h,res} 可选，图像块",
+    "alpha": "u8 可选，默认 0（未声明 ≡ 255）；cap2 data-alpha，0–1 比例 / 0–255 绝对值",
+    "alpha_mode": "u8 可选，默认 0；0=ordered16 / 1=none",
+    "elevation": "u8 可选，默认 0；0..5 阴影档（flat/raised/hover/float/overlay/modal）",
+    "border_sides": "u8 可选，默认 0=全边；bit0 l / bit1 r / bit2 t / bit3 b",
+    "wrap_lines": "u8 可选，默认 0；0 / 1..6 / 255=auto",
+    "ellipsis": "u8 可选，默认 0；0=none / 1=char / 2=word",
+    "font_size": "u8 可选，默认 0；1=8/caption / 2=16/body / 3=24/title / 4=32/display",
+    "font_bold": "u8 可选，默认 0；0/1 伪粗",
+    "font_tabular": "u8 可选，默认 0；0/1 等宽数字",
+    "line_h": "u8 可选，默认 0=令牌默认；>0 显式 px 行高",
+    "anim_ms": "u16 可选，默认 0=无动画；档 48/96/144/192/288",
+    "anim_ease": "u8 可选，默认 0=none；1 linear / 2 in / 3 out / 4 inout / 5 out-back / 6 in-back / 7 step",
+    "anim_mask": "u8 位掩码可选，默认 0；bit0 x / bit1 y / bit2 w / bit3 h / bit4 alpha / bit5 elevation",
+    "anchor_id": "u32 可选，默认 0=父框；c-popover data-anchor 元素 id 解析结果",
+    "pop_prefer": "u8 位掩码可选，默认 0；up1 / down2 / left4 / right8，可组合",
+    "pop_max_h": "u16 可选，默认 0=不限；浮层最大高 px",
+    "icon": "u8 可选，默认 0；BLK_ICON(16) 图标号",
+    "tint_role": "u8 可选，默认 0；1 fg / 2 bg / 3 accent / 4 border",
+    "scrollbar": "u8 可选，默认 0=auto；1=always / 2=never",
+    "scroll_axis": "u8 可选，默认 0=auto；1=x / 2=y / 3=both",
+    "hc_force": "u8 可选，默认 0；1=本子树按 HC 规则渲染（radius=0 / border=2）",
+    "corner_shape": "u8 可选，默认 0=ARC；1=SQUIRCLE（cap3，整块形态，与逐角半径正交）",
+    "corner_n": "u8 可选，默认 0=默认 50(5.0)；单位 0.1，仅 SQUIRCLE 有效；CE rec2 不下发",
     "ce": "ce_blk_rec_t 九字段镜像；html2blk 必须写出，blk2bin 重新计算 text_off 后可写回（显式存在便于 review）",
     "children": "node[] 可选"
   },
@@ -129,12 +222,15 @@
       "input": "input（type=text 单行）",
       "img": "image",
       "hr": "divider",
-      "br/space": "spacer"
+      "br/space": "spacer",
+      "c-popover": "popover（BLK_POPOVER=15）cap2 浮层容器",
+      "c-icon": "icon（BLK_ICON=16）cap2 单色图标叶子"
     },
     "attributes": {
       "id/class": "class 只能命中 HTML 内联 <style> 里定义的受限规则；未知 class 报 UNSUPPORTED_CLASS",
       "style": "仅接受白名单属性（见 css_properties）",
-      "data-blk": "声明层覆盖属性（HTML 里唯一的样式外入口）：data-blk-layer=work|overlay|...；data-blk-anchor=\"R,T\"；data-blk-overflow=clip|visible|scroll；data-blk-drag=none|title|full；data-blk-drag-bounds=free|parent|screen；data-blk-resize=\"R,B\"；data-blk-resize-edge=<px>；data-blk-bleed=true；data-blk-role=<role>；data-blk-z=<int>；data-blk-text-overflow=ellipsis|clip"
+      "data-blk": "声明层覆盖属性（HTML 里唯一的样式外入口）：data-blk-layer=work|overlay|...；data-blk-anchor=\"R,T\"；data-blk-overflow=clip|visible|scroll；data-blk-drag=none|title|full；data-blk-drag-bounds=free|parent|screen；data-blk-resize=\"R,B\"；data-blk-resize-edge=<px>；data-blk-bleed=true；data-blk-role=<role>；data-blk-z=<int>；data-blk-text-overflow=ellipsis|clip",
+      "data-cap2": "v0.3 cap2 能力扩展属性，清单与映射见 cap2.fields：data-alpha / data-alpha-mode / data-elevation / data-radius(-tl/tr/br/bl) / data-border-sides / data-wrap / data-ellipsis / data-font / data-bold / data-tabular / data-line-h / data-anim / data-ease / data-anim-props / data-anchor / data-prefer / data-max-h / data-icon / data-tint / data-scrollbar / data-scroll / data-theme=hc"
     }
   },
 
@@ -159,17 +255,18 @@
       "font-size": "12|16 → scale 1|2（其它值报 UNSUPPORTED_FONT_SIZE）",
       "opacity": "仅 1 允许；其余 UNSUPPORTED",
       "line-height": "仅匹配 16（scale1）/ 32（scale2）允许",
-      "z-index": "int → z"
+      "z-index": "int → z",
+      "cap2 data-*": "v0.3 能力扩展属性，映射见 cap2.fields（data-alpha / data-alpha-mode / data-elevation / data-radius(-*) / data-border-sides / data-wrap / data-ellipsis / data-font / data-bold / data-tabular / data-line-h / data-anim / data-ease / data-anim-props / data-anchor / data-prefer / data-max-h / data-icon / data-tint / data-scrollbar / data-scroll / data-theme=hc）"
     },
     "unsupported": [
       "float", "position:fixed", "position:sticky", "grid / display:grid", "inline-block 布局流",
-      "transform / rotate / scale / translate", "transition / animation",
-      "opacity < 1", "filter / backdrop-filter", "background-image / url()", "gradient",
-      "border-radius 百分比或非档值", "font-family / font-weight / font-style", "text-align 非 left",
-      "伪元素 ::before/::after", "绝对定位之外的自动换行排版", "rgba()/hsl() 任何带 alpha 的颜色",
+      "transform / rotate / scale / translate", "CSS transition / animation（cap2 动效走 data-anim / data-ease / data-anim-props）",
+      "CSS opacity < 1（cap2 透明走 data-alpha / data-alpha-mode）", "filter / backdrop-filter", "background-image / url()", "gradient",
+      "border-radius 百分比", "font-family / font-weight / font-style（伪粗走 data-bold）", "text-align 非 left",
+      "伪元素 ::before/::after", "CSS 自动换行排版（cap2 折行走 data-wrap / data-ellipsis）", "rgba()/hsl() 任何带 alpha 的颜色",
       "混合模式 mix-blend-mode", "clip-path / mask", "writing-mode", "direction:rtl",
       "表格 / 列表语义 (table, li)", "iframe / canvas / video / svg",
-      "多行文本自动折行（BLK_TEXT 单行不换行）", "任意 CSS 变量 var()", "媒体查询 @media", "@font-face"
+      "任意 CSS 变量 var()", "媒体查询 @media", "@font-face"
     ],
     "policy": "命中 unsupported 一律以 `UNSUPPORTED <selector> <property>` 记录到 diagnostics 并以非 0 退出（--allow-lossy 才降级为 warning），禁止静默丢弃。"
   },
@@ -215,6 +312,7 @@
     "T1": "文本按 font_ascii 度量必须能在自身内容矩形内放下（或声明 ellipsis 截断）",
     "L1": "layer 取值合法；走 CE 投影时只允许 work",
     "O1": "overflow=scroll 时 scroll 偏移必须 <= 内容溢出的实际范围",
+    "C2": "cap2/cap3 字段值域：alpha 0..255；alpha_mode/elevation/font_bold/font_tabular/hc_force 0/1 或 0..5；wrap_lines ∈ 0/1..6/255；ellipsis 0..2；font_size 0..4；line_h 0..255；anim_ms ∈ 0/48/96/144/192/288；anim_ease 0..7；anim_mask 位 0..5；pop_prefer 位 up/down/left/right；pop_max_h 0..65535；icon 0..255；tint_role 0/1/2/3/4；scrollbar 0..2；scroll_axis 0..3；radius 0..63|128|255；corner_shape 0/1；corner_n 0..50",
     "P1": "blk2bin 产出：text_off/pix_off 落在 strings 池内 (0 <= off < slen 或 -1)，recs 长度 = 40*n（sizeof(ce_blk_rec_t)，decl.c:329-330），pad0=0，pix_off 恒 -1"
   },
 

@@ -551,5 +551,502 @@ class TestRuleIdPrefix(unittest.TestCase):
         self.assertTrue(any(l.startswith("[G1] FAIL") for l in g1))
 
 
+class TestCap2Alpha(unittest.TestCase):
+    """M-CAP2-01/02：data-alpha 比例 / 绝对值判别 + alpha_mode。"""
+
+    def _conv(self, html):
+        return html2blk.convert(html, "t", "dark")
+
+    def test_ratio_half_maps_to_128(self):
+        tree, diag = self._conv('<span data-alpha="0.5">x</span>')
+        self.assertFalse(diag.hard_fail, diag.lines())
+        node = tree["root"]["children"][0]
+        self.assertEqual(node["alpha"], 128)
+
+    def test_integer_one_is_ratio_255(self):
+        tree, diag = self._conv('<span data-alpha="1">x</span>')
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["alpha"], 255)
+
+    def test_absolute_200_passthrough(self):
+        tree, diag = self._conv('<span data-alpha="200">x</span>')
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["alpha"], 200)
+
+    def test_zero_means_undeclared(self):
+        tree, diag = self._conv('<span data-alpha="0">x</span>')
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["alpha"], 0)
+
+    def test_ratio_over_one_rejected(self):
+        tree, diag = self._conv('<span data-alpha="1.5">x</span>')
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-01" for i in diag.items))
+
+    def test_absolute_over_255_rejected(self):
+        tree, diag = self._conv('<span data-alpha="300">x</span>')
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-01" for i in diag.items))
+
+    def test_alpha_mode_map(self):
+        tree, diag = self._conv(
+            '<span data-alpha-mode="none">x</span>')
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["alpha_mode"], 1)
+        tree, diag = self._conv(
+            '<span data-alpha-mode="ordered16">x</span>')
+        self.assertEqual(tree["root"]["children"][0]["alpha_mode"], 0)
+
+    def test_alpha_mode_bad_diagnosed(self):
+        tree, diag = self._conv('<span data-alpha-mode="weird">x</span>')
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-02" for i in diag.items))
+
+
+class TestCap2ElevationRadius(unittest.TestCase):
+    """M-CAP2-03/04/05：elevation 档位与逐角半径哨兵。"""
+
+    def test_elevation_names_and_numbers(self):
+        cases = {"flat": 0, "raised": 1, "hover": 2, "float": 3,
+                 "overlay": 4, "modal": 5}
+        for name, val in cases.items():
+            tree, diag = html2blk.convert(
+                '<span data-elevation="%s">x</span>' % name, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["elevation"], val,
+                             name)
+
+    def test_elevation_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-elevation="sideways">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-03" for i in diag.items))
+
+    def _node(self, attrs):
+        el = html2blk.El("span", dict(attrs))
+        node = {"kind": "text"}
+        diag = html2blk.Diag()
+        html2blk.apply_cap2(el, node, diag, "s")
+        return node, diag
+
+    def test_radius_single_value_all_corners(self):
+        node, diag = self._node({"data-radius": "16"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["radius"],
+                         {"tl": 16, "tr": 16, "br": 16, "bl": 16})
+
+    def test_radius_four_values_tl_tr_br_bl(self):
+        node, diag = self._node({"data-radius": "16 16 0 0"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["radius"],
+                         {"tl": 16, "tr": 16, "br": 0, "bl": 0})
+
+    def test_radius_sentinels(self):
+        for tok, val in (("pill", 128), ("auto", 255), ("inherit", 0)):
+            node, diag = self._node({"data-radius": tok})
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(node["radius"]["tl"], val, tok)
+
+    def test_radius_per_corner_override(self):
+        node, diag = self._node({"data-radius": "8",
+                                  "data-radius-tl": "pill",
+                                  "data-radius-br": "auto"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        rad = node["radius"]
+        self.assertEqual(rad["tl"], 128)
+        self.assertEqual(rad["br"], 255)
+        self.assertEqual(rad["tr"], 8)
+        self.assertEqual(rad["bl"], 8)
+
+    def test_radius_px_over_63_rejected(self):
+        node, diag = self._node({"data-radius": "99"})
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-04" for i in diag.items))
+
+    def test_radius_corner_bad_diagnosed(self):
+        node, diag = self._node({"data-radius-tr": "99"})
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-05" for i in diag.items))
+
+
+class TestCap2Text(unittest.TestCase):
+    """M-CAP2-07..12：折行 / 省略 / 字号 / 粗体 / 等宽 / 行高。"""
+
+    def test_wrap_values(self):
+        for v, exp in (("0", 0), ("3", 3), ("6", 6), ("auto", 255)):
+            tree, diag = html2blk.convert(
+                '<span data-wrap="%s">x</span>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["wrap_lines"], exp, v)
+
+    def test_wrap_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-wrap="9">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-07" for i in diag.items))
+
+    def test_ellipsis_map(self):
+        for v, exp in (("none", 0), ("char", 1), ("word", 2)):
+            tree, diag = html2blk.convert(
+                '<span data-ellipsis="%s">x</span>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["ellipsis"], exp, v)
+
+    def test_ellipsis_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-ellipsis="middle">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-08" for i in diag.items))
+
+    def test_font_size_map(self):
+        cases = {"8": 1, "caption": 1, "16": 2, "body": 2,
+                 "24": 3, "title": 3, "32": 4, "display": 4}
+        for v, exp in cases.items():
+            tree, diag = html2blk.convert(
+                '<span data-font="%s">x</span>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["font_size"], exp, v)
+
+    def test_font_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-font="99">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-09" for i in diag.items))
+
+    def test_bold_tabular_bool(self):
+        tree, diag = html2blk.convert(
+            '<span data-bold="true" data-tabular="0">x</span>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        node = tree["root"]["children"][0]
+        self.assertEqual(node["font_bold"], 1)
+        self.assertEqual(node["font_tabular"], 0)
+
+    def test_bold_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-bold="maybe">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-10" for i in diag.items))
+
+    def test_line_h(self):
+        tree, diag = html2blk.convert(
+            '<span data-line-h="24">x</span>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["line_h"], 24)
+
+    def test_line_h_over_255_rejected(self):
+        tree, diag = html2blk.convert(
+            '<span data-line-h="300">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-12" for i in diag.items))
+
+
+class TestCap2Anim(unittest.TestCase):
+    """M-CAP2-13/14/15：动效时长 / 缓动 / 属性掩码。"""
+
+    def test_anim_ms_ladder(self):
+        for v in (48, 96, 144, 192, 288):
+            tree, diag = html2blk.convert(
+                '<span data-anim="%d">x</span>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["anim_ms"], v)
+
+    def test_anim_ms_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-anim="120">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-13" for i in diag.items))
+
+    def test_ease_map(self):
+        cases = {"none": 0, "linear": 1, "in": 2, "out": 3, "inout": 4,
+                 "out-back": 5, "in-back": 6, "step": 7}
+        for v, exp in cases.items():
+            tree, diag = html2blk.convert(
+                '<span data-ease="%s">x</span>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["anim_ease"], exp, v)
+
+    def test_ease_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-ease="bounce">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-14" for i in diag.items))
+
+    def test_anim_props_mask(self):
+        tree, diag = html2blk.convert(
+            '<span data-anim-props="x,alpha">x</span>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["anim_mask"], 1 << 0 | 1 << 4)
+
+    def test_anim_props_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<span data-anim-props="z">x</span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-15" for i in diag.items))
+
+
+class TestCap2PopoverIcon(unittest.TestCase):
+    """M-CAP2-16..20：浮层锚定 / 朝向 / 限高 / 图标 / 着色。"""
+
+    def test_popover_kind_and_prefer_maxh(self):
+        html = ('<button id="btn1">OK</button>'
+                '<c-popover data-anchor="btn1" data-prefer="down|right" '
+                'data-max-h="120"><span>menu</span></c-popover>')
+        tree, diag = html2blk.convert(html, "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        pop = [n for n in bc.iter_nodes(tree["root"])
+               if n["kind"] == "popover"][0]
+        self.assertEqual(pop["anchor_id"], 1)
+        self.assertEqual(pop["pop_prefer"], 2 | 8)
+        self.assertEqual(pop["pop_max_h"], 120)
+
+    def test_popover_anchor_unresolved_diagnosed(self):
+        html = '<c-popover data-anchor="nope"><span>m</span></c-popover>'
+        tree, diag = html2blk.convert(html, "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-16" for i in diag.items))
+
+    def test_prefer_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<c-popover data-prefer="upleft"><span>m</span></c-popover>',
+            "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-17" for i in diag.items))
+
+    def test_max_h_over_u16_rejected(self):
+        tree, diag = html2blk.convert(
+            '<c-popover data-max-h="70000"><span>m</span></c-popover>',
+            "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-18" for i in diag.items))
+
+    def test_data_icon_switches_kind(self):
+        tree, diag = html2blk.convert(
+            '<span data-icon="7" data-tint="accent"></span>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        node = tree["root"]["children"][0]
+        self.assertEqual(node["kind"], "icon")
+        self.assertEqual(node["icon"], 7)
+        self.assertEqual(node["tint_role"], 3)
+
+    def test_c_icon_tag(self):
+        tree, diag = html2blk.convert('<c-icon data-icon="2"></c-icon>',
+                                      "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        node = tree["root"]["children"][0]
+        self.assertEqual(node["kind"], "icon")
+        self.assertEqual(node["icon"], 2)
+
+    def test_icon_number_over_255_rejected(self):
+        tree, diag = html2blk.convert(
+            '<span data-icon="300"></span>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-19" for i in diag.items))
+
+    def test_tint_map_and_bad(self):
+        for v, exp in (("fg", 1), ("bg", 2), ("accent", 3), ("border", 4)):
+            tree, diag = html2blk.convert(
+                '<c-icon data-icon="1" data-tint="%s"></c-icon>' % v,
+                "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["tint_role"], exp, v)
+        tree, diag = html2blk.convert(
+            '<c-icon data-icon="1" data-tint="red"></c-icon>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-20" for i in diag.items))
+
+
+class TestCap2ScrollTheme(unittest.TestCase):
+    """M-CAP2-06/21/22/23：描边侧别 / 滚动条 / 滚动轴 / HC 覆盖。"""
+
+    def test_border_sides_mask(self):
+        tree, diag = html2blk.convert(
+            '<div data-border-sides="l,t"></div>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["border_sides"],
+                         1 << 0 | 1 << 2)
+
+    def test_border_sides_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<div data-border-sides="x"></div>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-06" for i in diag.items))
+
+    def test_scrollbar_map(self):
+        for v, exp in (("auto", 0), ("always", 1), ("never", 2)):
+            tree, diag = html2blk.convert(
+                '<div data-scrollbar="%s"></div>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["scrollbar"], exp, v)
+
+    def test_scroll_axis_map(self):
+        for v, exp in (("x", 1), ("y", 2), ("both", 3)):
+            tree, diag = html2blk.convert(
+                '<div data-scroll="%s"></div>' % v, "t", "dark")
+            self.assertFalse(diag.hard_fail, diag.lines())
+            self.assertEqual(tree["root"]["children"][0]["scroll_axis"], exp, v)
+
+    def test_scrollbar_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<div data-scrollbar="auto-x"></div>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-21" for i in diag.items))
+
+    def test_scroll_axis_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<div data-scroll="z"></div>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-22" for i in diag.items))
+
+    def test_theme_hc_force(self):
+        tree, diag = html2blk.convert(
+            '<div data-theme="hc"><span>x</span></div>', "t", "dark")
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(tree["root"]["children"][0]["hc_force"], 1)
+
+    def test_theme_bad_diagnosed(self):
+        tree, diag = html2blk.convert(
+            '<div data-theme="light"></div>', "t", "dark")
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "M-CAP2-23" for i in diag.items))
+
+
+class TestCap2ValidateC2(unittest.TestCase):
+    """C2：cap2 字段值域校验。"""
+
+    def _rep(self, node):
+        tree = {"schema": "catos.blk/1.0", "root": {
+            "id": 0, "kind": "root", "layer": "work",
+            "rect": {"x": 0, "y": 0, "w": 160, "h": 80},
+            "children": [node]}}
+        rep = validate.Report()
+        validate.validate_tree(tree, rep)
+        return rep
+
+    def test_valid_cap2_node_passes(self):
+        node = {"id": 1, "kind": "column", "layer": "work",
+                "rect": {"x": 0, "y": 0, "w": 160, "h": 80},
+                "alpha": 128, "elevation": 3, "wrap_lines": 2,
+                "ellipsis": 2, "font_size": 3, "anim_ms": 96,
+                "anim_ease": 5, "anim_mask": 17, "pop_prefer": 10,
+                "pop_max_h": 120, "icon": 7, "tint_role": 3,
+                "scrollbar": 1, "scroll_axis": 2, "hc_force": 1,
+                "border_sides": 5, "line_h": 24}
+        rep = self._rep(node)
+        self.assertFalse(rep.failed, rep.text_lines())
+
+    def test_out_of_range_alpha_fails(self):
+        node = {"id": 1, "kind": "rect", "layer": "work",
+                "rect": {"x": 0, "y": 0, "w": 16, "h": 16}, "alpha": 300}
+        rep = self._rep(node)
+        self.assertTrue(any(r["rule"] == "C2" and r["status"] == "FAIL"
+                             for r in rep.results))
+
+    def test_bad_anim_ms_fails(self):
+        node = {"id": 1, "kind": "rect", "layer": "work",
+                "rect": {"x": 0, "y": 0, "w": 16, "h": 16}, "anim_ms": 120}
+        rep = self._rep(node)
+        self.assertTrue(any(r["rule"] == "C2" and r["status"] == "FAIL"
+                             for r in rep.results))
+
+    def test_bad_tint_role_fails(self):
+        node = {"id": 1, "kind": "icon", "layer": "work",
+                "rect": {"x": 0, "y": 0, "w": 16, "h": 16}, "tint_role": 9}
+        rep = self._rep(node)
+        self.assertTrue(any(r["rule"] == "C2" and r["status"] == "FAIL"
+                             for r in rep.results))
+
+
+class TestCap2AuditConsistency(unittest.TestCase):
+    """A-9-05..10：真实规范 md ↔ schema ↔ 转换器一致性审计 RC=0。"""
+
+    def test_real_md_audit_passes(self):
+        md_path = os.path.join(TOOL_DIR, "..", "..", "docs",
+                               "HTML-块树-转换规范.md")
+        results, _ = validate.run_spec_audit(md_path)
+        fails = [r for r in results if r["status"] == "FAIL"]
+        self.assertEqual(fails, [], [f["detail"] for f in fails])
+        rules = {r["rule"] for r in results}
+        for rule in ("A-9-05", "A-9-06", "A-9-07", "A-9-08", "A-9-09",
+                     "A-9-10"):
+            self.assertIn(rule, rules)
+
+
+class TestCap3Shape(unittest.TestCase):
+    """cap3 增量：data-radius-shape / data-squircle-n（R-7.5-01..03）。"""
+
+    def _node(self, attrs):
+        el = html2blk.El("div", dict(attrs))
+        node = {"kind": "column"}
+        diag = html2blk.Diag()
+        html2blk.apply_cap2(el, node, diag, "s")
+        return node, diag
+
+    def test_shape_arc_default(self):
+        node, diag = self._node({"data-radius-shape": "arc"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["corner_shape"], 0)
+
+    def test_shape_squircle_and_g2_alias(self):
+        node, diag = self._node({"data-radius-shape": "squircle"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["corner_shape"], 1)
+        node, diag = self._node({"data-radius-shape": "g2"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["corner_shape"], 1)
+
+    def test_shape_bad_diagnosed(self):
+        node, diag = self._node({"data-radius-shape": "blob"})
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "E_RADIUS_SHAPE_BAD"
+                             for i in diag.items))
+
+    def test_squircle_n_units(self):
+        node, diag = self._node({"data-radius-shape": "squircle",
+                                  "data-squircle-n": "4.5"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["corner_n"], 45)
+        node, diag = self._node({"data-radius-shape": "squircle",
+                                  "data-squircle-n": "5"})
+        self.assertEqual(node["corner_n"], 50)
+
+    def test_squircle_n_bad_exponent_hard_fail(self):
+        node, diag = self._node({"data-radius-shape": "squircle",
+                                  "data-squircle-n": "abc"})
+        self.assertTrue(diag.hard_fail)
+        self.assertTrue(any(i["prop"] == "E_RADIUS_N_BAD"
+                             for i in diag.items))
+
+    def test_squircle_n_out_of_range_clamped_warn(self):
+        node, diag = self._node({"data-radius-shape": "squircle",
+                                  "data-squircle-n": "8"})
+        self.assertFalse(diag.hard_fail, diag.lines())
+        self.assertEqual(node["corner_n"], 50)
+        self.assertTrue(any(i["prop"] == "WARN_RADIUS_N_RANGE"
+                             and i["level"] == "WARN" for i in diag.items))
+
+    def test_corner_n_dropped_under_arc(self):
+        node, diag = self._node({"data-radius-shape": "arc",
+                                  "data-squircle-n": "4.5"})
+        self.assertNotIn("corner_n", node)
+
+    def test_c2_shape_n_ranges(self):
+        good = {"id": 1, "kind": "rect", "layer": "work",
+                "rect": {"x": 0, "y": 0, "w": 16, "h": 16},
+                "corner_shape": 1, "corner_n": 45}
+        tree = {"schema": "catos.blk/1.0", "root": {
+            "id": 0, "kind": "root", "layer": "work",
+            "rect": {"x": 0, "y": 0, "w": 160, "h": 80}, "children": [good]}}
+        rep = validate.Report()
+        validate.validate_tree(tree, rep)
+        self.assertFalse(rep.failed, rep.text_lines())
+
+        bad = dict(good, corner_n=99)
+        tree["root"]["children"] = [bad]
+        rep = validate.Report()
+        validate.validate_tree(tree, rep)
+        self.assertTrue(any(r["rule"] == "C2" and r["status"] == "FAIL"
+                             for r in rep.results))
+
+
 if __name__ == "__main__":
     unittest.main()

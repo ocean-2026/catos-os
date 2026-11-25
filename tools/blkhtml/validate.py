@@ -253,6 +253,47 @@ def validate_tree(tree, rep, ce_projection=False):
                    "scroll=%s rect=%s" % (scroll, r))
     rep.record("O1", "scroll range", True, "")
 
+    # ---- C2：cap2 字段值域（v0.3，冻结表口径）----
+    c2_ranges = {
+        "alpha": (0, 255), "alpha_mode": (0, 1), "elevation": (0, 5),
+        "border_sides": (0, 15), "ellipsis": (0, 2), "font_size": (0, 4),
+        "font_bold": (0, 1), "font_tabular": (0, 1), "line_h": (0, 255),
+        "anim_ease": (0, 7), "anim_mask": (0, 63), "pop_prefer": (0, 15),
+        "pop_max_h": (0, 65535), "icon": (0, 255), "tint_role": (0, 4),
+        "scrollbar": (0, 2), "scroll_axis": (0, 3), "hc_force": (0, 1),
+        "anchor_id": (0, 4294967295),
+        "corner_shape": (0, 1), "corner_n": (0, 50),
+    }
+    c2_sets = {
+        "wrap_lines": {0, 1, 2, 3, 4, 5, 6, bc.CAP2_WRAP_AUTO},
+        "anim_ms": set(bc.CAP2_ANIM_MS),
+        "tint_role": {0, 1, 2, 3, 4},
+    }
+    c2_pref_bits = {1, 2, 4, 8}
+    for n in nodes:
+        obj = "id=%s" % n["id"]
+        for f, (lo, hi) in c2_ranges.items():
+            if f in n:
+                v = n[f]
+                rep.record("C2", obj, isinstance(v, int) and lo <= v <= hi,
+                            "%s=%d want %d..%d" % (f, v, lo, hi))
+        for f, allowed in c2_sets.items():
+            if f in n:
+                rep.record("C2", obj, n[f] in allowed,
+                            "%s=%r want %s" % (f, n[f], sorted(allowed)))
+        if "pop_prefer" in n:
+            mask = n["pop_prefer"]
+            unknown = mask & ~15
+            rep.record("C2", obj, unknown == 0 and
+                       all((mask & b) in (0, b) for b in c2_pref_bits),
+                       "pop_prefer=%d (bits up/down/left/right)" % mask)
+        rad = n.get("radius") or {}
+        for corner, v in rad.items():
+            rep.record("C2", obj, v in range(0, 64) or v in (128, 255),
+                       "radius.%s=%d want 0..63|128(pill)|255(auto)"
+                       % (corner, v))
+    rep.record("C2", "cap2 ranges", True, "")
+
 
 # ---------------------------------------------------------------------------
 # 二进制 P1 复核
@@ -307,6 +348,12 @@ AUDIT_RULE_FILE = "A-9-01"    # 引用的文件存在（相对仓库根）
 AUDIT_RULE_SYMBOL = "A-9-02"  # 符号在该文件中作为独立标识符出现
 AUDIT_RULE_MISFILED = "A-9-03"  # 符号被跨文件误引（实际在别的源码文件）
 AUDIT_RULE_BLSPEC = "A-9-04"  # 文档至少引用一条 blk_spec 字段
+AUDIT_RULE_ATTR_DRIFT = "A-9-05"  # cap2 HTML 属性名 md/schema/转换器三处一致
+AUDIT_RULE_FIELD_DRIFT = "A-9-06"  # cap2 内核字段名 md/schema 两处一致
+AUDIT_RULE_ENUM_MAP = "A-9-07"   # cap2 枚举映射冻结表 ↔ schema ↔ md 一致
+AUDIT_RULE_DEFAULT = "A-9-08"     # cap2 默认值与冻结表一致
+AUDIT_RULE_DIAG_ID = "A-9-09"     # 每个 cap2 数值属性有规则 ID 诊断分支
+AUDIT_RULE_CAP2_KIND = "A-9-10"  # popover(15)/icon(16) kind 枚举三处一致
 
 # 引用格式：`` `kernel_v25/src/gui/decl.c::validate()` ``，
 # 路径 = 相对仓库根；符号 = C 标识符；行号提示可在反引号内或反引号后。
@@ -353,6 +400,81 @@ def _symbol_locations(root, symbol):
         if locs:
             hits[os.path.relpath(abs_path, root)] = locs
     return hits
+
+
+def run_cap2_audit(text, results):
+    """cap2（v0.3）命名 / 映射 / 默认值 / 诊断 ID / 新 kind 一致性审计。
+
+    真源：blkcommon.CAP2_FIELDS / CAP2_* 冻结表；交叉核对 schema.json 与
+    规范 md、转换器源码三处，任一漂移即 FAIL（A-9-05..10）。
+    片段文档（不含 cap2 章节标记）不参与本组审计。
+    """
+    if "M-CAP2-01" not in text:
+        return
+    schema = bc.schema()
+    schema_text = json.dumps(schema, ensure_ascii=False)
+    cap2_schema = schema.get("cap2") or {}
+    cap3_schema = schema.get("cap3") or {}
+    fields_schema = {**(cap2_schema.get("fields") or {}),
+                     **(cap3_schema.get("fields") or {})}
+    enums_schema = {**(cap2_schema.get("enums") or {}),
+                    **(cap3_schema.get("enums") or {})}
+    with open(os.path.join(HERE, "html2blk.py"), "r", encoding="utf-8") as f:
+        conv_src = f.read()
+
+    def add(rule, ok, obj, detail):
+        results.append({"rule": rule, "status": "PASS" if ok else "FAIL",
+                        "path": "", "symbol": obj, "detail": detail,
+                        "line_hint": None})
+
+    for entry in bc.CAP2_FIELDS + bc.CAP3_FIELDS:
+        attr, field, rule = entry["attr"], entry["field"], entry["rule"]
+        in_md, in_schema, in_conv = attr in text, attr in schema_text, \
+            attr in conv_src
+        add(AUDIT_RULE_ATTR_DRIFT, in_md and in_schema and in_conv, attr,
+            "md=%s schema=%s converter=%s" % (in_md, in_schema, in_conv))
+        add(AUDIT_RULE_FIELD_DRIFT, field in text and field in schema_text,
+            field, "md=%s schema=%s" % (field in text, field in schema_text))
+        s_entry = fields_schema.get(attr) or {}
+        def_ok = s_entry.get("default", entry["default"]) == entry["default"]
+        add(AUDIT_RULE_DEFAULT, def_ok, attr,
+            "default=%s schema=%s" % (entry["default"],
+                                      s_entry.get("default")))
+        add(AUDIT_RULE_DIAG_ID, rule in text and rule in conv_src, rule,
+            "md=%s converter=%s" % (rule in text, rule in conv_src))
+
+    enum_pairs = [
+        ("alpha_mode", bc.CAP2_ALPHA_MODE),
+        ("elevation", bc.CAP2_ELEVATION),
+        ("ease", bc.CAP2_EASE),
+        ("font_size", bc.CAP2_FONT_SIZE),
+        ("ellipsis", bc.CAP2_ELLIPSIS),
+        ("tint", bc.CAP2_TINT),
+        ("scrollbar", bc.CAP2_SCROLLBAR),
+        ("scroll_axis", bc.CAP2_SCROLL_AXIS),
+        ("anim_props", bc.CAP2_ANIM_PROPS),
+        ("pop_prefer", bc.CAP2_POP_PREFER),
+        ("border_sides", bc.CAP2_BORDER_SIDES),
+        ("radius_shape", bc.CAP3_RADIUS_SHAPE),
+    ]
+    for name, mp in enum_pairs:
+        s_mp = enums_schema.get(name) or {}
+        map_ok = dict(s_mp) == dict(mp)
+        keys_md = all(str(k) in text for k in mp)
+        add(AUDIT_RULE_ENUM_MAP, map_ok and keys_md, name,
+            "schema_match=%s md_keys=%s" % (map_ok, keys_md))
+
+    kind_schema = schema.get("kind_enum") or {}
+    pop_ok = (kind_schema.get("popover") == 15 ==
+              bc.KIND_FROM_NAME["popover"] and "popover" in text)
+    icon_ok = (kind_schema.get("icon") == 16 ==
+               bc.KIND_FROM_NAME["icon"] and "icon" in text)
+    add(AUDIT_RULE_CAP2_KIND, pop_ok, "popover",
+        "schema=%s common=%s" % (kind_schema.get("popover"),
+                                 bc.KIND_FROM_NAME["popover"]))
+    add(AUDIT_RULE_CAP2_KIND, icon_ok, "icon",
+        "schema=%s common=%s" % (kind_schema.get("icon"),
+                                 bc.KIND_FROM_NAME["icon"]))
 
 
 def run_spec_audit(md_path, repo_root=None):
@@ -414,6 +536,8 @@ def run_spec_audit(md_path, repo_root=None):
         add(AUDIT_RULE_BLSPEC, "FAIL", "", "",
             "doc references no blk_spec; kernel facts may have dropped "
             "out of the document")
+
+    run_cap2_audit(text, results)
 
     return results, blkspec_ok
 

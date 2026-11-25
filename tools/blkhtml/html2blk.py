@@ -97,10 +97,11 @@ STRUCTURAL = {"html", "head", "body", "meta", "title", "link", "script",
               "style", "noscript"}
 
 # HTML void 元素：入栈即出栈，后续兄弟不会被错挂成其子树（B5）。
-VOID = {"input", "hr", "img", "br"}
+VOID = {"input", "hr", "img", "br", "c-icon"}
 
 TAG_KIND = {"div": "container", "span": "text", "button": "button",
-            "input": "input", "img": "image", "hr": "divider", "br": "spacer"}
+            "input": "input", "img": "image", "hr": "divider", "br": "spacer",
+            "c-popover": "popover", "c-icon": "icon"}
 
 
 def split_decl(decl):
@@ -272,6 +273,388 @@ def inspect_raw(style_text, selector, diag):
     for pat, name in RAW_UNSUPPORTED:
         if re.search(pat, style_text):
             diag.unsupported(selector, name)
+
+
+# ---------------------------------------------------------------------------
+# cap2 能力扩展（v0.3）：v3 HTML 属性 → 内核冻结字段唯一映射。
+# 规则 ID M-CAP2-01..23；越界 / 冲突一律给规则 ID 诊断，禁止静默降级。
+# 映射表与枚举以 blkcommon.CAP2_FIELDS / CAP2_* 为工具线单一真源。
+# ---------------------------------------------------------------------------
+
+
+def _cap2_num(raw, diag, selector, rule, attr, lo, hi, prop=""):
+    """解析非负整数并闭区间校验；返回 int 或 None（已诊断）。"""
+    s = (raw or "").strip()
+    m = re.fullmatch(r"(\d+)", s)
+    if not m:
+        diag.unsupported(selector, rule, "%s: want integer %s, got %r"
+                         % (attr, prop or "%d..%d" % (lo, hi), raw))
+        return None
+    n = int(m.group(1))
+    if not (lo <= n <= hi):
+        diag.unsupported(selector, rule, "%s: %d out of %s"
+                         % (attr, n, prop or "%d..%d" % (lo, hi)))
+        return None
+    return n
+
+
+def parse_alpha(raw, diag, selector):
+    """data-alpha：0–1（含小数点或 ≤1）视为比例，0–255 视为绝对值；0 = 未声明。
+
+    判别规则（M-CAP2-01）：值含小数点 → 比例 0..1；纯整数 ≤1 → 比例
+    （1 → 255）；纯整数 >1 → 绝对值 0..255。比例 0.5 → round(0.5*255)=128。
+    """
+    s = (raw or "").strip()
+    if s == "":
+        diag.unsupported(selector, "M-CAP2-01", "data-alpha empty")
+        return None
+    if "." in s:
+        try:
+            f = float(s)
+        except ValueError:
+            diag.unsupported(selector, "M-CAP2-01",
+                             "data-alpha bad ratio %r" % raw)
+            return None
+        if not (0.0 <= f <= 1.0):
+            diag.unsupported(selector, "M-CAP2-01",
+                             "data-alpha ratio must be 0..1, got %r" % raw)
+            return None
+        if f == 0:
+            return 0
+        return min(255, round(f * 255))
+    m = re.fullmatch(r"(\d+)", s)
+    if not m:
+        diag.unsupported(selector, "M-CAP2-01",
+                         "data-alpha want 0..1 ratio or 0..255, got %r" % raw)
+        return None
+    n = int(m.group(1))
+    if n == 0:
+        return 0
+    if n <= 1:  # 纯整数 ≤1 视为比例
+        return 255
+    if n <= 255:
+        return n
+    diag.unsupported(selector, "M-CAP2-01",
+                     "data-alpha %d out of 0..255" % n)
+    return None
+
+
+def parse_radius_token(tok, diag, selector, rule):
+    """逐角半径令牌：0..63 px / pill=128 / auto=255 / inherit=0。"""
+    tok = tok.strip()
+    if tok in bc.CAP2_RADIUS_SENTINEL:
+        return bc.CAP2_RADIUS_SENTINEL[tok]
+    m = re.fullmatch(r"(\d+)", tok)
+    if m and 0 <= int(m.group(1)) <= bc.CAP2_RADIUS_MAX_PX:
+        return int(m.group(1))
+    diag.unsupported(selector, rule,
+                     "data-radius: want 0..63px|pill|auto|inherit, got %r"
+                     % tok)
+    return None
+
+
+def parse_corner_n(raw, diag, selector):
+    """data-squircle-n：指数，单位 0.1（4.5→45，5→50）；0 = 默认 5.0。
+
+    非数值指数 → E_RADIUS_N_BAD 硬诊断；超出 1.0..5.0 → 钳到 50 并记
+    WARN_RADIUS_N_RANGE（不硬失败）。仅 SQUIRCLE 形态有效，调用方按
+    corner_shape 决定是否写入。
+    """
+    s = (raw or "").strip()
+    try:
+        f = float(s)
+    except ValueError:
+        diag.unsupported(selector, "E_RADIUS_N_BAD",
+                         "data-squircle-n: numeric exponent expected, "
+                         "got %r" % raw)
+        return None
+    n10 = round(f * 10)
+    if not (bc.CAP3_CORNER_N_MIN <= n10 <= bc.CAP3_CORNER_N_MAX):
+        diag.add("WARN", selector, "WARN_RADIUS_N_RANGE",
+                 "data-squircle-n=%r out of 1.0..5.0, clamped to 50" % raw)
+        n10 = bc.CAP3_CORNER_N_MAX
+    return n10
+
+
+def parse_bool_attr(raw, diag, selector, rule, attr):
+    """布尔 cap2 属性：true/1/yes/on（空值同 true）→ 1；false/0/no/off → 0。"""
+    s = (raw or "").strip().lower()
+    if s in ("", "true", "1", "yes", "on"):
+        return 1
+    if s in ("false", "0", "no", "off"):
+        return 0
+    diag.unsupported(selector, rule, "%s: want bool, got %r" % (attr, raw))
+    return None
+
+
+def apply_cap2(el, node, diag, selector):
+    """解析 v3 cap2 属性，写入节点冻结字段；不支持 / 冲突给 M-CAP2-* 诊断。"""
+    attrs = el.attrs
+
+    # data-alpha → alpha:u8（0 = 未声明）
+    if "data-alpha" in attrs:
+        a = parse_alpha(attrs["data-alpha"], diag, selector)
+        if a is not None:
+            node["alpha"] = a
+
+    # data-alpha-mode → alpha_mode 0|1
+    if "data-alpha-mode" in attrs:
+        v = attrs["data-alpha-mode"].strip()
+        if v in bc.CAP2_ALPHA_MODE:
+            node["alpha_mode"] = bc.CAP2_ALPHA_MODE[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-02",
+                             "data-alpha-mode want ordered16|none, got %r" % v)
+
+    # data-elevation → elevation 0..5（名称与档位一一对应）
+    if "data-elevation" in attrs:
+        v = attrs["data-elevation"].strip()
+        if v in bc.CAP2_ELEVATION:
+            node["elevation"] = bc.CAP2_ELEVATION[v]
+        else:
+            m = re.fullmatch(r"([0-5])", v)
+            if m:
+                node["elevation"] = int(m.group(1))
+            else:
+                diag.unsupported(selector, "M-CAP2-03",
+                                 "data-elevation want flat|raised|hover|float|"
+                                 "overlay|modal or 0..5, got %r" % v)
+
+    # data-radius → corner_tl/tr/br/bl（中间层落 radius 字典）
+    rad = {}
+    if "data-radius" in attrs:
+        toks = attrs["data-radius"].split()
+        if len(toks) == 1:
+            val = parse_radius_token(toks[0], diag, selector, "M-CAP2-04")
+            if val is not None:
+                rad = {c: val for c in ("tl", "tr", "br", "bl")}
+        elif len(toks) == 4:
+            for c, tok in zip(("tl", "tr", "br", "bl"), toks):
+                val = parse_radius_token(tok, diag, selector, "M-CAP2-04")
+                if val is not None:
+                    rad[c] = val
+        else:
+            diag.unsupported(selector, "M-CAP2-04",
+                             "data-radius want 1 or 4 values, got %r"
+                             % attrs["data-radius"])
+    # 逐角覆盖 data-radius-tl / data-radius-tr / data-radius-br / data-radius-bl
+    for corner, key in (("tl", "data-radius-tl"), ("tr", "data-radius-tr"),
+                        ("br", "data-radius-br"), ("bl", "data-radius-bl")):
+        if key in attrs:
+            val = parse_radius_token(attrs[key], diag, selector, "M-CAP2-05")
+            if val is not None:
+                rad[corner] = val
+    if rad:
+        node["radius"] = rad
+        node["radius_mode"] = "per_corner"
+
+    # cap3：data-radius-shape → corner_shape:u8（整块形态，与逐角半径正交）
+    shape = None
+    if "data-radius-shape" in attrs:
+        v = attrs["data-radius-shape"].strip()
+        if v in bc.CAP3_RADIUS_SHAPE:
+            shape = bc.CAP3_RADIUS_SHAPE[v]
+            node["corner_shape"] = shape
+        else:
+            diag.unsupported(selector, "E_RADIUS_SHAPE_BAD",
+                             "data-radius-shape want arc|squircle|g2, "
+                             "got %r" % v)
+    # data-squircle-n → corner_n:u8（仅 SQUIRCLE 有效）
+    if "data-squircle-n" in attrs:
+        n = parse_corner_n(attrs["data-squircle-n"], diag, selector)
+        if n is not None:
+            if shape == 1 or node.get("corner_shape") == 1:
+                node["corner_n"] = n
+            # ARC 形态下 corner_n 不写入（仅 SQUIRCLE 有效）
+
+    # data-border-sides → border_sides:u8 位掩码；省略 = 0 = 全边
+    if "data-border-sides" in attrs:
+        sides = [x.strip() for x in re.split(r"[|, ]+",
+                                               attrs["data-border-sides"])
+                 if x.strip()]
+        mask = 0
+        bad = []
+        for s in sides:
+            if s in bc.CAP2_BORDER_SIDES:
+                mask |= 1 << bc.CAP2_BORDER_SIDES[s]
+            else:
+                bad.append(s)
+        if bad:
+            diag.unsupported(selector, "M-CAP2-06",
+                             "data-border-sides want l|r|t|b, got %r"
+                             % ",".join(bad))
+        else:
+            node["border_sides"] = mask
+
+    # data-wrap → wrap_lines:u8（0 / 1..6 / auto=255）
+    if "data-wrap" in attrs:
+        v = attrs["data-wrap"].strip()
+        if v == "auto":
+            node["wrap_lines"] = bc.CAP2_WRAP_AUTO
+        elif v == "0":
+            node["wrap_lines"] = 0
+        else:
+            m = re.fullmatch(r"([1-6])", v)
+            if m:
+                node["wrap_lines"] = int(m.group(1))
+            else:
+                diag.unsupported(selector, "M-CAP2-07",
+                                 "data-wrap want 0|1..6|auto, got %r" % v)
+
+    # data-ellipsis → ellipsis 0|1|2
+    if "data-ellipsis" in attrs:
+        v = attrs["data-ellipsis"].strip()
+        if v in bc.CAP2_ELLIPSIS:
+            node["ellipsis"] = bc.CAP2_ELLIPSIS[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-08",
+                             "data-ellipsis want none|char|word, got %r" % v)
+
+    # data-font → font_size:u8
+    if "data-font" in attrs:
+        v = attrs["data-font"].strip()
+        if v in bc.CAP2_FONT_SIZE:
+            node["font_size"] = bc.CAP2_FONT_SIZE[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-09",
+                             "data-font want 8|16|24|32|caption|body|title|"
+                             "display, got %r" % v)
+
+    # data-bold / data-tabular → 0/1
+    if "data-bold" in attrs:
+        b = parse_bool_attr(attrs["data-bold"], diag, selector,
+                            "M-CAP2-10", "data-bold")
+        if b is not None:
+            node["font_bold"] = b
+    if "data-tabular" in attrs:
+        b = parse_bool_attr(attrs["data-tabular"], diag, selector,
+                            "M-CAP2-11", "data-tabular")
+        if b is not None:
+            node["font_tabular"] = b
+
+    # data-line-h → line_h:u8 px（0 = 令牌默认）
+    if "data-line-h" in attrs:
+        h = _cap2_num(attrs["data-line-h"], diag, selector, "M-CAP2-12",
+                      "data-line-h", 0, 255, "0..255 px")
+        if h is not None:
+            node["line_h"] = h
+
+    # data-anim → anim_ms:u16（档值 48/96/144/192/288）
+    if "data-anim" in attrs:
+        v = attrs["data-anim"].strip()
+        m = re.fullmatch(r"(\d+)", v)
+        if m and int(m.group(1)) in bc.CAP2_ANIM_MS[1:]:
+            node["anim_ms"] = int(m.group(1))
+        else:
+            diag.unsupported(selector, "M-CAP2-13",
+                             "data-anim want 48|96|144|192|288, got %r" % v)
+
+    # data-ease → anim_ease:u8
+    if "data-ease" in attrs:
+        v = attrs["data-ease"].strip()
+        if v in bc.CAP2_EASE:
+            node["anim_ease"] = bc.CAP2_EASE[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-14",
+                             "data-ease want linear|in|out|inout|out-back|"
+                             "in-back|step, got %r" % v)
+
+    # data-anim-props → anim_mask:u8 位掩码
+    if "data-anim-props" in attrs:
+        props = [x.strip() for x in re.split(r"[|, ]+",
+                                               attrs["data-anim-props"])
+                 if x.strip()]
+        mask = 0
+        bad = []
+        for p in props:
+            if p in bc.CAP2_ANIM_PROPS:
+                mask |= 1 << bc.CAP2_ANIM_PROPS[p]
+            else:
+                bad.append(p)
+        if bad:
+            diag.unsupported(selector, "M-CAP2-15",
+                             "data-anim-props want x|y|w|h|alpha|elevation, "
+                             "got %r" % ",".join(bad))
+        else:
+            node["anim_mask"] = mask
+
+    # c-popover：data-anchor 存引用，建树后统一解析为 anchor_id:u32
+    if "data-anchor" in attrs:
+        ref = attrs["data-anchor"].strip().lstrip("#")
+        if ref:
+            node["anchor_ref"] = ref
+        else:
+            diag.unsupported(selector, "M-CAP2-16",
+                             "data-anchor empty; element id required")
+    # data-prefer → pop_prefer:u8 位掩码（可组合）
+    if "data-prefer" in attrs:
+        prefs = [x.strip() for x in re.split(r"[|, ]+",
+                                              attrs["data-prefer"])
+                 if x.strip()]
+        mask = 0
+        bad = []
+        for p in prefs:
+            if p in bc.CAP2_POP_PREFER:
+                mask |= bc.CAP2_POP_PREFER[p]
+            else:
+                bad.append(p)
+        if bad:
+            diag.unsupported(selector, "M-CAP2-17",
+                             "data-prefer want up|down|left|right, got %r"
+                             % ",".join(bad))
+        else:
+            node["pop_prefer"] = mask
+    # data-max-h → pop_max_h:u16（0 = 不限）
+    if "data-max-h" in attrs:
+        mh = _cap2_num(attrs["data-max-h"], diag, selector, "M-CAP2-18",
+                       "data-max-h", 0, 65535, "0..65535")
+        if mh is not None:
+            node["pop_max_h"] = mh
+
+    # data-icon → kind=icon + icon:u8
+    if "data-icon" in attrs:
+        ic = _cap2_num(attrs["data-icon"], diag, selector, "M-CAP2-19",
+                       "data-icon", 0, 255, "0..255")
+        if ic is not None:
+            node["icon"] = ic
+            node["kind"] = "icon"
+
+    # data-tint → tint_role:u8
+    if "data-tint" in attrs:
+        v = attrs["data-tint"].strip()
+        if v in bc.CAP2_TINT:
+            node["tint_role"] = bc.CAP2_TINT[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-20",
+                             "data-tint want fg|accent|bg|border, got %r" % v)
+
+    # data-scrollbar → scrollbar 0|1|2
+    if "data-scrollbar" in attrs:
+        v = attrs["data-scrollbar"].strip()
+        if v in bc.CAP2_SCROLLBAR:
+            node["scrollbar"] = bc.CAP2_SCROLLBAR[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-21",
+                             "data-scrollbar want auto|always|never, got %r"
+                             % v)
+
+    # data-scroll → scroll_axis x1/y2/both3（省略 0 = auto）
+    if "data-scroll" in attrs:
+        v = attrs["data-scroll"].strip()
+        if v in bc.CAP2_SCROLL_AXIS:
+            node["scroll_axis"] = bc.CAP2_SCROLL_AXIS[v]
+        else:
+            diag.unsupported(selector, "M-CAP2-22",
+                             "data-scroll want x|y|both, got %r" % v)
+
+    # data-theme="hc" → hc_force=1（本子树按 HC 规则渲染）
+    if "data-theme" in attrs:
+        v = attrs["data-theme"].strip()
+        if v == "hc":
+            node["hc_force"] = 1
+        else:
+            diag.unsupported(selector, "M-CAP2-23",
+                             "data-theme want hc, got %r" % v)
 
 
 def apply_style(el, node, diag, selector):
@@ -560,7 +943,7 @@ def apply_style(el, node, diag, selector):
 def natural_size(el, node, ctx):
     """叶子自然尺寸；容器由聚合得到。"""
     scale = (node.get("font") or {}).get("scale", 1)
-    tag = el.tag
+    tag = node.get("kind") or TAG_KIND.get(el.tag, el.tag)
     if tag in ("text", "span"):
         return bc.snap8(bc.text_width(el.text.strip(), scale)), 16 * scale
     if tag == "button":
@@ -575,12 +958,17 @@ def natural_size(el, node, ctx):
         return 0, 1
     if tag == "spacer":
         return ctx.get("spacer_w", 16), ctx.get("spacer_h", 16)
+    if tag == "icon":
+        return 16, 16
+    if tag == "popover":
+        return 0, 0
     return 0, 0
 
 
 def build_node(el, parent_node, parent_content, ctx, diag, id_counter):
     selector = ".".join(el.classes) or el.tag
     node = {"id": id_counter[0]}
+    ctx.setdefault("selectors", {})[node["id"]] = selector
     id_counter[0] += 1
 
     # 种类映射
@@ -591,12 +979,16 @@ def build_node(el, parent_node, parent_content, ctx, diag, id_counter):
     else:
         kind = TAG_KIND[el.tag]
     node["kind"] = kind
+    html_id = el.attrs.get("id")
+    if html_id:
+        node["html_id"] = html_id
     node.setdefault("layer", "work")
     node.setdefault("visible", True)
     node.setdefault("focusable", False)
     node.setdefault("inert", False)
 
     apply_style(el, node, diag, selector)
+    apply_cap2(el, node, diag, selector)
 
     # B7：容器 kind 由 flex-direction 决定（row→row；column/stack/free→column）。
     # 内核布局按 kind 判主轴，kind 与 flow 不一致会把 row 摆成竖排。
@@ -787,6 +1179,41 @@ def apply_flush(root, diag):
     walk(root)
 
 
+def resolve_anchors(root, diag, selectors=None):
+    """cap2：c-popover data-anchor 元素 id → anchor_id:u32（第二趟解析）。
+
+    引用先以 anchor_ref 原样挂在节点上；整棵树建好后按 html id 表解析为
+    块 id。解析不到命中元素 → M-CAP2-16 诊断，禁止静默落 0 冒充父框锚定。
+    html_id 仅用于本趟解析，落地前从节点移除，不进产物。
+    """
+    selectors = selectors or {}
+    by_html_id = {}
+
+    def index(n):
+        hid = n.get("html_id")
+        if hid:
+            by_html_id[hid] = n["id"]
+        for c in n.get("children") or []:
+            index(c)
+
+    def resolve(n):
+        ref = n.get("anchor_ref")
+        if ref is not None:
+            if ref in by_html_id:
+                n["anchor_id"] = by_html_id[ref]
+            else:
+                diag.unsupported(selectors.get(n["id"], "?"), "M-CAP2-16",
+                                 "data-anchor: element id %r not found in tree"
+                                 % ref)
+            n.pop("anchor_ref", None)
+        n.pop("html_id", None)
+        for c in n.get("children") or []:
+            resolve(c)
+
+    index(root)
+    resolve(root)
+
+
 def fill_ce_mirror(root):
     """写出每个节点的 ce 九字段镜像（text_off/pix_off 由 blk2bin 回填）。"""
     def walk(node, parent_id):
@@ -868,6 +1295,7 @@ def convert(html_text, title, theme, frame_w=800, frame_h=600,
 
     place_children(root, diag)
     apply_flush(root, diag)
+    resolve_anchors(root, diag, ctx.get("selectors", {}))
     fill_ce_mirror(root)
 
     tree = {"schema": "catos.blk/1.0", "title": title, "theme": theme,
