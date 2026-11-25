@@ -68,6 +68,8 @@ volatile uint8_t *gfx24_lfb_ptr(void);
 uint32_t gfx24_pitch(void);
 uint8_t  gfx24_stride(void);
 void     gfx24_putpx(int x, int y, uint32_t rgb);
+/* Read back one live LFB pixel as 0x00RRGGBB (kernel-side coverage blend). */
+uint32_t gfx24_getpx(int x, int y);
 
 /* Fixed diagnostic picture used by the shell `gfx24` command and by
  * tests/gfx24_regress.py.  Colour blocks + a 256-step gradient prove that

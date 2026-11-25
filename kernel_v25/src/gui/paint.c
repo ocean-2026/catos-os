@@ -196,6 +196,8 @@ static int text_trimmed(const char *txt, int max_w, uint8_t scale,
 
 #define CALM_R_N 4
 static const int CALM_RADII[CALM_R_N] = { 8, 12, 16, 24 };
+/* 覆盖率掩码 cov∈[0,255]：角象限逐像素；255=块内，0=角外（保留父表面原值），
+ * 过渡带内随超椭圆距离单调回落（无锯齿弧）。 */
 static uint8_t calm_mask[CALM_R_N][24][24];
 static int     calm_mask_ready;
 
@@ -206,16 +208,77 @@ static void calm_masks_init(void) {
     for (int ri = 0; ri < CALM_R_N; ri++) {
         int r = CALM_RADII[ri];
         uint32_t r5 = fifth_pow(r);
+        uint32_t inner = r5 * 80u / 100u;   /* 80% 以内全不透明 */
         for (int dy = 0; dy < r; dy++)
             for (int dx = 0; dx < r; dx++) {
                 /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
                 uint32_t u = (uint32_t)(r - dx), v = (uint32_t)(r - dy);
-                calm_mask[ri][dy][dx] =
-                    (fifth_pow(u) + fifth_pow(v) <= r5) ? 1 : 0;
+                uint32_t t = fifth_pow(u) + fifth_pow(v);
+                uint8_t cov;
+                if (t <= inner)        cov = 255;
+                else if (t >= r5)      cov = 0;
+                else {
+                    uint32_t rem = r5 - t;
+                    uint32_t span = r5 - inner;
+                    cov = (uint8_t)(span ? 255u * rem / span : 0);
+                }
+                calm_mask[ri][dy][dx] = cov;
             }
     }
     calm_mask_ready = 1;
 }
+
+/* ---- 覆盖率合成：out = under*(1-cov) + color*cov，under 为当前父表面结果 ---- */
+
+static void blend_px(int x, int y, uint32_t color, int cov) {
+    if (cov <= 0) return;                       /* 角外：逐像素保留父表面原值 */
+    if (cov >= 255) { gfx24_putpx(x, y, color); return; }
+    uint32_t under = gfx24_getpx(x, y);
+    int ia = 255 - cov;
+    int r = ((int)(under >> 16 & 0xFF) * ia + (int)(color >> 16 & 0xFF) * cov) / 255;
+    int g = ((int)(under >>  8 & 0xFF) * ia + (int)(color >>  8 & 0xFF) * cov) / 255;
+    int b = ((int)(under      & 0xFF) * ia + (int)(color      & 0xFF) * cov) / 255;
+    gfx24_putpx(x, y, ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
+}
+
+/* ---- per-corner 贴边判定：8pt 量化后坐标精确相等（容差 0）即贴边 ---- */
+
+/* 与 layout.c::grid_snap 同口径：calm 档位下内边距归整到 {4,8,12,16,24}。 */
+static int snap_pad(int v) {
+    if (!gui_style_calm() || v <= 0) return v;
+    static const int steps[5] = { 4, 8, 12, 16, 24 };
+    for (int i = 0; i < 5; i++)
+        if (v <= steps[i]) return steps[i];
+    return 24;
+}
+
+static void flush_edges(block *b, int *fl, int *fr, int *ft, int *fb) {
+    *fl = *fr = *ft = *fb = 0;
+    block *p = b->parent;
+    if (!p) { *fl = *fr = *ft = *fb = 1; return; }
+    int pl = snap_pad(p->pad_l), pr = snap_pad(p->pad_r);
+    int pt = snap_pad(p->pad_t), pb = snap_pad(p->pad_b);
+    int cx = p->x + pl, cy = p->y + pt;
+    int cw = p->w - pl - pr, ch = p->h - pt - pb;
+    if (cw < 0) cw = 0;
+    if (ch < 0) ch = 0;
+    if (b->bleed) { cx = p->x; cy = p->y; cw = p->w; ch = p->h; }
+    if (b->x      == cx)     *fl = 1;
+    if (b->x + b->w == cx + cw) *fr = 1;
+    if (b->y      == cy)     *ft = 1;
+    if (b->y + b->h == cy + ch) *fb = 1;
+    /* 同列兄弟紧贴：相接边整条方角。 */
+    for (block *s = p->first_child; s; s = s->next_sibling) {
+        if (s == b) continue;
+        if (s->x == b->x && s->x + s->w == b->x + b->w) {
+            if (s->y + s->h == b->y) *ft = 1;
+            if (b->y + b->h == s->y) *fb = 1;
+        }
+    }
+}
+
+/* 四角半径档：贴边角强制 0；返回 -1 表示该角方角。 */
+static int corner_ri(int base_ri, int flush) { return flush ? -1 : base_ri; }
 
 static int calm_on(void) {
     if (!gui_style_calm()) return 0;
@@ -239,29 +302,73 @@ static int calm_r_index(int w, int h) {
     return 0;                 /* 8：小控件 */
 }
 
-static int calm_inset(int ri, int dy) {
-    int r = CALM_RADII[ri];
-    if (dy < 0 || dy >= r) return 0;
-    for (int dx = 0; dx < r; dx++)
-        if (calm_mask[ri][dy][dx]) return dx;
-    return r;
+/* 取某角掩码在 (col,row) 处的覆盖率；ri=-1（方角）返回 255。 */
+static int corner_cov(int ri, int r, int col, int row,
+                       int w, int h, int corner) {
+    if (ri < 0 || r <= 0) return 255;
+    int dy, dx;
+    switch (corner) {
+    case 0: dy = row;            dx = col;            break;  /* TL */
+    case 1: dy = row;            dx = r - 1 - (col - (w - r)); break; /* TR */
+    case 2: dy = r - 1 - (h - 1 - row); dx = col;    break;  /* BL */
+    default:dy = r - 1 - (h - 1 - row); dx = r - 1 - (col - (w - r)); break; /* BR */
+    }
+    if (dy < 0 || dy >= r || dx < 0 || dx >= r) return 255;
+    return calm_mask[ri][dy][dx];
 }
 
-static void fill_round(block *b, int ri, uint32_t color) {
-    int w = b->w, h = b->h, r = CALM_RADII[ri];
-    if (r * 2 > w || r * 2 > h) { gui_fill_rect(b->x, b->y, w, h, color); return; }
+/* 逐角覆盖率填充：角带逐像素混合，中段不透明直写；cov=0 保留父表面原值。 */
+static void fill_round(block *b, int ri_tl, int ri_tr, int ri_bl, int ri_br,
+                       uint32_t color) {
+    int w = b->w, h = b->h;
+    if (w <= 0 || h <= 0) return;
+    int rtl = ri_tl < 0 ? 0 : CALM_RADII[ri_tl];
+    int rtr = ri_tr < 0 ? 0 : CALM_RADII[ri_tr];
+    int rbl = ri_bl < 0 ? 0 : CALM_RADII[ri_bl];
+    int rbr = ri_br < 0 ? 0 : CALM_RADII[ri_br];
+    if (rtl * 2 > w) rtl = w / 2;
+    if (rtr * 2 > w) rtr = w / 2;
+    if (rbl * 2 > w) rbl = w / 2;
+    if (rbr * 2 > w) rbr = w / 2;
+
     for (int row = 0; row < h; row++) {
-        int inset = 0;
-        if (row < r)            inset = calm_inset(ri, row);
-        else if (row >= h - r) inset = calm_inset(ri, h - 1 - row);
-        gui_fill_rect(b->x + inset, b->y + row, w - 2 * inset, 1, color);
+        int rL = row < rtl ? rtl : (row >= h - rbl ? rbl : 0);
+        int rR = row < rtr ? rtr : (row >= h - rbr ? rbr : 0);
+        int riL = row < rtl ? ri_tl : (row >= h - rbl ? ri_bl : -1);
+        int riR = row < rtr ? ri_tr : (row >= h - rbr ? ri_br : -1);
+        int y = b->y + row;
+        /* 左角带逐像素。 */
+        for (int col = 0; col < rL; col++)
+            blend_px(b->x + col, y, color,
+                     corner_cov(riL, rL, col, row, w, h,
+                                row < rtl ? 0 : 2));
+        /* 右角带逐像素。 */
+        for (int col = w - rR; col < w; col++)
+            blend_px(b->x + col, y, color,
+                     corner_cov(riR, rR, col, row, w, h,
+                                row < rtr ? 1 : 3));
+        /* 中段不透明。 */
+        int mx = rL, mw = w - rL - rR;
+        if (mw > 0) gui_fill_rect(b->x + mx, y, mw, 1, color);
     }
+}
+
+static void corner_ris(block *b, int base,
+                       int *tl, int *tr, int *bl, int *br) {
+    int fl, fr, ft, fb;
+    flush_edges(b, &fl, &fr, &ft, &fb);
+    *tl = corner_ri(base, fl || ft);
+    *tr = corner_ri(base, fr || ft);
+    *bl = corner_ri(base, fl || fb);
+    *br = corner_ri(base, fr || fb);
 }
 
 static void body_fill(block *b, uint32_t color) {
     if (calm_shape_eligible(b)) {
         calm_masks_init();
-        fill_round(b, calm_r_index(b->w, b->h), color);
+        int tl, tr, bl, br;
+        corner_ris(b, calm_r_index(b->w, b->h), &tl, &tr, &bl, &br);
+        fill_round(b, tl, tr, bl, br, color);
     } else {
         gui_fill_rect(b->x, b->y, b->w, b->h, color);
     }
@@ -271,13 +378,15 @@ static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
     if (bw < 1) return;
     if (calm_shape_eligible(b)) {
         calm_masks_init();
-        int ri = calm_r_index(b->w, b->h);
-        fill_round(b, ri, color);
+        int tl, tr, bl, br;
+        corner_ris(b, calm_r_index(b->w, b->h), &tl, &tr, &bl, &br);
+        fill_round(b, tl, tr, bl, br, color);
         if (bw >= 1) {
             block inner = *b;
             inner.x += bw; inner.y += bw;
             inner.w -= 2 * bw; inner.h -= 2 * bw;
-            if (inner.w > 0 && inner.h > 0) fill_round(&inner, ri, bg);
+            if (inner.w > 0 && inner.h > 0)
+                fill_round(&inner, tl, tr, bl, br, bg);
         }
     } else {
         gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
@@ -292,13 +401,19 @@ static uint32_t mix_black(uint32_t c, int kpermil) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
 }
 
-/* 双层柔和阴影（无 alpha 预混色阶）：WORK 卡片单层接触；OVERLAY/TOAST 双层。 */
+/* 双层柔和阴影：WORK 卡片单层接触；OVERLAY/TOAST 双层。贴边/成组紧贴的块
+ * 不投影（接缝处不得造假空隙或暗带），阴影只出现在自由边外侧。 */
 static void paint_halo(block *b) {
     if (!calm_shape_eligible(b)) return;
     int el = 0;
     if (b->layer == LAYER_OVERLAY || b->layer == LAYER_TOAST) el = 2;
     else if (b->layer == LAYER_WORK) el = 1;
     if (!el) return;
+
+    int fl, fr, ft, fb;
+    flush_edges(b, &fl, &fr, &ft, &fb);
+    /* 成组紧贴（上下接兄弟）或贴父上/下边：不投接触/投影层。 */
+    if (ft || fb) return;
 
     uint32_t under = b->parent ? resolve_color(b->parent, 1)
                                : gui_active_style()->bg;
@@ -308,26 +423,6 @@ static void paint_halo(block *b) {
         uint32_t drop = mix_black(under, 100); /* 投影层：黑 10% */
         gui_draw_border(b->x, b->y + 3, b->w, b->h, drop, 1);
         gui_draw_border(b->x, b->y + 4, b->w, b->h, drop, 1);
-    }
-}
-
-/* 角部覆写 pass：子树照常画完后，把父块四个角掩码之外的像素用桌面底色
- * 覆写，盖住子块矩形填进圆角切口的部分；full-bleed / 根块 / chrome / bg
- * 由 calm_shape_eligible 排除。 */
-static void corner_restore(block *b) {
-    if (!calm_shape_eligible(b)) return;
-    calm_masks_init();
-    int ri = calm_r_index(b->w, b->h);
-    int r = CALM_RADII[ri];
-    if (r * 2 > b->w || r * 2 > b->h) return;
-    uint32_t c = gui_active_style()->bg;
-    for (int row = 0; row < r; row++) {
-        int ins = calm_inset(ri, row);
-        gui_fill_rect(b->x, b->y + row, ins, 1, c);
-        gui_fill_rect(b->x + b->w - ins, b->y + row, ins, 1, c);
-        int rowb = b->h - 1 - row;
-        gui_fill_rect(b->x, b->y + rowb, ins, 1, c);
-        gui_fill_rect(b->x + b->w - ins, b->y + rowb, ins, 1, c);
     }
 }
 
@@ -426,7 +521,7 @@ void paint_node(block *b) {
     }
     if (b->overflow == OVF_SCROLL) paint_trans_pop();
     if (clip_self) paint_clip_pop();
-    corner_restore(b);
+    /* 角外像素由覆盖率合成保留父表面原值，不再用全局桌面底色覆写（漏底根因）。 */
 
     b->dirty_paint = 0;
     b->snap = 0;
