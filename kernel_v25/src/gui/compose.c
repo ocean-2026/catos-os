@@ -23,13 +23,13 @@ static struct { int x, y, w, h; } dmg[DMG_MAX];
 static int dmg_n;
 static int dmg_full;
 
-/* 2b 阴影外扩保守量：halo 接触层 y+1、投影层 y+3/y+4，左右/上 1px。
+/* cap2 阴影外扩保守量：6 档最大 pad=10，右下光源偏移 ox/oy 最大 6。
  * 贴边/成组紧贴的块本就不投影（paint.c flush_edges），这里按最大外扩留边，
  * 宁多纳一条窄边，不把阴影像素留在损伤区外。 */
-#define HALO_PAD_L 1
-#define HALO_PAD_T 1
-#define HALO_PAD_R 1
-#define HALO_PAD_B 4
+#define HALO_PAD_L 10
+#define HALO_PAD_T 10
+#define HALO_PAD_R 16
+#define HALO_PAD_B 16
 
 static uint32_t s_frames, s_layout_nodes, s_double_commit;
 static uint32_t s_damage_rects, s_damage_area;
