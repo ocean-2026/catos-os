@@ -297,6 +297,7 @@ static block_id demo_add_sample(void) {
     block_id root_id = gui_root_block()->id;
     blk_spec sample_spec = spec_panel(LAYER_WORK, 320, 200, 1);
     sample_spec.focusable = 1;
+    sample_spec.drag_mode = DRAG_TITLE;
     sample_spec.pad_l = sample_spec.pad_r = sample_spec.pad_t = sample_spec.pad_b = 0;
     block_id sample = b_column(root_id, &sample_spec);
 
@@ -734,6 +735,63 @@ void gui_probe_drag(void) {
     ser_write(" frame_us="); ser_dec(us);
     ser_write(" b_same="); ser_dec(b_same ? 1 : 0);
     int ok = b_same && measured <= sub + 1 && area <= 120000u && us <= 4000u;
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+/* 禁拖自检：背景/图标/任务栏等硬禁拖块被拖动时几何必须零变化；
+ * 正控：显式 DRAG_TITLE 的示例面板标题带仍应可拖。 */
+void gui_probe_deny(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    block *root = gui_root_block();
+    block *denied[8]; int dn = 0;
+    int sx[8], sy[8], sw[8], sh[8];
+    block *sample = 0;
+    for (block *c = root->first_child; c && dn < 8; c = c->next_sibling) {
+        if (c->drag_mode == DRAG_TITLE || c->drag_mode == DRAG_FULL) {
+            sample = c;
+            continue;
+        }
+        denied[dn] = c;
+        sx[dn] = c->x; sy[dn] = c->y; sw[dn] = c->w; sh[dn] = c->h;
+        dn++;
+    }
+
+    /* 空白桌面拖 10 步，再拖桌面图标；禁拖块几何不得变化。 */
+    gui_inject_press(400, 300);
+    for (int i = 0; i < 10; i++)
+        gui_inject_move(400 + 10 * (i + 1), 300 + 6 * (i + 1));
+    gui_inject_release();
+    gui_inject_press(668, 64);
+    for (int i = 0; i < 10; i++)
+        gui_inject_move(668 - 8 * (i + 1), 64 + 6 * (i + 1));
+    gui_inject_release();
+
+    int moved = 0;
+    for (int k = 0; k < dn; k++) {
+        block *c = denied[k];
+        if (c->x != sx[k] || c->y != sy[k] ||
+            c->w != sw[k] || c->h != sh[k])
+            moved++;
+    }
+
+    int sample_before_x = sample ? sample->x : 0;
+    int sample_before_y = sample ? sample->y : 0;
+    if (sample) {
+        gui_inject_press(224, 76);
+        gui_inject_move(320, 140);
+        gui_inject_release();
+    }
+    int sample_moved = sample &&
+        (sample->x != sample_before_x || sample->y != sample_before_y);
+
+    ser_write("GUI:deny denied="); ser_dec(dn);
+    ser_write(" denied_moved="); ser_dec(moved);
+    ser_write(" sample_moved="); ser_dec(sample_moved ? 1 : 0);
+    int ok = (moved == 0) && sample_moved;
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
@@ -1709,6 +1767,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return; }
         if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
         if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
+        if (!strcmp_probe(arg, "deny"))  { gui_probe_deny(); return; }
         if (!strcmp_probe(arg, "hit"))   { gui_probe_hit(); return; }
         if (!strcmp_probe(arg, "rate"))  { gui_probe_rate(); return; }
         if (!strcmp_probe(arg, "idle"))  { gui_probe_idle(); return; }

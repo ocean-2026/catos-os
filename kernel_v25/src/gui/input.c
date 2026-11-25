@@ -12,6 +12,16 @@
 #include "keyboard.h"
 #include "gfx24.h"
 
+extern void ser_write(const char *s);
+extern void ser_putc(char c);
+
+static void ser_dec_u(uint32_t v) {
+    char buf[12]; int n = 0;
+    if (v == 0) { ser_write("0"); return; }
+    while (v) { buf[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) ser_putc(buf[--n]);
+}
+
 #define DRAG_NONE   0
 #define DRAG_MOVE   1
 #define DRAG_RESIZE 2
@@ -115,10 +125,20 @@ static int in_resize_band(block *b, int x, int y) {
 }
 
 static int drag_band_hit(block *cur, int y) {
-    /* drag_mode=0 回落标题带拖拽（v1 兼容默认；v2 可显式声明整块/不可拖）。 */
-    uint8_t dm = cur->drag_mode ? cur->drag_mode : DRAG_TITLE;
-    if (dm == DRAG_FULL) return 1;
-    if (dm == DRAG_TITLE && y < cur->y + TITLE_H) return 1;
+    /* 默认 DRAG_NONE 不可拖；仅显式声明 TITLE/FULL 的块参与拖拽带判定，
+     * 不再把 0 回落成标题带可拖。 */
+    if (cur->drag_mode == DRAG_FULL) return 1;
+    if (cur->drag_mode == DRAG_TITLE && y < cur->y + TITLE_H) return 1;
+    return 0;
+}
+
+/* 硬禁拖：背景层 / 内容层 / 根块 / 全出血块一律不可拖，即使显式声明
+ * DRAG_FULL 也忽略。这类块是桌面底、容器或任务栏，拖拽只会误移动底色。 */
+static int drag_denied(block *b) {
+    if (!b) return 1;
+    if (b->layer == LAYER_BG || b->layer == LAYER_CONTENT) return 1;
+    if (b->kind == BLK_ROOT) return 1;
+    if (b->bleed) return 1;
     return 0;
 }
 
@@ -135,8 +155,17 @@ static block *resolve_interaction(block *b, int x, int y,
     block *target = b;
     while (target->parent && target->parent->kind != BLK_ROOT &&
            !target->focusable && !target->resize_dir &&
-           target->drag_mode == 0)
+           target->drag_mode == DRAG_NONE)
         target = target->parent;
+
+    /* 硬禁拖：背景层 / 内容层 / 根块 / 全出血块一律不可拖，即使声明
+     * DRAG_FULL 也忽略；记串口告警供探针核验。 */
+    if (drag_denied(target)) {
+        ser_write("GUI:warn dragdeny id="); ser_dec_u(target->id);
+        ser_write(" layer="); ser_dec_u(target->layer); ser_write("\n");
+        *mode = DRAG_NONE;
+        return target;
+    }
 
     /* 1) resize 边缘带（优先于拖拽带）。 */
     if (in_resize_band(target, x, y)) {
