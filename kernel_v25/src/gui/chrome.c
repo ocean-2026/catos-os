@@ -13,6 +13,7 @@
 #include "serial_log.h"
 #include "task.h"
 #include "kstring.h"
+#include "keyboard.h"
 #include "fs.h"
 
 static void geom_walk(block *b);
@@ -99,6 +100,19 @@ static blk_spec spec_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border)
 static block_id clock_row = 0;
 static block_id clock_text_blk = 0;
 static char clock_last[16] = "";
+
+/* D 轮 overlay 几何：任务栏/开始按钮句柄 + 任务栏高度档（默认 32，高 48）。 */
+static block_id taskbar_id = 0;
+static block_id start_id   = 0;
+static int      taskbar_h   = 32;
+static int      probe_tb_high = 0;
+static int      probe_menu_tall = 0;
+
+/* 菜单键盘选择：可点行按显示顺序常驻索引。 */
+static block_id menu_row_ids[32];
+static int      menu_row_n   = 0;
+static int      menu_sel     = -1;
+static void     menu_scroll_bottom(void);
 
 #define DEMO_ICON_W 16
 #define DEMO_ICON_H 16
@@ -561,17 +575,19 @@ void gui_demo_build(void) {
 
     if (!probe_no_sample) demo_add_sample();
 
-    /* 任务栏：全出血贴底，宽 = 屏宽，交叉轴 END 钉下边缘。 */
-    blk_spec bar_tb = spec_panel(LAYER_CHROME, GFX24_W, 32, 0);
+    /* 任务栏：全出血贴底，宽 = 屏宽，交叉轴 END 钉下边缘。高度两档：默认 32，高 48。 */
+    taskbar_h = probe_tb_high ? 48 : 32;
+    blk_spec bar_tb = spec_panel(LAYER_CHROME, GFX24_W, taskbar_h, 0);
     bar_tb.align_cross = XALN_END;
-    block_id taskbar = b_row(root_id, &bar_tb);
-    btable_get(taskbar)->bleed = 1;
+    taskbar_id = b_row(root_id, &bar_tb);
+    block *taskbar = btable_get(taskbar_id);
+    taskbar->bleed = 1;
 
     blk_spec start = spec_panel(LAYER_CHROME, 64, 24, 0);
     start.pad_l = 4;
     start.align_cross = XALN_CENTER;
     start.on_click = gui_menu_toggle;
-    block_id start_id = b_row(taskbar, &start);
+    start_id = b_row(taskbar_id, &start);
     blk_spec start_txt = spec_panel(LAYER_CHROME, 40, 16, 0);
     start_txt.align_cross = XALN_CENTER;
     b_text(start_id, &start_txt, "Start");
@@ -580,7 +596,7 @@ void gui_demo_build(void) {
     clk_s.align_main = ALN_END;
     clk_s.align_cross = XALN_CENTER;
     clk_s.pad_l = 4;
-    clock_row = b_row(taskbar, &clk_s);
+    clock_row = b_row(taskbar_id, &clk_s);
     blk_spec clk_txt = spec_panel(LAYER_CHROME, 64, 16, 0);
     clk_txt.align_cross = XALN_CENTER;
     clock_text_blk = b_text(clock_row, &clk_txt, "00:00:00");
@@ -643,6 +659,52 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
     gui_menu_close();
 }
 
+/* ---- D 轮 overlay 几何契约（规格 §16 新增规格） -------------------------- */
+/* 求解顺序（固定，不可调换）：
+ *   1. 期望尺寸（shrink-to-content：列布局按内容收敛自然宽高）；
+ *   2. 按可用区钳制宽高（max_w/max_h = 屏幕 − 任务栏带 − 安全边距）；
+ *   3. 最后才定锚点 / 放置方向（place above|below，空间不足 flip 到另一侧），
+ *      再把整框 clamp 回屏内安全区。
+ * 新字段语义：anchor 锚定参照（Start 按钮左边）、place 上方/下方、flip 翻侧、
+ * clamp 钳制进可用区、max_w/max_h 尺寸上限。overlay 与任务栏不同父，不套 §14。 */
+#define MENU_SAFE   8
+#define MENU_GAP    8
+
+static int menu_place_above = 1;   /* 1=above 任务栏之上；0=below（翻转后） */
+static int menu_flip        = 0;
+static int menu_natural_h   = 0;
+
+static void menu_paint_sel(void) {
+    for (int i = 0; i < menu_row_n; i++) {
+        block *r = btable_get(menu_row_ids[i]);
+        if (!r) continue;
+        r->focused = (i == menu_sel) ? 1 : 0;
+        r->dirty_paint = 1;
+    }
+}
+
+static int menu_key(int code, void *ud) {
+    (void)ud;
+    if (!menu_open || menu_row_n <= 0) return 0;
+    switch (code) {
+    case KB_UP:
+        menu_sel = (menu_sel <= 0) ? menu_row_n - 1 : menu_sel - 1;
+        menu_paint_sel(); return 1;
+    case KB_DOWN:
+        menu_sel = (menu_sel >= menu_row_n - 1) ? 0 : menu_sel + 1;
+        menu_paint_sel(); return 1;
+    case 10: {  /* Enter：执行当前选中项 */
+        block *r = btable_get(menu_row_ids[menu_sel]);
+        if (r && r->on_click) r->on_click(r->id, 0, 0);
+        return 1;
+    }
+    case 27:   /* Esc：关闭菜单（与全局 Esc 路径一致，钩子消费） */
+        gui_menu_close(); return 1;
+    default:
+        return 0;
+    }
+}
+
 void gui_menu_open(void) {
     if (menu_open) return;
     block_id root_id = gui_root_block()->id;
@@ -651,11 +713,10 @@ void gui_menu_open(void) {
     menu.pad_l = 4; menu.pad_r = 4; menu.pad_t = 4; menu.pad_b = 4; menu.gap = 2;
     menu_root = b_column(root_id, &menu);
     block *mr = btable_get(menu_root);
-    mr->x = 12;
-    mr->y = probe_menu_raise ? 80 : 396;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
     mr->st.corner_radius = 16;   /* §16.1 菜单外框 r16 */
 
+    menu_row_n = 0;
     block_id menu_ids[32];
     int n = menu_collect(menu_ids, 32);
     static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
@@ -664,6 +725,7 @@ void gui_menu_open(void) {
         row.on_click = on_menu_row;
         row.z = (int32_t)menu_ids[i];
         block_id rid = b_row(menu_root, &row);
+        if (menu_row_n < 32) menu_row_ids[menu_row_n++] = rid;
         id_label(menu_ids[i], menu_labels[i]);
         b_text(rid, 0, menu_labels[i]);
     }
@@ -674,6 +736,7 @@ void gui_menu_open(void) {
         app.on_click = on_menu_row;
         app.z = -(a + 1);
         block_id aid = b_row(menu_root, &app);
+        if (menu_row_n < 32) menu_row_ids[menu_row_n++] = aid;
         b_text(aid, 0, app_labels[a]);
     }
 
@@ -681,9 +744,71 @@ void gui_menu_open(void) {
     launch.on_click = on_menu_row;
     launch.z = 0;
     block_id lid = b_row(menu_root, &launch);
+    if (menu_row_n < 32) menu_row_ids[menu_row_n++] = lid;
     b_text(lid, 0, "Launch demo");
 
+    /* 探针超高例：追加若干合成行，强制内容高度超过 max_h，走内部滚动。 */
+    if (probe_menu_tall) {
+        static char tall_labels[16][16];
+        for (int t = 0; t < 16 && menu_row_n < 32; t++) {
+            blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 1);
+            row.on_click = on_menu_row;
+            row.z = 0;
+            block_id tid = b_row(menu_root, &row);
+            menu_row_ids[menu_row_n++] = tid;
+            int o = 0; const char *pre = "Item ";
+            while (*pre) tall_labels[t][o++] = *pre++;
+            tall_labels[t][o++] = (char)('1' + t); tall_labels[t][o] = 0;
+            b_text(tid, 0, tall_labels[t]);
+        }
+    }
+
+    layout_run();   /* ① shrink-to-content：按内容收敛自然宽高 */
+    menu_natural_h = mr->h;
+
+    /* ② 按可用区钳制（屏幕 − 任务栏带 − 安全边距）。 */
+    block *tb = btable_get(taskbar_id);
+    block *st = btable_get(start_id);
+    int avail_l = MENU_SAFE;
+    int avail_r = GFX24_W - MENU_SAFE;
+    int avail_t = MENU_SAFE;
+    int avail_b = tb ? tb->y - MENU_GAP : GFX24_H - MENU_SAFE;
+    int max_w = avail_r - avail_l;
+    int max_h = avail_b - avail_t;
+
+    int mw = mr->w, mh = mr->h;
+    if (mw > max_w) mw = max_w;
+    int overflow = OVF_CLIP;
+    if (mh > max_h) { mh = max_h; overflow = OVF_SCROLL; mr->scroll_y = 0; }
+    mr->max_w = (int16_t)max_w;
+    mr->max_h = (int16_t)max_h;
+    mr->req_w = mw; mr->req_h = mh;   /* 二次 measure 保留钳制后的视口尺寸 */
+    mr->w = mw; mr->h = mh;
+    mr->overflow = (uint8_t)overflow;
+
+    /* ③ 定锚点 / 方向：锚 Start 左边，默认 above（底边贴任务栏上沿）；
+     * 上方空间不足则 flip 到任务栏下方；最后 clamp 回屏内安全区。 */
+    int ax = st ? st->x : MENU_SAFE;
+    menu_place_above = 1; menu_flip = 0;
+    int y = avail_b - mh;
+    if (y < avail_t) {
+        menu_place_above = 0; menu_flip = 1;
+        y = (tb ? tb->y + tb->h : GFX24_H - MENU_SAFE) + MENU_GAP;
+    }
+    int x = ax;
+    if (x + mw > avail_r) x = avail_r - mw;
+    if (x < avail_l) x = avail_l;
+    if (y < avail_t) y = avail_t;
+    if (y + mh > GFX24_H - MENU_SAFE) y = GFX24_H - MENU_SAFE - mh;
+    mr->x = x; mr->y = y;
+    mr->dirty_layout = 1;
+    layout_run();
+
+    menu_sel = menu_row_n > 0 ? 0 : -1;
+    menu_paint_sel();
+    if (probe_menu_tall) menu_scroll_bottom();
     gui_modal_inert(menu_root);
+    gui_set_key_hook(menu_key, 0);
     menu_open = 1;
 }
 
@@ -691,6 +816,8 @@ void gui_menu_close(void) {
     if (!menu_open) return;
     if (menu_root) { b_remove(menu_root); menu_root = 0; }
     menu_clear_inert();
+    gui_set_key_hook(0, 0);
+    menu_row_n = 0; menu_sel = -1;
     menu_open = 0;
 }
 
@@ -698,6 +825,58 @@ int gui_menu_is_open(void) { return menu_open; }
 
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly) {
     if (menu_open) gui_menu_close(); else gui_menu_open();
+}
+
+/* 超高例：滚到底（末项完整进内容框，首项滚出视口）。 */
+static void menu_scroll_bottom(void) {
+    block *mr = btable_get(menu_root);
+    if (!mr || mr->overflow != OVF_SCROLL) return;
+    int content = menu_natural_h;
+    int view = mr->h;
+    mr->scroll_y = (int16_t)(content > view ? content - view : 0);
+    mr->dirty_paint = 1;
+    for (int i = 0; i < menu_row_n; i++) {
+        block *r = btable_get(menu_row_ids[i]);
+        if (r) r->dirty_paint = 1;
+    }
+}
+
+/* D 轮探针：把菜单 / 任务栏 / 开始按钮矩形与几何状态打到串口，供像素断言对照。 */
+static void menu_report_rects(void) {
+    block *mr = btable_get(menu_root);
+    block *tb = btable_get(taskbar_id);
+    block *st = btable_get(start_id);
+    ser_write("GUI:menu-rect ");
+    if (mr) { ser_dec(mr->x); ser_write(","); ser_dec(mr->y); ser_write(",");
+              ser_dec(mr->w); ser_write(","); ser_dec(mr->h); }
+    else ser_write("-1,-1,-1,-1");
+    ser_write(" taskbar-rect ");
+    if (tb) { ser_dec(tb->x); ser_write(","); ser_dec(tb->y); ser_write(",");
+              ser_dec(tb->w); ser_write(","); ser_dec(tb->h); }
+    else ser_write("-1,-1,-1,-1");
+    ser_write(" start-rect ");
+    if (st) { ser_dec(st->x); ser_write(","); ser_dec(st->y); ser_write(",");
+              ser_dec(st->w); ser_write(","); ser_dec(st->h); }
+    else ser_write("-1,-1,-1,-1");
+    ser_write(" place="); ser_dec(menu_place_above);
+    ser_write(" flip="); ser_dec(menu_flip);
+    ser_write(" maxh="); ser_dec(mr ? mr->max_h : 0);
+    ser_write(" nat="); ser_dec(menu_natural_h);
+    ser_write(" scroll="); ser_dec(mr ? mr->scroll_y : 0);
+    ser_write(" sel="); ser_dec(menu_sel);
+    ser_write(" rows="); ser_dec(menu_row_n);
+    ser_write(" ovf="); ser_dec(mr ? mr->overflow : 0);
+    if (menu_row_n > 0) {
+        block *f = btable_get(menu_row_ids[0]);
+        block *l = btable_get(menu_row_ids[menu_row_n - 1]);
+        ser_write(" first ");
+        if (f) { ser_dec(f->x); ser_write(","); ser_dec(f->y); ser_write(",");
+                 ser_dec(f->w); ser_write(","); ser_dec(f->h); }
+        ser_write(" last ");
+        if (l) { ser_dec(l->x); ser_write(","); ser_dec(l->y); ser_write(",");
+                 ser_dec(l->w); ser_write(","); ser_dec(l->h); }
+    }
+    ser_write("\n");
 }
 
 /* ---- 自检探针 ---------------------------------------------------------- */
@@ -1179,6 +1358,53 @@ void gui_probe_menuclick(void) {
     ser_write(" live_before="); ser_dec(live_before);
     ser_write(" live_after="); ser_dec(live_after);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+/* D 轮交互自检：点外部关闭 / Esc 关闭 / 方向键移动选中 / 回车执行选中项。 */
+void gui_probe_menu_itest(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    /* D5a 点菜单外部（桌面底色块）关闭，不下发命中。 */
+    gui_menu_open();
+    layout_run();
+    gui_inject_press(400, 300);
+    gui_inject_release();
+    int outside_closed = !gui_menu_is_open();
+
+    /* D5b Esc 经菜单键盘钩子关闭。 */
+    gui_menu_open();
+    layout_run();
+    menu_key(27, 0);
+    int esc_closed = !gui_menu_is_open();
+
+    /* D6a 方向键下移：选中索引必须由 0 变 1。 */
+    gui_menu_open();
+    layout_run();
+    int sel_before = menu_sel;
+    menu_key(KB_DOWN, 0);
+    int sel_after = menu_sel;
+
+    /* D6b 回车执行：定位 Notepad 行（z=-1）后回车，记事本激活且菜单关闭。 */
+    int np_idx = -1;
+    for (int i = 0; i < menu_row_n; i++) {
+        block *r = btable_get(menu_row_ids[i]);
+        if (r && r->z == -1) { np_idx = i; break; }
+    }
+    if (np_idx >= 0) { menu_sel = np_idx; menu_paint_sel(); }
+    menu_key(10, 0);
+    int enter_notepad = gui_notepad_active();
+    int enter_closed  = !gui_menu_is_open();
+
+    ser_write("GUI:itest outside_closed="); ser_dec(outside_closed);
+    ser_write(" esc_closed="); ser_dec(esc_closed);
+    ser_write(" sel_before="); ser_dec(sel_before);
+    ser_write(" sel_after="); ser_dec(sel_after);
+    ser_write(" enter_notepad="); ser_dec(enter_notepad);
+    ser_write(" enter_closed="); ser_dec(enter_closed);
+    ser_write("\n");
     gui_end();
 }
 
@@ -1889,6 +2115,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "home"))  { gui_probe_home(); return; }
         if (!strcmp_probe(arg, "menu"))  { gui_probe_menu(); return; }
         if (!strcmp_probe(arg, "menuclick")) { gui_probe_menuclick(); return; }
+        if (!strcmp_probe(arg, "menu-itest")) { gui_probe_menu_itest(); return; }
         if (!strcmp_probe(arg, "presence")) { gui_probe_presence(); return; }
         if (!strcmp_probe(arg, "diff"))   { gui_probe_diff(); return; }
         if (!strcmp_probe(arg, "theme"))  { gui_probe_theme(); return; }
@@ -1944,6 +2171,7 @@ void gui_shell_cmd(const char *arg) {
     char word[24];
     split_word(arg, word, sizeof(word), &rest);
     if (!strcmp_probe(word, "shot-menu"))  { shot_menu = 1; probe_menu_raise = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-menu-geo")) { shot_menu = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls")) { shot_controls = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls-card")) { shot_controls = 1; probe_no_sample = 1; probe_card_only = 1; }
     else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
@@ -1981,6 +2209,8 @@ void gui_shell_cmd(const char *arg) {
         else if (style_contains(rest, "app")) shot_style = 0;
         if (style_contains(rest, "light")) shot_tok = TOK_LIGHT;
         else if (style_contains(rest, "hc")) shot_tok = TOK_HIGH_CONTRAST;
+        if (style_contains(rest, "high")) probe_tb_high = 1;
+        if (style_contains(rest, "tall")) probe_menu_tall = 1;
     }
 
     /* v2.80 hotfix: 进桌面先清空控制台文本并冻结控制台侧绘制/选中，
@@ -2002,7 +2232,11 @@ void gui_shell_cmd(const char *arg) {
     if (shot_reset) { gui_reset(); if (!free_sample && !flush_probe) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
     if (shot_style >= 0) gui_style_set(shot_style);
-    if (shot_menu) gui_menu_open();
+    if (shot_menu) {
+        gui_menu_open();
+        if (probe_menu_tall) gui_frame();
+        menu_report_rects();
+    }
     if (shot_controls) { shot_controls_build(); gui_frame(); }
     if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
     if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }

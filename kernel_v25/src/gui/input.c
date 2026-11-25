@@ -217,12 +217,12 @@ static void focus_set(block *b) {
 
 static void on_press(int x, int y) {
     block *b = hit_test(x, y);
-    if (!b) return;
-    /* 菜单模态：点下层空白只关闭菜单，不下发命中。 */
-    if (gui_menu_is_open() && b->layer < LAYER_OVERLAY) {
+    /* 菜单模态：点菜单外部（含下层全部被 inert 后命中为空）只关闭菜单，不下发命中。 */
+    if (gui_menu_is_open() && (!b || b->layer < LAYER_OVERLAY)) {
         gui_menu_close();
         return;
     }
+    if (!b) return;
 
     /* 点击冒泡：命中的通常是最里层的标签/文本块，而 on_click 声明在
      * 行/面板上。向上找最近一个带 on_click 的祖先（含自身），否则

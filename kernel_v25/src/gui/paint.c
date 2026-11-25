@@ -634,6 +634,7 @@ void paint_node_clipped(block *b) {
 void paint_node_body_clipped(block *b) {
     if (!b || !b->visible) return;
     int depth0 = clip_depth;
+    int tdepth0 = tr_depth;
     block *chain[CLIP_DEPTH];
     int n = 0;
     for (block *p = b->parent; p && p->parent && n < CLIP_DEPTH - 1;
@@ -644,8 +645,12 @@ void paint_node_body_clipped(block *b) {
         if (b->overflow == OVF_VISIBLE || p->overflow == OVF_VISIBLE) continue;
         if (b->layer > p->layer) continue;         /* 浮层逃逸父框 */
         paint_clip_push(p->x, p->y, p->w, p->h);
+        if (p->overflow == OVF_SCROLL)
+            paint_trans_push(p->scroll_x, p->scroll_y);
     }
     paint_node_body(b);
+    while (tr_depth > tdepth0)
+        paint_trans_pop();
     while (clip_depth > depth0)
         paint_clip_pop();
 }
