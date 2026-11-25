@@ -281,8 +281,9 @@ static void flush_edges(block *b, int *fl, int *fr, int *ft, int *fb) {
 static int corner_ri(int base_ri, int flush) { return flush ? -1 : base_ri; }
 
 static int calm_on(void) {
-    if (!gui_style_calm()) return 0;
-    return gui_active_style() != gui_token_style(TOK_HIGH_CONTRAST);
+    /* 圆角仅在 calm 样式档；dark/light/hc 三主题同一路径，HC 2px 边框沿同一
+     * cov 掩码 fill_round 收边，不再按主题整体豁免方角。 */
+    return gui_style_calm() ? 1 : 0;
 }
 
 /* full-bleed / 根块 / chrome / 桌面底：不圆角、不加外扩边距、不画阴影。 */
