@@ -1741,6 +1741,7 @@ void gui_shell_cmd(const char *arg) {
             char w2[24]; const char *r2 = 0;
             split_word(arg, w2, sizeof(w2), &r2);
             if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
+            if (!strcmp_probe(w2, "perf"))  { gui_perf_set(r2 ? r2 : ""); return; }
         }
     }
 

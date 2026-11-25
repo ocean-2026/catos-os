@@ -140,6 +140,76 @@ uint32_t stat_damage_area(void)      { return s_damage_area; }
 uint64_t stat_frame_cycles(void)    { return s_frame_cycles; }
 uint32_t stat_last_frame_us(void)   { return s_last_us; }
 
+/* ---- 第 2a 轮：帧性能观测环形缓冲（只测量，不做优化） ------------------ */
+
+#define PERF_RING 32
+static uint32_t perf_on = 1;
+static uint32_t perf_us[PERF_RING];
+static uint32_t perf_area[PERF_RING];   /* 本帧 damage 合并区域覆盖像素数（触碰写像素估计） */
+static uint32_t perf_rects[PERF_RING];  /* 本帧 damage 合并后区域数 */
+static uint32_t perf_n, perf_head;
+
+static void perf_record(uint32_t us, uint32_t area, uint32_t rects) {
+    if (!perf_on) return;
+    perf_us[perf_head] = us;
+    perf_area[perf_head] = area;
+    perf_rects[perf_head] = rects;
+    perf_head = (perf_head + 1) % PERF_RING;
+    if (perf_n < PERF_RING) perf_n++;
+}
+
+static uint32_t perf_sorted_us[PERF_RING];
+
+static uint32_t perf_sort_us(void) {
+    for (uint32_t i = 0; i < perf_n; i++) perf_sorted_us[i] = perf_us[i];
+    for (uint32_t i = 1; i < perf_n; i++) {
+        uint32_t key = perf_sorted_us[i];
+        int j = (int)i - 1;
+        while (j >= 0 && perf_sorted_us[j] > key) {
+            perf_sorted_us[j + 1] = perf_sorted_us[j];
+            j--;
+        }
+        perf_sorted_us[j + 1] = key;
+    }
+    return perf_n;
+}
+
+static int perf_eq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+void gui_perf_set(const char *op) {
+    if (!op || !*op) { gui_perf_dump(); return; }
+    if (perf_eq(op, "on"))    { perf_on = 1; return; }
+    if (perf_eq(op, "off"))   { perf_on = 0; return; }
+    if (perf_eq(op, "reset")) { perf_n = 0; perf_head = 0; perf_on = 1; return; }
+}
+
+void gui_perf_dump(void) {
+    if (perf_n == 0) {
+        ser_write("GUI:perf n=0\n");
+        return;
+    }
+    uint32_t sum_us = 0, sum_area = 0, sum_rect = 0;
+    for (uint32_t i = 0; i < perf_n; i++) {
+        sum_us += perf_us[i]; sum_area += perf_area[i]; sum_rect += perf_rects[i];
+    }
+    uint32_t n = perf_sort_us();
+    uint32_t avg_us = (uint32_t)(sum_us / n);
+    uint32_t med_us = perf_sorted_us[n / 2];
+    uint32_t p95_us = perf_sorted_us[(n * 95) / 100];
+    uint32_t avg_area = (uint32_t)(sum_area / n);
+    uint32_t avg_rect = (uint32_t)(sum_rect / n);
+    ser_write("GUI:perf n="); ser_dec_u(n);
+    ser_write(" us_avg="); ser_dec_u(avg_us);
+    ser_write(" us_median="); ser_dec_u(med_us);
+    ser_write(" us_p95="); ser_dec_u(p95_us);
+    ser_write(" px_avg="); ser_dec_u(avg_area);
+    ser_write(" rects_avg="); ser_dec_u(avg_rect);
+    ser_write("\n");
+}
+
 /* ---- 帧 ----------------------------------------------------------------- */
 
 void gui_frame(void) {
@@ -197,6 +267,7 @@ void gui_frame(void) {
     uint32_t area = 0;
     for (int i = 0; i < dmg_n; i++) area += (uint32_t)(dmg[i].w * dmg[i].h);
     stat_note_frame(t1 - t0, (uint32_t)dmg_n, area);
+    perf_record(s_last_us, stat_damage_area(), stat_damage_rects());
 
     uint32_t seq = s_frames;
     if (seq == 0) {

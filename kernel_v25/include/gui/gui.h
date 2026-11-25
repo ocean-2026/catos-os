@@ -58,6 +58,10 @@ uint32_t  stat_damage_area(void);
 uint64_t  stat_frame_cycles(void);
 uint32_t  stat_last_frame_us(void);
 
+/* 第 2a 轮：帧性能观测（只测量，不优化）。op ∈ on|off|reset；无参 = dump。 */
+void      gui_perf_set(const char *op);
+void      gui_perf_dump(void);
+
 /* ---- 自检探针（串口 GUI: 前缀行） ---- */
 uint32_t  gui_tree_hash(void);
 void      gui_probe_idempotent(void);
