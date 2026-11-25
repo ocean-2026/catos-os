@@ -1,0 +1,153 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "notepad-anim",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column"
+        },
+        "req": {
+          "w": 400,
+          "h": 300
+        },
+        "children": [
+          {
+            "id": 2,
+            "kind": "column",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "layout": {
+              "flow": "column"
+            },
+            "req": {
+              "w": 200,
+              "h": 160
+            },
+            "fill": "panel",
+            "anim_ms": 144,
+            "anim_ease": 5,
+            "anim_mask": 15,
+            "children": [
+              {
+                "id": 3,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "Notepad",
+                "children": [],
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 56,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "T"
+                ],
+                "ce": {
+                  "id": 3,
+                  "parent": 2,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 200,
+              "h": 160
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 1,
+              "layer": 200,
+              "req_w": 200,
+              "req_h": 160,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 400,
+          "h": 304
+        },
+        "flush_sides": [
+          "L",
+          "T"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 400,
+          "req_h": 300,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}
