@@ -33,9 +33,9 @@ import os
 import struct
 import sys
 
-MAGIC = b"CSO1"
-VERSION = 1
-HEADER_SIZE = 32
+MAGIC = b"CSO2"
+VERSION = 2
+HEADER_SIZE = 64
 NO_API = 0xFFFFFFFF
 
 # Mirrors CSO_MAX_* in include/dl.h.
@@ -128,9 +128,21 @@ def main():
         struct.pack("<II", name_off[nm], off) for nm, off in exports)
     name_off_field = export_off + len(table)
 
-    header = MAGIC + struct.pack("<IIIIIII",
-                                 VERSION, base, img, bss, api,
-                                 export_off, len(exports))
+    # CSO2 v2 header: v1 fields keep offsets 0..31; the trailing eight v2
+    # fields default to "no rela / no arrays / whole image RW" until the
+    # 2C-2 relocator and 2C-3 RO text split populate them.
+    header = MAGIC + struct.pack(
+        "<IIIIIIIIIIIIIII",
+        VERSION, base, img, bss, api, export_off, len(exports),
+        0,            # rela_off
+        0,            # rela_cnt
+        0,            # text_end (RO span end; 0 = no RO split yet)
+        img,          # data_end (.data end = whole image for v1-style lib)
+        0,            # init_array_off
+        0,            # init_array_cnt
+        0,            # fini_array_off
+        0,            # fini_array_cnt
+    )
     assert len(header) == HEADER_SIZE
 
     out = header + table + blob + image

@@ -47,21 +47,26 @@ static dl_module_t *dl_find_base(uint32_t base, int tid) {
 int dl_open(struct task *t, const char *path) {
     if (!t || !path || !*path) return DL_ERR_INVAL;
 
-    uint32_t fsize = 0;
-    if (fs_resolve_file(path, 0, &fsize) != 0 || fsize == 0) return DL_ERR_NOENT;
+    uint32_t fsize = 0, clus = 0;
+    if (fs_resolve_file(path, &clus, &fsize) != 0 || fsize == 0) return DL_ERR_NOENT;
     if (fsize > CSO_MAX_FILE) return DL_ERR_INVAL;
 
-    /* Read just the 32-byte header into a small stack buffer first. */
+    /* Read the header into a small stack buffer first.  CSO2 extends the
+     * header to 64 bytes; a CSO1 file only supplies the first 32, so the
+     * trailing v2 fields stay zeroed. */
     uint8_t hb[sizeof(cso_header_t)];
-    if (fs_read_at(path, (char *)hb, 0, (int)sizeof(hb)) < (int)sizeof(hb))
-        return DL_ERR_INVAL;
+    for (uint32_t i = 0; i < sizeof(hb); i++) hb[i] = 0;
+    int hdr_rd = fs_read_at(path, (char *)hb, 0, (int)sizeof(hb));
+    if (hdr_rd < (int)sizeof(cso_header_t) - 32) return DL_ERR_INVAL;
 
     cso_header_t h;
     for (uint32_t i = 0; i < sizeof(h); i++) ((uint8_t *)&h)[i] = hb[i];
     if (h.magic[0] != CSO_MAGIC0 || h.magic[1] != CSO_MAGIC1 ||
-        h.magic[2] != CSO_MAGIC2 || h.magic[3] != CSO_MAGIC3)
+        h.magic[2] != CSO_MAGIC2 ||
+        (h.magic[3] != CSO_MAGIC3 && h.magic[3] != CSO2_MAGIC3))
         return DL_ERR_INVAL;
-    if (h.version != CSO_VERSION) return DL_ERR_INVAL;
+    int is_v2 = (h.magic[3] == CSO2_MAGIC3);
+    if (h.version != CSO_VERSION && h.version != CSO2_VERSION) return DL_ERR_INVAL;
     if (h.image_size == 0 || h.image_size > CSO_MAX_IMAGE) return DL_ERR_INVAL;
     if (h.bss_size > CSO_MAX_BSS) return DL_ERR_INVAL;
     if ((h.base & 0xFFFu) != 0 || h.base < USER_LIB_BASE ||
@@ -70,6 +75,30 @@ int dl_open(struct task *t, const char *path) {
     if (h.export_off < sizeof(cso_header_t) ||
         h.export_off > fsize - h.export_cnt * sizeof(cso_export_t))
         return DL_ERR_INVAL;
+
+    /* CSO2 v2 layout sanity: RO text span ends no after data end, which ends
+     * no after the image; rela/array offsets lie inside the file/image. */
+    if (is_v2) {
+        if (h.text_end > h.data_end || h.data_end > h.image_size)
+            return DL_ERR_INVAL;
+        if (h.rela_off != 0 &&
+            (h.rela_off < sizeof(cso_header_t) ||
+             h.rela_off + h.rela_cnt * sizeof(cso_rela_t) > fsize))
+            return DL_ERR_INVAL;
+        if (h.init_array_cnt > 64 || h.fini_array_cnt > 64) return DL_ERR_INVAL;
+        if (h.init_array_cnt &&
+            (h.init_array_off >= h.image_size ||
+             h.init_array_off + h.init_array_cnt * 4 > h.image_size))
+            return DL_ERR_INVAL;
+        if (h.fini_array_cnt &&
+            (h.fini_array_off >= h.image_size ||
+             h.fini_array_off + h.fini_array_cnt * 4 > h.image_size))
+            return DL_ERR_INVAL;
+    } else {
+        h.rela_off = h.rela_cnt = h.text_end = h.data_end = 0;
+        h.init_array_off = h.init_array_cnt = 0;
+        h.fini_array_off = h.fini_array_cnt = 0;
+    }
 
     /* The raw image is the tail of the file. */
     uint32_t image_off = fsize - h.image_size;
@@ -170,6 +199,16 @@ int dl_open(struct task *t, const char *path) {
     m->export_cnt  = h.export_cnt;
     m->meta        = meta;
     m->meta_bytes  = meta_bytes;
+    m->cluster     = clus;
+    m->text_end    = h.text_end;
+    m->data_end    = h.data_end;
+    m->rela_off    = h.rela_off;
+    m->rela_cnt    = h.rela_cnt;
+    m->init_off    = h.init_array_off;
+    m->init_cnt    = h.init_array_cnt;
+    m->fini_off    = h.fini_array_off;
+    m->fini_cnt    = h.fini_array_cnt;
+    m->refcnt      = 1;
     return m->handle;
 }
 

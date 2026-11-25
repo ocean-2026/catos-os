@@ -39,7 +39,16 @@
 #define CSO_MAGIC1 'S'
 #define CSO_MAGIC2 'O'
 #define CSO_MAGIC3 '1'
+#define CSO2_MAGIC3 '2'
 #define CSO_VERSION  1u
+#define CSO2_VERSION 2u
+
+/* R_386 relocation types (mirror ELF32 i386 codes).  2C-2 implements
+ * 1/2/6/7; every other code is rejected explicitly by the loader. */
+#define R_386_32        1u
+#define R_386_PC32      2u
+#define R_386_GLOB_DAT  6u
+#define R_386_JMP_SLOT  7u
 
 #define CSO_NO_API   0xFFFFFFFFu
 
@@ -60,7 +69,23 @@ typedef struct {
     uint32_t api_offset;
     uint32_t export_off;
     uint32_t export_cnt;
-} cso_header_t;                     /* 32 bytes */
+    /* CSO2 v2 fields (zero / absent for CSO1 v1 files). */
+    uint32_t rela_off;        /* file offset of rela table, 0 = none */
+    uint32_t rela_cnt;
+    uint32_t text_end;        /* RO span end offset from base (text+rodata) */
+    uint32_t data_end;        /* RW .data end offset from base; bss follows */
+    uint32_t init_array_off;  /* offset from base; 0 = none */
+    uint32_t init_array_cnt;
+    uint32_t fini_array_off;
+    uint32_t fini_array_cnt;
+} cso_header_t;                     /* 64 bytes v2; first 32 shared with v1 */
+
+/* CSO2 rela entry (12 bytes, LE). */
+typedef struct {
+    uint32_t r_offset;       /* offset from base where the reloc applies */
+    uint32_t r_info;         /* type: low16, sym_idx: high16 */
+    int32_t  r_addend;
+} cso_rela_t;
 
 typedef struct {
     uint32_t name_off;              /* offset into the name blob */
@@ -76,6 +101,17 @@ typedef struct {
     uint32_t export_cnt;
     uint8_t *meta;                  /* one kernel frame: exports + names */
     uint32_t meta_bytes;
+    /* CSO2 v2 layout + load bookkeeping. */
+    uint32_t cluster;               /* source file first cluster (pool key) */
+    uint32_t text_end;              /* RO span offset from base */
+    uint32_t data_end;              /* RW .data end offset from base */
+    uint32_t rela_off;
+    uint32_t rela_cnt;
+    uint32_t init_off;
+    uint32_t init_cnt;
+    uint32_t fini_off;
+    uint32_t fini_cnt;
+    int      refcnt;                /* global lib refcount (2C-3 shared pool) */
 } dl_module_t;
 
 /* Return codes (negative errno, matching the rest of the syscall ABI). */
