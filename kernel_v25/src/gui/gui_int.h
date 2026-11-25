@@ -96,6 +96,11 @@ int       pop_esc(void);
 void      sh_paint(block *b, uint8_t elevation);
 /* 子树乘法继承后的有效不透明度（返回 1..255） */
 uint8_t   blk_alpha_of(block *b);
+/* 该像素的有效覆盖率 0..255：会话 alpha(ordered16 棋盘量化) × 圆角覆盖率 ×
+ * 命中区域；alpha==未声明且无圆角时返回 255（旧路径零开销）。 */
+uint8_t   blk_cov(block *b, int x, int y);
+/* 以覆盖率合成一个像素（内部走 blend_px；cov>=255 直接写）。文本/图标共用。 */
+void      blk_px_blend(int x, int y, uint32_t color, int cov);
 
 /* cap2 探针族：`gui cap2-<case>`；cap2probe.c 分派到三个包的实现 */
 int       cap2_probe_cmd(const char *arg);
