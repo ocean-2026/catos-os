@@ -30,7 +30,7 @@
 > 未单独合并、未 reset。stb PNG/JPEG 接入仍阻塞于 32 位软浮点运行时，未入构建。
 > 本地三个修复/测试提交（`8fea31e`/`08db94e`/`605ea25`）**尚未 push**。
 
-## 2. 三门禁结果（当前 HEAD `605ea25`，test 镜像实测）
+## 2. 三门禁结果（当前 HEAD `77f0ec0`，test 镜像实测）
 
 测试镜像：`kernel_v25/catos-v2.80-test.iso`（`GUI_AUTOSTART=0`，停 prompt），
 sha256 `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add`。
@@ -219,9 +219,11 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
   `8ac9d54b6b2f482a7b8753177d8714567c0af2a2e4208bb6d03e4f68abfa08a1`（67,108,864 B），未改动。
 
 ### 7.3 main 合并一致性（ff-only）
-- main 已合并：main=`605ea258041abd7c1b1800a858062f7633613b9d`，tree=`48128f42f7454f1ad27a80f94577bbe4fe89a7d7`，
-  双 ISO（`catos-v2.80.iso` `c6c2d19f…26db1f` / `catos-v2.80-test.iso` `8533f41e…31e88`）与 main 一致，无需重打，sha 不变。
-- 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；两侧 commit 与 tree hash 逐一比对相同。
+- main 已合并：main=`77f0ec0ed177f20343ba75a825db1b7427e80a36`，tree=`eeb946b8708f8625a55dca3e6d23dbad6ace1294`，
+  两侧 commit 与 tree hash 逐一比对相同。本轮含 TLS 状态码透传源码 delta，双 ISO 已据此重出：
+  release `catos-v2.80.iso` `37c3f11c…47009` / test `catos-v2.80-test.iso` `6ce35635…021add`。
+- 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；`ls-remote` 确认 main 与 feat/gui-blocks 同值 `77f0ec0`。
+- 历史留档：上一批 `605ea25` 基线双 ISO（`c6c2d19f…26db1f` / `8533f41e…31e88`）当时与 main 一致、无需重打；`444b413`/`504f3ba` 为纯文档提交。
 
 ## 8. 未决 / 已知限制 / 实测清单
 
