@@ -1,5 +1,46 @@
 # 用户态多线程（Stage 3，feat/hosted）
 
+## 3A-1：页后备虚拟连续堆（kvheap，已落地）
+
+在拆 proc/thread 之前先打好通用内核堆地基。实现见 `src/kvheap.c` /
+`include/kvheap.h`，映射原语 `paging_kmap/paging_kunmap` 在 `src/paging.c`。
+
+### 虚拟窗口
+
+```
+0x18000000 .. 0x1a000000   kvheap 窗口，32 MiB（8192 帧），supervisor-only 写回
+```
+
+选窗依据：低于 4 GiB 物理上限；在 256 MiB 身份映射 RAM 顶（实测 `top=0xffe0000`）
+之上，不被 PSE 身份映射覆盖；避开 CE 映像 `0x02000000` 与用户区
+`0x2000000..0x2800000`。窗口 PDE 在 `kdir` 内建 4 KiB 页表，任务目录在建空间时
+从 `kdir` 拷贝这些 supervisor-only PDE，所以在调用者 CR3 上内核仍可达窗口。
+
+### 分配模型
+
+- 接口：`void *kvmalloc(size, align)` / `void kvmfree(va)`；载荷 16 字节对齐，
+  `align` 参数暂留。分配器只发虚拟地址，物理帧可碎。
+- slab：`<=4096` 按 size class（32/64/128/256/512/1024/2048/4096）从共享帧切分；
+  每类一条空闲链。
+- extent：`>4096` 取窗口内一段连续 VA，逐帧映射零散物理帧；头部记帧数。
+- 元数据：每类空闲链头 + extent 空闲链为固定小静态表，**未新增大 `.bss` 数组**。
+
+### 启动自检
+
+`kvheap_selftest()`：分配 8 KiB / 32 KiB 各一次，写满后读回比对；释放后重分配同尺寸
+须拿回同一虚拟地址；再做一次 1 KiB slab 往返同址校验。串口：
+
+```
+kvheap selftest: PASS total=13 free=0 bytes=0
+```
+
+### 已知边界（本轮 deferred）
+
+- extent 空闲跑在释放时**保留帧与映射**挂回空闲链（高水位缓存），帧池回收与 VA 跑
+  紧凑化 deferred；进程/线程退出时的 extent 归还在 3A-3 接线程栈时再补。
+- extent 单次最多 8 帧（32 KiB 量级）；超过需扩 `pa_tmp[]` 容量。
+- 未做对齐大于 16、未做 OOM 回退到 slab 外的大块拆分。
+
 ## 结论
 
 Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态线程。本轮按时间盒

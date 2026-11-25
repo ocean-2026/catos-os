@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "intr.h"
 #include "paging.h"
+#include "kvheap.h"
 #include "task.h"
 #include "fpu.h"
 #include "hw.h"
@@ -58,6 +59,8 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info) {
     tasks_init();
     fpu_init();                 /* Stage 1: CPUID FPU probe + CR0/CR4 lazy setup */
     paging_static_slot_guard_selftest();   /* #D11: prove static-slot overwrite is refused */
+    kvheap_init();
+    kvheap_selftest();                     /* 3A-1: page-backed contiguous heap probe */
     intr_enable();
     btime_mark("K3 intr+tasks+sti");
     hw_mem_boot(lo, hi);

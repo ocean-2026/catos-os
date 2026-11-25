@@ -44,6 +44,10 @@ void     task_space_destroy(task_space_t *s);
  * mirror of a kernel static frame. Prints a [guard] result line to COM1. */
 void     paging_static_slot_guard_selftest(void);
 
+/* Stage 3A-1: supervisor-only high-window map/unmap (kvheap backing). */
+void     paging_kmap(uint32_t va, uint32_t pa, int uc);
+uint32_t paging_kunmap(uint32_t va);   /* returns old frame PA, 0 if absent */
+
 /* ---- VMA type and management ----------------------------------------- */
 /* vma_kind values for vma_new(). */
 #define VMA_IMAGE  0        /* program code/data (read-write or read-only) */
