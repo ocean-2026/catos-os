@@ -1821,7 +1821,7 @@ void gui_shell_cmd(const char *arg) {
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
-    enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
+    enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER, APP_SETTINGS };
     int app_open = APP_NONE;
     char app_path[160]; app_path[0] = 0;
     const char *rest = 0;
@@ -1845,11 +1845,20 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-images"))  { app_open = APP_IMAGES; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-browser")) { app_open = APP_BROWSER; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "shot-settings")) { app_open = APP_SETTINGS; }
     else if (!strcmp_probe(word, "notepad")) { app_open = APP_NOTEPAD; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "canvas"))   { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "files"))    { app_open = APP_FILEMGR; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "browser"))   { app_open = APP_BROWSER; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
+
+    /* 第二参数档/主题：`gui shot-notepad calm dark` 这类后置词。 */
+    if (rest) {
+        if (style_contains(rest, "calm")) shot_style = 1;
+        else if (style_contains(rest, "app")) shot_style = 0;
+        if (style_contains(rest, "light")) shot_tok = TOK_LIGHT;
+        else if (style_contains(rest, "hc")) shot_tok = TOK_HIGH_CONTRAST;
+    }
 
     /* v2.80 hotfix: 进桌面先清空控制台文本并冻结控制台侧绘制/选中，
      * 否则底下的 shell 内容会在鼠标/时钟等路径上被重绘进帧缓冲。 */
@@ -1884,6 +1893,7 @@ void gui_shell_cmd(const char *arg) {
         if (app_path[0]) gui_browser_open(app_path);
         else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
     }
+    if (app_open == APP_SETTINGS) gui_settings_open();
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
 
     gui_idle_loop();

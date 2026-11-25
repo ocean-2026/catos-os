@@ -297,13 +297,20 @@ diff = 0（时钟区除外）；整屏触碰像素相对 480000 显著小于整�
   不得为凑圆角冲出父块边界。
 - 胶囊形（按钮）半径恒为高度一半，不参与同心减法。
 
-### 16.3 现状普查（B 轮第一阶段，dark）
+### 16.3 现状普查（B 轮，dark / calm 档实测）
 - 令牌层 `tokens.c` 三套主题 `.radius = 0`；圆角实际由 paint.c `CALM_RADII = {8,12,16,24}`
   按块短边分档（≥128→24，≥64→16，≥32→12，其余 8）。
-- 圆角路径仅在 **calm 样式档**（`gui_style_calm()`）且块非 ROOT / 非 bleed /
-  非 CHROME / 非 BG、`corner_mode != 1` 时生效；默认 app 档下六组件均为方角。
-- 分层豁免现状：浏览器窗口当前落在 LAYER_CONTENT，被 `calm_shape_eligible` 排除；
-  若要求浏览器外框圆角，需在资格判定中显式纳入 LAYER_CONTENT 窗口块（下一轮评估）。
+- 圆角路径仅在 **calm 样式档**（`gui_style_calm()`，命令 `gui style calm|app`，落盘
+  `/etc/style`）且块非 ROOT / 非 bleed / 非 CHROME / 非 BG、`corner_mode != 1` 时生效；
+  默认 app 档下六组件均为方角。采样必须在 calm 档进行。
+- 浏览器外框根块为 LAYER_WORK（`browser.c br_build_ui`），资格合格；其内容视图
+  LAYER_CONTENT 被排除，属正常分层。浏览器外框 `corner_mode` 保持 0（继承圆角），无需强改。
+- 菜单行 / 关闭块等与父内容区或同列兄弟紧贴的边，按 flush 规则该边角强制方角；
+  菜单行本身是贴列面板行，四角方角是规则结果，不是漏圆。
+- 当前 demo 桌面**无独立 BLK_BUTTON / BLK_INPUT 实例**：按钮工厂在 `decl.c`，
+  输入框在 `inputbox.c`，但未被 Settings / Notepad / 浏览器开屏实例化；菜单行是面板行，
+  浏览器地址栏是面板条。按钮 r12 / 输入栏 r8 档待对应实例落地后再采。
 - 验收采样：通用设施 `evidence-fix/scripts/corner_probe.py`；每角采角外 8 点零差异、
-  块内 4 点 + 中心填充色、法线序列无尖峰、父层单渲染帧同坐标 diff = 0。
+  块内 4 点 + 中心填充色、法线序列无尖峰、父层单渲染帧同坐标 diff = 0，
+  外加几何存在性：绝对角点 ≠ 填充色、距角心 r-1 内点 = 填充色。
 
