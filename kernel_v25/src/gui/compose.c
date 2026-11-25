@@ -468,8 +468,9 @@ void gui_presence_sweep(void) {
     }
 }
 
-void gui_reset(void) {
-    tree_reset();
+static void gui_reset_common(int keep_ce) {
+    if (keep_ce) tree_reset_keep_ce();
+    else         tree_reset();
     anim_reset();
     dmg_reset();
     s_frames = 0; s_layout_nodes = 0; s_double_commit = 0;
@@ -477,6 +478,11 @@ void gui_reset(void) {
     s_frame_cycles = 0; s_last_us = 0;
     s_last_tick = 0;
 }
+
+void gui_reset(void) { gui_reset_common(0); }
+
+/* gui_begin 会话重建专用：保留控制台阶段已提交的 CE 声明子树（见 tree.c）。 */
+void gui_reset_keep_ce(void) { gui_reset_common(1); }
 
 void gui_begin(void) {
     /* v2.80 hotfix: 组件/画布先收摊（画布页池按块持有，不关会跨会话泄漏，
@@ -494,7 +500,7 @@ void gui_begin(void) {
      * 避免上一轮的 sticky 按键或拖拽捕获带进新一轮桌面。保留绝对落点。 */
     mouse_state_reset();
     gui_chrome_reset();
-    gui_reset();
+    gui_reset_keep_ce();
     gfx24_clear(gui_active_style()->bg);
     block *root = gui_root_block();
     root->x = 0; root->y = 0;

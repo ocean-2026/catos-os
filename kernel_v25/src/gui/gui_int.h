@@ -23,6 +23,7 @@ void      tree_free_subtree(block *b);
 uint32_t  tree_count_nodes(void);
 uint32_t  tree_count_subtree(block *b);
 void      tree_reset(void);
+void      tree_reset_keep_ce(void);
 
 /* compose.c */
 void      gui_presence_sweep(void);
@@ -114,6 +115,7 @@ int       cap2_probe_ce(const char *arg);
 void      decl_post_wheel(struct block *b, int dx, int dy);
 void      decl_post_input(struct block *b, const char *utf8);
 void      decl_post_dismiss(struct block *b);
+void      decl_dump_ce_rects(void);
 
 /* input.c（探针注入钩子，复用真实命中/拖拽路径） */
 void      gui_inject_press(int x, int y);
@@ -139,7 +141,9 @@ int       gui_menu_is_open(void);
 
 /* inputbox.c BLK_INPUT 单行输入框（v1 单实例） */
 void      ib_attach(block_id id, void (*on_submit)(block_id id, const char *text));
+void      ib_activate(block_id id);
 void      ib_reset(void);
+void      ib_reset_if_owner(int tid);
 int       ib_is_active(void);
 int       ib_key(int code, void *ud);
 void      ib_render(block_id id);

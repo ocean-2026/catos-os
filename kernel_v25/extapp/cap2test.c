@@ -36,22 +36,32 @@
 #define CAP_EVENTS2   (1u << 8)
 #define CAP_WANT      (CAP_ALPHA | CAP_BUTTON | CAP_EVENTS2)
 
+/* 裁决行先格式化进缓冲区：既镜像到控制台（cap2_abi 门禁口径），
+ * 也通过 file_write 槽位直接落盘（deskev 门禁后台任务取不到 stdout 环）。 */
+static char vbuf[256];
+static int  vlen;
+
+static void vs_ch(char c) {
+    if (vlen < (int)sizeof(vbuf) - 1) vbuf[vlen++] = c;
+}
+static void vs_str(const char *s) { while (*s) vs_ch(*s++); }
+
 static void put_int(int v) {
     char b[12];
     int n = 0;
     unsigned int u;
-    if (v < 0) { ce_write("-"); u = (unsigned int)(-(int)v); }
+    if (v < 0) { vs_ch('-'); u = (unsigned int)(-(int)v); }
     else u = (unsigned int)v;
-    if (u == 0) { ce_write("0"); return; }
+    if (u == 0) { vs_ch('0'); return; }
     while (u) { b[n++] = (char)('0' + u % 10); u /= 10; }
-    while (n) ce_putc(b[--n]);
+    while (n) vs_ch(b[--n]);
 }
 
 static void put_hex(uint32_t v) {
-    ce_write("0x");
+    vs_str("0x");
     const char *dig = "0123456789abcdef";
     int s;
-    for (s = 28; s >= 0; s -= 4) ce_putc(dig[(v >> s) & 0xF]);
+    for (s = 28; s >= 0; s -= 4) vs_ch(dig[(v >> s) & 0xF]);
 }
 
 __attribute__((section(".text.ce_entry")))
@@ -118,9 +128,15 @@ int ce_main(int argc, char **argv) {
     char itext[24]; itext[0] = 0;
     ce_blk_event2_t ev;
 
+    /* 轮询次数可由 argv[1] 覆盖（deskev 端到端门禁需要更长窗口）；
+     * 默认 120 次（~12s），与 cap2_abi 门禁口径一致。 */
+    int iters = 120;
+    if (argc > 1 && argv[1]) iters = ce_atoi(argv[1]);
+    if (iters <= 0) iters = 120;
+
     /* Up to ~12 s: the gate driver injects the click / typing while this
      * task polls.  yield() lets the scheduler run; delay(100) backs off. */
-    for (i = 0; i < 120 && !(click_got && input_got); i++) {
+    for (i = 0; i < iters && !(click_got && input_got); i++) {
         if (api->blk_event_poll2) {
             int j;
             for (j = 0; j < (int)sizeof(ev); j++) ((uint8_t *)&ev)[j] = 0;
@@ -128,7 +144,7 @@ int ce_main(int argc, char **argv) {
             if (got == 1) {
                 if (ev.ev_kind == 0 && !click_got) {
                     click_got = 1;
-                    click_id = ev.target_id;
+                    click_id = ev.id;   /* local id（target_id 为全局块 gid） */
                     click_x = ev.x;
                     click_y = ev.y;
                 } else if (ev.ev_kind == 3 && !input_got) {
@@ -178,17 +194,23 @@ int ce_main(int argc, char **argv) {
     int ok = caps_ok && rc2 == 0 && click_got && input_got &&
              rc1 == 0 && badrec == -39 /* E_DECL_BADREC */;
 
-    ce_write("CAP2TEST caps="); put_hex(caps);
-    ce_write(" rc2="); put_int(rc2);
-    ce_write(" badrec="); put_int(badrec);
-    ce_write(" click="); put_int(click_got);
-    ce_write(" id="); put_int(click_id);
-    ce_write(" x="); put_int(click_x);
-    ce_write(" y="); put_int(click_y);
-    ce_write(" input="); put_int(input_got);
-    ce_write(" text="); ce_write(itext);
-    ce_write(" rec1="); put_int(rc1);
-    ce_write(ok ? " PASS\n" : " FAIL\n");
+    vs_str("CAP2TEST caps="); put_hex(caps);
+    vs_str(" rc2="); put_int(rc2);
+    vs_str(" badrec="); put_int(badrec);
+    vs_str(" click="); put_int(click_got);
+    vs_str(" id="); put_int(click_id);
+    vs_str(" x="); put_int(click_x);
+    vs_str(" y="); put_int(click_y);
+    vs_str(" input="); put_int(input_got);
+    vs_str(" text="); vs_str(itext);
+    vs_str(" rec1="); put_int(rc1);
+    vs_str(ok ? " PASS\n" : " FAIL\n");
+    vbuf[vlen] = 0;
+
+    /* 镜像到控制台（前台/串口裁决口径），并直接落盘供后台门禁读回。 */
+    ce_write(vbuf);
+    if (api->file_write)
+        api->file_write("/cap2.out", vbuf, vlen, 0);
 
     return ok ? 0 : 1;
 }

@@ -194,8 +194,13 @@ static void on_press(int x, int y) {
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
 
-    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。 */
-    if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。命中块本身是输入
+     * 框时按 b 接管（CE 声明块不带 legacy on_click，act 上溯会落空）。 */
+    block *ib_target = (b->kind == BLK_INPUT) ? b : act;
+    if (ib_target && ib_target->kind == BLK_INPUT) {
+        gui_set_key_hook(ib_key, (void *)ib_target->id);
+        ib_activate(ib_target->id);
+    }
     else if (ib_is_active())           gui_set_key_hook(0, 0);
 
     /* 拖拽/缩放：解析到可聚焦面板（resize 边缘带 > 标题/整块拖拽带）。 */
