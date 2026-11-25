@@ -301,6 +301,13 @@ typedef struct catos_api {
     int      (*blk_image_load)(const char *path);
     int      (*blk_image_free)(int res);
     int      (*blk_text_width)(const char *s);
+
+    /* ---- cap2: decl channel v2 (append-only; mirror slots 77-79) ----
+     * Old binaries index only the prefix above and keep working unchanged. */
+    uint32_t (*decl_caps)(void);
+    int      (*blk_commit2)(const void *recs, int n, const char *strings,
+                            int slen, uint32_t rec_size);
+    int      (*blk_event_poll2)(ce_blk_event2_t *ev, int timeout_ms);
 } catos_api_t;
 
 /* install the API (called once at boot) */

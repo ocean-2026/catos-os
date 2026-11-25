@@ -67,6 +67,12 @@ extern int  decl_image_free(task_t *t, int res);
 extern int  decl_text_width(const char *s);
 extern void decl_task_cleanup(task_t *t);
 
+/* cap2: decl channel v2 (src/gui/decl.c). */
+extern uint32_t decl_caps(void);
+extern int  decl_commit2(task_t *t, const void *recs, int n,
+                         const char *strings, int slen, uint32_t rec_size);
+extern int  decl_event_poll2(task_t *t, ce_blk_event2_t *ev, int timeout_ms);
+
 /* Command-drawing gate: a CE-origin call to a banned pixel entry is logged
  * on COM1 as `GUI:deny <slot> pid=<tid>` and answered E_EPERM.  Kernel-
  * internal pixel paths (be_vbe24, compositor blit, image/browser decode)
@@ -843,6 +849,8 @@ enum {
     /* P3 CE 声明式 ABI（append-only，槽 72..76） */
     SYS_DECL_COMMIT, SYS_DECL_EVENT_POLL,
     SYS_DECL_IMAGE_LOAD, SYS_DECL_IMAGE_FREE, SYS_DECL_TEXT_WIDTH,
+    /* cap2: decl channel v2（append-only，槽 77..79；旧号不动） */
+    SYS_DECL_CAPS, SYS_DECL_COMMIT2, SYS_DECL_EVENT_POLL2,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -865,12 +873,20 @@ static void generic_thunk(emit_t *e, uint32_t idx, int nargs) {
     e8(e,0x51);                          /* push ecx         */
     e8(e,0x52);                          /* push edx         */
     e8(e,0x56);                          /* push esi         */
-    if (nargs >= 1) { e8(e,0x8B); e8(e,0x5C); e8(e,0x24); e8(e,0x14); } /* mov ebx,[esp+14] */
-    if (nargs >= 2) { e8(e,0x8B); e8(e,0x4C); e8(e,0x24); e8(e,0x18); } /* mov ecx,[esp+18] */
-    if (nargs >= 3) { e8(e,0x8B); e8(e,0x54); e8(e,0x24); e8(e,0x1C); } /* mov edx,[esp+1C] */
-    if (nargs >= 4) { e8(e,0x8B); e8(e,0x74); e8(e,0x24); e8(e,0x20); } /* mov esi,[esp+20] */
+    /* cap2: a 5-argument call (blk_commit2) also forwards EDI as arg5; the
+     * extra push only exists on that thunk, so the 1..4-arg thunk byte
+     * layout stays unchanged. */
+    int npush = 4;
+    if (nargs >= 5) { e8(e,0x57); npush = 5; }   /* push edi */
+    uint32_t base = 4u * (uint32_t)(npush + 1); /* ret slot + pushes */
+    if (nargs >= 1) { e8(e,0x8B); e8(e,0x5C); e8(e,0x24); e8(e,base + 0); } /* mov ebx,[esp+..] */
+    if (nargs >= 2) { e8(e,0x8B); e8(e,0x4C); e8(e,0x24); e8(e,base + 4); } /* mov ecx,[esp+..] */
+    if (nargs >= 3) { e8(e,0x8B); e8(e,0x54); e8(e,0x24); e8(e,base + 8); } /* mov edx,[esp+..] */
+    if (nargs >= 4) { e8(e,0x8B); e8(e,0x74); e8(e,0x24); e8(e,base + 12); } /* mov esi,[esp+..] */
+    if (nargs >= 5) { e8(e,0x8B); e8(e,0x7C); e8(e,0x24); e8(e,base + 16); } /* mov edi,[esp+..] */
     e8(e,0xB8); e32(e, idx);             /* mov eax, idx     */
     e8(e,0xCD); e8(e,0x80);              /* int 0x80         */
+    if (nargs >= 5) e8(e,0x5F);          /* pop edi          */
     e8(e,0x5E);                          /* pop esi          */
     e8(e,0x5A);                          /* pop edx          */
     e8(e,0x59);                          /* pop ecx          */
@@ -917,6 +933,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*66*/0, /*67*/0, /*68*/0,               /* mouse_x/y/buttons: no args */
         /*69*/3, /*70*/1, /*71*/1,               /* canvas create/present/destroy */
         /*72*/4, /*73*/2, /*74*/1, /*75*/1, /*76*/1, /* decl commit/poll/load/free/textw */
+        /*77*/0, /*78*/5, /*79*/2,                 /* cap2 caps/commit2/poll2 */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -2375,6 +2392,32 @@ void isr_syscall(int_frame_t *f) {
         }
         buf[sizeof(buf) - 1] = 0;
         ret = (uint32_t)decl_text_width(buf);
+        break;
+    }
+
+    /* ---- cap2: decl channel v2（槽 77..79，口径同旧 P3 槽） ------ */
+    case SYS_DECL_CAPS:
+        ret = (uint32_t)decl_caps();
+        break;
+    case SYS_DECL_COMMIT2: {
+        const void *recs = (const void *)a1;
+        int n = (int)a2;
+        const char *strings = (const char *)a3;
+        int slen = (int)a4;
+        uint32_t rec_size = a5;
+        ret = (uint32_t)decl_commit2(t, recs, n, strings, slen, rec_size);
+        break;
+    }
+    case SYS_DECL_EVENT_POLL2: {
+        ce_blk_event2_t ev;
+        if (a1 == 0) { ret = (uint32_t)E_DECL_BADREC; break; }
+        if (copy_from_user(t, &ev, (const void *)a1, sizeof(ev)) != 0) {
+            ret = (uint32_t)E_DECL_BADREC; break;
+        }
+        int rc = decl_event_poll2(t, &ev, (int)a2);
+        if (rc > 0 && copy_to_user(t, (void *)a1, &ev, sizeof(ev)) != 0)
+            rc = E_DECL_BADREC;
+        ret = (uint32_t)rc;
         break;
     }
     default: ret = (uint32_t)-8; break;
