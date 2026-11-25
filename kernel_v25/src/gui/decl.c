@@ -251,6 +251,14 @@ static int validate2(const ce_blk_rec2_t *r, int n, const char *pool, int slen,
         if (d->cap_ver != CE_BLK_REC2_VER) return E_DECL_BADREC;
         if (!kind_allowed_rec2(b->kind)) return E_DECL_BADREC;
 
+        /* elevation 值域 0..5（阴影/SH_PAD/SH_OX 均为 6 元表）：越界明确
+         * 拒绝，不做静默钳制；整批不落树，旧子树不受影响。 */
+        if (d->elevation > 5) {
+            ser_write("GUI:decl bad elevation el="); decl_dec(d->elevation);
+            ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+            return E_DECL_BADREC;
+        }
+
         /* 越层：只允许 WORK。 */
         if (b->layer != LAYER_WORK) return E_DECL_LAYER;
 

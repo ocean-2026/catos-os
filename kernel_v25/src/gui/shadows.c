@@ -62,6 +62,11 @@ void sh_paint(block *b, uint8_t elevation) {
     if (b->kind == BLK_ROOT || b->bleed) return;
     const struct style *tok = gui_active_style();
 
+    /* 防御兜底：值域校验已在 CE 提交期 validate2 拒绝 0..5 之外的档位；
+     * 这里再 clamp 一次，防止内核内旧路径 / 残留字段把越界档带进索引表，
+     * 避免 shadow[el]/SH_PAD[el]/SH_OX[el] 越界读。 */
+    if (elevation > 5) elevation = 5;
+
     int el = elevation;
     if (b->focused && el < 5) el++;            /* 焦点自动 +1 档，上限 5 */
 

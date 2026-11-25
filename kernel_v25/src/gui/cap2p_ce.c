@@ -296,6 +296,60 @@ static int case_rec1_compat(void) {
     return 1;
 }
 
+/* ---- elev-reject：elevation 6 / 255 越界整批拒绝，旧子树不受影响 ---------- */
+
+static int case_elev_reject(void) {
+    int tid = 6;
+    decl_ce_probe_cleanup(tid);
+
+    /* 基线：一棵合法子树（2 块，elevation=3）；后续拒绝不得触碰它。 */
+    ce_blk_rec2_t base[2];
+    rec2_init(&base[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&base[1], 2, 1, BLK_RECT, -1);
+    base[1].elevation = 3;
+    int rc = decl_ce_probe_commit(tid, base, 2, "", 0,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        ser_write("GUI:cap2-elev-reject FAIL baseline rc="); p_dec(rc);
+        ser_putc('\n');
+        return 1;
+    }
+    int base_count = decl_ce_probe_count(tid);
+
+    /* 非法①：elevation=6（越出 0..5 值域）。 */
+    ce_blk_rec2_t bad[2];
+    rec2_init(&bad[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&bad[1], 2, 1, BLK_RECT, -1);
+    bad[1].elevation = 6;
+    rc = decl_ce_probe_commit(tid, bad, 2, "", 0,
+                              (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != E_DECL_BADREC) {
+        ser_write("GUI:cap2-elev-reject FAIL el=6 rc="); p_dec(rc); ser_putc('\n');
+        return 1;
+    }
+
+    /* 非法②：elevation=255。 */
+    bad[1].elevation = 255;
+    rc = decl_ce_probe_commit(tid, bad, 2, "", 0,
+                              (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != E_DECL_BADREC) {
+        ser_write("GUI:cap2-elev-reject FAIL el=255 rc="); p_dec(rc); ser_putc('\n');
+        return 1;
+    }
+
+    /* 拒绝后：块数不变、旧块仍在且档位未被改写；未落地即不渲染新块。 */
+    int after = decl_ce_probe_count(tid);
+    block *old = btable_get(decl_ce_probe_local_to_global(tid, 2));
+    int ok = (after == base_count) && old && old->elevation == 3;
+    ser_write("GUI:cap2-elev-reject ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" base="); p_dec(base_count);
+    ser_write(" after="); p_dec(after);
+    ser_write(" old_el="); p_dec(old ? old->elevation : -1);
+    ser_putc('\n');
+    return 1;
+}
+
 int cap2_probe_ce(const char *arg) {
     if (!arg) return 0;
     if (streq(arg, "ce-caps"))          return case_caps();
@@ -303,5 +357,6 @@ int cap2_probe_ce(const char *arg) {
     if (streq(arg, "ce-input"))         return case_input();
     if (streq(arg, "ce-popover-anchor")) return case_popover();
     if (streq(arg, "ce-rec1-compat"))   return case_rec1_compat();
+    if (streq(arg, "elev-reject"))       return case_elev_reject();
     return 0;
 }
