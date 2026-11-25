@@ -62,16 +62,36 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
 | `gui br` | **PASS** | `result=1 active=1` |
 | dektest（ring3） | 基线 **PASS** | `commit=0 poll=0 tw=16 img=-38 result=1`（74 无样图返 -38 属预期） |
 
-### 像素组
-| 组别 | v2 独立工树基线 | 合并树复跑 |
-|---|---|---|
-| free 像素组 | 3/3 PASS（v2 归档） | `PENDING` |
-| interact 像素组 | 3/3 PASS（v2 归档） | `PENDING` |
-| 桌面默认组（M0 三条） | 历史基线 | `PENDING` |
-| browser 截图组 | 见 §5（独立工树 acceptance） | `PENDING` |
+### 3.1 GUI 探针全量（v2.80 test 镜像复跑，10/10 PASS，anomalies=0）
+镜像 `catos-v2.80-test.iso`（`8533f41e…31e88`），串行逐条独立开机，日志
+`artifacts/gui-blocks/gate-gui-probes-0625.log`（每条串口 `artifacts/gui-blocks/` 下 `<sub>-serial.log`）。
 
-> 像素基线色值 / idem 哈希 / damage 占比：待最终树 `gui_pixel_regress.py` 与 v2 样例帧复跑后回填。
-> v2 基线参考：idem 哈希 `0x88751F07 match=1`；drag 帧 1.54 ms ≤ 4 ms；damage ≈ 2.0% ≤ 25%。
+| 探针 | 判定 | 关键打点（latest） |
+|---|---|---|
+| `gui free` | **PASS**（anomalies 0） | A–E 五块 latest 矩形；`result=1` |
+| `gui interact` | **PASS**（anomalies 0） | `grew_l/r/t/b=1 min_ok=1 max_ok=1 clamped=1 persist=1 result=1` |
+| `gui cvdirty` | **PASS**（anomalies 0） | `outside_bad=0 inside_miss=0 result=1`，帧 425 µs |
+| `gui decl` | **PASS**（anomalies 0） | `result=1 leaked=0`，拒绝码 `-36`（越层） |
+| `gui sak` | **PASS**（anomalies 0） | `panel=1 events_blocked=1 hit_panel=1 leaked=0 result=1`，帧 1175 µs |
+| `gui cvchan` | **PASS**（anomalies 0） | `result=1`，未知句柄 `-34` |
+| `gui cv` | **PASS**（anomalies 0） | `active=1 result=1`，帧 1399 µs |
+| `gui br` | **PASS**（anomalies 0） | `bytes=300 nodes=12 blocks=12 active=1 result=1`（离线样页） |
+| `gui term` | **PASS**（anomalies 0） | `count=2 cwd0=/ cwd1=/work result=1`，帧 1613 µs |
+| `gui style` | **PASS**（anomalies 0） | `mode=app residue=1 taskbar=1 result=1`，帧 1406 µs |
+
+### 3.2 像素组（v2.80 test 镜像复跑，4 组 × 3/3 = 12/12 PASS）
+日志 `artifacts/gui-blocks/`：`gate-pixel-style-app-0625.log`、`gate-pixel-style-calm-0625.log`、
+`gate-pixel-free-0625.log`、`gate-pixel-interact-0625.log`。
+
+| 组别 | 入口命令 | 判定 | 要点 |
+|---|---|---|---|
+| style-app | `gui shot-style-app` | **3/3 PASS** | bg=(30,30,38)；标题/正文/底栏色值命中 |
+| style-calm | `gui shot-style-calm` | **3/3 PASS** | 标题栏退化为 bg(30,30,38)；正文/底栏命中 |
+| free | `gui shot-free-overflow` | **3/3 PASS** | 旧矩形还原 count=4800；新矩形子块 count=4524 |
+| interact | `gui shot-free-interact` | **3/3 PASS** | 左缘拉伸到 180 宽 count=4802；左右块边界点命中 |
+
+- 桌面默认组（M0 三条）与 browser 截图组：browser 组见 §5.2（example/sample 像素 PASS）；M0 默认组本轮未单独跑，`PENDING`。
+- v2 基线参考：idem 哈希 `0x88751F07 match=1`；drag 帧 1.54 ms ≤ 4 ms；damage ≈ 2.0% ≤ 25%。
 
 ## 4. TLS 野站
 
@@ -80,15 +100,19 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
   ECDHE secp256r1（vendored micro-ecc），ECDSA P-256 叶公点 + SHA-256 签名校验；sig_algs 20 项；ChaCha20 写 IV。
 - 串口打点：握手记录 `TLS:rec msgs=<n> port=<p>`；curl HTTPS 成功 `TLS:wild status=<st> bytes=<n>`。
 
-### 4.2 真站结果
-| 站点 | 用户线实测基线（独立工树） | 合并树 `tests/tls_wild.py` 复跑 |
-|---|---|---|
-| `https://example.com` | **200 / 577 B** | `PENDING` |
-| `https://www.baidu.com` | **200 / 227 B** | `PENDING` |
-| 本地强制握手 `0xCCA8` | **PASS**（用户线） | `PENDING` |
+### 4.2 真站结果（v2.80 test 镜像 `8533f41e…31e88`，`tests/tls_wild.py` 复跑）
+日志 `artifacts/gui-blocks/gate-tls-wild-0625.log`；产物 `artifacts/d2-tls/wild_result.json`、`wild_serial.log`、`wild_<host>.ppm`。
 
-- 回归探针：`tests/tls_wild.py`（必需门 example.com 200 + 非空 body；baidu 次级记录）；
-  产物 `artifacts/d2-tls/wild_result.json`、`wild_serial.log`、`wild_<host>.ppm`。
+| 站点 | 基线（用户线） | 本轮字节 | 串口打点 | 状态码 | 判定（判据：status=200 + 字节数） |
+|---|---|---|---|---|---|
+| `https://example.com` | 200 / 577 B | **577 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=0`（非 200） | **FAIL**（状态码未达 200；body 已取回） |
+| `https://www.baidu.com` | 200 / 227 B | **227 B**（与基线一致） | `TLS:rec msgs=1 port=443` 在场 | `TLS:wild status=0`（非 200） | **FAIL**（状态码未达 200；body 已取回） |
+| 本地强制握手 `0xCCA8` | PASS（用户线） | 本轮未跑 | — | — | `PENDING` |
+
+- **定性（未改源码）**：TLS 握手与 body 抓取成功（字节数与基线一致、`TLS:rec msgs=` 在场），但 HTTPS 路径未把 HTTP 状态码透传到 `net_http_last_status()`。
+  源码：`tls_https_get()`（`tls.c:878`）内部已解析 `code` 却未回传；`http_fetch_once()` 的 https 分支（`netstack.c:1209`）直接 `return tls_https_get(...)`，未接 `status_out`，故 `s_http_status` 保持 0，串口 `TLS:wild status=0`。
+  HTTP 明文路径状态码解析正常（见 §5.2 example `status=200`），缺口仅限 HTTPS 回传。与本轮 ring3/GDT/paging 修复无关，列为后续修。
+- 回归探针：`tests/tls_wild.py`（必需门 example.com 200 + 非空 body；baidu 次级记录）；判据未放宽。
 - 本地强制套件探针 `tests/tls_probe.py`（`0xC027`）语义未改。
 
 ### 4.3 遗留说明
@@ -102,16 +126,24 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
   chunked 解码；BMP/PPM 同源图片解码；内联 CSS 盒模型最小集（padding/margin/border/对齐/颜色/尺寸）+ 百分比/max-width。
 - 打点：`GUI:br bytes/nodes/blocks/ms/status/active/result`。
 
-### 5.2 站点 acceptance（独立工树 `browser-accept.json` 基线）
+### 5.2 站点 acceptance（v2.80 test 镜像 `8533f41e…31e88` 复跑）
+驱动 `run_browser.py`；总日志 `artifacts/gui-blocks/gate-browser-accept-0625.log`，JSON
+`artifacts/overnight-20261124/browser-accept.json`，逐站串口/截图 `probes/logs/browser/`、`probes/shots/browser/`。
+
 | 站点 | 类别 | 判定 | 打点 |
 |---|---|---|---|
-| `http://example.com/` | net HTTP | **PASS** | `bytes=577 nodes=10 blocks=4 ms=1330 status=200 active=1 result=1` |
-| `sample://local` | offline | **PASS** | `bytes=300 nodes=12 blocks=12 status=0 active=1 result=1` |
+| `http://example.com/` | net HTTP | **PASS**（像素 PASS） | `bytes=577 nodes=10 blocks=4 status=200 active=1 result=1`，46.5s；截图 `br-example.png` |
+| `sample://local` | offline | **PASS**（像素 PASS） | `bytes=300 nodes=12 blocks=12 result=1`，45.2s；截图 `br-sample.png` |
 | domestic | net HTTP | SKIP | 未配置 `CATOS_BR_DOMESTIC` |
-| `https://example.com/` | https | SKIP（浏览器线当时） | HTTPS 通路待 TLS 修复；现 TLS 已合并，复跑 `PENDING` |
+| `https://example.com/` | https | **SKIP** | 无 `GUI:br` marker；HTTPS 渲染待 TLS 状态码/通路修复，`PENDING` |
 
-- 截图（独立工树 overnight `shots/`）：`http-example.png`、`offline-sample.png`、
-  `https-example-blocked.png`、`browser-bmp.png`。
+### 5.3 浏览器探针（v2.80 test 镜像复跑）
+| 探针 | 判定 | 数字 | 日志 |
+|---|---|---|---|
+| chunked 解码 + 缓冲扩容 | **3/3 PASS** | body **28,739 B**；chunked `bytes=28739` == body、`status=200`、无 trailer 残留（`bytes ≤ body`） | `gate-br-chunked-0625.log`；串口 `artifacts/overnight-20261124/br-chunked-serial.log` |
+| BMP/PPM 同源图 | **2/2 PASS** | `/samples/desktop.bmp` 解码贴图 **800×600**；截图 `browser-bmp.png` | `gate-br-img-0625.log`；串口 `br-img-serial.log` |
+
+- 截图（本轮 overnight `shots/`）：`br-example.png`、`br-sample.png`、`browser-bmp.png`。
 
 ## 6. 本轮修复：ring3 `.ce` 启动空屏根因
 
@@ -176,26 +208,37 @@ sha256 `8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88`。
   双 ISO（`catos-v2.80.iso` `c6c2d19f…26db1f` / `catos-v2.80-test.iso` `8533f41e…31e88`）与 main 一致，无需重打，sha 不变。
 - 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；两侧 commit 与 tree hash 逐一比对相同。
 
-## 8. 未决 / 已知限制 / PENDING 清单
+## 8. 未决 / 已知限制 / 实测清单
+
+> 本轮（2026-11-25 08:05–08:22）全部跑在 `catos-v2.80-test.iso`（`8533f41e…31e88`），串行、独立 /tmp 与端口 448x/449x；日志均在 `artifacts/gui-blocks/`。
 
 1. desk 线合并：`BLK_BUTTON/BLK_INPUT/BLK_TERM`、Settings `gui style` corner 圆角、`gui term` 走
    `shell_exec`；Settings `-6` 菜单动作与 v2 探针分发并集；`con_gui_owned` 闸门与 hotfix `gui_begin`
-   收摊顺序保持不丢。
-2. 全量 GUI 探针与像素回归（free/interact/desktop/browser 组）在最终树复跑；像素色值/idem 哈希/damage 占比待回填。
-3. 真站回归：`tests/tls_wild.py` 两站 + `0xCCA8` 本地握手；浏览器 HTTPS 站复跑。
-4. 真鼠标 `mouse_smoke`：BLOCK-1 穿模、BLOCK-2 点 `z>0` 行整块消失，合并态 ISO 未复验。
-5. calm 档证据：`GUI:style mode=calm` 串口行 + 全块 G2 像素组 + `/etc/style` 重启读回。
-6. stb PNG/JPEG：待 32 位软浮点助手或定点替代；74/75 当前仅 BMP/PPM。
-7. **已知限制（写实）**：
-   - PNG/JPEG 软浮点阻塞；
-   - SMP AP / 多核调度 deferred；
-   - AHCI IDENTIFY ABRT 未通；
-   - calm 示例块几何左偏约 40 px；
-   - CBC `0xC027` Finished 首条 decode_error（不影响 AEAD 野站通路）。
-8. **未做**：`D:\CatOs` 本地同步：主机下线，未做。
+   收摊顺序保持不丢。**仍 PENDING（本轮未涉及）。**
+2. **GUI 探针全量 — PASS 10/10**：free/interact/cvdirty/decl/sak/cvchan/cv/br/term/style 逐条 `RESULT=PASS`、`anomalies=0`；
+   日志 `gate-gui-probes-0625.log`（详见 §3.1）。
+3. **像素组全量 — PASS 12/12**：style-app / style-calm / free / interact 各 3/3；日志
+   `gate-pixel-{style-app,style-calm,free,interact}-0625.log`（详见 §3.2）。桌面默认 M0 组本轮未单独跑，仍 `PENDING`。
+4. **console_clean — PASS**：`diff_px=2338/256000 ratio=0.0091`（0.91%，tol=6）；日志 `gate-console-clean-0625.log`。
+5. **mouse_smoke（真鼠标）— PASS 7/7**：menu_open / menu_row_click / block1_titlebar（三点标题栏色）/
+   block2_alive（块存活）/ drag / resize / second_run_ok；日志 `gate-mouse-smoke-0625.log`。
+6. **TLS 野站回归 — FAIL（状态码判据未达）**：example.com 577 B、baidu 227 B 字节数与基线一致、`TLS:rec msgs=` 在场，
+   但 `TLS:wild status=0`（未到 200）；定性为 HTTPS 状态码未透传（§4.2），未改源码。`0xCCA8` 本地强制握手本轮未跑，`PENDING`。
+7. **浏览器 — PASS（HTTP/离线/解码），HTTPS `PENDING`**：`http://example.com` 577 B status=200 像素 PASS；
+   `sample://local` 300 B PASS；chunked 28,739 B 无残留 3/3；BMP 800×600 2/2（§5.2/§5.3）。`https://example.com/` 无 marker，SKIP/`PENDING`。
+8. calm 档：style-calm 像素组 3/3 PASS（§3.2）；`/etc/style` 重启读回与 `GUI:style mode=calm` 串口行本轮未单独留证，`PENDING`。
+9. stb PNG/JPEG：待 32 位软浮点助手或定点替代；74/75 当前仅 BMP/PPM。
+10. **已知限制（写实）**：
+    - PNG/JPEG 软浮点阻塞；
+    - SMP AP / 多核调度 deferred；
+    - AHCI IDENTIFY ABRT 未通；
+    - calm 示例块几何左偏约 40 px；
+    - CBC `0xC027` Finished 首条 decode_error（不影响 AEAD 野站通路）；
+    - HTTPS 状态码未透传到 `net_http_last_status`（§4.2，待修）。
+11. **未做**：`D:\CatOs` 本地同步：主机下线，未做。
 
-> 注：§8 第 1–6 项的 PENDING（TLS 两站、浏览器 HTTPS、mouse_smoke 7/7 在 v2.80 镜像复验、全量像素组等）
-> 保持 PENDING，本次合并 main 不视为已复验通过。
+> 仍保持 `PENDING` 的项：desk 线合并、桌面默认 M0 像素组、`0xCCA8` 本地握手、浏览器 HTTPS 站、
+> `/etc/style` 重启读回、stb PNG/JPEG。本次合并 main 不视为这些项已复验通过。
 
 ## 9. 环境与口径备注
 
