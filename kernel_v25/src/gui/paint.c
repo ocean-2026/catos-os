@@ -682,7 +682,9 @@ uint8_t blk_cov(block *b, int x, int y) {
     cap2_resolve(b, r);
     int rounded = r[0] || r[1] || r[2] || r[3];
     if (a == 255 && !rounded) return 255;       /* 快速路径：逐像素不变 */
-    int cov = alpha_cov_px(a, b->alpha_mode, x, y);
+    /* 继承 HC：关闭有序抖动（四舍五入最近档）；主题 HC 不改既有抖动行为。 */
+    uint8_t mode = hc_force_tree(b) ? 1 : b->alpha_mode;
+    int cov = alpha_cov_px(a, mode, x, y);
     if (!rounded) return (uint8_t)cov;
     int cc = cap2_shape_cov(b, r, x - b->x, y - b->y);
     return (uint8_t)((uint32_t)cov * (uint32_t)cc / 255u);
@@ -703,9 +705,11 @@ static void fill_round_cap2(block *b, int r[4], uint32_t color) {
     int shape = cap3_shape_of(b, &n10);
     cap3_ensure(shape);
     cap2_masks_init(shape);
+    /* 继承 HC：关闭有序抖动；主题 HC 不改既有抖动行为。 */
+    uint8_t mode = hc_force_tree(b) ? 1 : b->alpha_mode;
     for (int row = 0; row < h; row++) {
         for (int col = 0; col < w; col++) {
-            int cov = alpha_cov_px(a, b->alpha_mode, b->x + col, b->y + row);
+            int cov = alpha_cov_px(a, mode, b->x + col, b->y + row);
             if (cov && rounded) {
                 int cc = cap2_shape_cov(b, r, col, row);
                 cov = cov * cc / 255;
