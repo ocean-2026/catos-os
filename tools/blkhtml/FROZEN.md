@@ -129,10 +129,10 @@ tools/blkhtml/
 ├── schema.json      # 冻结契约（本文件配套，已写好，不改字段名）
 ├── html2blk.py      # HTML → .blk.json（含 diagnostics / UNSUPPORTED）
 ├── blk2bin.py       # .blk.json → recs.bin + strings.bin（+ --emit-c 内核内置页 C 片段）
-├── preview.py       # .blk.json → 单文件 HTML / PNG（app|calm|design 三口径）
+├── preview.py       # .blk.json → 单文件 HTML / PNG / 帧序列（app|calm|design 三口径）
 ├── validate.py      # 断言 C1/G1/G2/B1/B2/R1/S1/S2/D1/T1/L1/O1/P1
-├── samples/         # 5 个样例：.html + .blk.json + 预览产物
-├── tests/           # 单元/回归夹具
+├── samples/         # 基线 5 样例 + samples/cap2/ 五个离线预览样例
+├── tests/           # 单元/回归夹具（test_blkhtml / test_preview / test_cap2_samples）
 └── README.md        # 用法 + 与 schema 的对应
 ```
 
@@ -141,5 +141,17 @@ tools/blkhtml/
 
 ## 8. 提交与证据
 
-- 分支 `feat/blkhtml`，工具 + 文档一起 commit；日志/截图落 `artifacts/gui-tools/`（**不进仓库根**）。
-- 交付前必须：`validate.py` 全绿（5 样例）；`check_link_layout.py --strict` RC=0（若改了内核源）。
+- 分支 `feat/blk-spec3`，工具 + 文档一起 commit；日志/截图落 `artifacts/gui-tools/`（**不进仓库根**）。
+- 交付前必须：`validate.py` 全绿（基线 5 样例 + cap2 5 样例）；`--spec-audit` RC=0；`check_link_layout.py --strict` RC=0（若改了内核源）。
+- cap2 样例证据：`samples/cap2/<名>.blk.json` 哈希锚点见规范 §9.0 / §9.56；预览图与帧序列在 `samples/cap2/out/`；像素断言阈值由几何覆盖率推导，不许写死整图 RGB。
+
+### 8.1 离线预览算法口径（preview.py，确定性纯函数）
+
+> 这些是工具线离线复算口径，用于原型作者不装系统即可复核；与内核取帧残差归因沿用规范 §9.0，不冒充内核逐像素对齐。
+
+- 抖动：4×4 Bayer 16 档阈值表；覆盖率 0..255 量化到 16 级；`alpha_mode=none` 取最近档不抖动；子树 alpha 乘法继承（父×子/255）。
+- 阴影：elevation 0..5 右下光源 9-slice 六档（黑千分比 / 偏移 / 外扩）；HC 主题用 1px 边框替代；阴影在块体外。
+- 形态：arc 四分之一圆 / squircle 超椭圆 n；4×4 子采样面积法覆盖率，阈值 ≥8/16 判不透明；不用线性斜坡。
+- 排版：16px 字高 / 24px 行高基准；字号 8/16/24/32；bold 横向 1px 膨胀；tabular 数字等宽步进；末行按 char/word 补 `...`。
+- 动画：7 缓动 × 5 档时长；按 16ms tick 预生成偏移表；`--frames` 逐帧 PNG、`--play` 进度表；离线推演不改写产物块树。
+- popover：锚定 → 超 max-h 收缩 → 8px 安全边距钳制 → 四向翻转；scrollbar thumb 比例 = 视口/内容。

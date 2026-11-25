@@ -17,7 +17,8 @@ tools/blkhtml/
 ├── blk2bin.py       # .blk.json → recs.bin + strings.bin（+ --emit-c）
 ├── preview.py       # .blk.json → 单文件 HTML / 纯净 PNG
 ├── validate.py      # 规则断言 + --spec-audit 规范一致性审计
-└── tests/           # run_tests.py 入口 + test_blkhtml.py + fixtures/
+├── samples/         # 基线 5 样例 + samples/cap2/ 离线预览样例
+└── tests/           # run_tests.py 入口 + test_blkhtml/preview/cap2_samples + fixtures/
 ```
 
 ## 快速开始
@@ -47,7 +48,15 @@ warning 且退出 0。
 ### preview.py — 预览渲染
 
 参数：`--html`、`--png`、`--mode app|calm|design`、`--theme dark|light|hc`、
-`--font-src`、`--verbose`。
+`--font-src`、`--verbose`、`--frames DIR`（按 16ms tick 逐帧导出 PNG 序列）、
+`--play`（打印每 tick 缓动进度表，不落图）。
+
+离线渲染为确定性纯函数，所有结果可复核：单图走 `--png`，动画走 `--frames`
+序列；不做不可复现的浏览器特效。已实现口径：ordered16 Bayer 16 档抖动（子树
+alpha 乘法继承）、elevation 0..5 右下光源 9-slice 阴影（HC 换 1px 边框）、
+逐角 / pill / auto 半径、arc / squircle 4×4 面积子采样、多行 wrap + ellipsis、
+四档字号（8/16/24/32，bold 横胀、tabular 等宽）、7 条缓动 × 5 档时长、
+popover 锚定→8px 钳制→四向翻转、内置 8 单色图标 + 四角色 tint、scrollbar 比例。
 
 ### validate.py — 规则断言 / 规范审计
 
@@ -84,6 +93,29 @@ md 四处逐字一致，由 `A-9-05..10` 复核。
 - 越界 / 枚举不匹配 / 引用解析失败一律带规则 ID 诊断，**禁止静默降级**；
   `data-alpha` 0–1 比例与 0–255 绝对值判别见规范 §4.12.2。
 
+## samples/cap2 离线预览样例
+
+五个样例各含 `.html` 源、转换后的 `.blk.json`、`out/` 预览图与像素断言；
+哈希锚点与断言口径见规范 §9.56。
+
+```bash
+# 逐样例：转换 → 校验 → 出图
+python3 html2blk.py samples/cap2/alpha-menu.html \
+    --out samples/cap2/alpha-menu.blk.json --title alpha-menu --theme dark
+python3 validate.py samples/cap2/alpha-menu.blk.json
+python3 preview.py samples/cap2/alpha-menu.blk.json \
+    --png samples/cap2/out/alpha-menu-app.png
+# 动画帧序列
+python3 preview.py samples/cap2/notepad-anim.blk.json \
+    --frames samples/cap2/out/notepad-anim-frames
+# popover 四向对照图（up/down/left/right 各一张）
+python3 samples/cap2/export_flip.py samples/cap2/out
+```
+
+断言口径：几何 / 属性直接取块树字段；像素只取块体内部区域统计角色色点亮
+比例，阈值由 alpha 覆盖率与几何尺寸推导，不写死整图 RGB。样例断言脚本
+`tests/test_cap2_samples.py`，预览函数专项 `tests/test_preview.py`。
+
 ## 退出码与常见诊断
 
 - 退出 0：全部 PASS（WARN 不计失败）；退出 1：任一 FAIL（html2blk 命中
@@ -105,7 +137,10 @@ python3 tests/run_tests.py        # 或 python3 -m unittest discover -s tests
 
 覆盖：40 字节记录布局与 pad0、text_off 偏移与 `-1` 语义、串池去重、贴边四角
 归零、UNSUPPORTED 非 0 退出、PNG 解码与尺寸、design/app 像素差异、fixture 全链路，
-cap2/cap3 全部属性 / 标签 / 枚举映射 / 边界值 / 诊断 ID 与 C2 值域，以及回归用例、
+cap2/cap3 全部属性 / 标签 / 枚举映射 / 边界值 / 诊断 ID 与 C2 值域，preview 离线
+渲染专项（抖动覆盖率、9-slice 阴影、逐角/pill/auto 半径、wrap 省略、四档字高、
+7 缓动落点、popover 四向、icon tint、scrollbar 比例、arc vs squircle 覆盖率差），
+五个 cap2 样例端到端流水线 + 哈希锚点 + 像素断言，以及回归用例、
 `--spec-audit` 审计（含 A-9-05..10）与诊断 ID 前缀单测。
 
 ## 语义与判定理由

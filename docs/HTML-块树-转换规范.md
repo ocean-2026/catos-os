@@ -960,6 +960,16 @@ validate --spec-audit
 | browser-toolbar | `8137303d838d2b486ac3c208b2f96863ae585ffde10b09fd29bc24eb9b6f39bf` |
 | fullbleed | `263add68c522893ecf183da1b90953bf748762772cf476803286b8822e02cff3` |
 
+cap2 离线预览样例（`samples/cap2/`，同样 `--title <名> --theme dark` 严格复现）：
+
+| 样例 | `sha256` |
+|---|---|
+| alpha-menu | `019079c7d15b8d5d25e9506b51c0f3fb32a169e947c72eda224d83e83e8794da` |
+| popover-flip | `0d5eed7f66aa64cf9bf0e69f91cbf14490a41548f4fe58ed28872cf12bd81383` |
+| settings-btns | `d81d611f4f9efefb8bd4740b547e6d6301b6936b6dd44254cd9e19864ee35c9d` |
+| notepad-anim | `fd4b5e2ad483336d9ec1044d0e6c0710b13418767ef04f6fb3b4543c14daf275` |
+| status-bar | `4594aab172ee09f51890e70fd6d079407f21b11989d0669a65d4f4fe95d1f52d` |
+
 ### 9.1 样例 settings（18 块 · 池 86 · recs 720B）
 
 #### (a) HTML 片段与规则标注
@@ -1315,6 +1325,37 @@ python3 tools/blkhtml/preview.py out/fullbleed.blk.json \
 sh kernel_v25/build.sh iso
 # 内置页路径：shell 内 gui shot-style-app fullbleed
 ```
+
+### 9.56 cap2 离线预览样例（5 个 · 可复核像素断言）
+
+本组样例走离线 `preview.py` 证据链（不依赖内核取帧）：`html2blk` → `validate` → `preview --png` / `--frames`；像素断言只取块体内部区域统计角色色点亮比例，阈值由 alpha 覆盖率与几何尺寸推导，不写死整图 RGB。断言脚本：`tools/blkhtml/tests/test_cap2_samples.py`；预览专项函数断言：`tools/blkhtml/tests/test_preview.py`。
+
+| 样例 | 块数 | 能力点 | 断言口径 | 证据路径（`samples/cap2/out/`） |
+|---|---:|---|---|---|
+| alpha-menu | 5 | alpha 192/128 乘法继承 + wrap=2 + ellipsis=char | 面板顶部空行点亮比例 ≈ 192/255（±12%）；首文本折 2 行且末行以 `...` 收尾 | `alpha-menu-app.png` |
+| popover-flip | 11 | 四向翻转 prefer up/down/left/right + max-h 收缩 | 四浮层解析出四个方向；rect 满足 8px 安全边距；max-h 超限时高度收缩 | `popover-flip-app.png`、`flip-up/down/left/right.png`（`export_flip.py` 逐向导出） |
+| settings-btns | 5 | 逐角半径 16 16 0 0 + caption 8px | 块树 `radius` 四角与声明一致；说明文字 `font_size=1`；绝对定位规避贴边 flush 清零（§5.1） | `settings-btns-app.png` |
+| notepad-anim | 4 | anim=144 ease=out-back 掩码 x,y,w,h | 帧表 10 帧（144/16+1）；端点进度 0→1；`--frames` 逐帧 PNG 落盘 | `notepad-anim-app.png`、`notepad-anim-frames/frame-000…009.png` |
+| status-bar | 5 | 图标 tint accent/fg + caption tabular 时钟 | 两图标 tint_role=3/1；时钟 `font_size=1`、`font_tabular=1`；accent 图标有墨水像素 | `status-bar-app.png` |
+
+复现（路径相对仓库根）：
+
+```bash
+# 逐样例：转换 → 校验 → 出图
+python3 tools/blkhtml/html2blk.py tools/blkhtml/samples/cap2/<名>.html \
+    --out tools/blkhtml/samples/cap2/<名>.blk.json --title <名> --theme dark
+python3 tools/blkhtml/validate.py tools/blkhtml/samples/cap2/<名>.blk.json
+python3 tools/blkhtml/preview.py tools/blkhtml/samples/cap2/<名>.blk.json \
+    --png tools/blkhtml/samples/cap2/out/<名>-app.png
+# 动画帧序列 / 四向对照图
+python3 tools/blkhtml/preview.py tools/blkhtml/samples/cap2/notepad-anim.blk.json \
+    --frames tools/blkhtml/samples/cap2/out/notepad-anim-frames
+python3 tools/blkhtml/samples/cap2/export_flip.py tools/blkhtml/samples/cap2/out
+# 断言
+python3 -m unittest tools/blkhtml/tests/test_cap2_samples.py tools/blkhtml/tests/test_preview.py
+```
+
+**cap2 残差口径**：离线 preview 的 Bayer 抖动、9-slice 阴影、超椭圆面积采样、缓动插值与翻页定位均为确定性纯函数，单测直接复核覆盖率/比例/落点；本组尚未与内核 QEMU 取帧逐像素比对，字形边缘、掩码表差异归因沿用 §9.0 既有残差类别。
 
 ### 9.6 产物二进制字节级规范
 
