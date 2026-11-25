@@ -331,7 +331,15 @@ void gui_frame(void) {
         paint_begin_frame();
         paint_clip_push_rect(rx0, ry0, dmg[r].w, dmg[r].h);
         /* 覆盖兜底：重合成前先以 bg 角色色填实整条损伤矩形；即使某块
-         * 生命周期出错、某片无人画，屏上也只剩纯底色，不烙上一帧残影。 */
+         * 生命周期出错、某片无人画，屏上也只剩纯底色，不烙上一帧残影。
+         * 矩形面积 ≤0 时预填被跳过，是唯一需要告警的覆盖缺口点。 */
+        if (dmg[r].w <= 0 || dmg[r].h <= 0) {
+            ser_write("GUI:warn coveredskip rect=");
+            ser_dec_u(rx0); ser_write(","); ser_dec_u(ry0);
+            ser_write(","); ser_dec_u(dmg[r].w);
+            ser_write(","); ser_dec_u(dmg[r].h); ser_write("\n");
+            continue;
+        }
         gui_fill_rect(rx0, ry0, dmg[r].w, dmg[r].h, gui_active_style()->bg);
         for (int i = 0; i < paint_count; i++) {
             block *b = paint_list[i];

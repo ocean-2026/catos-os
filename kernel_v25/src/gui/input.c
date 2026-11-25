@@ -38,6 +38,17 @@ static uint8_t   drag_resize_dir;
 static int       drag_off_x, drag_off_y;
 static block    *hover_block;
 
+/* 运行时调试开关（默认关，release 惰性）：故障注入时对硬禁拖块临时放行，
+ * 仅用于核验“被拖块出现在本不该出现的位置时，兜底重合成仍不烙残影”。
+ * 唯一绕过点：drag_denied / drag_band_hit；不写任何像素。 */
+int g_dbg_dragfull = 0;
+
+void gui_dbg_set_dragfull(int on) {
+    g_dbg_dragfull = on ? 1 : 0;
+    ser_write("GUI:warn fault=dragfull ");
+    ser_write(g_dbg_dragfull ? "on\n" : "off\n");
+}
+
 block *gui_hover_target(void) { return hover_block; }
 
 /* 组件键盘钩子：返回 1 表示消费该键，默认 Esc 退出路径不再触发。 */
@@ -125,6 +136,8 @@ static int in_resize_band(block *b, int x, int y) {
 }
 
 static int drag_band_hit(block *cur, int y) {
+    /* 故障注入开关：临时把禁拖块视为整块可拖（仅此一处）。 */
+    if (g_dbg_dragfull) return 1;
     /* 默认 DRAG_NONE 不可拖；仅显式声明 TITLE/FULL 的块参与拖拽带判定，
      * 不再把 0 回落成标题带可拖。 */
     if (cur->drag_mode == DRAG_FULL) return 1;
@@ -136,6 +149,8 @@ static int drag_band_hit(block *cur, int y) {
  * DRAG_FULL 也忽略。这类块是桌面底、容器或任务栏，拖拽只会误移动底色。 */
 static int drag_denied(block *b) {
     if (!b) return 1;
+    /* 故障注入开关：临时放行硬禁拖块（仅此一处绕过，默认关）。 */
+    if (g_dbg_dragfull) return 0;
     if (b->layer == LAYER_BG || b->layer == LAYER_CONTENT) return 1;
     if (b->kind == BLK_ROOT) return 1;
     if (b->bleed) return 1;

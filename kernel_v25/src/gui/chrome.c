@@ -1801,6 +1801,15 @@ void gui_shell_cmd(const char *arg) {
             split_word(arg, w2, sizeof(w2), &r2);
             if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
             if (!strcmp_probe(w2, "perf"))  { gui_perf_set(r2 ? r2 : ""); return; }
+            if (!strcmp_probe(w2, "debug")) {
+                char w3[16]; const char *r3 = 0;
+                split_word(r2 ? r2 : "", w3, sizeof(w3), &r3);
+                if (!strcmp_probe(w3, "dragfull")) {
+                    extern void gui_dbg_set_dragfull(int on);
+                    gui_dbg_set_dragfull(!strcmp_probe(r3 ? r3 : "", "on"));
+                }
+                return;
+            }
         }
     }
 
