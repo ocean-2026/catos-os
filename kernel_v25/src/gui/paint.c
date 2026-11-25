@@ -545,9 +545,31 @@ static int cap2_bucket(int r) {
     return CAP2_R_N - 1;
 }
 
+/* 子树 HC 强制：本块或任一祖先声明 hc_force（绘制漫游沿父链下传；父块
+ * hc_force=1 时整棵子树按 HC 规则渲染）。活动令牌自身的 HC 主题口径由
+ * hc_forced 另行并入，二者正交。 */
+static int hc_force_tree(block *b) {
+    for (; b; b = b->parent)
+        if (b->hc_force) return 1;
+    return 0;
+}
+
 static int hc_forced(block *b) {
     const struct style *tok = gui_active_style();
-    return tok->radius_hc_zero || b->hc_force;
+    return tok->radius_hc_zero || hc_force_tree(b);
+}
+
+/* 有效描边宽度：子树 HC 强制取令牌 border_w_hc（缺省 2）；否则走本块声明。
+ * 主题 HC 不改变既有声明宽度，保持旧帧像素零漂移。 */
+static uint8_t eff_border_w(block *b) {
+    const struct style *tok = gui_active_style();
+    if (hc_force_tree(b)) return tok->border_w_hc ? tok->border_w_hc : 2;
+    return b->st.border_w;
+}
+
+/* 是否需要描边：沿用本块声明（HC 主题/继承不自动补边，避免既有帧漂移）。 */
+static int eff_border_on(block *b) {
+    return b->st.border_w;
 }
 
 static int cap2_shape_declared(const block *b) {
@@ -699,16 +721,59 @@ static void body_fill_cap2(block *b, uint32_t color) {
     fill_round_cap2(b, r, color);
 }
 
-static void body_border_cap2(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
+/* cap2 路径按边描边：只画 sides 声明的边；角带逐像素取圆角掩码覆盖率，
+ * 角外 cov=0 保留父表面原值（边色不得长出圆角外）。bw×bw 角方归水平边，
+ * 垂直边遇邻接水平边跳过，角落只混合一次、不加深。 */
+static void border_sides_cap2(block *b, uint32_t color, uint8_t bw,
+                              uint8_t sides, int r[4]) {
+    int w = b->w, h = b->h;
+    int L = sides & 1, R = sides & 2, T = sides & 4, B = sides & 8;
+    for (int row = 0; row < h; row++) {
+        int hzt = T && row < bw;
+        int hzb = B && row >= h - bw;
+        for (int col = 0; col < w; col++) {
+            int vtl = L && col < bw;
+            int vtr = R && col >= w - bw;
+            if (!hzt && !hzb && !vtl && !vtr) continue;
+            /* 角方去重：水平边在场时，垂直边放弃 bw×bw 交接方块。 */
+            if ((vtl || vtr) && (hzt || hzb)) continue;
+            int cov = 255;
+            int k = -1;
+            if (row < r[0] && col < r[0])                k = 0;
+            else if (row < r[1] && col >= w - r[1])      k = 1;
+            else if (row >= h - r[2] && col < r[2])      k = 2;
+            else if (row >= h - r[3] && col >= w - r[3]) k = 3;
+            if (k >= 0) cov = cap2_shape_cov(b, r, col, row);
+            blend_px(b->x + col, b->y + row, color, cov);
+        }
+    }
+}
+
+/* 非 cap2 路径的按边描边：不透明直写；角方同色重复覆盖不加深。 */
+static void border_sides_plain(block *b, uint32_t color, uint8_t bw,
+                               uint8_t sides) {
+    int x = b->x, y = b->y, w = b->w, h = b->h;
+    if (sides & 1) gui_fill_rect(x, y, bw, h, color);
+    if (sides & 2) gui_fill_rect(x + w - bw, y, bw, h, color);
+    if (sides & 4) gui_fill_rect(x, y, w, bw, color);
+    if (sides & 8) gui_fill_rect(x, y + h - bw, w, bw, color);
+}
+
+static void body_border_cap2(block *b, uint32_t color, uint32_t bg,
+                             uint8_t bw, uint8_t sides) {
     if (bw < 1) return;
     int r[4];
     cap2_resolve(b, r);
-    fill_round_cap2(b, r, color);
-    block inner = *b;
-    inner.x += bw; inner.y += bw;
-    inner.w -= 2 * bw; inner.h -= 2 * bw;
-    if (inner.w > 0 && inner.h > 0)
-        fill_round_cap2(&inner, r, bg);
+    if (!sides) {
+        fill_round_cap2(b, r, color);
+        block inner = *b;
+        inner.x += bw; inner.y += bw;
+        inner.w -= 2 * bw; inner.h -= 2 * bw;
+        if (inner.w > 0 && inner.h > 0)
+            fill_round_cap2(&inner, r, bg);
+        return;
+    }
+    border_sides_cap2(b, color, bw, sides, r);
 }
 
 static void body_fill(block *b, uint32_t color) {
@@ -723,23 +788,32 @@ static void body_fill(block *b, uint32_t color) {
     }
 }
 
-static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
+static void body_border(block *b, uint32_t color, uint32_t bg,
+                        uint8_t bw, uint8_t sides) {
     if (bw < 1) return;
-    if (cap2_shape_declared(b) || b->alpha) { body_border_cap2(b, color, bg, bw); return; }
+    if (cap2_shape_declared(b) || b->alpha) {
+        body_border_cap2(b, color, bg, bw, sides); return;
+    }
     if (calm_shape_eligible(b)) {
         calm_masks_init();
         int tl, tr, bl, br;
         corner_ris(b, calm_r_index(b->w, b->h), &tl, &tr, &bl, &br);
-        fill_round(b, tl, tr, bl, br, color);
-        if (bw >= 1) {
-            block inner = *b;
-            inner.x += bw; inner.y += bw;
-            inner.w -= 2 * bw; inner.h -= 2 * bw;
-            if (inner.w > 0 && inner.h > 0)
-                fill_round(&inner, tl, tr, bl, br, bg);
+        if (!sides) {
+            fill_round(b, tl, tr, bl, br, color);
+            if (bw >= 1) {
+                block inner = *b;
+                inner.x += bw; inner.y += bw;
+                inner.w -= 2 * bw; inner.h -= 2 * bw;
+                if (inner.w > 0 && inner.h > 0)
+                    fill_round(&inner, tl, tr, bl, br, bg);
+            }
+        } else {
+            /* 按边声明：calm 圆角只作用于块体填充，描边走直边条带。 */
+            border_sides_plain(b, color, bw, sides);
         }
     } else {
-        gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
+        if (!sides) gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
+        else        border_sides_plain(b, color, bw, sides);
     }
 }
 
@@ -784,17 +858,21 @@ void paint_node(block *b) {
     uint32_t fg = resolve_color(b, 0);
     uint32_t bg = resolve_color(b, 1);
     uint32_t accent = resolve_color(b, 2);
+    const struct style *tok = gui_active_style();
+    uint8_t bw = eff_border_w(b);
+    int border_on = eff_border_on(b);
 
     paint_halo(b);
 
-    /* cap2：elevation 九宫阴影（画在块体之外，先于本体绘制）。 */
-    sh_paint(b, b->elevation);
+    /* cap2：elevation 九宫阴影（画在块体之外，先于本体绘制）。
+     * HC 强制（含子树继承）：无阴影，elevation 清零不下传投影层。 */
+    sh_paint(b, hc_forced(b) ? 0 : b->elevation);
 
     switch (b->kind) {
     case BLK_RECT:
         body_fill(b, bg);
-        if (b->st.border_w)
-            body_border(b, gui_active_style()->border, bg, b->st.border_w);
+        if (border_on)
+            body_border(b, tok->border, bg, bw, b->border_sides);
         break;
     case BLK_TEXT: {
         if (bg) body_fill(b, bg);
@@ -822,15 +900,15 @@ void paint_node(block *b) {
         uint32_t bgc = bg, fgc = fg;
         if (b->focused) { fgc = bg; bgc = fg; }   /* 按压/聚焦反色反馈 */
         body_fill(b, bgc);
-        if (b->st.border_w)
-            body_border(b, gui_active_style()->border, bgc, b->st.border_w);
+        if (border_on)
+            body_border(b, tok->border, bgc, bw, b->border_sides);
         txt_draw_block(b, fgc);     /* BUTTON 由文本层做居中；单行/折行同一入口 */
         break;
     }
     case BLK_INPUT:
         body_fill(b, bg);
-        if (b->st.border_w)
-            body_border(b, gui_active_style()->border, bg, b->st.border_w);
+        if (border_on)
+            body_border(b, tok->border, bg, bw, b->border_sides);
         break;
     case BLK_COLUMN:
     case BLK_ROW:
@@ -842,8 +920,8 @@ void paint_node(block *b) {
     case BLK_POPOVER:
         /* 浮层本体：底色 + 描边由这里画；几何（翻转/钳制）由 popover.c 在布局期算。 */
         if (bg || b->st.role_bg) body_fill(b, bg);
-        if (b->st.border_w)
-            body_border(b, gui_active_style()->border, bg, b->st.border_w);
+        if (border_on)
+            body_border(b, tok->border, bg, bw, b->border_sides);
         break;
     case BLK_ICON:
         icon_draw(b, fg, accent);
