@@ -98,6 +98,7 @@ void      ib_render(block_id id);
 void      gui_settings_open(void);
 void      gui_settings_close(void);
 int       gui_settings_active(void);
+void      st_layout_rects(int i, int *x, int *y, int *w, int *h);
 int       gui_style_calm(void);
 void      gui_style_set(int calm);
 void      gui_style_load(void);

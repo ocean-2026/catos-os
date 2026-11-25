@@ -2440,7 +2440,20 @@ void gui_shell_cmd(const char *arg) {
         if (app_path[0]) gui_browser_open(app_path);
         else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
     }
-    if (app_open == APP_SETTINGS) gui_settings_open();
+    if (app_open == APP_SETTINGS) {
+        gui_settings_open();
+        int rx, ry, rw, rh; st_layout_rects(-1, &rx, &ry, &rw, &rh);
+        ser_write("GUI:settings-rows root ");
+        ser_dec(rx); ser_write(","); ser_dec(ry); ser_write(",");
+        ser_dec(rw); ser_write(","); ser_dec(rh);
+        for (int i = 0; i < 2; i++) {
+            int ox, oy, ow, oh; st_layout_rects(i, &ox, &oy, &ow, &oh);
+            ser_write(" opt ");
+            ser_dec(ox); ser_write(","); ser_dec(oy); ser_write(",");
+            ser_dec(ow); ser_write(","); ser_dec(oh);
+        }
+        ser_write("\n");
+    }
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
 
     gui_idle_loop();

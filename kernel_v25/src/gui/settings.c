@@ -208,4 +208,11 @@ void gui_settings_open(void) {
     gui_raise_to_front(st_root);
 }
 
+/* 08d：上报根框(i=-1)与选项行(i=0/1) bbox，供行框两两不相交断言。 */
+void st_layout_rects(int i, int *x, int *y, int *w, int *h) {
+    block *b = (i < 0) ? btable_get(st_root) : btable_get(st_opt[i]);
+    if (!b) { if (x) *x = 0; if (y) *y = 0; if (w) *w = 0; if (h) *h = 0; return; }
+    if (x) *x = b->x; if (y) *y = b->y; if (w) *w = b->w; if (h) *h = b->h;
+}
+
 int gui_settings_active(void) { return st_active; }
