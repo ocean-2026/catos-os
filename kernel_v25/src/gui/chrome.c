@@ -1761,6 +1761,7 @@ void gui_shell_cmd(const char *arg) {
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
+    int deskev = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
@@ -1780,6 +1781,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-float")) free_float = 1;
     else if (!strcmp_probe(word, "shot-free-overflow")) free_overflow = 1;
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
+    else if (!strcmp_probe(word, "deskev")) deskev = 1;
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
@@ -1804,7 +1806,7 @@ void gui_shell_cmd(const char *arg) {
         return;
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
-                      free_interact;
+                      free_interact || deskev;
     gui_begin();
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
@@ -1827,6 +1829,7 @@ void gui_shell_cmd(const char *arg) {
         else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
     }
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
+    if (deskev) { layout_run(); gui_frame(); decl_dump_ce_rects(); }
 
     gui_idle_loop();
 
