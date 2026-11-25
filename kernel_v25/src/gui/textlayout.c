@@ -219,16 +219,18 @@ static int layout_core(const char *s, uint8_t fs, uint8_t sc, uint8_t tabular,
 static struct {
     const char *txt;
     int    max_w;
-    uint8_t fs, wrap, tab, used;
+    uint8_t fs, wrap, ell, lh, sc, tab, used;
     int    lines, natw, h;
 } cache[CACHE_N];
 static int cache_hits = 0;
 
 static int cache_get(const char *s, int max_w, uint8_t fs, uint8_t wrap,
-                     uint8_t tab, int *lines, int *natw, int *h) {
+                     uint8_t ell, uint8_t lh, uint8_t sc, uint8_t tab,
+                     int *lines, int *natw, int *h) {
     for (int i = 0; i < CACHE_N; i++) {
         if (!cache[i].used || cache[i].txt != s || cache[i].max_w != max_w ||
-            cache[i].fs != fs || cache[i].wrap != wrap || cache[i].tab != tab)
+            cache[i].fs != fs || cache[i].wrap != wrap || cache[i].ell != ell ||
+            cache[i].lh != lh || cache[i].sc != sc || cache[i].tab != tab)
             continue;
         *lines = cache[i].lines; *natw = cache[i].natw; *h = cache[i].h;
         cache_hits++;
@@ -238,11 +240,13 @@ static int cache_get(const char *s, int max_w, uint8_t fs, uint8_t wrap,
 }
 
 static void cache_put(const char *s, int max_w, uint8_t fs, uint8_t wrap,
-                      uint8_t tab, int lines, int natw, int h) {
+                      uint8_t ell, uint8_t lh, uint8_t sc, uint8_t tab,
+                      int lines, int natw, int h) {
     static int ring = 0;
     int i = ring; ring = (ring + 1) % CACHE_N;
     cache[i].txt = s; cache[i].max_w = max_w;
-    cache[i].fs = fs; cache[i].wrap = wrap; cache[i].tab = tab;
+    cache[i].fs = fs; cache[i].wrap = wrap; cache[i].ell = ell;
+    cache[i].lh = lh; cache[i].sc = sc; cache[i].tab = tab;
     cache[i].used = 1;
     cache[i].lines = lines; cache[i].natw = natw; cache[i].h = h;
 }
@@ -278,7 +282,8 @@ int txt_wrapped_h(const char *s, uint8_t font_size, uint8_t scale,
     if (!s || !*s) return txt_font_h(font_size, scale);
     uint8_t sc = scale ? scale : 1;
     int lines, natw, h;
-    if (cache_get(s, max_w, font_size, wrap_lines, tabular, &lines, &natw, &h))
+    if (cache_get(s, max_w, font_size, wrap_lines, ellipsis, line_h_px, sc,
+                  tabular, &lines, &natw, &h))
         return h;
     txt_line_t la[MAX_LINE];
     int nl = layout_core(s, font_size, sc, tabular, max_w, wrap_lines,
@@ -288,7 +293,8 @@ int txt_wrapped_h(const char *s, uint8_t font_size, uint8_t scale,
     int maxlw = 0;
     for (int i = 0; i < nl; i++) if (la[i].w > maxlw) maxlw = la[i].w;
     h = nl * lh;
-    cache_put(s, max_w, font_size, wrap_lines, tabular, nl, maxlw, h);
+    cache_put(s, max_w, font_size, wrap_lines, ellipsis, line_h_px, sc,
+              tabular, nl, maxlw, h);
     return h;
 }
 

@@ -13,6 +13,7 @@
 #include "gfx24.h"
 #include "serial_log.h"
 #include "render.h"
+#include "render_be.h"
 
 /* 与 textlayout.c 同布局的行结构镜像。 */
 typedef struct {
@@ -173,6 +174,75 @@ static int case_font(const char *arg, uint8_t fs, int exp_h, int exp_aw,
     return 1;
 }
 
+static int hz_ink16(uint32_t cp) {
+    const uint8_t *h = render_font_hz(cp);
+    if (!h) return 0;
+    int n = 0;
+    for (int r = 0; r < 16; r++)
+        for (int c = 0; c < 16; c++)
+            if (h[r * 2 + (c >> 3)] & (1u << (7 - (c & 7)))) n++;
+    return n;
+}
+
+static int case_font8_cjk(const char *arg) {
+    (void)arg;
+    /* 像素读数必须在 gfx24 后端：文本控制台里 LFB 为空，读数恒 0。 */
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:cap2-font8-cjk FAIL gfx=0\n");
+        con_set_gui_mode(0);
+        return 1;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W;
+    gui_root_block()->h = GFX24_H;
+
+    blk_spec sp;
+    for (int i = 0; i < (int)sizeof(sp); i++) ((char *)&sp)[i] = 0;
+    sp.layer = LAYER_WORK; sp.visible = 1; sp.scale = 1;
+    sp.req_w = -1; sp.req_h = -1;
+    sp.fg = gui_active_style()->fg;
+    sp.bg = gui_active_style()->panel;
+    sp.font_size = 1;
+
+    block_id id = b_text(0, &sp, "中");
+    gui_frame();
+
+    block *b = btable_get(id);
+    uint32_t cp; dec_utf8("中", &cp);
+    int ink16 = hz_ink16(cp);
+    int lit = 0, left = 0, right = 0;
+    if (b) {
+        uint32_t bg = gfx24_getpx(b->x + 1, b->y + 1);
+        int br = bg >> 16 & 0xFF, bg_ = bg >> 8 & 0xFF, bb = bg & 0xFF;
+        for (int y = 0; y < b->h; y++)
+            for (int x = 0; x < b->w; x++) {
+                uint32_t c = gfx24_getpx(b->x + x, b->y + y);
+                int r = c >> 16 & 0xFF, g = c >> 8 & 0xFF, bl = c & 0xFF;
+                int dr = r > br ? r - br : br - r;
+                int dg = g > bg_ ? g - bg_ : bg_ - g;
+                int db = bl > bb ? bl - bb : bb - bl;
+                if (dr > 30 || dg > 30 || db > 30) {
+                    lit++;
+                    if (x < b->w / 2) left++; else right++;
+                }
+            }
+    }
+    int ok = b && lit > 0 && lit * 2 <= ink16 && left > 0 && right > 0;
+    ser_write("GUI:cap2-font8-cjk ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" lit="); t_dec(lit);
+    ser_write(" ink16="); t_dec(ink16);
+    ser_write(" left="); t_dec(left);
+    ser_write(" right="); t_dec(right);
+    ser_write("\n");
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+    return 1;
+}
+
 static int case_font8(const char *arg)  { return case_font(arg, 1,  8,  8,  8, "font8"); }
 static int case_font16(const char *arg) { return case_font(arg, 0, 16,  8, 16, "font16"); }
 static int case_font24(const char *arg) { return case_font(arg, 3, 24, 12, 24, "font24"); }
@@ -282,12 +352,17 @@ static int case_cache(const char *arg) {
     txt_probe_cache_reset();
     int h1 = txt_wrapped_h(s, 0, 1, 0, 120, 2, 1, 0);
     int h2 = txt_wrapped_h(s, 0, 1, 0, 120, 2, 1, 0);
+    /* 同文本同宽：改 line_h 必须未命中缓存且取到新值；改 ellipsis 也必须未命中。 */
+    int h3 = txt_wrapped_h(s, 0, 1, 0, 120, 2, 1, 40);
+    int h4 = txt_wrapped_h(s, 0, 1, 0, 120, 2, 2, 0);
     int hits = txt_probe_cache_hits();
-    int ok = h1 == h2 && hits == 1;
+    int ok = h1 == h2 && h3 != h1 && hits == 1;
     ser_write("GUI:cap2-cache ");
     ser_write(ok ? "PASS" : "FAIL");
     ser_write(" h1="); t_dec(h1);
     ser_write(" h2="); t_dec(h2);
+    ser_write(" h3="); t_dec(h3);
+    ser_write(" h4="); t_dec(h4);
     ser_write(" hits="); t_dec(hits);
     ser_write("\n");
     return 1;
@@ -301,6 +376,7 @@ int cap2_probe_text(const char *arg) {
     if (eq(arg, "ellipsis-char"))  return case_ellchar(arg);
     if (eq(arg, "ellipsis-word"))  return case_ellword(arg);
     if (eq(arg, "font8"))          return case_font8(arg);
+    if (eq(arg, "font8-cjk"))      return case_font8_cjk(arg);
     if (eq(arg, "font16"))         return case_font16(arg);
     if (eq(arg, "font24"))         return case_font24(arg);
     if (eq(arg, "font32"))         return case_font32(arg);
