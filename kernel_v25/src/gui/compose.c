@@ -344,6 +344,9 @@ void gui_begin(void) {
     gui_term_reset();
     ib_reset();
     gui_input_reset();
+    /* 跨会话清残留按键 / 半包 / 积压滚轮：与 GUI 输入态在同一处一起复位，
+     * 避免上一轮的 sticky 按键或拖拽捕获带进新一轮桌面。保留绝对落点。 */
+    mouse_state_reset();
     gui_chrome_reset();
     gui_reset();
     gfx24_clear(gui_active_style()->bg);
@@ -354,5 +357,9 @@ void gui_begin(void) {
 }
 
 void gui_end(void) {
+    /* 退出桌面边界：先清 GUI 拖拽/捕获/焦点/退出请求态，再清鼠标驱动会话态
+     * （残留按键 / 半包 / 滚轮），两边一起清，避免半清把 sticky 态留给下一轮。 */
+    gui_input_reset();
+    mouse_state_reset();
     gui_reset();
 }
