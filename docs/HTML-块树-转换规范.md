@@ -633,6 +633,72 @@ HTML 元素上的 `data-blk-*` 属性是样式白名单之外唯一的显式覆�
 
 ARC 形态下 `corner_n` 不写入；`corner_n` 仅 SQUIRCLE 形态有效。
 
+#### 4.12.6 动画字段语义（`anim_ms` / `anim_ease` / `anim_mask`）
+
+**`anim_ms`（`data-anim`，u16）时长档与语义**
+
+| `anim_ms` | 语义 | 帧表口径 |
+|---|---|---|
+| 0 | 无动画（缺省 = 关） | 两帧之间无中间帧；状态一帧直达终态，不走过渡路径 |
+| 48 | 超短过渡（微交互 / 高亮闪烁） | 按 16ms tick 预生成偏移表 |
+| 96 | 短过渡 | 同上 |
+| 144 | 标准过渡（`notepad-anim` 样例） | 同上；`144/16+1` = 10 帧 |
+| 192 | 长过渡 | 同上 |
+| 288 | 最长过渡 | 同上 |
+
+- 允许集合 `{0, 48, 96, 144, 192, 288}`，单位 ms；表外取值 → C2 / M-CAP2-13 诊断。
+- 省略或缺省 = 0（关）；`anim_ms=0` 时绘制 / 帧循环不产生过渡。
+
+**`anim_ease`（`data-ease`，u8）逐值映射**
+
+| HTML 值 | `anim_ease` | 曲线 | 离线预览公式（t ∈ [0,1]） |
+|---|---:|---|---|
+| `none` | 0 | 无缓动（恒起点；配合 `anim_ms=0`） | 0 |
+| `linear` | 1 | 线性 | t |
+| `in` | 2 | 二次加速 | t² |
+| `out` | 3 | 二次减速 | 1 − (1 − t)² |
+| `inout` | 4 | 三次对称 | 3t² − 2t³ |
+| `out-back` | 5 | 回弹出 | 1 + c3·(t−1)³ + c1·(t−1)²，`c1=1.70158`，`c3=c1+1` |
+| `in-back` | 6 | 回弹入 | c3·t³ − c1·t²，`c1=1.70158`，`c3=c1+1` |
+| `step` | 7 | 阶跃 | `t<1` → 0；`t≥1` → 1 |
+
+- 值域 0..7；表外枚举 → M-CAP2-14 诊断；省略缺省 0 = `none`。
+
+**`anim_mask`（`data-anim-props`，u8）位映射**
+
+| 位 | 掩码值 | HTML 值 | 动画的属性 |
+|---|---:|---|---|
+| bit0 | 1 | `x` | 横坐标 |
+| bit1 | 2 | `y` | 纵坐标 |
+| bit2 | 4 | `w` | 宽度 |
+| bit3 | 8 | `h` | 高度 |
+| bit4 | 16 | `alpha` | 透明度 |
+| bit5 | 32 | `elevation` | 层级阴影（保留位） |
+
+- 0 = 无可动画属性；多值以 `,` / `|` / 空白分隔位或；表外侧别名 → M-CAP2-15；值域 0..63（bit6 / bit7 保留置 0）。
+
+**reduced motion（减弱动效）口径**
+
+- 进入减弱动效状态时：动画**一帧直达**终态——不生成中间帧、不播放缓动、不出帧序列；`anim_ms` 视同 0，块直接落在终态 rect / alpha / elevation。
+- 内核预留钩子 `anim_reduced(int on)`（`kernel_v25/src/gui/anim.c`），当前为接线桩；消费点随 cap2 动画包线落地。工具线预览无 reduced-motion 开关时按基线静帧（tick 为空）渲染，等同终态单帧。
+
+#### 4.12.7 cap3 形态字段补充（`corner_shape` / `corner_n`）
+
+照抄表（与 §4.12.5 总账行一致，展开取值与钳制口径）：
+
+| HTML 属性 | 块字段 | 取值 / 转换 | 默认 / 钳制 |
+|---|---|---|---|
+| `data-radius-shape` | `corner_shape:u8` | `arc`→0；`squircle`→1；`g2`→1（别名） | 省略 = 0 = `arc`；表外值 → `E_RADIUS_SHAPE_BAD` |
+| `data-squircle-n` | `corner_n:u8` | 超椭圆阶数，单位 0.1：`4.5`→45，`5`→50 | 0 = 默认 50（n=5.0）；合法 10..50（1.0..5.0）；越界钳到 50 并记 `WARN_RADIUS_N_RANGE`；非数值 → `E_RADIUS_N_BAD`；仅 SQUIRCLE 形态写入，ARC 不写 `corner_n` |
+
+**内核实测口径（cap3 渲染包，只读事实；本工具线不改内核）**
+
+- 三套惰性掩码表：`ARC`（n=2.0 圆）/ `SQ5`（n=5.0 超椭圆）/ `SQ45`（n=4.5 超椭圆）；表位 `cap3_tab[shape][半径档][24][24]`，惰性生成（`cap3_ensure` 用位图控制已生成形态）。
+- 半径档位 4 档 `CALM_RADII = {8, 12, 16, 24}`；每像素 4×4 = 16 个子样本（1/8 px 中点 `OFF={1,3,5,7}`），按形态方程判定后 `count*255/16` 量化为覆盖率 0..255；纯整数 Q16 运算，无浮点 / SSE。
+- 实测（离线复算内核同公式）：**ARC（n=2.0）与解析圆弧掩码逐字节 diff=0**；**ARC 与 SQ5 在角部对角中段逐像素覆盖率差 maxdiff=255**（4 档 `{8,12,16,24}` 均成立），证明两套几何确实不同。
+- CE 通道：`ce_blk_rec2_t` 只下发 `corner_shape`，**不下发** `corner_n`；squircle 指数在 CE 侧回落到默认 n=5.0（SQ5）。
+- 预览口径：`preview.py` 已按同一 4×4 面积公式支持 arc / squircle（读 `corner_shape` / `corner_n`，`n = corner_n/10.0`）；arc 走圆方程 `x²+y²≤r²`，squircle 走超椭圆 `|x/r|ⁿ+|y/r|ⁿ≤1`。预览用浮点解析方程、内核用 Q16 整数，角部残差归因沿用 §9.0，不冒充逐像素对齐。
+
 ---
 
 ## 5. 贴边方角与圆角覆盖率（规则 + 分界）
@@ -1376,6 +1442,7 @@ python3 -m unittest tools/blkhtml/tests/test_cap2_samples.py tools/blkhtml/tests
 | v0.1 | 基线 `89584c4` | 工作记录稿：HTML/JSON → 块树映射、内核事实摘录、首轮样例证据 | 参考实现轮次 |
 | v0.2 | 2026-11-25 | 定位重写（三层真源，工具降为可弃参考实现）；新增 §3 `blk_spec` v2 演进计划；§7 三态判定（甲 / 乙 / 丙）+ 有损表；规则 ID 体系（M-* / U-* / L-7.3-* / A-9-*）；断言可复核化（`path::symbol` 双标注）；§9 五个端到端样例附录；规范表全部内联，去除对外部契约文件的权威外挂 | 规范定稿 |
 | v0.3 | 2026-11-25 | cap2 能力扩展：新增 §4.12 字段映射总账（26 个 v3 属性 + `c-popover` / `c-icon` 两标签，规则 `M-CAP2-01..23`）；§7.2.0「已支持」表迁移半透明 / 多行折行 / 六档阴影 / 动效缓动 / 浮层锚定；kind 追加 `BLK_POPOVER=15` / `BLK_ICON=16`；校验新增 C2 值域断言；审计新增 A-9-05..10（属性 / 字段 / 枚举 / 默认值 / 诊断 ID / kind 三处一致性）；cap3 形态增量 §4.12.5（`data-radius-shape` / `data-squircle-n` → `corner_shape` / `corner_n`，规则 `R-7.5-01..03`，诊断 `E_RADIUS_N_BAD` / `WARN_RADIUS_N_RANGE`）；HTML 属性名以 v3 规范为权威、内核字段名以冻结表为准，映射唯一 | cap2 契约线（`feat/blk-cap2` `754d82c`）；cap3 命名已评审定稿 |
+| v0.3.1 | 2026-11-26 | 文档债收口：§4.12.6 补 `anim_ms` 时长档语义与默认 0=关、`anim_ease` 0..7 逐值映射表、`anim_mask` bit0..5 位表、reduced motion 一帧直达口径；§4.12.7 补 `corner_shape` / `corner_n` 照抄表与 cap3 内核实测口径（三套惰性表 ARC/SQ5/SQ45、4 档 `{8,12,16,24}`、24×24、4×4 面积采样、ARC vs 解析圆弧逐字节 diff=0、ARC vs SQ5 maxdiff=255、CE 只下发 `corner_shape`）；写明 preview 同公式 arc/squircle 口径 | 工具线收口（`feat/blk-spec3`） |
 
 ### 10.2 文档债定义与登记位置
 
