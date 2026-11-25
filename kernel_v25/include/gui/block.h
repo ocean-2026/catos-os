@@ -31,7 +31,10 @@ typedef enum {
     BLK_FREE,                        /* v2 追加在末尾：自由布局容器 */
     BLK_BUTTON,                      /* desk 追加：按钮 */
     BLK_INPUT,                       /* desk 追加：单行输入框 */
-    BLK_TERM                         /* desk 追加：块内终端 */
+    BLK_TERM,                        /* desk 追加：块内终端 */
+    /* ---- cap2 能力扩展：锚定浮层 / 内置单色图标（append-only，旧值不动） ---- */
+    BLK_POPOVER,                     /* 锚定浮层：内核做 measure→place/翻转/钳制/内部滚动 */
+    BLK_ICON                         /* 内置单色图标：icon 号 + tint 角色着色 */
 } blk_kind;
 
 /* 溢出三态（v2，规格 v2 §2）。几何上允许越界；视觉/命中按本字段对齐。 */
@@ -137,6 +140,31 @@ typedef struct {
     int16_t  resize_max_w, resize_max_h;  /* 0 = 不设 */
     int16_t  resize_step;          /* 0 = 连续 */
     int16_t  scroll_x, scroll_y;    /* OVF_SCROLL 视口偏移，不改子块几何 */
+
+    /* ---- cap2 能力扩展（规格 v3，全部 append-only；0 = 未声明 ≡ 旧行为） ----
+     * 语义冻结：字段名/取值不可擅自改名或降级；消费点见 docs/blk-cap2-实现.md。 */
+    uint8_t  alpha;                 /* 0=未声明(≡255)；1..255 块不透明度 */
+    uint8_t  alpha_mode;            /* 0=ordered16（present 阶段 4x4 Bayer 量化 16 档）；1=none */
+    uint8_t  elevation;             /* 0..5 = flat/raised/hover/float/overlay/modal；光源固定右下 */
+    uint8_t  corner_tl, corner_tr, corner_br, corner_bl; /* 0..63 px；128=pill；255=auto */
+    uint8_t  wrap_lines;            /* 0=不折行；1..6=固定行数；255=auto(≤6) */
+    uint8_t  ellipsis;              /* 0=无；1=字符 + "…"；2=词边界 */
+    uint8_t  font_size;             /* 0=16(默认)/1=8/2=16/3=24/4=32 */
+    uint8_t  font_bold;             /* 0/1：8px 档 8x16 位图；其余 1px 横向膨胀伪粗 */
+    uint8_t  font_tabular;          /* 0/1：等宽数字（时钟跳秒不抖） */
+    uint8_t  line_h;                /* 0=走令牌默认行高；>0 显式行高 px */
+    uint16_t anim_ms;               /* 0=无动画；48/96/144/192/288 */
+    uint8_t  anim_ease;             /* 0=none 1=linear 2=in 3=out 4=inout 5=out-back 6=in-back 7=step */
+    uint8_t  anim_mask;             /* bit0 x / bit1 y / bit2 w / bit3 h / bit4 alpha / bit5 elevation */
+    uint8_t  scrollbar;             /* 0=auto 1=always 2=never（内核统一 track+thumb） */
+    uint8_t  scroll_axis;           /* 0=auto(按溢出轴) 1=x 2=y 3=both（HTML data-scroll） */
+    uint8_t  border_sides;          /* bit0 l / bit1 r / bit2 t / bit3 b；0=全边（旧行为） */
+    uint8_t  hc_force;              /* 1=本子树按 HC 规则渲染（radius=0/border=2，HTML data-theme="hc"） */
+    uint32_t anchor_id;             /* BLK_POPOVER 锚块 id（0=无锚，按父框） */
+    uint8_t  pop_prefer;            /* 位 up1/down2/left4/right8；0 视为 down|right */
+    uint16_t pop_max_h;             /* 0=不限；超出则浮层内部滚动 */
+    uint8_t  icon;                  /* BLK_ICON 内置图标号 */
+    uint8_t  tint_role;             /* 0=不自着色 1=fg 2=bg 3=accent 4=border */
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -182,6 +210,22 @@ typedef struct block {
     int16_t  resize_min_w, resize_min_h, resize_max_w, resize_max_h, resize_step;
     int16_t  scroll_x, scroll_y;
     int32_t  pos_x, pos_y;              /* 拖拽收敛的偏移属性，跨帧保持 */
+
+    /* ---- cap2 声明镜像（与 blk_spec cap2 段一一对应） ---- */
+    uint8_t  alpha;                     /* 本块声明不透明度（1..255） */
+    uint8_t  alpha_mode, elevation;
+    uint8_t  corner_tl, corner_tr, corner_br, corner_bl;
+    uint8_t  wrap_lines, ellipsis, font_size, font_bold, font_tabular, line_h;
+    uint16_t anim_ms;
+    uint8_t  anim_ease, anim_mask;
+    uint8_t  scrollbar, scroll_axis, border_sides, hc_force;
+    uint32_t anchor_id;
+    uint8_t  pop_prefer;
+    uint16_t pop_max_h;
+    uint8_t  icon, tint_role;
+    /* POPOVER 运行时：最近一次锚点矩形 + 内容自然高（供翻转/滚动范围） */
+    int32_t  pop_ax, pop_ay, pop_aw, pop_ah;
+    int32_t  pop_content_h;
 
     const char   *text;
     const uint8_t *pix;

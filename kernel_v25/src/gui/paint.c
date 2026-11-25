@@ -171,8 +171,8 @@ static uint32_t resolve_color(block *b, int which) {
     return which == 1 ? tok->bg : tok->fg;
 }
 
-static int text_trimmed(const char *txt, int max_w, uint8_t scale,
-                        char *out, int outsz) {
+int gui_text_trim(const char *txt, int max_w, uint8_t scale,
+                  char *out, int outsz) {
     int step = 8 * scale;
     int cap = max_w / step;
     int len = 0;
@@ -442,10 +442,8 @@ void paint_node(block *b) {
             body_border(b, gui_active_style()->border, bg, b->st.border_w);
         break;
     case BLK_TEXT: {
-        char buf[160];
-        text_trimmed(b->text, b->w, b->st.scale, buf, sizeof(buf));
         if (bg) body_fill(b, bg);
-        gui_draw_text(b->x, b->y, buf, fg, b->st.scale);
+        txt_draw_block(b, fg);      /* cap2：折行/省略/字号/伪粗/等宽统一入口 */
         break;
     }
     case BLK_IMAGE:
@@ -471,13 +469,7 @@ void paint_node(block *b) {
         body_fill(b, bgc);
         if (b->st.border_w)
             body_border(b, gui_active_style()->border, bgc, b->st.border_w);
-        char buf[160];
-        text_trimmed(b->text, b->w, b->st.scale, buf, sizeof(buf));
-        int blen = 0; while (buf[blen]) blen++;
-        uint8_t sc = b->st.scale ? b->st.scale : 1;
-        int tx = b->x + (b->w - 8 * sc * blen) / 2;
-        int ty = b->y + (b->h - 16 * sc) / 2;
-        gui_draw_text(tx, ty, buf, fgc, sc);
+        txt_draw_block(b, fgc);     /* BUTTON 由文本层做居中；单行/折行同一入口 */
         break;
     }
     case BLK_INPUT:
@@ -491,6 +483,15 @@ void paint_node(block *b) {
     case BLK_FREE:
     case BLK_ROOT:
         if (b->st.bg || b->st.role_bg) body_fill(b, bg);
+        break;
+    case BLK_POPOVER:
+        /* 浮层本体：底色 + 描边由这里画；几何（翻转/钳制）由 popover.c 在布局期算。 */
+        if (bg || b->st.role_bg) body_fill(b, bg);
+        if (b->st.border_w)
+            body_border(b, gui_active_style()->border, bg, b->st.border_w);
+        break;
+    case BLK_ICON:
+        icon_draw(b, fg, accent);
         break;
     default:
         break;
@@ -520,6 +521,8 @@ void paint_node(block *b) {
         if (escape && clip_self) paint_clip_push(b->x, b->y, b->w, b->h);
     }
     if (b->overflow == OVF_SCROLL) paint_trans_pop();
+    /* cap2：标准滚动条在平移栈之外画（track/thumb 固定，不随内容滚动）。 */
+    if (b->overflow == OVF_SCROLL && sb_visible(b)) sb_paint(b);
     if (clip_self) paint_clip_pop();
     /* 角外像素由覆盖率合成保留父表面原值，不再用全局桌面底色覆写（漏底根因）。 */
 

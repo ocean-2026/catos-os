@@ -67,4 +67,25 @@ int  decl_pid_blocks(int tid);
 /* 探针：`gui decl` 自检一轮。 */
 int  decl_self_test(void);
 
+/* ---- cap2：CE 通道能力扩展（append-only，旧入口语义不变） ---- */
+/* 能力位：应用启动后探测，内核据返回位决定用 rec1 还是 rec2 / 事件结构。 */
+enum {
+    DECL_CAP_ALPHA     = 1u << 0,
+    DECL_CAP_RADIUS    = 1u << 1,
+    DECL_CAP_ELEV      = 1u << 2,
+    DECL_CAP_WRAP      = 1u << 3,
+    DECL_CAP_FONT      = 1u << 4,
+    DECL_CAP_ANIM      = 1u << 5,
+    DECL_CAP_SCROLLBAR = 1u << 6,
+    DECL_CAP_BUTTON    = 1u << 7,   /* CE 可提交 BLK_BUTTON/INPUT/TERM/POPOVER/ICON */
+    DECL_CAP_EVENTS2   = 1u << 8    /* 事件槽按 ce_blk_event2_t 回传 */
+};
+#define DECL_CAP2_ALL  (DECL_CAP_ALPHA|DECL_CAP_RADIUS|DECL_CAP_ELEV|DECL_CAP_WRAP| \
+                        DECL_CAP_FONT|DECL_CAP_ANIM|DECL_CAP_SCROLLBAR|DECL_CAP_BUTTON| \
+                        DECL_CAP_EVENTS2)
+uint32_t decl_caps(void);
+int  decl_commit2(struct task *t, const void *recs, int n,
+                  const char *strings, int slen, uint32_t rec_size);
+int  decl_event_poll2(struct task *t, ce_blk_event2_t *ev, int timeout_ms);
+
 #endif /* CATOS_GUI_DECL_H */

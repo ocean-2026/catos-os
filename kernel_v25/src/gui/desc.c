@@ -54,6 +54,36 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->resize_step = s->resize_step;
     b->scroll_x = s->scroll_x; b->scroll_y = s->scroll_y;
 
+    /* ---- cap2 镜像（append-only）：声明 0 一律视为旧行为 ---- */
+    if (b->wrap_lines != s->wrap_lines || b->font_size != s->font_size ||
+        b->font_bold != s->font_bold || b->font_tabular != s->font_tabular ||
+        b->line_h != s->line_h || b->border_sides != s->border_sides ||
+        b->elevation != s->elevation)
+        geo_changed = 1;
+    b->alpha = s->alpha;            /* 0 = 未声明，消费点按 255 处理 */
+    b->alpha_mode = s->alpha_mode;
+    b->elevation = s->elevation;
+    b->corner_tl = s->corner_tl; b->corner_tr = s->corner_tr;
+    b->corner_br = s->corner_br; b->corner_bl = s->corner_bl;
+    b->wrap_lines = s->wrap_lines;
+    b->ellipsis = s->ellipsis;
+    b->font_size = s->font_size;
+    b->font_bold = s->font_bold;
+    b->font_tabular = s->font_tabular;
+    b->line_h = s->line_h;
+    b->anim_ms = s->anim_ms;
+    b->anim_ease = s->anim_ease;
+    b->anim_mask = s->anim_mask;
+    b->scrollbar = s->scrollbar;
+    b->scroll_axis = s->scroll_axis;
+    b->border_sides = s->border_sides;
+    b->hc_force = s->hc_force;
+    b->anchor_id = s->anchor_id;
+    b->pop_prefer = s->pop_prefer;
+    b->pop_max_h = s->pop_max_h;
+    b->icon = s->icon;
+    b->tint_role = s->tint_role;
+
     if (s->fg != INHERIT_COLOR)     b->st.fg = s->fg;
     if (s->bg != INHERIT_COLOR)     b->st.bg = s->bg;
     if (s->accent != INHERIT_COLOR) b->st.accent = s->accent;

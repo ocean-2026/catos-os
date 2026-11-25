@@ -29,6 +29,19 @@ struct style {
     /* ---- 桌面外观档位（calm 模式消费；app 模式下不生效） ---- */
     uint8_t  corner_radius;    /* 0 = 按块尺寸走阶梯；>0 固定角档 px */
     uint8_t  corner_mode;      /* 0 继承模式 / 1 强制直角 / 2 强制圆角 */
+    /* ---- cap2：几何/阴影/字体进令牌（三主题各自取值；HC 自动降级） ----
+     * radius[] 缺省角档 TL TR BR BL；shadow[0..5] 各 elevation 档强度；
+     * spacing 为 8pt 栅格基数；font_* 为四档字高；line_h 是默认行高。 */
+    uint8_t  radius4[4];       /* 缺省角档 TL TR BR BL（文档里的 radius[4]，避开旧 radius 单值）；HC 恒 0 */
+    uint8_t  shadow[6];        /* 0..5 档；0=无阴影；HC 全 0（用 1px 边框替代） */
+    uint8_t  spacing;
+    uint8_t  font_small;       /* 8 */
+    uint8_t  font_body;        /* 16 */
+    uint8_t  font_title;       /* 24 */
+    uint8_t  font_display;     /* 32 */
+    uint8_t  line_h;           /* 16 字高默认行高 */
+    uint8_t  radius_hc_zero;   /* 1 = 本主题强制直角（HC） */
+    uint8_t  border_w_hc;      /* HC 下描边宽度（2） */
 };
 
 enum gui_token {
