@@ -853,6 +853,11 @@ enum {
     SYS_FILE_MMAP, SYS_MPROTECT, SYS_MUNMAP_SHARED,
     /* Stage 2A: CSO1 fixed-base shared object (append-only, slots 80..82). */
     SYS_DLOPEN, SYS_DLSYM, SYS_DLCLOSE,
+    /* Stage 3A: user threads (append-only, slots 83..86).  The ABI surface
+     * is reserved this stage; the shared-address-space thread path still
+     * needs the process/thread ownership split (see docs/threading.md), so
+     * the dispatch returns -8 ENOSYS for now. */
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_DETACH,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -929,6 +934,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*72*/4, /*73*/2, /*74*/1, /*75*/1, /*76*/1, /* decl commit/poll/load/free/textw */
         /*77*/4, /*78*/3, /*79*/2,                 /* file_mmap / mprotect / munmap_shared */
         /*80*/1, /*81*/2, /*82*/1,                 /* dlopen / dlsym / dlclose */
+        /*83*/2, /*84*/1, /*85*/1, /*86*/1,       /* thread_create/exit/join/detach */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -2421,6 +2427,13 @@ void isr_syscall(int_frame_t *f) {
     }
     case SYS_DLCLOSE:
         ret = (uint32_t)dl_close(t, (int)a1);
+        break;
+    /* ---- Stage 3A: user threads (reserved; shared-space path pending) -- */
+    case SYS_THREAD_CREATE:
+    case SYS_THREAD_EXIT:
+    case SYS_THREAD_JOIN:
+    case SYS_THREAD_DETACH:
+        ret = (uint32_t)-8;                 /* ENOSYS */
         break;
     default: ret = (uint32_t)-8; break;
     }

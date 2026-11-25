@@ -264,6 +264,12 @@ typedef struct catos_api {
     int      (*dlopen)(const char *path);            /* 80 */
     void *   (*dlsym)(int handle, const char *name); /* 81 */
     int      (*dlclose)(int handle);                 /* 82 */
+
+    /* ---- Stage 3A: user threads (append-only; mirror 83-86) ---------- */
+    int      (*thread_create)(void *entry, void *arg); /* 83 */
+    void     (*thread_exit)(void *retval);             /* 84 */
+    void *   (*thread_join)(int tid);                  /* 85 */
+    int      (*thread_detach)(int tid);                /* 86 */
 } catos_api_t;
 
 /* install the API (called once at boot) */

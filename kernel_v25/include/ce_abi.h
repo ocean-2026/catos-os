@@ -337,6 +337,18 @@ typedef struct catos_api {
     int      (*dlopen)(const char *path);                                         /*80*/
     void *   (*dlsym)(int handle, const char *name);                              /*81*/
     int      (*dlclose)(int handle);                                              /*82*/
+    /* Stage 3A: user threads (append-only, slots 83..86).  A worker thread
+     * shares the caller's address space (VMA/page table) but has its own
+     * kernel slot, user stack and join state.  thread_create(entry, arg) ->
+     * tid > 0 / negative errno; thread_exit(retval) terminates the caller;
+     * thread_join(tid) blocks until the thread exits and returns its retval;
+     * thread_detach(tid) makes exit auto-reap.  NOTE: this stage reserves
+     * the ABI surface only; the live shared-space thread path is deferred
+     * (see docs/threading.md), dispatch returns ENOSYS. */
+    int      (*thread_create)(void *entry, void *arg);                            /*83*/
+    void     (*thread_exit)(void *retval);                                        /*84*/
+    void *   (*thread_join)(int tid);                                             /*85*/
+    int      (*thread_detach)(int tid);                                          /*86*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
