@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CatOS HTML 原型开发规范 v3（cap2）</title>
+<style>
+:root{
+  --fg:#1d2028; --muted:#646b7a; --bg:#f6f7fb; --paper:#fff;
+  --line:#e2e5ee; --soft:#f0f2f8; --accent:#2456d6; --accent-soft:#e8eefc;
+  --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --sans:"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.75 var(--sans);}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px 96px;}
+header.hero{padding:56px 0 36px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.eyebrow{font:600 12px/1 var(--mono);letter-spacing:.16em;color:var(--accent);text-transform:uppercase}
+h1{font-size:32px;line-height:1.35;margin:14px 0 10px;letter-spacing:-.01em}
+.sub{color:var(--muted);max-width:820px}
+.meta{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:500 12px/1 var(--mono);padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:var(--paper);color:var(--muted)}
+.chip.on{background:var(--accent-soft);border-color:#c9d7f8;color:var(--accent)}
+.layout{display:grid;grid-template-columns:248px 1fr;gap:44px;margin-top:36px}
+nav.toc{position:sticky;top:24px;align-self:start;font-size:13px}
+nav.toc h4{font:600 11px/1 var(--mono);letter-spacing:.12em;color:var(--muted);margin:0 0 10px;text-transform:uppercase}
+nav.toc a{display:block;padding:6px 10px;color:var(--fg);text-decoration:none;border-left:2px solid transparent;border-radius:0 4px 4px 0}
+nav.toc a:hover{background:var(--soft)}
+nav.toc a b{font:600 11px/1 var(--mono);color:var(--muted);margin-right:8px}
+main{min-width:0}
+section{margin:0 0 44px;scroll-margin-top:24px}
+h2{font-size:22px;margin:0 0 6px;letter-spacing:-.01em;display:flex;gap:10px;align-items:baseline}
+h2 span.no{font:600 12px/1 var(--mono);color:var(--accent);padding-top:4px}
+.lead{color:var(--muted);margin:0 0 18px;max-width:900px}
+h3{font-size:16px;margin:26px 0 8px}
+h4{font-size:14px;margin:20px 0 6px;color:var(--muted)}
+p{margin:0 0 12px;max-width:900px}
+ul,ol{margin:0 0 14px 22px;padding:0;max-width:900px}
+li{margin:5px 0}
+table{width:100%;border-collapse:collapse;margin:12px 0 18px;font-size:13.5px;background:var(--paper)}
+th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+th{background:var(--soft);font-weight:600;font-size:12.5px;color:#3b4252}
+td code,th code,li code,p code,pre code{font-family:var(--mono);font-size:12.5px;background:var(--soft);padding:1px 5px;border-radius:4px;color:#243}
+pre{background:#12151c;color:#dfe4f2;padding:16px 18px;border-radius:10px;overflow:auto;font:12.5px/1.7 var(--mono);margin:12px 0 18px}
+pre code{background:none;color:inherit;padding:0;font-size:12.5px}
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0 18px;font-size:13.5px}
+.warn{border-left:3px solid #c2410c;background:#fdf1ea;padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0 18px;font-size:13.5px}
+.ok{border-left:3px solid #15803d;background:#edf8f1;padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0 18px;font-size:13.5px}
+.rule{font:600 11px/1 var(--mono);color:#8b93a7}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card h4{margin:0 0 8px;color:var(--fg);font-size:14px}
+.card p{margin:0;font-size:13px;color:var(--muted)}
+.kv{font:12px/1.6 var(--mono);color:var(--muted)}
+/* ---- demo: alpha over checkerboard ---- */
+.checker{background-color:#cfd3dd;background-image:linear-gradient(45deg,#aeb4c2 25%,transparent 25%,transparent 75%,#aeb4c2 75%),linear-gradient(45deg,#aeb4c2 25%,transparent 25%,transparent 75%,#aeb4c2 75%);background-size:10px 10px;background-position:0 0,5px 5px;border-radius:8px;padding:10px;display:flex;gap:8px;flex-wrap:wrap}
+.sw{width:86px;height:56px;border-radius:8px;background:#2456d6;color:#fff;font:600 11px/56px var(--mono);text-align:center}
+.sw.a90{opacity:.92}.sw.a70{opacity:.72}.sw.a55{opacity:.55}.sw.a25{opacity:.25}.sw.a12{opacity:.12;color:#2456d6}
+/* ---- demo: elevation ---- */
+.elev-row{display:flex;gap:20px;flex-wrap:wrap;background:#eceef4;border-radius:12px;padding:22px}
+.ecard{width:120px;height:74px;background:#fff;border-radius:10px;display:flex;align-items:center;justify-content:center;font:600 11px/1 var(--mono);color:#5b6274}
+.e0{box-shadow:none;border:1px solid #dde1ea}
+.e1{box-shadow:0 1px 2px rgba(18,24,38,.10),0 2px 6px rgba(18,24,38,.06)}
+.e2{box-shadow:0 2px 4px rgba(18,24,38,.12),0 6px 14px rgba(18,24,38,.09)}
+.e3{box-shadow:0 4px 8px rgba(18,24,38,.14),0 12px 26px rgba(18,24,38,.12)}
+.e4{box-shadow:0 6px 12px rgba(18,24,38,.16),0 18px 40px rgba(18,24,38,.16)}
+.e5{box-shadow:0 10px 20px rgba(18,24,38,.20),0 28px 64px rgba(18,24,38,.22)}
+/* ---- demo: radius ---- */
+.rad-row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;background:#eceef4;border-radius:12px;padding:22px}
+.rb{background:#fff;border:1px solid #d9dde7;display:flex;align-items:flex-end;justify-content:center;font:600 10px/1 var(--mono);color:#6b7280;padding-bottom:6px}
+.r-group{display:flex;background:#fff;border:1px solid #d9dde7;overflow:hidden}
+.r-group div{width:56px;height:40px;border-right:1px solid #e6e9f1;display:flex;align-items:center;justify-content:center;font:10px var(--mono);color:#7b8194}
+.r-group div:last-child{border-right:0}
+/* ---- demo: type ---- */
+.type-row{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 24px}
+.type-row div{margin:8px 0;white-space:nowrap;overflow:hidden}
+/* ---- demo: easing ---- */
+.ease-row{display:flex;gap:12px;flex-wrap:wrap;background:#eceef4;border-radius:12px;padding:20px}
+.ease{background:#fff;border-radius:8px;padding:10px 12px;width:150px;font:600 11px/1.4 var(--mono);color:#4b5563;border:1px solid #dde1ea}
+.ease small{display:block;font:400 10.5px/1.5 var(--sans);color:#8b93a7;margin-top:4px}
+footer{border-top:1px solid var(--line);margin-top:40px;padding-top:22px;color:var(--muted);font-size:13px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}nav.toc{position:static}.grid2,.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">CatOS · 块化 GUI · 原型侧规范</div>
+  <h1>HTML 原型开发规范 v3（cap2 能力就绪版）</h1>
+  <p class="sub">这份文档写给“做 HTML 原型的人”。它假定内核侧 cap2 能力（连续 alpha、六档 elevation、逐角/pill/同心圆角、1–6 行折行、五档字号、八条缓动、Popover、滚动条、单色图标、CE 事件通道、令牌扩展）已经全部就绪，因此不再讨论“能不能”，只讨论“怎么写才一次过”。</p>
+  <div class="meta">
+    <span class="chip on">cap2 就绪</span>
+    <span class="chip">800×600 / 24bpp</span>
+    <span class="chip">纯整数渲染</span>
+    <span class="chip">规则号 R-*</span>
+    <span class="chip">对应 md: HTML-块树-转换规范 v0.3</span>
+    <span class="chip">v3 · 2026-11-25</span>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc">
+  <h4>目录</h4>
+  <a href="#s0"><b>00</b>这份文档怎么用</a>
+  <a href="#s1"><b>01</b>能力假设（cap2 矩阵）</a>
+  <a href="#s2"><b>02</b>画布、网格与安全区</a>
+  <a href="#s3"><b>03</b>结构语法与组件白名单</a>
+  <a href="#s4"><b>04</b>属性速查（写代码只看这页）</a>
+  <a href="#s5"><b>05</b>Alpha 半透明</a>
+  <a href="#s6"><b>06</b>Elevation 与阴影</a>
+  <a href="#s7"><b>07</b>圆角：逐角 / pill / 同心</a>
+  <a href="#s8"><b>08</b>排版：五档字号</a>
+  <a href="#s9"><b>09</b>折行与省略</a>
+  <a href="#s10"><b>10</b>动效：八条缓动</a>
+  <a href="#s11"><b>11</b>Popover 与浮层</a>
+  <a href="#s12"><b>12</b>滚动与滚动条</a>
+  <a href="#s13"><b>13</b>图标与令牌</a>
+  <a href="#s14"><b>14</b>CE 应用通道</a>
+  <a href="#s15"><b>15</b>主题与 HC 降级</a>
+  <a href="#s16"><b>16</b>反例清单</a>
+  <a href="#s17"><b>17</b>自检清单</a>
+  <a href="#s18"><b>18</b>验收与交付</a>
+  <a href="#sa"><b>A</b>令牌表</a>
+  <a href="#sb"><b>B</b>属性全表</a>
+  <a href="#sc"><b>C</b>规则索引</a>
+</nav>
+
+<main>
+
+<!-- ============ 0 ============ -->
+<section id="s0">
+<h2><span class="no">00</span>这份文档怎么用</h2>
+<p class="lead">一条硬规矩：<strong>原型里出现的每个视觉决定，都能在这份文档或 md v0.3 里找到对应规则号。</strong>找不到的，先当成“未支持”，不要自己发明。</p>
+
+<div class="grid3">
+  <div class="card"><h4>本文 = 设计侧真源</h4><p>回答“该不该这样画、画多少、用哪档”。数值、组成、禁用项都在这里。</p></div>
+  <div class="card"><h4>md v0.3 = 转换侧真源</h4><p>回答“这段 HTML 会变成什么块树”。字段、映射、诊断规则在那边，两边字段名一致。</p></div>
+  <div class="card"><h4>内核头文件 = 实现侧真源</h4><p>回答“到底生效没有”。文档与实现有出入时，以 `blk_spec` 定稿为准，并回写文档。</p></div>
+</div>
+
+<p>写作顺序建议：先按 §03 搭结构，再按 §04 填属性，最后逐条过 §17 自检。不要反过来从配色开始——块化 GUI 里，结构错了一切都错。</p>
+<div class="note"><strong>关于“假设已就绪”：</strong>文档按 cap2 全量能力写。若某次构建尚未开启某项能力，转换器会给规则号级降级诊断（例如 <code>R-5.1-02 未支持：alpha 已忽略</code>），原型侧把它当“待开启”，不要改成假造效果。</div>
+</section>
+
+<!-- ============ 1 ============ -->
+<section id="s1">
+<h2><span class="no">01</span>能力假设（cap2 矩阵）</h2>
+<p class="lead">下面这些是这份规范默认你“可以随便用”的。凡是标“上限”的，超过即视为违规，不是建议。</p>
+<table>
+<tr><th style="width:20%">能力</th><th style="width:34%">可用形态</th><th style="width:16%">上限</th><th>不做什么</th></tr>
+<tr><td>半透明</td><td><code>data-alpha</code> 0.00–1.00（或 0–255）；<code>data-alpha-mode</code> ordered16 / none</td><td>同屏叠层 ≤ 2 层</td><td>不做毛玻璃、不做背景模糊、不做颜色相乘</td></tr>
+<tr><td>阴影</td><td><code>data-elevation</code> 0–5（flat/raised/hover/float/overlay/modal）</td><td>同屏 ≤ 3 档共存</td><td>不自定义方向/颜色/模糊半径</td></tr>
+<tr><td>圆角</td><td>单值、四值 TL TR BR BL、<code>pill</code>、<code>auto</code>、<code>inherit</code></td><td>半径档 0/8/12/16/24</td><td>不做任意半径、不做椭圆角</td></tr>
+<tr><td>文本</td><td><code>data-wrap</code> 0/1–6/auto，<code>data-ellipsis</code> none/char/word</td><td>≤ 6 行</td><td>不做无限折行、不做富文本、不做行内混排</td></tr>
+<tr><td>字号</td><td><code>data-font</code> 8/16/24/32，<code>data-bold</code>、<code>data-tabular</code></td><td>4 档</td><td>不做 10/12/14/18/20 等中间档</td></tr>
+<tr><td>动效</td><td><code>data-anim</code> 48/96/144/192/288，<code>data-ease</code> 七种 + none</td><td>单次 ≤ 288ms</td><td>不做循环动画（画布内除外）、不做 CSS transition</td></tr>
+<tr><td>浮层</td><td><code>&lt;c-popover&gt;</code> + anchor/prefer/max-h</td><td>嵌套 ≤ 2 层</td><td>不自己算翻转与钳制</td></tr>
+<tr><td>滚动</td><td><code>data-scroll</code> + <code>data-scrollbar</code></td><td>嵌套 ≤ 1 层</td><td>不自绘滚动条、不接管滚轮</td></tr>
+<tr><td>图标</td><td><code>data-icon</code> 16/32 单色 + <code>data-tint</code></td><td>单色</td><td>不做多色图标、不做 emoji、不做 SVG 任意路径</td></tr>
+<tr><td>CE 通道</td><td>BUTTON/INPUT/TERM/POPOVER/ICON + 事件回传</td><td>无像素写</td><td>不在 CE 里自绘整窗口、不申请帧缓冲</td></tr>
+</table>
+<div class="warn"><strong>一条总纪律：</strong>原型里禁止出现 CSS 的 <code>opacity / box-shadow / filter / backdrop-filter / transform / transition / animation / gradient / border-radius</code>——这些全部走 <code>data-*</code> 声明，由内核绘制。原型用 CSS 做出来的效果，转换器一律丢弃。</div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section id="s2">
+<h2><span class="no">02</span>画布、网格与安全区</h2>
+<p class="lead">800×600 是唯一目标分辨率。所有尺寸写整数像素，禁止 <code>vw/vh/%/em/rem</code> 参与布局（百分比只允许出现在 <code>data-w="50%"</code> 这类内置百分比属性里）。</p>
+
+<h3>2.1 三个保留区</h3>
+<table>
+<tr><th>区域</th><th>数值</th><th>规则</th></tr>
+<tr><td>任务栏</td><td>高 32px，贴底，宽 800</td><td>浮层钳制区必须扣掉它；开始菜单不得压住它（R-2.1-01）</td></tr>
+<tr><td>安全边距</td><td>8px</td><td>所有浮层距屏幕边 ≥ 8px；窗口贴边时该侧圆角归 0（R-2.1-02）</td></tr>
+<tr><td>标题带</td><td>高 28px</td><td>标题带内不放操作按钮以外的内容；拖动热区默认只在这一带</td></tr>
+</table>
+
+<h3>2.2 间距刻度</h3>
+<p>只用 2 / 4 / 8 / 12 / 16 / 24 / 32 七档（令牌 <code>--space-1..7</code>）。容器内边距常用 12 或 16；列表项间 0（靠 divider 或分组圆角分隔）；分组之间 16。</p>
+
+<h3>2.3 网格与量化</h3>
+<ul>
+<li>所有坐标与尺寸 8pt 对齐；例外：描边 1px、分隔线 1px、图标 16px 网格内部细节。</li>
+<li>文本基线由内核排，原型只给字号与行高，不要用 <code>padding-top</code> 去“顶”文字。</li>
+<li>贴边判定看量化后坐标是否精确相等；但你已经能用 <code>data-radius</code> 显式写 0，所以<strong>不要依赖贴边判定，直接写</strong>（R-7.4-01）。</li>
+</ul>
+</section>
+
+<!-- ============ 3 ============ -->
+<section id="s3">
+<h2><span class="no">03</span>结构语法与组件白名单</h2>
+<p class="lead">块树只有一种节点。HTML 只是它的书写外壳，所以“语义标签”不重要，“块类型 + 属性”才重要。</p>
+
+<h3>3.1 最小骨架</h3>
+<pre><code>&lt;!doctype html&gt;
+&lt;html lang="zh-CN"&gt;
+&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Settings&lt;/title&gt;&lt;/head&gt;
+&lt;body data-role="root"&gt;
+  &lt;main data-blk="column" data-w="800" data-h="600" data-pad="0"&gt;
+    &lt;header data-blk="row" data-h="28" data-drag="title" data-elevation="1"&gt;
+      &lt;span data-font="16" data-bold&gt;Settings&lt;/span&gt;
+    &lt;/header&gt;
+    &lt;section data-blk="column" data-pad="16" data-gap="8"&gt; … &lt;/section&gt;
+  &lt;/main&gt;
+&lt;/body&gt;</code></pre>
+
+<h3>3.2 白名单（15 种块 + 3 个原型专用标签）</h3>
+<table>
+<tr><th>HTML 写法</th><th>块类型</th><th>CE 可提交</th><th>备注</th></tr>
+<tr><td><code>div</code> + <code>data-blk="column|row|stack"</code></td><td>COLUMN / ROW / STACK</td><td>是</td><td>stack 子块居中叠放</td></tr>
+<tr><td><code>div</code> + <code>data-place="float|anchor"</code></td><td>FREE</td><td>否</td><td>自由布局只在内置页使用</td></tr>
+<tr><td><code>span / p</code></td><td>TEXT</td><td>是</td><td>单块文本，折行走 §09</td></tr>
+<tr><td><code>div data-blk="rect"</code></td><td>RECT</td><td>是</td><td>纯色块/背景/高亮</td></tr>
+<tr><td><code>img</code></td><td>IMAGE</td><td>是</td><td>24bpp 不透明位图；图标请用 <code>c-icon</code></td></tr>
+<tr><td><code>canvas</code></td><td>CANVAS</td><td>是</td><td>唯一位图自由绘制区</td></tr>
+<tr><td><code>hr</code></td><td>DIVIDER</td><td>是</td><td>1px line 色</td></tr>
+<tr><td><code>div data-blk="spacer"</code></td><td>SPACER</td><td>是</td><td>占位，不绘</td></tr>
+<tr><td><code>button</code></td><td>BUTTON</td><td>是</td><td>自动 focusable，点击回传 id</td></tr>
+<tr><td><code>input</code></td><td>INPUT</td><td>是（只读输入 + 事件）</td><td>单行，UTF-8 回传</td></tr>
+<tr><td><code>div data-blk="term"</code></td><td>TERM</td><td>是</td><td>等宽 16px，行缓冲</td></tr>
+<tr><td><code>&lt;c-popover&gt;</code></td><td>POPOVER</td><td>是</td><td>锚定 + 翻转 + 钳制内置（§11）</td></tr>
+<tr><td><code>&lt;c-icon&gt;</code></td><td>ICON</td><td>是</td><td>单色图标 + tint</td></tr>
+<tr><td><code>&lt;c-sheet&gt;</code></td><td>—</td><td>—</td><td>原型专用：只用于分组说明，转换时展开为 column</td></tr>
+</table>
+<div class="warn">禁止：<code>table</code> 布局、<code>grid</code>、<code>position:fixed</code>、<code>z-index</code> 手写（用 <code>data-layer</code> / <code>data-z</code>）、<code>float</code>、<code>margin:auto</code> 居中（用 <code>data-align</code>）。</div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section id="s4">
+<h2><span class="no">04</span>属性速查（写代码只看这页）</h2>
+<p class="lead">属性全部走 <code>data-*</code>；值是枚举就写枚举名，别写数字猜。下表是唯一合法集合，未列出的属性转换器会报警并丢弃。</p>
+
+<h3>4.1 几何</h3>
+<table>
+<tr><th style="width:22%">属性</th><th style="width:22%">取值</th><th style="width:12%">默认</th><th>语义 / 常见错用</th></tr>
+<tr><td><code>data-w / data-h</code></td><td>整数 px，<code>auto</code>，<code>50%</code>（父框百分比）</td><td>auto</td><td>auto 由内容撑开；百分比只用于弹性列</td></tr>
+<tr><td><code>data-pad</code></td><td>1 值或 4 值 <code>t r b l</code></td><td>0</td><td>内边距参与内容框计算，别再用 margin 模拟</td></tr>
+<tr><td><code>data-gap</code></td><td>0/2/4/8/12/16/24/32</td><td>0</td><td>只对 column/row 生效</td></tr>
+<tr><td><code>data-align</code></td><td><code>start|center|end|between</code></td><td>start</td><td>主轴对齐；<code>between</code> 至少 2 个子块才有意义</td></tr>
+<tr><td><code>data-cross</code></td><td><code>start|center|end|stretch</code></td><td>start</td><td>交叉轴；stretch 时子块不要写死宽/高</td></tr>
+<tr><td><code>data-place</code></td><td><code>inline|float|anchor</code></td><td>inline</td><td>float 不占父容器流</td></tr>
+<tr><td><code>data-anchor</code></td><td><code>tl|tr|bl|br|t|b|l|r|center</code> 组合</td><td>l+t</td><td>配合 <code>data-x/data-y</code> 偏移</td></tr>
+<tr><td><code>data-min-w/h</code> <code>data-max-w/h</code></td><td>整数 px</td><td>0</td><td>0 = 不设；max 与 min 冲突时以 min 为准并打 WARN</td></tr>
+<tr><td><code>data-margin</code></td><td>1 值或 4 值</td><td>0</td><td>只影响 FREE 父框下的落位</td></tr>
+<tr><td><code>data-overflow</code></td><td><code>clip|visible|scroll</code></td><td>clip</td><td>scroll 必须同时写 <code>data-scroll</code> 方向</td></tr>
+<tr><td><code>data-drag</code></td><td><code>none|title|full</code></td><td>none</td><td>桌面/容器/任务栏禁止 full；只有窗口根与标题带可用</td></tr>
+<tr><td><code>data-drag-bounds</code></td><td><code>free|parent|screen</code></td><td>screen</td><td>窗口默认 screen</td></tr>
+<tr><td><code>data-resize</code></td><td><code>l|r|t|b</code> 组合或 <code>none</code></td><td>none</td><td>可缩放窗口才写；移动端不适用</td></tr>
+<tr><td><code>data-bleed</code></td><td><code>true</code></td><td>false</td><td>全出血块（如标题底色），不可拖、不可聚焦</td></tr>
+</table>
+
+<h3>4.2 外观</h3>
+<table>
+<tr><th style="width:22%">属性</th><th style="width:30%">取值</th><th style="width:10%">默认</th><th>语义 / 常见错用</th></tr>
+<tr><td><code>data-alpha</code></td><td>0.00–1.00 或 0–255</td><td>1.00</td><td>子树相乘；文字别低于 0.85</td></tr>
+<tr><td><code>data-alpha-mode</code></td><td><code>ordered16|none</code></td><td>ordered16</td><td>none 只用于大面积纯色背景，边缘会硬</td></tr>
+<tr><td><code>data-elevation</code></td><td><code>0|1|2|3|4|5</code> 或档名</td><td>0</td><td>同屏最多 3 档共存（§06）</td></tr>
+<tr><td><code>data-radius</code></td><td>单值 / 4 值 / <code>pill|auto|inherit</code></td><td>auto</td><td>4 值顺序 TL TR BR BL</td></tr>
+<tr><td><code>data-radius-tl/tr/br/bl</code></td><td>0–63 或 <code>auto</code></td><td>auto</td><td>与 data-radius 同时写时，逐角优先</td></tr>
+<tr><td><code>data-border</code></td><td><code>0|1|2</code></td><td>主题令牌</td><td>HC 下强制 2</td></tr>
+<tr><td><code>data-border-sides</code></td><td><code>l|r|t|b</code> 组合或 <code>all|none</code></td><td>all</td><td>共享边只让一侧画，避免双线</td></tr>
+<tr><td><code>data-role</code></td><td><code>fg|bg|panel|bar|accent|border|line|muted</code></td><td>fg</td><td>颜色一律走角色，不写十六进制</td></tr>
+<tr><td><code>data-fg / data-bg / data-accent</code></td><td>令牌名或 <code>inherit</code></td><td>inherit</td><td>只有确实需要覆盖角色时才用</td></tr>
+</table>
+
+<h3>4.3 文本</h3>
+<table>
+<tr><th style="width:22%">属性</th><th style="width:32%">取值</th><th style="width:10%">默认</th><th>语义</th></tr>
+<tr><td><code>data-font</code></td><td><code>8|16|24|32</code> 或 <code>caption|body|title|display</code></td><td>16 / body</td><td>§08 用法表</td></tr>
+<tr><td><code>data-bold</code></td><td><code>true</code></td><td>false</td><td>伪粗；只用于标题与强调，同屏 ≤ 2 处</td></tr>
+<tr><td><code>data-tabular</code></td><td><code>true</code></td><td>false</td><td>等宽数字：时钟、计数、表格列</td></tr>
+<tr><td><code>data-line-h</code></td><td><code>auto|12|24|32|40</code></td><td>auto</td><td>auto 按字号映射（8→12，16→24，24→32，32→40）</td></tr>
+<tr><td><code>data-wrap</code></td><td><code>0|1|2|3|4|5|6|auto</code></td><td>0</td><td>0 = 单行不折；auto = 最多 6 行</td></tr>
+<tr><td><code>data-ellipsis</code></td><td><code>none|char|word</code></td><td>char</td><td>折行或单行超宽时截断；CJK 用 char</td></tr>
+<tr><td><code>data-text</code></td><td>纯文本（含 <code>\n</code> 仅按折行规则处理）</td><td>—</td><td>不解析任何标签；HTML 实体请先转义</td></tr>
+</table>
+
+<h3>4.4 动效</h3>
+<table>
+<tr><th style="width:22%">属性</th><th style="width:38%">取值</th><th style="width:10%">默认</th><th>语义</th></tr>
+<tr><td><code>data-anim</code></td><td><code>0|48|96|144|192|288</code>（ms，必须是 16 的倍数）</td><td>0</td><td>0 = 瞬移，无中间帧</td></tr>
+<tr><td><code>data-ease</code></td><td><code>linear|in|out|inout|out-back|in-back|step</code></td><td>out</td><td>§10 组合表</td></tr>
+<tr><td><code>data-anim-props</code></td><td><code>x,y,w,h,alpha,elevation</code> 组合</td><td>全部几何属性</td><td>只动你要动的，动得越少帧越稳</td></tr>
+<tr><td><code>data-anim-trigger</code></td><td><code>show|hide|click|focus|layout</code></td><td>layout</td><td>trigger=layout 指几何变化时播放</td></tr>
+</table>
+
+<h3>4.5 浮层 / 滚动 / 图标 / 事件</h3>
+<table>
+<tr><th style="width:26%">属性</th><th style="width:34%">取值</th><th style="width:10%">默认</th><th>语义</th></tr>
+<tr><td><code>&lt;c-popover data-anchor&gt;</code></td><td><code>#id</code> 或 <code>@ref</code></td><td>必填</td><td>锚定块；缺失即校验失败</td></tr>
+<tr><td><code>data-prefer</code></td><td><code>down|up|right|left</code> 空格分隔，可多值</td><td>down</td><td>顺序即优先级，越界自动翻转</td></tr>
+<tr><td><code>data-max-h</code></td><td>整数 px 或 <code>60%</code></td><td>60% 可用区</td><td>超出内部滚动，不是裁掉</td></tr>
+<tr><td><code>data-offset</code></td><td>整数 px</td><td>4</td><td>锚点与浮层间距，安全值 4–8</td></tr>
+<tr><td><code>data-dismiss</code></td><td><code>outside|esc|both|none</code></td><td>both</td><td>开始菜单用 none，由点击切换控制</td></tr>
+<tr><td><code>data-scroll</code></td><td><code>x|y|both</code></td><td>—</td><td>必须配合 overflow=scroll</td></tr>
+<tr><td><code>data-scrollbar</code></td><td><code>auto|always|never</code></td><td>auto</td><td>auto = 内容超出才出现</td></tr>
+<tr><td><code>data-icon</code></td><td>内置图标名，如 <code>folder|gear|terminal|play|close</code></td><td>—</td><td>16/32 由 <code>data-w</code> 选择</td></tr>
+<tr><td><code>data-tint</code></td><td><code>fg|accent|bg|border</code></td><td>fg</td><td>单色着色，不写颜色值</td></tr>
+<tr><td><code>data-on</code></td><td><code>click|input|focus|blur|wheel|key|dismiss</code> 组合</td><td>—</td><td>CE 事件回传声明；内置页可省</td></tr>
+<tr><td><code>data-id</code></td><td>字符串，页面内唯一</td><td>自动生成</td><td>事件回传的 target_id；建议都写</td></tr>
+</table>
+</section>
+
+<!-- ============ 5 ============ -->
+<section id="s5">
+<h2><span class="no">05</span>Alpha 半透明</h2>
+<p class="lead">层次感八成来自这里，但 alpha 也是最容易把界面做“糊”的东西。规则只有三条：<strong>分角色定值、同屏叠层 ≤ 2、文字不半透</strong>。</p>
+
+<div class="checker">
+  <div class="sw a90">0.92 面板</div>
+  <div class="sw a70">0.72 浮层</div>
+  <div class="sw a55">0.55 遮罩</div>
+  <div class="sw a25">0.25 悬停</div>
+  <div class="sw a12">0.12 高亮</div>
+</div>
+<p class="kv">上图是 alpha 的五个标准档。暗色主题下 0.92/0.72/0.55 已足够表达层次；0.25 以下请只在悬停/按下态使用，大面积会露抖动颗粒。</p>
+
+<h3>5.1 标准档（照抄，不要自己调）</h3>
+<table>
+<tr><th>用途</th><th>alpha</th><th>elevation</th><th>说明</th></tr>
+<tr><td>普通面板 / 卡片底</td><td>1.00 或 0.92</td><td>1</td><td>0.92 只用于叠在内容之上且需要透出底色的面板</td></tr>
+<tr><td>开始菜单 / 对话框</td><td>0.94</td><td>4</td><td>与任务栏重叠区域必须不透明兜底（见 §11.4）</td></tr>
+<tr><td>右键菜单 / 下拉 / Tooltip</td><td>0.96</td><td>3</td><td>低于 0.92 会看不清菜单项</td></tr>
+<tr><td>通知 / Toast</td><td>0.90</td><td>4</td><td>下滑入时 alpha 一并过渡</td></tr>
+<tr><td>模态遮罩</td><td>0.55</td><td>—</td><td>遮罩本身不带 elevation，弹层带 5</td></tr>
+<tr><td>悬停高亮</td><td>0.12</td><td>—</td><td>叠在行背景上，不改行底色</td></tr>
+<tr><td>按下态</td><td>0.18</td><td>—</td><td>按下同时 elevation 降 1 档</td></tr>
+<tr><td>禁用</td><td>0.45</td><td>—</td><td>作用于整块子树的 alpha 继承</td></tr>
+</table>
+
+<h3>5.2 继承与叠层</h3>
+<ul>
+<li>alpha 继承是<strong>乘法</strong>：父 0.9 + 子 0.8 = 0.72。所以父块半透明时，子块不要再写 alpha。</li>
+<li>同一位置最多两层半透明叠加；第三层开始必须改成不透明或降为 0。</li>
+<li>文字块（TEXT/BUTTON 文本）自身 alpha 不得低于 0.85；禁用态靠父级 0.45 继承实现，不要在文字上单独写 0.45。</li>
+</ul>
+
+<h3>5.3 抖动与边缘</h3>
+<p>24bpp 出屏时按 4×4 Bayer 量化到 16 档。抖动在 0.35–0.80 区间几乎不可见；<strong>0.25 以下、纯色大面积</strong>会明显颗粒。规避方法：小面积用，或把底色改成不透明色块再用 0.12 叠高亮。</p>
+<div class="warn">不要用 alpha 做“阴影”（那是 elevation 的事），也不要用 alpha 做“淡入淡出”以外的效果——淡入淡出属于动效，写 <code>data-anim-props="alpha"</code>。</div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section id="s6">
+<h2><span class="no">06</span>Elevation 与阴影</h2>
+<p class="lead">阴影只表达“离地高度”，不表达“风格”。六档固定、光源固定右下、每档一张预生成贴图。你只选档，不调参。</p>
+
+<div class="elev-row">
+  <div class="ecard e0">0 flat</div>
+  <div class="ecard e1">1 raised</div>
+  <div class="ecard e2">2 hover</div>
+  <div class="ecard e3">3 float</div>
+  <div class="ecard e4">4 overlay</div>
+  <div class="ecard e5">5 modal</div>
+</div>
+
+<h3>6.1 档位分配表</h3>
+<table>
+<tr><th style="width:10%">档</th><th style="width:20%">名称</th><th>用在哪</th><th>规则</th></tr>
+<tr><td>0</td><td>flat</td><td>页面内容、列表行、标题带、任务栏、桌面</td><td>无阴影；靠 1px 分隔线或底色差区分</td></tr>
+<tr><td>1</td><td>raised</td><td>卡片、设置分组、内容面板</td><td>常态窗口用这一档</td></tr>
+<tr><td>2</td><td>hover</td><td>悬停中的卡片/窗口、被选中的窗口</td><td>焦点窗口自动 +1 档，不必手写</td></tr>
+<tr><td>3</td><td>float</td><td>Popover、下拉、Tooltip、右键菜单</td><td>必须叠在浮层之上，锚定后不改档</td></tr>
+<tr><td>4</td><td>overlay</td><td>开始菜单、对话框、通知</td><td>允许与任务栏重叠，但不得被任务栏盖住</td></tr>
+<tr><td>5</td><td>modal</td><td>模态弹层（配 0.55 遮罩）</td><td>同屏只允许一个；关闭前不得再开第二个</td></tr>
+</table>
+
+<h3>6.2 一致性与禁区</h3>
+<ul>
+<li>同屏最多 3 档共存（常见组合：1 + 3 + 4）。出现 4 档说明层级乱。</li>
+<li>父子不叠加：子块 elevation 恒 0，阴影由父块统一画，避免“框中框”双影。</li>
+<li>贴边侧不投影：窗口贴屏幕边时，该侧阴影由内核裁掉，不要用偏移补偿。</li>
+<li><strong>HC 主题</strong>：阴影全部换成 2px 描边，elevation 值仍要写（内核据此选边框层次），但视觉上不再有投影。</li>
+<li>禁止用 <code>box-shadow</code> 手写阴影，禁止用多层 div 模拟。</li>
+</ul>
+<div class="note">按下态 = elevation 降 1 档 + alpha 0.18；抬起（hover）= elevation 升 1 档。抬升只允许 1 档，不要从 1 跳到 4。</div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section id="s7">
+<h2><span class="no">07</span>圆角：逐角 / pill / 同心</h2>
+<p class="lead">圆角的坑几乎全在“组合控件”上：菜单项成组、按钮组、贴边面板、父子嵌套。规则只有四条：<strong>显式写、逐角写、成组只画外沿、子块内缩</strong>。</p>
+
+<div class="rad-row">
+  <div class="rb" style="width:96px;height:64px;border-radius:8px">8</div>
+  <div class="rb" style="width:96px;height:64px;border-radius:16px">16</div>
+  <div class="rb" style="width:96px;height:64px;border-radius:999px">pill</div>
+  <div class="rb" style="width:96px;height:64px;border-radius:16px 16px 0 0">16 16 0 0</div>
+  <div class="r-group" style="border-radius:12px">
+    <div style="border-radius:12px 0 0 12px">组首</div><div>中间</div><div style="border-radius:0 12px 12px 0">组尾</div>
+  </div>
+</div>
+
+<h3>7.1 四值顺序</h3>
+<p><code>data-radius="16 16 0 0"</code> = TL TR BR BL（左上、右上、右下、左下）。与 CSS 的 <code>border-radius</code> 顺序一致，不要写成“上 下 左 右”。只写一个值 = 四角相同；写 <code>pill</code> = 短边一半。</p>
+
+<h3>7.2 档位</h3>
+<table>
+<tr><th>档</th><th>用途</th><th>禁止</th></tr>
+<tr><td>0</td><td>贴边侧、任务栏、全出血块、组内中间项</td><td>—</td></tr>
+<tr><td>8</td><td>小控件：按钮、输入框、标签、菜单项</td><td>大面板用 8 会显得碎</td></tr>
+<tr><td>12</td><td>卡片、设置分组、Popover</td><td>—</td></tr>
+<tr><td>16</td><td>窗口、开始菜单、对话框</td><td>小于 240px 宽时降到 12</td></tr>
+<tr><td>24</td><td>全屏面板、通知（大圆角风格）</td><td>800×600 上慎用</td></tr>
+<tr><td>pill</td><td>状态胶囊、搜索框、开关</td><td>高度 > 64px 时不要用</td></tr>
+</table>
+
+<h3>7.3 同心圆角（父子嵌套）</h3>
+<p>父半径 R、内边距 P，子块半径取 <code>R − P</code>（小于 0 取 0）。原型里直接写 <code>data-radius="auto"</code> 让内核推；只有需要覆盖时才手写数值。这条是“内弧穿帮”的唯一正解——子块用和父一样的 16，看起来就会像内框凸出来。</p>
+
+<h3>7.4 成组与贴边</h3>
+<ul>
+<li><strong>成组</strong>：一组紧贴的项，只有组首 TL/BL 和组尾 TR/BR 有半径，中间项全 0；组内分隔线只画 1px，不画整框（<code>data-border-sides</code> 只留 b 或 r）。</li>
+<li><strong>贴边</strong>：贴屏幕边或贴父框边的一侧，该侧两角写 0。<strong>不要依赖自动判定</strong>——动态内容宽度你算不准，显式写才稳（R-7.4-01）。</li>
+<li><strong>全出血</strong>：<code>data-bleed</code> 块四角 0，且不投影、不可拖。</li>
+<li>共享边只画一道：相邻两块，只让左边那块画右边框，或统一用 divider。</li>
+</ul>
+<div class="warn">禁止：同一块用两套半径（外层 16、内层再套 12 且没有 padding 差）、圆形头像用 <code>pill</code> 以外的写法、用 <code>overflow:hidden</code> 裁圆角（裁剪由内核按覆盖率做）。</div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section id="s8">
+<h2><span class="no">08</span>排版：五档字号</h2>
+<p class="lead">只有 8 / 16 / 24 / 32 四档字号，加一个 16px 等宽变体。看起来少，但 800×600 上足够撑起完整层级——关键是<strong>每档只承担一种角色</strong>。</p>
+
+<div class="type-row">
+  <div style="font-size:32px;font-weight:600">Display 32 · 对话框标题</div>
+  <div style="font-size:24px;font-weight:600">Title 24 · 分组标题</div>
+  <div style="font-size:16px">Body 16 · 正文 / 菜单项 / 按钮</div>
+  <div style="font-size:16px;font-family:ui-monospace,monospace">Tabular 16 · 14:10:02 · 128 MB</div>
+  <div style="font-size:8px;letter-spacing:.2px">Caption 8 · 时间戳 / 状态栏 / 图标下标签</div>
+</div>
+
+<h3>8.1 角色映射</h3>
+<table>
+<tr><th style="width:12%">字号</th><th style="width:22%">令牌</th><th>用途</th><th>行高</th><th>备注</th></tr>
+<tr><td>32</td><td><code>--font-display</code></td><td>对话框标题、关于页大标题、空状态主文案</td><td>40</td><td>同屏 ≤ 1 处</td></tr>
+<tr><td>24</td><td><code>--font-title</code></td><td>设置分组标题、页面区块标题、开始菜单标题</td><td>32</td><td>可配 <code>data-bold</code></td></tr>
+<tr><td>16</td><td><code>--font-body</code></td><td>正文、菜单项、按钮、输入框、窗口标题</td><td>24</td><td>默认；不要给正文加粗</td></tr>
+<tr><td>8</td><td><code>--font-caption</code></td><td>状态栏、时间戳、图标下标签、次要说明</td><td>12</td><td>只读信息，不放需要点击的内容</td></tr>
+<tr><td>16 mono</td><td><code>--font-mono</code></td><td>终端、代码、时钟、计数、表格数字</td><td>24</td><td><code>data-tabular</code> 让数字等宽</td></tr>
+</table>
+
+<h3>8.2 三条铁律</h3>
+<ol>
+<li><strong>不造中间档</strong>。需要“稍小一点”就用 8 或 16，不要 12/14。内核没有这些字形，转换器会拒绝。</li>
+<li><strong>粗体只给标题</strong>。同屏最多 2 处 <code>data-bold</code>；正文加粗 = 层级失效。</li>
+<li><strong>数字必须 tabular</strong>。时钟、进度、内存、计数，凡是会跳变的数字都加 <code>data-tabular</code>，否则每秒宽窄抖动。</li>
+</ol>
+
+<h3>8.3 中文与英文混排</h3>
+<p>中文 16×16 点阵，英文 8×16。混排时英文按半角排，不要手动插空格；<code>data-font="8"</code> 只用于 ASCII 状态信息，中文降采样到 8px 会糊，禁止。</p>
+</section>
+
+<!-- ============ 9 ============ -->
+<section id="s9">
+<h2><span class="no">09</span>折行与省略</h2>
+<p class="lead">这条解决“信息密度”：通知正文、设置项说明、错误提示都需要两行。规则是<strong>只允许有限折行，且必须给省略策略</strong>。</p>
+
+<table>
+<tr><th>场景</th><th>写法</th><th>行高</th><th>说明</th></tr>
+<tr><td>通知正文</td><td><code>data-wrap="2" data-ellipsis="char"</code></td><td>24（8px 字号时 12）</td><td>两行足够；第三行起省略</td></tr>
+<tr><td>设置项说明</td><td><code>data-wrap="2" data-ellipsis="word"</code></td><td>24</td><td>英文按词断，避免半个单词</td></tr>
+<tr><td>错误提示</td><td><code>data-wrap="3" data-ellipsis="char"</code></td><td>24</td><td>错误信息可以长一点，但别超 3 行</td></tr>
+<tr><td>窗口内正文段落</td><td><code>data-wrap="auto" data-ellipsis="char"</code></td><td>24</td><td>auto = 最多 6 行，超出省略</td></tr>
+<tr><td>菜单项 / 按钮 / 标签</td><td><code>data-wrap="0"</code></td><td>—</td><td>单行，超宽用 <code>ellipsis</code>，不得折行</td></tr>
+<tr><td>文件名 / 路径</td><td><code>data-wrap="0" data-ellipsis="word"</code></td><td>—</td><td>路径超长时中间省略更友好（内核按词边界）</td></tr>
+</table>
+
+<h3>9.1 排版细节</h3>
+<ul>
+<li>折行宽度 = 内容框宽度（外框 − padding），不需要你算；写 <code>data-w</code> 即可。</li>
+<li>末行省略号由内核加，<strong>不要自己在文本里写“…”</strong>，否则会双省略。</li>
+<li>CJK 不会在字中间断行；行首禁则（。，、）」等不落行首）由内核处理。你的文案里不要手动加 <code>\n</code> 做“假折行”，除非确实需要硬换行（如地址两行）。</li>
+<li>折行块的高度用 <code>data-h="auto"</code>，让内核按行数撑开；写死高度会导致文字被裁半行。</li>
+</ul>
+<div class="warn">禁止无限折行：<code>data-wrap</code> 最大 6 或 auto；超过 6 行一律省略。桌面端没有“滚动文字块”，要读全文请放进可滚动面板。</div>
+</section>
+
+<!-- ============ 10 ============ -->
+<section id="s10">
+<h2><span class="no">10</span>动效：八条缓动</h2>
+<p class="lead">动效只做“状态变化的解释”，不做装饰。时长必须是 16ms 的倍数，曲线只能选枚举，<strong>不允许自定义贝塞尔</strong>。</p>
+
+<div class="ease-row">
+  <div class="ease">out-back<small>开合、滑入：过冲一点再回落，最“现代”</small></div>
+  <div class="ease">out<small>默认：快起慢收，位置变化通用</small></div>
+  <div class="ease">in<small>收起、消失：慢起快收</small></div>
+  <div class="ease">inout<small>同屏内挪动、重排</small></div>
+  <div class="ease">linear<small>只给 alpha 淡变</small></div>
+  <div class="ease">in-back<small>收起时的“先吸一下”</small></div>
+  <div class="ease">step<small>离散跳变：进度、计数、光标</small></div>
+</div>
+
+<h3>10.1 帧数对照</h3>
+<table>
+<tr><th>时长</th><th>帧数（16ms）</th><th>适用</th></tr>
+<tr><td>48</td><td>3</td><td>按下/抬起反馈、颜色变化</td></tr>
+<tr><td>96</td><td>6</td><td>收起、淡出、内容切换</td></tr>
+<tr><td>144</td><td>9</td><td>开始菜单展开、最小化飞入</td></tr>
+<tr><td>192</td><td>12</td><td>窗口打开、通知滑入</td></tr>
+<tr><td>288</td><td>18</td><td>整页转场（少用，同屏只允许一个）</td></tr>
+</table>
+
+<h3>10.2 组合表（照抄）</h3>
+<table>
+<tr><th>交互</th><th>anim</th><th>ease</th><th>anim-props</th><th>备注</th></tr>
+<tr><td>窗口打开</td><td>192</td><td>out</td><td>w,h,alpha</td><td>从 92% 尺寸放大 + 淡入</td></tr>
+<tr><td>窗口关闭</td><td>96</td><td>in</td><td>alpha</td><td>不做缩小，避免闪</td></tr>
+<tr><td>开始菜单展开</td><td>144</td><td>out-back</td><td>h,alpha</td><td>高度从 0 过冲到目标</td></tr>
+<tr><td>开始菜单收起</td><td>96</td><td>in</td><td>h,alpha</td><td>—</td></tr>
+<tr><td>通知滑入</td><td>192</td><td>out-back</td><td>x,alpha</td><td>从右侧 24px 外滑入</td></tr>
+<tr><td>通知消失</td><td>96</td><td>in</td><td>alpha</td><td>先淡出再移除块</td></tr>
+<tr><td>最小化</td><td>144</td><td>in</td><td>x,y,w,h,alpha</td><td>中止时 settle 到目标</td></tr>
+<tr><td>悬停 / 按下</td><td>0</td><td>—</td><td>—</td><td>即时，不做过渡（R-10.2-01）</td></tr>
+<tr><td>主题切换</td><td>96</td><td>linear</td><td>alpha</td><td>整屏交叉淡变</td></tr>
+<tr><td>内容重排</td><td>96</td><td>inout</td><td>x,y</td><td>列表增删项时</td></tr>
+</table>
+
+<h3>10.3 可中断与无障碍</h3>
+<ul>
+<li>动画进行中新目标到来，立即接管，旧动画 <strong>settle 到目标</strong>——不会停在半路（这是内核保证，你不需要补帧）。</li>
+<li>同一个块同一时刻只能有一条动画；连点两次不要叠加 <code>data-anim</code>。</li>
+<li>全局 <code>reduced_motion</code> 开启时所有 <code>data-anim</code> 归 0，你的原型必须保证“无动画也正确”（只验证终点状态，不依赖中间帧）。</li>
+<li>禁止循环动画（除非画布内自绘内容）；禁止 <code>transition</code> / <code>animation</code> CSS。</li>
+</ul>
+</section>
+
+<!-- ============ 11 ============ -->
+<section id="s11">
+<h2><span class="no">11</span>Popover 与浮层</h2>
+<p class="lead">浮层几何全部由内核算：按内容收缩 → 8px 安全边距 → 空间不足翻转 → 超 max-h 内部滚动。你只给锚点和偏好方向。</p>
+
+<pre><code>&lt;button data-id="btn-more" data-on="click"&gt;…&lt;/button&gt;
+
+&lt;c-popover data-anchor="#btn-more" data-prefer="down up right"
+           data-max-h="60%" data-offset="4" data-dismiss="both"&gt;
+  &lt;div data-blk="column" data-radius="12" data-elevation="3" data-alpha="0.96"&gt;
+    &lt;button data-id="mi-new"  data-on="click"&gt;New Folder&lt;/button&gt;
+    &lt;button data-id="mi-prop" data-on="click"&gt;Properties&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/c-popover&gt;</code></pre>
+
+<h3>11.1 参数约定</h3>
+<table>
+<tr><th>项</th><th>取值</th><th>说明</th></tr>
+<tr><td>prefer</td><td><code>down up right left</code> 任意顺序</td><td>按序尝试，全越界则钳制到可用区</td></tr>
+<tr><td>offset</td><td>4–8</td><td>锚点与浮层的间距；菜单用 4</td></tr>
+<tr><td>max-h</td><td>默认 60% 可用区</td><td>超出滚动，不裁切</td></tr>
+<tr><td>宽</td><td>auto，最大 320</td><td>内容撑开；不要写死 400</td></tr>
+<tr><td>行高</td><td>32</td><td>菜单项统一 32，含 1px 分隔</td></tr>
+<tr><td>dismiss</td><td>outside / esc / both / none</td><td>开始菜单用 none</td></tr>
+</table>
+
+<h3>11.2 子菜单桥</h3>
+<p>二级菜单必须允许“斜着移过去”不消失：内核做 400ms hover 桥（鼠标在锚点与子菜单之间的三角形区域内保持打开）。原型<strong>不要</strong>用 <code>dismiss="outside"</code> 去模拟，写默认 both 即可。</p>
+
+<h3>11.3 层与遮挡</h3>
+<ul>
+<li>Popover 恒定在 <code>LAYER_OVERLAY</code> 之上、Toast 之下；不要手写 <code>data-layer</code> 提升它。</li>
+<li>开始菜单用 overlay 层 + <code>data-elevation="4"</code>，且几何上不得被任务栏遮挡、不得出屏、超高可内部滚动。</li>
+<li>模态弹层（elevation 5）同屏只允许一个，且必须配 0.55 遮罩；遮罩点击 = 关闭（除声明 <code>data-dismiss="none"</code>）。</li>
+</ul>
+
+<h3>11.4 半透明浮层的兜底</h3>
+<p>浮层压到任务栏/窗口上时，alpha 0.96 可能透出底下的文字造成“叠字”。规则：<strong>浮层内部再垫一层不透明 RECT（role=panel）</strong>，alpha 只作用于最外层圆角与投影。这是唯一允许的双层半透明写法。</p>
+<div class="warn">禁止：自己算翻转坐标、给 Popover 写 <code>data-place="anchor"</code> 手动定位、嵌套超过 2 层、在浮层里放另一个浮层的触发器（改用行内展开）。</div>
+</section>
+
+<!-- ============ 12 ============ -->
+<section id="s12">
+<h2><span class="no">12</span>滚动与滚动条</h2>
+<p class="lead">滚动条由内核统一画，你不允许自绘。你只需要声明“能不能滚、往哪滚、滚动条什么时候出现”。</p>
+<table>
+<tr><th>属性</th><th>取值</th><th>说明</th></tr>
+<tr><td><code>data-overflow="scroll"</code></td><td>—</td><td>开启裁剪 + 视口平移</td></tr>
+<tr><td><code>data-scroll="y"</code></td><td>x / y / both</td><td>一次只允许一个方向为主；both 仅终端</td></tr>
+<tr><td><code>data-scrollbar="auto"</code></td><td>auto / always / never</td><td>设置页用 auto；终端用 always</td></tr>
+</table>
+<ul>
+<li>轨道 8px，thumb 最小 24px，颜色取 <code>role=border</code>/<code>accent</code>，不写死灰度。</li>
+<li>滚轮一格 = 3 行 = 3×行高；不加速度、不做惯性（内核固定）。</li>
+<li>滚动条与内容之间留 4px，不遮内容。</li>
+<li>嵌套滚动最多 1 层；内层滚动到边界不传递（不做滚动链）。</li>
+<li>列表滚动时，悬停高亮跟随行，不跟 thumb。</li>
+</ul>
+</section>
+
+<!-- ============ 13 ============ -->
+<section id="s13">
+<h2><span class="no">13</span>图标与令牌</h2>
+<p class="lead">图标是单色位图 + 角色着色，不是 SVG、不是字体图标、不是 emoji。这样做的好处是三主题、HC 全自动成立。</p>
+<table>
+<tr><th>项</th><th>规则</th></tr>
+<tr><td>尺寸</td><td>16×16（列表/按钮内）与 32×32（桌面/空状态/设置首图）两档，不缩放</td></tr>
+<tr><td>网格</td><td>16 档用 1px 描边，32 档用 2px；留 2px 内边距</td></tr>
+<tr><td>着色</td><td><code>data-tint="fg|accent|bg|border"</code>，只改色不改形</td></tr>
+<tr><td>命名</td><td>用内置名（folder/gear/terminal/play/close/search/image/note），不自造</td></tr>
+<tr><td>禁用</td><td>多色图标、渐变图标、emoji、文字当图标、外链 SVG</td></tr>
+</table>
+
+<h3>13.1 令牌</h3>
+<p>颜色、圆角、阴影、间距、字体全部走令牌，原型<strong>不写十六进制</strong>。三套主题（DARK / LIGHT / HC）由内核切换，你只需要保证用的是角色而不是具体色值。</p>
+<table>
+<tr><th>令牌</th><th>DARK</th><th>LIGHT</th><th>HC</th></tr>
+<tr><td>fg</td><td>#E8E8EC</td><td>#181820</td><td>#FFFFFF</td></tr>
+<tr><td>bg</td><td>#1E1E26</td><td>#ECECF1</td><td>#000000</td></tr>
+<tr><td>panel</td><td>#2A2A34</td><td>#DDDDE6</td><td>#101010</td></tr>
+<tr><td>accent</td><td>#4C8DFF</td><td>#2563D8</td><td>#FFFF00</td></tr>
+<tr><td>border</td><td>#555A66</td><td>#8A8F9E</td><td>#FFFF00（2px）</td></tr>
+<tr><td>radius</td><td>8/12/16/24</td><td>同</td><td>全 0</td></tr>
+<tr><td>shadow</td><td>0–5 六档</td><td>同</td><td>无（改 2px 边）</td></tr>
+</table>
+</section>
+
+<!-- ============ 14 ============ -->
+<section id="s14">
+<h2><span class="no">14</span>CE 应用通道</h2>
+<p class="lead">CE 应用现在能声明真正的控件，不再只能自绘到画布。但边界很清楚：<strong>能声明块与事件，不能写像素。</strong></p>
+
+<h3>14.1 可提交类型</h3>
+<p>容器：COLUMN / ROW / STACK；叶：TEXT / RECT / IMAGE / DIVIDER / SPACER / CANVAS / BUTTON / INPUT / TERM / POPOVER / ICON。<strong>不可提交</strong>：FREE（自由布局容器，内置页专用）。</p>
+
+<h3>14.2 事件模型</h3>
+<table>
+<tr><th>事件</th><th>回调数据</th><th>说明</th></tr>
+<tr><td>click</td><td>target_id、局部 x/y</td><td>按钮、菜单项；≤400ms 双击由内核合成 dblclick</td></tr>
+<tr><td>focus / blur</td><td>target_id</td><td>输入框获焦时自动聚焦</td></tr>
+<tr><td>input</td><td>target_id、UTF-8 文本、光标位</td><td>每次编辑回传一次，不做逐键</td></tr>
+<tr><td>wheel</td><td>target_id、dx/dy</td><td>仅声明了 scroll 的容器才收到</td></tr>
+<tr><td>key</td><td>keysym、mods</td><td>焦点块内有效</td></tr>
+<tr><td>dismiss</td><td>target_id</td><td>Popover 被点外/ESC 关闭</td></tr>
+</table>
+<div class="note">CE 应用的事件循环是拉取式：一帧内多次事件会排队，<code>blk_event_poll</code> 一次取一条。不要假设“点击必到”，要处理队列空。</div>
+
+<h3>14.3 仍然禁止</h3>
+<ul>
+<li>申请帧缓冲、直接写屏幕、绕过合成器。</li>
+<li>声明 <code>data-radius</code>/<code>data-alpha</code> 之外的“自绘装饰”（阴影、圆角由内核按字段画）。</li>
+<li>用画布冒充整个窗口：CANVAS 只用于内容区（图表、游戏、预览图）。</li>
+</ul>
+</section>
+
+<!-- ============ 15 ============ -->
+<section id="s15">
+<h2><span class="no">15</span>主题与 HC 降级</h2>
+<p class="lead">三主题不是三套皮肤，而是同一份结构 + 不同令牌。HC 的降级必须能在原型里表达，不能假装不存在。</p>
+<ul>
+<li>默认只写角色（fg/bg/panel/bar/accent/border/line），三主题自动成立。</li>
+<li>确实需要为 HC 单独改结构时，用 <code>data-theme="hc"</code> 覆盖块：HC 下强制 radius=0、border=2、阴影转描边、alpha 二值化（0 或 1）。</li>
+<li>HC 下不要用 alpha 做层次（会被二值化）；改用底/边框对比。</li>
+<li>不要为 HC 单独复制一份页面；一份 HTML 三主题都能过，才算合格。</li>
+</ul>
+<div class="ok">验收时的做法：同一份原型切三主题各截一张，逐项过 §17 清单。任何一套需要“临时改 CSS”的，都是结构问题。</div>
+</section>
+
+<!-- ============ 16 ============ -->
+<section id="s16">
+<h2><span class="no">16</span>反例清单</h2>
+<p class="lead">下面这些是真实踩过的坑，全部来自实机截图。写之前先对照一遍。</p>
+<table>
+<tr><th style="width:6%">#</th><th style="width:34%">错法</th><th>为什么错 / 正确写法</th></tr>
+<tr><td>1</td><td>给桌面/容器写 <code>data-drag="full"</code></td><td>桌面不可拖；只有窗口根与标题带可拖，默认 none</td></tr>
+<tr><td>2</td><td>父块 elevation=4，子块再 elevation=3</td><td>双影；子块恒 0</td></tr>
+<tr><td>3</td><td>子块半径和父块一样（无 padding 差）</td><td>内弧穿帮；用 auto 走同心，或 R−P</td></tr>
+<tr><td>4</td><td>开始菜单 alpha 0.8 压住任务栏</td><td>叠字；浮层内部垫不透明 RECT，alpha 只给外层</td></tr>
+<tr><td>5</td><td>文字 <code>data-alpha="0.6"</code></td><td>看不清；文字 ≥0.85，禁用靠父级 0.45</td></tr>
+<tr><td>6</td><td>菜单项写成 <code>data-wrap="auto"</code></td><td>菜单会变两行高，行高不齐；菜单项 0 行 + ellipsis</td></tr>
+<tr><td>7</td><td>按钮组每项都 8 圆角</td><td>组内接缝出圆角缺口；成组只画外沿</td></tr>
+<tr><td>8</td><td>用 CSS <code>box-shadow</code> 做卡片</td><td>转换器丢弃，实机无阴影；写 elevation</td></tr>
+<tr><td>9</td><td>时钟不加 tabular</td><td>每秒数字宽度变化，任务栏抖；加 data-tabular</td></tr>
+<tr><td>10</td><td>自己算 Popover 的 top/left</td><td>贴底被裁；交给内核 anchor/prefer</td></tr>
+<tr><td>11</td><td>悬停加 300ms transition</td><td>手感拖沓且内核不支持；悬停即时</td></tr>
+<tr><td>12</td><td>给 8px 文字写中文</td><td>降采样糊成一团；8px 只放 ASCII/数字</td></tr>
+<tr><td>13</td><td>列表每个 item 都写 <code>data-border="all"</code></td><td>双线；只画 b 侧或用 divider</td></tr>
+<tr><td>14</td><td>用 emoji 当图标</td><td>内核没有该字形；用 data-icon</td></tr>
+<tr><td>15</td><td>滚动容器自绘 thumb</td><td>样式不一致；交给 scrollbar</td></tr>
+</table>
+</section>
+
+<!-- ============ 17 ============ -->
+<section id="s17">
+<h2><span class="no">17</span>自检清单（交稿前逐条打勾）</h2>
+<p class="lead">30 条，全部可机械核对。少于 30 条全过，不要交。</p>
+<div class="grid2">
+<div class="card"><h4>结构</h4><p>
+1 每个块都有明确 kind，无裸 div 兜底<br>
+2 层级 ≤ 3 层容器嵌套<br>
+3 无 table/grid/position:fixed<br>
+4 所有可交互块有唯一 data-id<br>
+5 桌面/任务栏/容器无 drag=full<br>
+6 浮层嵌套 ≤ 2 层<br>
+7 CE 声明不含 FREE / 不含像素缓冲
+</p></div>
+<div class="card"><h4>几何</h4><p>
+8 全部尺寸 8pt 对齐（描边/分隔线除外）<br>
+9 无 %/vw/vh/em 参与布局<br>
+10 浮层距屏幕边 ≥8px，且不压任务栏<br>
+11 贴边侧圆角显式为 0<br>
+12 成组控件只画外沿圆角<br>
+13 子块半径 = 父半径 − padding
+</p></div>
+<div class="card"><h4>层次</h4><p>
+14 同屏 elevation ≤3 档<br>
+15 子块 elevation 恒 0<br>
+16 模态同屏只 1 个 + 遮罩<br>
+17 alpha 叠层 ≤2 层<br>
+18 浮层内部有不透明垫层<br>
+19 文字 alpha ≥0.85
+</p></div>
+<div class="card"><h4>排版</h4><p>
+20 字号 ∈ {8,16,24,32}（mono 16）<br>
+21 bold ≤2 处/屏<br>
+22 跳变数字全部 tabular<br>
+23 8px 档无中文<br>
+24 长文本有 wrap 与 ellipsis<br>
+25 无手动 “…” 与假 \n
+</p></div>
+<div class="card"><h4>动效</h4><p>
+26 anim 时长 ∈ {48,96,144,192,288}<br>
+27 ease 为枚举，无贝塞尔<br>
+28 无循环动画 / 无 CSS transition<br>
+29 reduced_motion 下终点正确
+</p></div>
+<div class="card"><h4>主题</h4><p>
+30 三主题（DARK/LIGHT/HC）各截一张，均无破版；HC 下无 alpha 层次、radius=0、border=2
+</p></div>
+</div>
+</section>
+
+<!-- ============ 18 ============ -->
+<section id="s18">
+<h2><span class="no">18</span>验收与交付</h2>
+<p class="lead">原型不是“画完就行”，要能过转换、过像素比对、过三主题。</p>
+
+<h3>18.1 四步流程</h3>
+<ol>
+<li><strong>结构稿</strong>：只搭块树，灰阶，无颜色无阴影。转换器跑一遍，必须 <code>rc=0</code> 且诊断 0 阻断。</li>
+<li><strong>视觉稿</strong>：填角色色、elevation、alpha、radius、字号。再跑转换 + 离线预览，对照 §16 反例。</li>
+<li><strong>实机对照</strong>：进内核跑，按样例截 800×600 图，与离线预览逐像素比。</li>
+<li><strong>三主题 + 动效</strong>：切 DARK/LIGHT/HC 各截一张；动画逐帧导出 9 帧检查终点。</li>
+</ol>
+
+<h3>18.2 合格线</h3>
+<table>
+<tr><th>指标</th><th>阈值</th><th>怎么测</th></tr>
+<tr><td>结构诊断</td><td>阻断 0、警告 ≤3</td><td><code>validate.py</code></td></tr>
+<tr><td>app 类页面像素一致</td><td>≥98.5%</td><td>整屏 diff</td></tr>
+<tr><td>calm 类页面像素一致</td><td>≥75%</td><td>整屏 diff（柔和风格容差放宽）</td></tr>
+<tr><td>alpha 采样点误差</td><td>≤1/255</td><td>3 档 × 3 主题取点</td></tr>
+<tr><td>阴影拼缝</td><td>0 px</td><td>9-slice 边界扫描</td></tr>
+<tr><td>圆角角带</td><td>8 点采样全对</td><td>逐角 3×3 邻域</td></tr>
+<tr><td>平均帧</td><td>≤16ms</td><td>拖动/展开时采样 60 帧</td></tr>
+<tr><td>整屏重合成</td><td>≤25ms</td><td>主题切换 / 首次绘制</td></tr>
+</table>
+
+<h3>18.3 交付物</h3>
+<ul>
+<li>一份自包含 HTML（无外链、无脚本依赖），<code>lang="zh-CN"</code>，<code>meta charset="utf-8"</code>。</li>
+<li>转换产物 <code>.blk.json</code> 与哈希，写进页面注释或伴随 README。</li>
+<li>三主题截图各一张、动效逐帧导出（如涉及）。</li>
+<li>自检清单勾选结果（§17 的 30 条）。</li>
+</ul>
+</section>
+
+<!-- ============ A ============ -->
+<section id="sa">
+<h2><span class="no">A</span>令牌表</h2>
+<table>
+<tr><th>类别</th><th>令牌</th><th>值 / 档位</th></tr>
+<tr><td rowspan="3">颜色</td><td>fg / bg / panel / bar</td><td>见 §13.1 三主题表</td></tr>
+<tr><td>accent / border / line / muted</td><td>同上；muted 由 fg 派生</td></tr>
+<tr><td>inherit</td><td>0xFFFFFFFF 哨兵，继承父块角色</td></tr>
+<tr><td>圆角</td><td>--radius-sm/md/lg/xl</td><td>8 / 12 / 16 / 24，HC 全 0</td></tr>
+<tr><td>阴影</td><td>--shadow-0..5</td><td>预生成 9-slice，光源右下</td></tr>
+<tr><td>间距</td><td>--space-1..7</td><td>2 / 4 / 8 / 12 / 16 / 24 / 32</td></tr>
+<tr><td>字体</td><td>--font-caption/body/title/display/mono</td><td>8 / 16 / 24 / 32 / 16 等宽</td></tr>
+<tr><td>行高</td><td>--line-caption/body/title/display</td><td>12 / 24 / 32 / 40</td></tr>
+<tr><td>保留区</td><td>--taskbar-h / --safe-margin / --titlebar-h</td><td>32 / 8 / 28</td></tr>
+</table>
+</section>
+
+<!-- ============ B ============ -->
+<section id="sb">
+<h2><span class="no">B</span>属性全表（速查一张纸）</h2>
+<pre><code>几何   data-blk  data-w  data-h  data-pad  data-gap  data-align  data-cross
+       data-place  data-anchor  data-x  data-y  data-min-w  data-max-w
+       data-min-h  data-max-h  data-margin  data-overflow  data-bleed
+       data-drag  data-drag-bounds  data-resize  data-layer  data-z
+外观   data-alpha  data-alpha-mode  data-elevation  data-radius
+       data-radius-tl/tr/br/bl  data-border  data-border-sides
+       data-role  data-fg  data-bg  data-accent
+文本   data-text  data-font  data-bold  data-tabular  data-line-h
+       data-wrap  data-ellipsis
+动效   data-anim  data-ease  data-anim-props  data-anim-trigger
+浮层   data-anchor(REF)  data-prefer  data-max-h  data-offset  data-dismiss
+滚动   data-scroll  data-scrollbar
+图标   data-icon  data-tint
+事件   data-on  data-id
+主题   data-theme="hc"</code></pre>
+</section>
+
+<!-- ============ C ============ -->
+<section id="sc">
+<h2><span class="no">C</span>规则索引（本文自有编号）</h2>
+<table>
+<tr><th>规则号</th><th>内容</th></tr>
+<tr><td>R-2.1-01</td><td>浮层钳制区必须扣除任务栏 32px，开始菜单不得压住任务栏</td></tr>
+<tr><td>R-2.1-02</td><td>浮层距屏幕边 ≥8px；贴边侧圆角为 0</td></tr>
+<tr><td>R-5.1-01</td><td>alpha 按角色取标准档（0.92 / 0.96 / 0.94 / 0.90 / 0.55 / 0.18 / 0.12 / 0.45）</td></tr>
+<tr><td>R-5.2-01</td><td>alpha 乘法继承；同位置 ≤2 层</td></tr>
+<tr><td>R-5.2-02</td><td>文字块 alpha ≥0.85；禁用走父级 0.45</td></tr>
+<tr><td>R-6.1-01</td><td>六档 elevation 分配固定，同屏 ≤3 档</td></tr>
+<tr><td>R-6.2-01</td><td>子块 elevation 恒 0；贴边侧不投影；HC 转描边</td></tr>
+<tr><td>R-7.1-01</td><td>四值顺序 TL TR BR BL</td></tr>
+<tr><td>R-7.3-01</td><td>同心圆角：子半径 = 父半径 − padding，下限 0</td></tr>
+<tr><td>R-7.4-01</td><td>贴边/成组必须显式写半径，不依赖自动判定</td></tr>
+<tr><td>R-8.1-01</td><td>字号仅 8/16/24/32（mono 16），不造中间档</td></tr>
+<tr><td>R-8.2-01</td><td>粗体 ≤2 处/屏，仅标题与强调</td></tr>
+<tr><td>R-8.2-02</td><td>跳变数字必须 tabular</td></tr>
+<tr><td>R-9.1-01</td><td>折行上限 6 或 auto；末行省略由内核加，文本内不写 “…”</td></tr>
+<tr><td>R-9.1-02</td><td>菜单项/按钮/标签不折行</td></tr>
+<tr><td>R-10.1-01</td><td>时长必须 16ms 倍数，≤288ms；曲线只取枚举</td></tr>
+<tr><td>R-10.2-01</td><td>悬停/按下不做过渡，即时变化</td></tr>
+<tr><td>R-10.3-01</td><td>动画可中断且 settle 到目标；禁止循环与 CSS transition</td></tr>
+<tr><td>R-11.1-01</td><td>Popover 只给锚点与 prefer，几何全交内核</td></tr>
+<tr><td>R-11.4-01</td><td>半透明浮层内部必须垫不透明 RECT</td></tr>
+<tr><td>R-12.1-01</td><td>滚动条由内核统一绘制，不自绘；嵌套 ≤1 层</td></tr>
+<tr><td>R-13.1-01</td><td>颜色只走角色令牌，不写十六进制</td></tr>
+<tr><td>R-14.2-01</td><td>CE 事件拉取式排队，必须处理空队列</td></tr>
+<tr><td>R-15.1-01</td><td>三主题同一份结构成立；HC 降级用 data-theme="hc" 表达</td></tr>
+<tr><td>R-18.1-01</td><td>四步流程与合格线（§18.2）为交付门槛</td></tr>
+</table>
+</section>
+
+<footer>
+<p>CatOS 块化 GUI · HTML 原型开发规范 v3（cap2）· 2026-11-25 · 与 <code>docs/HTML-块树-转换规范.md v0.3</code> 配套使用。字段以内核 <code>blk_spec</code> 定稿为准；本文负责“怎么用”，不负责“怎么实现”。</p>
+</footer>
+
+</main>
+</div>
+</div>
+</body>
+</html>
