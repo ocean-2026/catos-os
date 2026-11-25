@@ -121,6 +121,17 @@ typedef struct {
 #define DL_ERR_FULL     -4
 #define DL_ERR_NOMEM   -12
 #define DL_ERR_BADH    -22          /* bad handle / unknown symbol */
+#define DL_ERR_RELOC    -8          /* unsupported / rejected relocation */
+
+/* Shared relocation engine (2C-1 block ①).  Applies one resolved relocation
+ * to the mapped task space.  base is the load VA; loc_off is the offset from
+ * base of the slot; sym_val is the resolved symbol VA (0 if the reloc has no
+ * symbol); addend is the ELF/CSO2 addend.  Returns 0 on success,
+ * DL_ERR_RELOC on an unsupported type or out-of-range slot.  Used by both
+ * the CSO2 dlopen path and the ELF executable loader. */
+int dl_reloc_apply(struct task_space *sp, uint32_t base, uint32_t img_size,
+                   uint32_t loc_off, uint32_t type, uint32_t sym_val,
+                   int32_t addend);
 
 struct task;
 

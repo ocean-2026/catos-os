@@ -2595,6 +2595,20 @@ typedef struct {
     uint32_t p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align;
 } elf32_phdr_t;
 
+typedef struct {
+    uint32_t sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
+             sh_link, sh_info, sh_addralign, sh_entsize;
+} elf32_shdr_t;
+
+typedef struct {
+    uint32_t st_name, st_value, st_size;
+    uint8_t  st_info, st_other;
+    uint16_t st_shndx;
+} elf32_sym_t;
+
+#define ELF_SHT_REL    9u
+#define ELF_SHT_DYNSYM 11u
+
 #define ELF_PT_LOAD 1u
 #define ELF_ET_EXEC 2u
 #define ELF_ET_DYN  3u
@@ -2624,6 +2638,75 @@ static int fat_pread(uint32_t clus0, uint32_t fsize, uint32_t off, uint32_t len,
         uint32_t nx = fat_get(c);
         if (done < len && (nx < 2 || nx >= 0x0FFFFFF0)) return -1;
         c = nx;
+    }
+    return 0;
+}
+
+/* Apply ELF dynamic relocations (.rel.dyn / .rel.plt) through the shared
+ * relocation engine (block ①).  Images without a dynamic section (the current
+ * prelinked CE/ELF samples) take the early no-op return.  Unsupported reloc
+ * types are rejected by dl_reloc_apply rather than skipped. */
+static int elf_apply_relocs(task_t *t, uint32_t clus0, uint32_t fsize,
+                            uint32_t base, const elf32_ehdr_t *eh,
+                            const elf32_phdr_t *ph, int nph) {
+    if (!eh->e_shoff || eh->e_shnum == 0 || eh->e_shnum > 32) return 0;
+    uint32_t shb = (uint32_t)eh->e_shnum * sizeof(elf32_shdr_t);
+    if ((uint64_t)eh->e_shoff + shb > fsize) return 0;   /* no usable sections */
+
+    elf32_shdr_t sh[32];
+    if (fat_pread(clus0, fsize, eh->e_shoff, shb, (uint8_t *)sh) != 0) return -4;
+
+    uint32_t bound = 0;
+    for (int i = 0; i < nph; i++)
+        if (ph[i].p_type == ELF_PT_LOAD) {
+            uint32_t e = base + ph[i].p_vaddr + ph[i].p_memsz;
+            if (e > bound) bound = e;
+        }
+    bound -= base;
+
+    int dynsym = -1;
+    for (int i = 0; i < eh->e_shnum; i++)
+        if (sh[i].sh_type == ELF_SHT_DYNSYM) { dynsym = i; break; }
+
+    static elf32_sym_t dynsym_buf[128];
+    const elf32_sym_t *syms = 0;
+    uint32_t sym_cnt = 0;
+    if (dynsym >= 0) {
+        if (sh[dynsym].sh_size > sizeof(dynsym_buf)) return -5;
+        sym_cnt = sh[dynsym].sh_size / sizeof(elf32_sym_t);
+        if (fat_pread(clus0, fsize, sh[dynsym].sh_offset,
+                      sh[dynsym].sh_size, (uint8_t *)dynsym_buf) != 0) return -4;
+        syms = dynsym_buf;
+    }
+
+    static uint32_t relbuf[256];                 /* up to 128 REL entries */
+    for (int i = 0; i < eh->e_shnum; i++) {
+        if (sh[i].sh_type != ELF_SHT_REL) continue;
+        uint32_t entsz = sh[i].sh_entsize ? sh[i].sh_entsize : 8;
+        if (entsz != 8) continue;
+        uint32_t n = sh[i].sh_size / 8;
+        if (n == 0 || n > 128) return -5;
+        if (sh[i].sh_offset + n * 8 > fsize) return -5;
+        if (fat_pread(clus0, fsize, sh[i].sh_offset, n * 8,
+                      (uint8_t *)relbuf) != 0) return -4;
+        for (uint32_t k = 0; k < n; k++) {
+            uint32_t r_off  = relbuf[2 * k];
+            uint32_t r_info = relbuf[2 * k + 1];
+            uint32_t type = r_info & 0xFFu;
+            uint32_t sym  = r_info >> 8;
+            uint32_t symval = 0;
+            if (sym && syms && sym < sym_cnt)
+                symval = base + syms[sym].st_value;
+            int32_t addend = 0;
+            if (type == 1 /* R_386_32: REL addend lives in the slot */) {
+                uint32_t pa = task_virt_to_phys(&t->space, base + r_off);
+                if (!pa) return -5;
+                addend = (int32_t) * (uint32_t *)pa;
+            }
+            if (dl_reloc_apply(&t->space, base, bound, r_off, type,
+                               symval, addend) != DL_OK)
+                return -8;
+        }
     }
     return 0;
 }
@@ -2708,6 +2791,10 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
             va += n; off += n; remaining -= n;
         }
     }
+
+    /* Apply any dynamic relocations through the shared engine (block ①). */
+    int rel = elf_apply_relocs(t, clus0, fsize, base, &eh, ph, eh.e_phnum);
+    if (rel != 0) return rel;
 
     uint32_t entry = base + eh.e_entry;
     int ok = 0;

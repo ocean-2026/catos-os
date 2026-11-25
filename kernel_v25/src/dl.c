@@ -16,6 +16,7 @@
 #include "task.h"
 #include "fs.h"
 #include "vga.h"
+#include "serial_log.h"
 
 /* One descriptor table, fixed size.  The kernel is non-preemptive inside a
  * syscall, so no locking is needed.  There is NO large static staging
@@ -42,6 +43,37 @@ static dl_module_t *dl_find_base(uint32_t base, int tid) {
         if (dl_mods[i].used && dl_mods[i].base == base &&
             dl_mods[i].owner_tid == tid) return &dl_mods[i];
     return 0;
+}
+
+/* ---- shared relocation engine (block ①) ------------------------------ */
+/* Supported R_386 types; anything else is rejected explicitly rather than
+ * skipped.  GLOB_DAT and JMP_SLOT both write the resolved symbol VA into the
+ * GOT/PLT slot; R_386_32 writes an absolute value; PC32 is relative to the
+ * slot (minus the 4-byte instruction length, as the ELF ABI specifies). */
+int dl_reloc_apply(struct task_space *sp, uint32_t base, uint32_t img_size,
+                   uint32_t loc_off, uint32_t type, uint32_t sym_val,
+                   int32_t addend) {
+    if (!sp || loc_off >= img_size) return DL_ERR_RELOC;
+    uint32_t loc_va = base + loc_off;
+    uint32_t pa = task_virt_to_phys(sp, loc_va);
+    if (!pa) return DL_ERR_RELOC;
+    uint32_t *slot = (uint32_t *)pa;
+    uint32_t val;
+    switch (type) {
+    case R_386_32:
+    case R_386_GLOB_DAT:
+    case R_386_JMP_SLOT:
+        val = sym_val + (uint32_t)addend;
+        break;
+    case R_386_PC32:
+        val = sym_val - loc_va - 4u + (uint32_t)addend;
+        break;
+    default:
+        /* Unsupported reloc type: reject, do not silently skip. */
+        return DL_ERR_RELOC;
+    }
+    *slot = val;
+    return DL_OK;
 }
 
 int dl_open(struct task *t, const char *path) {
@@ -187,6 +219,65 @@ int dl_open(struct task *t, const char *path) {
         uint32_t va = h.base + h.api_offset;
         uint32_t pa = task_virt_to_phys(&t->space, va);
         if (pa) *(uint32_t *)pa = 0x2080800u;           /* CATOS_VS_TABLE */
+    }
+
+    /* ---- relocation pass (block ①) ------------------------------------
+     * Walk the CSO2 rela table, resolve each symbol against the export
+     * table, and apply through the shared engine.  Unsupported types are
+     * rejected explicitly (DL_ERR_RELOC) with the type dumped to COM1; the
+     * loader never silently skips a slot. */
+    if (h.rela_cnt) {
+        uint32_t relab = h.rela_cnt * sizeof(cso_rela_t);
+        uint8_t *relaf = (uint8_t *)kzalloc_frame();
+        if (!relaf) {
+            for (uint32_t off = 0; off < span; off += 4096)
+                task_unmap_page(&t->space, h.base + off);
+            t->vm = vma_remove(t->vm, v);
+            vma_free(v);
+            frame_free((uint32_t)meta);
+            return DL_ERR_NOMEM;
+        }
+        if (fs_read_at(path, (char *)relaf, (int)h.rela_off, (int)relab)
+            < (int)relab) {
+            frame_free((uint32_t)relaf);
+            for (uint32_t off = 0; off < span; off += 4096)
+                task_unmap_page(&t->space, h.base + off);
+            t->vm = vma_remove(t->vm, v);
+            vma_free(v);
+            frame_free((uint32_t)meta);
+            return DL_ERR_INVAL;
+        }
+        cso_export_t *ex = (cso_export_t *)meta;
+        int rel_ok = 1;
+        for (uint32_t i = 0; i < h.rela_cnt; i++) {
+            cso_rela_t *r =
+                (cso_rela_t *)(relaf + i * sizeof(cso_rela_t));
+            uint32_t type = r->r_info & 0xFFFFu;
+            uint32_t sym  = r->r_info >> 16;
+            if (r->r_offset >= h.image_size) { rel_ok = 0; break; }
+            uint32_t symval = 0;
+            if (sym) {
+                if (sym >= h.export_cnt) { rel_ok = 0; break; }
+                symval = h.base + ex[sym].func_off;
+            }
+            if (dl_reloc_apply(&t->space, h.base, h.image_size,
+                                r->r_offset, type, symval,
+                                r->r_addend) != DL_OK) {
+                ser_write("dl reloc reject type=");
+                ser_hex("reloc", type);
+                rel_ok = 0;
+                break;
+            }
+        }
+        frame_free((uint32_t)relaf);
+        if (!rel_ok) {
+            for (uint32_t off = 0; off < span; off += 4096)
+                task_unmap_page(&t->space, h.base + off);
+            t->vm = vma_remove(t->vm, v);
+            vma_free(v);
+            frame_free((uint32_t)meta);
+            return DL_ERR_RELOC;
+        }
     }
 
     dl_module_t *m = &dl_mods[slot];

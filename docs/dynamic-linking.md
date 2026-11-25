@@ -215,6 +215,40 @@ MMAP PASS
 - 8 MiB 用户区上限见上节：最多 4 库 / 512 KiB 共享 `.text`；若撞墙先扩 VMA 规划
   并写明新上限，不偷抬基址。
 
+## Stage 2C block ①：内核 relocate 引擎
+
+### 支持的 R_386 重定位类型
+
+| type | 名称 | 语义 | 槽内写入 |
+|---|---|---|---|
+| 1 | `R_386_32` | 绝对地址（数据绝对指针） | `*slot = sym_val + addend` |
+| 2 | `R_386_PC32` | 相对调用 / 跳转 | `*slot = sym_val - loc_va - 4 + addend` |
+| 6 | `R_386_GLOB_DAT` | GOT 数据项（对象/变量引用） | `*slot = sym_val + addend` |
+| 7 | `R_386_JMP_SLOT` | PLT 函数槽 | `*slot = sym_val + addend` |
+
+其余类型由 `dl_reloc_apply()` 显式拒绝，返回 `DL_ERR_RELOC = -8`（ENOEXEC
+语义：镜像含内核不支持的重定位），并向 COM1 打点 `dl reloc reject
+type=<hex>`；**不静默跳过**任何槽。
+
+### 引擎复用（同一条 relocate 路径）
+
+- **CSO2 `dlopen` 路径**：拷镜像、注入 vsyscall 表指针后，遍历 CSO2 rela
+  表（12 B/条 `{r_offset, r_info, r_addend}`）；`r_info` 低 16 位为 type、高
+  16 位为 sym_idx；符号按导出表解析（`sym_val = base + ex[sym].func_off`），
+  逐条过引擎。槽偏移越界、sym 越界同样拒绝。
+- **ELF 可执行路径（`spawn_load_elf`）**：节头扫描 `.rel.dyn` / `.rel.plt`
+  （`SHT_REL=9`）与 `.dynsym`（`SHT_DYNSYM=11`）；REL 条目 8 B
+  `{r_offset, r_info}`；`R_386_32` 的 addend 从槽内现值读取（REL 无显式
+  addend），其余类型 addend=0；解析后同样调 `dl_reloc_apply()`，拒绝返回
+  `-8`。当前内置 `hello.elf` 无动态节，走节表缺失的 no-op 早返回。
+
+### 本块边界（未实机跑过的部分）
+
+- 四类重定位的实机补丁由块②产出的「必须重定位」库（导出变量 + GOT 调导出
+  函数）验证；本块仅证明零重定位既有镜像（`dltest.ce` / `mmap.ce`）无回归。
+- `init_array` / `fini_array` 的调用接线（按顺序调构造、末次 `dlclose` 调
+  析构）在后续块落地；本块只把偏移/计数存入模块描述符。
+
 ## 限制
 
 - 库镜像按任务独立复制，本轮不共享物理页（2C 才做只读共享）；
