@@ -37,6 +37,7 @@ static int       drag_mode;
 static uint8_t   drag_resize_dir;
 static int       drag_off_x, drag_off_y;
 static block    *hover_block;
+static block    *pressed_block;     /* E 轮新增：左键按住期间命中的按钮（三态按下反馈） */
 
 /* 运行时调试开关（默认关，release 惰性）：故障注入时对硬禁拖块临时放行，
  * 仅用于核验“被拖块出现在本不该出现的位置时，兜底重合成仍不烙残影”。
@@ -50,6 +51,7 @@ void gui_dbg_set_dragfull(int on) {
 }
 
 block *gui_hover_target(void) { return hover_block; }
+block *gui_press_target(void) { return pressed_block; }
 
 /* 组件键盘钩子：返回 1 表示消费该键，默认 Esc 退出路径不再触发。 */
 static int       (*key_hook)(int code, void *ud);
@@ -224,6 +226,10 @@ static void on_press(int x, int y) {
     }
     if (!b) return;
 
+    /* E 轮三态：左键按住期间记录命中块（优先上溯到按钮），供按下反馈；松开清空。 */
+    { block *p = b; while (p && p->kind != BLK_BUTTON) p = p->parent;
+      pressed_block = p ? p : b; }
+
     /* 点击冒泡：命中的通常是最里层的标签/文本块，而 on_click 声明在
      * 行/面板上。向上找最近一个带 on_click 的祖先（含自身），否则
      * Start、菜单条目这类"行 + 文本子块"永远点不动。 */
@@ -320,6 +326,7 @@ static void on_drag_move(int x, int y) {
 }
 
 static void on_release(void) {
+    pressed_block = 0;
     if (drag_block && drag_block->on_drag)
         drag_block->on_drag(drag_block->id, 0, 0, 2); /* phase 2 = end */
     drag_block = 0;
@@ -331,6 +338,7 @@ void gui_pump_input(void) {
     while (mouse_poll_event(&e)) {
         if (e.down && (e.changed & MOUSE_BTN_LEFT)) on_press(e.x, e.y);
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
+            pressed_block = 0;
             if (drag_mode != DRAG_NONE) on_release();
             else hover_block = hit_test(e.x, e.y);
         } else if (drag_block) {
@@ -371,6 +379,7 @@ void gui_input_reset(void) {
     focus_n = 0;
     for (int i = 0; i < 4; i++) focus_stack[i] = 0;
     hover_block = 0;
+    pressed_block = 0;
     key_hook = 0;
     key_ud = 0;
 }
@@ -379,6 +388,9 @@ void gui_input_reset(void) {
 void gui_inject_press(int x, int y)  { on_press(x, y); }
 void gui_inject_move(int x, int y)   { on_drag_move(x, y); }
 void gui_inject_release(void)        { on_release(); }
+void gui_inject_hover(int x, int y) { hover_block = hit_test(x, y); }
+void gui_inject_press_block(block_id id) { pressed_block = btable_get(id); }
+void gui_inject_hover_block(block_id id) { hover_block = btable_get(id); }
 block_id gui_hit_test(int x, int y) {
     block *b = hit_test(x, y);
     return b ? b->id : 0;

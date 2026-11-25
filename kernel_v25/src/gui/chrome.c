@@ -314,6 +314,62 @@ static void shot_controls_build(void) {
     layout_run();
 }
 
+/* E1-③ 探针：按钮三态同点采样（idle/hover/pressed 分帧注入，不触发点击/焦点反色）。 */
+static block_id e1_btn_id;
+static void shot_e1_btn_build(const char *state) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec btn = spec_panel(LAYER_WORK, 160, 28, 1);
+    e1_btn_id = b_button(F, &btn, "Btn");
+    block *bp = btable_get(e1_btn_id);
+    bp->x = 320; bp->y = 280; bp->moved = 1;
+
+    if (state && !strcmp_probe(state, "hover"))
+        gui_inject_hover_block(e1_btn_id);
+    else if (state && !strcmp_probe(state, "pressed"))
+        gui_inject_press_block(e1_btn_id);
+
+    layout_run();
+    block *b = btable_get(e1_btn_id);
+    ser_write("GUI:e1-btn rect ");
+    if (b) { ser_dec(b->x); ser_write(","); ser_dec(b->y); ser_write(",");
+             ser_dec(b->w); ser_write(","); ser_dec(b->h); }
+    ser_write(" state="); ser_write(state ? state : "idle"); ser_write("\n");
+}
+
+/* E1-① 描边正反例：A 行 border=1 必显环；B 行 border=0 环上不得取到描边色。 */
+static block_id e1_row_a, e1_row_b;
+static void shot_e1_outline_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec a = spec_panel(LAYER_WORK, 240, 24, 1);
+    e1_row_a = b_row(F, &a);
+    block *pa = btable_get(e1_row_a); pa->x = 280; pa->y = 220; pa->moved = 1;
+    b_text(e1_row_a, 0, "Stroked");
+
+    blk_spec b = spec_panel(LAYER_WORK, 240, 24, 0);
+    e1_row_b = b_row(F, &b);
+    block *pb = btable_get(e1_row_b); pb->x = 280; pb->y = 270; pb->moved = 1;
+    b_text(e1_row_b, 0, "Plain");
+
+    layout_run();
+    block *A = btable_get(e1_row_a), *B = btable_get(e1_row_b);
+    ser_write("GUI:e1-outline a ");
+    if (A) { ser_dec(A->x); ser_write(","); ser_dec(A->y); ser_write(",");
+             ser_dec(A->w); ser_write(","); ser_dec(A->h); }
+    ser_write(" b ");
+    if (B) { ser_dec(B->x); ser_write(","); ser_dec(B->y); ser_write(",");
+             ser_dec(B->w); ser_write(","); ser_dec(B->h); }
+    if (A) { ser_write(" dbg kind="); ser_dec(A->kind);
+             ser_write(" rolebg="); ser_dec(A->st.role_bg);
+             ser_write(" bg="); ser_dec(A->st.bg);
+             ser_write(" bw="); ser_dec(A->st.border_w);
+             ser_write(" vis="); ser_dec(A->visible); }
+    ser_write("\n");
+}
+
 /* C 轮组 1：父卡 r16 内嵌两子块——C1 贴左+贴顶，C2 贴右+贴底（对照）。
  * 自由层绝对定位，8pt 网格；父卡 pad=0，内容框即整框。 */
 static void shot_flush_inset_build(void) {
@@ -2160,6 +2216,8 @@ void gui_shell_cmd(const char *arg) {
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     int shot_controls = 0;
+    int e1_btn = 0, e1_outline = 0;
+    const char *e1_state = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
@@ -2174,6 +2232,8 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-menu-geo")) { shot_menu = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls")) { shot_controls = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls-card")) { shot_controls = 1; probe_no_sample = 1; probe_card_only = 1; }
+    else if (!strcmp_probe(word, "shot-e1-btn")) { e1_btn = 1; probe_no_sample = 1; e1_state = rest ? rest : "idle"; }
+    else if (!strcmp_probe(word, "shot-e1-outline")) { e1_outline = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-hpair"))  { probe_flush_hpair = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-vgroup")) { probe_flush_vgroup = 1; probe_no_sample = 1; }
@@ -2238,6 +2298,8 @@ void gui_shell_cmd(const char *arg) {
         menu_report_rects();
     }
     if (shot_controls) { shot_controls_build(); gui_frame(); }
+    if (e1_btn)       { shot_e1_btn_build(e1_state); gui_frame(); }
+    if (e1_outline)   { shot_e1_outline_build(); gui_frame(); }
     if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
     if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }
     if (probe_flush_vgroup) { shot_flush_vgroup_build(); gui_frame(); }

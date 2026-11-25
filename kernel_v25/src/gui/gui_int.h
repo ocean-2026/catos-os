@@ -63,12 +63,16 @@ void      layout_run(void);
 void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
+void      gui_inject_hover(int x, int y);
+void      gui_inject_press_block(block_id id);
+void      gui_inject_hover_block(block_id id);
 block_id  gui_hit_test(int x, int y);
 int       gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir);
 #define GUI_IT_NONE   0
 #define GUI_IT_MOVE   1
 #define GUI_IT_RESIZE 2
 block    *gui_hover_target(void);
+block    *gui_press_target(void);
 void      gui_focus_raise(block_id id);
 void      gui_modal_inert(block_id overlay_id);
 

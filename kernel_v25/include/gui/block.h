@@ -111,6 +111,7 @@ typedef struct {
     uint32_t fg, bg, accent;
     uint8_t  role_fg, role_bg, role_accent;
     uint8_t  scale, border_w;
+    uint8_t  stroke;                    /* E 轮新增规格：描边线宽（append-only；0 = 未设） */
     const char   *text;
     const uint8_t *pix;
     int32_t  pix_w, pix_h;
@@ -181,8 +182,8 @@ typedef struct block {
     uint8_t  resize_dir, resize_edge;
     int16_t  resize_min_w, resize_min_h, resize_max_w, resize_max_h, resize_step;
     int16_t  scroll_x, scroll_y;
+    uint8_t  stroke;                    /* E 轮新增规格：描边线宽镜像（append-only） */
     int32_t  pos_x, pos_y;              /* 拖拽收敛的偏移属性，跨帧保持 */
-
     const char   *text;
     const uint8_t *pix;
     int32_t    pix_w, pix_h;

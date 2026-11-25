@@ -474,6 +474,16 @@ static uint32_t mix_black(uint32_t c, int kpermil) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
 }
 
+/* E 轮三态：向白混 kpermil（hover 提亮）；clamp 到 255。 */
+static uint32_t mix_white(uint32_t c, int kpermil) {
+    int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, bl = c & 0xFF;
+    r = r * (1000 - kpermil) / 1000 + 255 * kpermil / 1000;
+    g = g * (1000 - kpermil) / 1000 + 255 * kpermil / 1000;
+    bl = bl * (1000 - kpermil) / 1000 + 255 * kpermil / 1000;
+    if (r > 255) r = 255; if (g > 255) g = 255; if (bl > 255) bl = 255;
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
+}
+
 /* 双层柔和阴影：WORK 卡片单层接触；OVERLAY/TOAST 双层。贴边/成组紧贴的块
  * 不投影（接缝处不得造假空隙或暗带），阴影只出现在自由边外侧。 */
 static void paint_halo(block *b) {
@@ -543,6 +553,12 @@ void paint_node_body(block *b) {
         break;
     case BLK_BUTTON: {
         uint32_t bgc = bg, fgc = fg;
+        /* E 轮三态（简化，不新增令牌阶）：pressed 向黑混 18%，hover 向白混 12%，
+         * 闲置为本体填充；亮度单调 pressed < idle < hover。聚焦反色优先。 */
+        int pressed = (gui_press_target() == b);
+        int hov = (gui_hover_target() == b);
+        if (pressed)      bgc = mix_black(bg, 180);
+        else if (hov)     bgc = mix_white(bg, 120);
         if (b->focused) { fgc = bg; bgc = fg; }   /* 按压/聚焦反色反馈 */
         body_fill(b, bgc);
         if (b->st.border_w)
@@ -567,6 +583,10 @@ void paint_node_body(block *b) {
     case BLK_FREE:
     case BLK_ROOT:
         if (b->st.bg || b->st.role_bg) body_fill(b, bg);
+        /* E1-① 容器描边：行/列等容器在声明 border_w/stroke 时同样画 1px 环，
+         * 未设（border_w=0）时不画，避免恒描边。 */
+        if (b->st.border_w)
+            body_border(b, gui_active_style()->border, bg, b->st.border_w);
         break;
     default:
         break;
