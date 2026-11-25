@@ -1,5 +1,77 @@
 # 用户态多线程（Stage 3，feat/hosted）
 
+## 3A-3 / 3A-4：per-thread TLS + 四线程隔离（已落地，实机实测）
+
+槽 83–86 从 `ENOSYS` 改为真分发，工作线程**共享父进程地址空间**跑通 create /
+exit / join / detach。实现见 `src/task.c` 线程子系统块（`thread_create` /
+`thread_exit_current` / `thread_join` / `thread_detach` / `thread_reap` /
+`tls_apply`），探针 `extapp/t1.c`、`extapp/threads.c`。
+
+### 资源归属（`thread_create`）
+
+先把父进程共享字段拷过来（顺序关键：必须先建活目录，后续 anon mmap / 用户拷贝
+才能经父目录映射）：`space`（`dir/pt/pt2` 结构拷贝）、`vm` 链表指针、`heap_end`、
+`heap_free_root[slot]`、`uid/gid/caps`、`out_pipe/in_pipe/out_append/bg_mode`。
+随后线程私有资源：
+
+| 资源 | 大小 | 来源 |
+|---|---|---|
+| 内核栈 | 8 KiB | kvheap extent（`kvmalloc`），零页 |
+| 用户栈 | 16 KiB | 扩展 arena 匿名 VMA（guard 在前） |
+| TLS 用户页 | 4 KiB | 扩展 arena 匿名 VMA，**用户可写映射**（supervisor-only 的 KV 堆窗口不能当 TLS） |
+
+TLS 页布局（32 位字）：`[0]=tid`、`[4]=errno（创建置 0）`、`[8]=0xC0FFEE` canary。
+
+### TLS 走 MSR（不新增 GDT 描述符 / LDT）
+
+- 特征门：`cpu_msr_supported()` 读 CPUID leaf1 EDX bit5 判 MSR 支持；不支持时
+  `tls_apply()` 静默跳过（LDT fallback 未接线，见已知边界）。
+- `IA32_GS_BASE = 0xC0000100`：`tls_apply(next)` 在 `schedule_to` 每次切换时
+  `wrmsr` 写 `next->tls_va`；无 TLS 的任务写 0。`IA32_KERNEL_GS_BASE = 0xC0000101`
+  已定义暂未用。
+
+### ring3 帧构造
+
+cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈顶手搭
+`int_frame_t`：`eip=entry`、`cs=SEL_UCODE`、`eflags=0x202`（IF=1）、`esp=用户栈顶`、
+`ss=SEL_UDATA`、`ds/es/fs/gs=SEL_UDATA`；状态 `T_READY`、`resume_frame=1`、
+`is_thread=1`、`proc=parent->proc`、`parent=parent`。
+
+### 退出 / 回收状态机
+
+- `thread_exit_current(retval)`：写 `thread_ret`；只 `vma_munmap` 自身用户栈与 TLS
+  页，**绝不** `task_space_destroy` 拆共享 space。非 detached 置 ZOMBIE 并唤醒
+  `waiter`；detached 置 ZOMBIE（其 kvheap 内核栈回收 deferred，见边界）。
+- `thread_join(tid)`：找不到 / 非线程返回 `-22` EINVAL；非 zombie 则 `waiter=caller`、
+  caller 阻塞 `T_WAIT_CHILD` 后 `reschedule()`；唤醒后取 `thread_ret`，调
+  `thread_reap` 释放 kvheap 内核栈并置 `T_UNUSED`。
+- `thread_detach(tid)`：置 `detached`；已 zombie 立即 reap。
+- `thread_reap`：`kvmfree(kstack_va)`，清 `kstack_top/ksp/resume_frame/
+  thr_stack_va/tls_va/waiter`，置 `T_UNUSED`；必须在非被回收线程上下文跑
+  （要释放其内核栈）。
+
+### 实机证据（本轮 mt2 构建）
+
+- `t1.ce`：单 worker 打印 `T1` 后 `thread_exit(0)`，main join 得 0，`T1 PASS`。
+- `threads.ce`：4 worker 各跑 1000 项私有栈数组并 `exit(id+1)`，main join 求和
+  `sum=10`；detach 一个 worker 不 join；fault worker `exit(1)`，join 得 retval 1
+  （非零退出不连坐进程空间）；终态 `THREAD PASS`。
+- 三门禁回归（不回归基线）：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a40`；无新增大 `.bss` 数组。
+
+### 已知边界（本轮 deferred，列入 3B/3C）
+
+- **内核态仍非抢占**：PIT ISR 只抢占 ring3；ring0 协作式让出。多线程本轮只保证不崩
+  隔离，不要求内核可抢占。
+- **detached 内核栈 deferred 回收**：detached 线程退出置 ZOMBIE 但未在自身运行栈上
+  立即释放 kvheap 内核栈；探针阶段 slot 占用 ≤16，泄漏在 3B/收尾处理。
+- **TLS errno 的 CE 用户态访问器缺失**：内核已写 TLS `[4]=0`，但 CE 侧尚无
+  `__tls_errno` 取址 / `mov %gs:off` 直读 thunk；探针 `errno=0` 为占位。
+- **共享堆分配器未 per-process**：`heap_free_root` 仍按 slot 拷自父进程；线程内
+  `malloc/free` 路径的归属/加锁列入 3B。
+- 按 tid 索引的静态缓冲（`ls_buf`、`e3_*_buf` 等）在多线程下的串扰属 3B。
+- MSR 不支持的 CPU 上 LDT TLS fallback 未接线；`kvheap inuse` 打点无对应 syscall 槽。
+
 ## 3A-2：`task_t` proc/thread 拆分脚手架（行为零变化）
 
 本轮只做结构边界落地，**不接新槽、不迁字段**：
@@ -58,11 +130,11 @@ kvheap selftest: PASS total=13 free=0 bytes=0
 
 ## 结论
 
-Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态线程。本轮按时间盒
-纪律只落地 **3A 的 ABI 表面（槽 83..86，append-only 预留）**；共享地址空间的
-活线程路径、3B per-thread scratch 迁移、3C 内核态可抢占均**如实 deferred**，原因与
-下一步见文末。既有进程路径（spawn / wait / pipe / console / heap / FPU）行为
-字节级未改，三门禁基线保持绿色。
+Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态线程。3A 已落地：
+kvheap 页后备堆、`task_t` proc/thread 拆分脚手架、槽 83–86 真线程分发（共享地址空间 +
+per-thread MSR TLS）、四线程隔离探针，三门禁回归不回归基线。3B per-thread scratch 迁移、
+3C 内核态可抢占仍**如实 deferred**，原因与下一步见文末。既有进程路径（spawn / wait /
+pipe / console / heap / FPU）行为字节级未改。
 
 红线延续：不动 v2.80 交付 ISO 与版本串；CE ABI append-only；不给应用可写像素出口；
 33 fps 不动；不新增大 `.bss` 数组；`check_link_layout.py --strict` RC=0。
@@ -71,10 +143,10 @@ Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态�
 
 | 槽位 | 成员 | 签名 / 语义 | 状态 |
 |---|---|---|---|
-| 83 | `thread_create(entry, arg)` | `entry` 为 ring3 函数指针 `void *fn(void *arg)`；`arg` 经新线程用户栈传入。返回 tid>0 / 负 errno | 预留，本轮 `ENOSYS (-8)` |
-| 84 | `thread_exit(retval)` | 终止调用线程；`retval` 作为 join 返回值 | 预留，本轮 `ENOSYS (-8)` |
-| 85 | `thread_join(tid)` | 阻塞直到目标线程退出，回收其槽位，返回 `retval` | 预留，本轮 `ENOSYS (-8)` |
-| 86 | `thread_detach(tid)` | 标记线程分离；退出时自动回收，无需 join | 预留，本轮 `ENOSYS (-8)` |
+| 83 | `thread_create(entry, arg)` | `entry` 为 ring3 函数指针 `void *fn(void *arg)`；`arg` 经新线程用户栈传入。返回 tid>0 / 负 errno | 已实现（3A-3） |
+| 84 | `thread_exit(retval)` | 终止调用线程；`retval` 作为 join 返回值 | 已实现（3A-3） |
+| 85 | `thread_join(tid)` | 阻塞直到目标线程退出，回收其槽位，返回 `retval` | 已实现（3A-3） |
+| 86 | `thread_detach(tid)` | 标记线程分离；退出时自动回收，无需 join | 已实现（3A-3） |
 
 两处镜像（`include/ce_abi.h`、`include/ce.h`）成员顺序与 `SYS_*` 枚举序、`nargs[]`
 表、vsyscall 表指针序一致：83 两参、84 一参、85 一参、86 一参。
@@ -94,7 +166,7 @@ Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态�
 idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧，没有
 >4 KiB 连续分配器，也没有通用内核堆**——这是每线程内核栈方案的硬约束。
 
-## 目标设计（下一轮落地，未编码）
+## 目标设计（早期设计草图；实际落地口径以首节为准）
 
 ### 进程 / 线程所有权拆分
 
@@ -126,10 +198,11 @@ idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧
 
 ### TLS / errno / canary
 
-- 本轮**未**接 per-thread `GS.base` TLS 块。32 位 x86 下需在 GDT 段描述符侧布置
-  TLS 段；内核与 CE 均已 `-fno-stack-protector`，canary 暂不参与。
-- 最小可用形态：线程局部变量天然落在各自用户栈上即隔离；errno 类每线程词先经
-  线程栈帧承载，待 GS.base TLS 落地后再迁到独立 TLS 页。
+- **已落地（3A-3）**：per-thread TLS 走 `IA32_GS_BASE` MSR，TLS 为独立用户映射页
+  （非 GDT TLS 段 / LDT）。内核与 CE 均 `-fno-stack-protector`，canary 暂不参与；
+  TLS `[8]=0xC0FFEE` 仅作占位校验。
+- **剩余缺口**：CE 用户态尚无 `__tls_errno` 取址 / `mov %gs:off` 直读访问器，探针
+  `errno=0` 为占位；errno 词的用户态读写 deferred 到 3B。
 
 ## 3B：静态 scratch 改 per-thread（可降级）
 
@@ -163,34 +236,18 @@ idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧
 **deferred**：定时器抢占点、`preempt_disable/enable` 关抢占区、抢占计数与栈深度
 安全审计。
 
-## 验收探针（待活路径落地后实机跑）
+## 验收探针（3A 已实机跑通；共享 text 证据属 2C 遗留）
 
-- 4 线程探针：各自栈变量 / errno 词互不干扰；join 返回值正确；detach 后退出不崩；
-  杀一个线程不影响进程地址空间与其他线程。
+- 4 线程探针（`extapp/threads.c`，已 PASS）：各自栈数组互不干扰；join 返回值正确
+  （求和 10）；detach 后退出不崩；杀一线程非零退出不连坐进程空间。
 - 共享证据：第二个程序加载同一库/代码段时 text 物理页不重复装入（打印物理页 /
   shared 计数）。Stage 2A 当前形态是每任务私有帧副本，text 尚未跨任务共享（2C 遗留）。
 
 ## 下一步
 
-1. **3A-3 活路径（未编码，槽 83..86 仍返 ENOSYS）**：
-   - `thread_create(entry,arg)`：取空闲 slot，**共享**父进程 `space.dir/pt/pt2` 与
-     `vm` 链表（不 `task_space_create`）；内核栈从 kvheap 发 extent（8 KiB 起）；在
-     扩展 arena 匿名区映射独立用户栈 VMA（带 guard 页，懒装入）；建 TLS 块；在新内核
-     栈上手搭 `int_frame_t`（`eip=entry`、`esp=新用户栈且栈顶压 `arg`、`cs/ss` 用户
-     选择子、`resume_frame=1`），`is_thread=1`、`proc` 指向父进程描述符，`T_READY`。
-   - **TLS / GS.base**：现 GDT 仅 6 项（null/kcode/kdata/ucode/udata/tss），需为每线程
-     加一个 TLS 描述符（或 LDTR），`gs` 指向 TLS 块（errno 槽 + canary + 保留）；
-     线程切换时随上下文换装。
-   - `thread_exit(retval)`：记 `thread_ret`、清 TLS；工作线程只回收自身用户栈 VMA /
-     TLS / 内核栈 extent，**不**销毁共享 space/VMA/堆/管道/控制台；分离线程自动收尸，
-     否则留 zombie 等 join；唤醒 `waiter`。
-   - `thread_join(tid)`：阻塞至目标退出取 `retval`；`thread_detach(tid)`：置 `detached`，
-     退出自动回收。
-   - 调度切换已按 `next->space.dir` 切 CR3，共享目录指针即可；需复核 FPU 懒归属与
-     `ls_buf/e3_*_buf` 等按 tid 索引静态区在多线程下的串扰（3B 项）。
-2. **3A-4 四线程隔离探针**：`extapp/threads.c` → `/bin/threads.ce`；4 线程独立计数器 /
-   TLS errno+canary / 栈数组校验；主线程 join 全部取 retval 求和比对；detach 退出不崩；
-   杀一线程不连坐；打 `threads: tid/i/errno/sum`、`join ret=`、`kvheap inuse=`、`THREAD PASS`。
-3. 3B：netstack/ssh 静态 scratch 与 dl 句柄表归属迁移 per-thread。
-4. 3C：内核态抢占点 + 关抢占区，先解除 netstack/ssh/dl 的非抢占假设。
-5. 全绿后版本号才走 v2.81；不动 v2.80 ISO/版本串。
+1. **3A-3 / 3A-4（已落地，见首节）**：槽 83–86 真分发、共享 space、MSR TLS、
+   四线程探针 `THREAD PASS`；三门禁 vprobe 10/10、E3 2/2、F11 9/9。
+2. **3B**：netstack/ssh 静态 scratch 与 dl 句柄表归属迁移 per-thread；共享堆分配器
+   per-process；detached 内核栈回收；TLS errno CE 访问器；按 tid 索引静态缓冲串扰。
+3. **3C**：内核态抢占点 + 关抢占区，先解除 netstack/ssh/dl 的非抢占假设。
+4. 全绿后版本号才走 v2.81；不动 v2.80 ISO/版本串。
