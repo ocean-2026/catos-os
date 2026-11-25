@@ -330,6 +330,8 @@ static void shot_e1_btn_build(const char *state) {
         gui_inject_hover_block(e1_btn_id);
     else if (state && !strcmp_probe(state, "pressed"))
         gui_inject_press_block(e1_btn_id);
+    else if (state && !strcmp_probe(state, "blank"))
+        gui_inject_press(600, 400);   /* E1-② 桌面空白命中：不应改任何块状态 */
 
     layout_run();
     mark_subtree_paint(gui_root_block());
