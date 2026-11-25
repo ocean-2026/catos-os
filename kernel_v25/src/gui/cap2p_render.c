@@ -432,6 +432,201 @@ static void probe_perf(void) {
     ser_write("\n");
 }
 
+/* ---- cap3：角形态探针（ARC / SQ5 / SQ45 面积采样表） -------------------- */
+
+extern void         gui_cap3_generator(int radius, int shape_n, uint8_t *out);
+extern const uint8_t *gui_cap3_table(int shape, int ri);
+extern void         gui_cap3_build(int shape);
+extern uint32_t     gui_cap3_built_mask(void);
+extern int          gui_cap3_warn_count(void);
+
+#define CAP3_ARC   0
+#define CAP3_SQ5   1
+#define CAP3_SQ45  2
+
+/* 解析圆弧参考：与生成器同口径 4×4 子样本，方程 |u|²+|v|²<=r²（64 位整数）。 */
+static int ref_arc_cov(int r, int dy, int dx) {
+    static const int OFF[4] = { 1, 3, 5, 7 };
+    int r8 = r * 8, cnt = 0;
+    for (int sy = 0; sy < 4; sy++) {
+        int v8 = r8 - (dy * 8 + OFF[sy]);
+        for (int sx = 0; sx < 4; sx++) {
+            int u8 = r8 - (dx * 8 + OFF[sx]);
+            uint64_t a = (uint64_t)(u8 < 0 ? -u8 : u8);
+            uint64_t b = (uint64_t)(v8 < 0 ? -v8 : v8);
+            if (a * a + b * b <= (uint64_t)r8 * r8) cnt++;
+        }
+    }
+    return cnt * 255 / 16;
+}
+
+/* shape-n2：同一生成器 n=2 与解析圆弧表逐字节 0 差异（四档全量比对）。 */
+static void probe_shape_n2(void) {
+    static const int RAD[4] = { 8, 12, 16, 24 };
+    uint8_t tab[24 * 24];
+    int total_diff = 0, cells = 0;
+    for (int ri = 0; ri < 4; ri++) {
+        int r = RAD[ri];
+        gui_cap3_generator(r, 20, tab);
+        for (int dy = 0; dy < r; dy++)
+            for (int dx = 0; dx < r; dx++) {
+                int ref = ref_arc_cov(r, dy, dx);
+                int d = tab[dy * r + dx] - ref;
+                if (d < 0) d = -d;
+                total_diff += d; cells++;
+            }
+    }
+    int ok = total_diff == 0;
+    ser_write(ok ? "GUI:cap2-shape-n2 PASS" : "GUI:cap2-shape-n2 FAIL");
+    ser_write(" diff="); pd((uint32_t)total_diff);
+    ser_write(" cells="); pd((uint32_t)cells);
+    ser_write("\n");
+}
+
+/* shape-arc：8 点采样与解析圆弧参考误差 ≤1/255（r=24 ARC 表）。 */
+static void probe_shape_arc(void) {
+    static const int PT[8][2] = {
+        { 3, 3 }, { 6, 6 }, { 7, 7 }, { 0, 12 }, { 12, 0 },
+        { 1, 18 }, { 18, 1 }, { 4, 10 }
+    };
+    const uint8_t *t = gui_cap3_table(CAP3_ARC, 3);
+    int maxerr = 0;
+    for (int i = 0; i < 8; i++) {
+        int dy = PT[i][0], dx = PT[i][1];
+        int ref = ref_arc_cov(24, dy, dx);
+        int d = t[dy * 24 + dx] - ref;
+        if (d < 0) d = -d;
+        if (d > maxerr) maxerr = d;
+    }
+    int ok = maxerr <= 1;
+    ser_write(ok ? "GUI:cap2-shape-arc PASS" : "GUI:cap2-shape-arc FAIL");
+    ser_write(" maxerr="); pd((uint32_t)maxerr);
+    ser_write("\n");
+}
+
+/* 形态表健全性：外角切底（0）、块内全不透明（255）。 */
+static void shape_table_sanity(int shape, const char *name) {
+    const uint8_t *t = gui_cap3_table(shape, 3);
+    int cut = t[0 * 24 + 0] == 0;
+    int body = t[23 * 24 + 23] == 255;
+    int ok = cut && body;
+    ser_write(ok ? "GUI:cap2-" : "GUI:cap2-");
+    ser_write(name);
+    ser_write(ok ? " PASS" : " FAIL");
+    ser_write(" cut="); pd(cut);
+    ser_write(" body="); pd(body);
+    ser_write("\n");
+}
+
+static void probe_shape_sq5(void)  { shape_table_sanity(CAP3_SQ5,  "shape-sq5"); }
+static void probe_shape_sq45(void) { shape_table_sanity(CAP3_SQ45, "shape-sq45"); }
+
+/* shape-diff：ARC vs SQ5 角中段（45° 对角方向）覆盖率差 ≥3/255。 */
+static void probe_shape_diff(void) {
+    const uint8_t *a = gui_cap3_table(CAP3_ARC, 3);
+    const uint8_t *s = gui_cap3_table(CAP3_SQ5, 3);
+    int maxdiff = 0;
+    for (int d = 0; d < 24; d++) {
+        int diff = s[d * 24 + d] - a[d * 24 + d];
+        if (diff < 0) diff = -diff;
+        if (diff > maxdiff) maxdiff = diff;
+    }
+    int ok = maxdiff >= 3;
+    ser_write(ok ? "GUI:cap2-shape-diff PASS" : "GUI:cap2-shape-diff FAIL");
+    ser_write(" maxdiff="); pd((uint32_t)maxdiff);
+    ser_write("\n");
+}
+
+/* shape-seam：声明圆角块邻边拼缝 0px（边中段与近角同为块体色，不露底色亮缝）。 */
+static void probe_shape_seam(void) {
+    if (!probe_enter()) { ser_write("GUI:cap2-shape-seam ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    const struct style *tok = gui_active_style();
+    uint32_t bg = tok->bg;
+    block_id fr = free_root();
+    blk_spec s = mk_spec(LAYER_CONTENT, 120, 80);
+    s.px_x = 40; s.px_y = 40;
+    s.corner_tl = s.corner_tr = s.corner_br = s.corner_bl = 16;
+    block_id id = b_rect(fr, &s);
+    block *b = btable_get(id);
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+
+    /* 顶边中段 / 左边中段应为面板色；近角允许半透明，不得回露底色成亮缝。 */
+    uint32_t top_mid = gfx24_getpx(b->x + b->w / 2, b->y + 2);
+    uint32_t left_mid = gfx24_getpx(b->x + 2, b->y + b->h / 2);
+    int top_ok = top_mid != bg;
+    int left_ok = left_mid != bg;
+    /* 邻边拼缝：顶边中段与左边中段亮度一致（无暗缝/亮缝）。 */
+    int lt = ch_r(top_mid) + ch_g(top_mid) + ch_b(top_mid);
+    int ll = ch_r(left_mid) + ch_g(left_mid) + ch_b(left_mid);
+    int seam_ok = iabs(lt - ll) <= 30;
+    probe_leave();
+    int ok = top_ok && left_ok && seam_ok;
+    ser_write(ok ? "GUI:cap2-shape-seam PASS" : "GUI:cap2-shape-seam FAIL");
+    ser_write(" top="); pd(top_ok);
+    ser_write(" left="); pd(left_ok);
+    ser_write(" seam="); pd(seam_ok);
+    ser_write("\n");
+}
+
+/* shape-lazy：默认路径不生成额外表；built_mask 位随显式构建置位。 */
+static void probe_shape_lazy(void) {
+    if (!probe_enter()) { ser_write("GUI:cap2-shape-lazy ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    block_id fr = free_root();
+    blk_spec s = mk_spec(LAYER_CONTENT, 100, 60);
+    s.px_x = 40; s.px_y = 40;
+    s.corner_tl = s.corner_tr = s.corner_br = s.corner_bl = 12;  /* 默认 ARC */
+    block_id id = b_rect(fr, &s);
+    (void)id;
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+    uint32_t m1 = gui_cap3_built_mask();
+    gui_cap3_build(CAP3_SQ45);
+    uint32_t m2 = gui_cap3_built_mask();
+    probe_leave();
+    int sq45_before = (m1 >> CAP3_SQ45) & 1u;
+    int sq45_after = (m2 >> CAP3_SQ45) & 1u;
+    int ok = sq45_before == 0 && sq45_after == 1;
+    ser_write(ok ? "GUI:cap2-shape-lazy PASS" : "GUI:cap2-shape-lazy FAIL");
+    ser_write(" mask1="); pd(m1);
+    ser_write(" mask2="); pd(m2);
+    ser_write("\n");
+}
+
+/* shape-clamp：SQUIRCLE 的 corner_n 越界钳到 50（SQ5），WARN 计数 +1。 */
+static void probe_shape_clamp(void) {
+    if (!probe_enter()) { ser_write("GUI:cap2-shape-clamp ENTER-FAIL\n"); return; }
+    gui_theme_set(TOK_DARK);
+    int w0 = gui_cap3_warn_count();
+    block_id fr = free_root();
+    blk_spec s = mk_spec(LAYER_CONTENT, 100, 60);
+    s.px_x = 40; s.px_y = 40;
+    s.corner_tl = s.corner_tr = s.corner_br = s.corner_bl = 12;
+    s.corner_shape = 1;                 /* SQUIRCLE */
+    s.corner_n = 99;                    /* 越界 -> 钳 50 + WARN */
+    block_id id = b_rect(fr, &s);
+    (void)id;
+    layout_run();
+    gui_mark_dirty(fr);
+    gui_frame();
+    int w1 = gui_cap3_warn_count();
+    uint32_t m = gui_cap3_built_mask();
+    probe_leave();
+    int warn_ok = (w1 - w0) == 1;
+    int sq5 = (m >> CAP3_SQ5) & 1u;
+    int sq45 = (m >> CAP3_SQ45) & 1u;
+    int ok = warn_ok && sq5 && !sq45;
+    ser_write(ok ? "GUI:cap2-shape-clamp PASS" : "GUI:cap2-shape-clamp FAIL");
+    ser_write(" warn="); pd((uint32_t)(w1 - w0));
+    ser_write(" sq5="); pd(sq5);
+    ser_write(" sq45="); pd(sq45);
+    ser_write("\n");
+}
+
 int cap2_probe_render(const char *arg) {
     if (!arg) return 0;
     if (eq_str(arg, "alpha64"))       { probe_alpha(64);  return 1; }
@@ -444,5 +639,13 @@ int cap2_probe_render(const char *arg) {
     if (eq_str(arg, "icon-tint"))      { probe_icon_tint(); return 1; }
     if (eq_str(arg, "sb-paint"))       { probe_sb_paint();  return 1; }
     if (eq_str(arg, "perf"))           { probe_perf();     return 1; }
+    if (eq_str(arg, "shape-arc"))      { probe_shape_arc();   return 1; }
+    if (eq_str(arg, "shape-sq5"))      { probe_shape_sq5();   return 1; }
+    if (eq_str(arg, "shape-sq45"))     { probe_shape_sq45();  return 1; }
+    if (eq_str(arg, "shape-n2"))       { probe_shape_n2();    return 1; }
+    if (eq_str(arg, "shape-diff"))     { probe_shape_diff();  return 1; }
+    if (eq_str(arg, "shape-seam"))     { probe_shape_seam();  return 1; }
+    if (eq_str(arg, "shape-lazy"))     { probe_shape_lazy();  return 1; }
+    if (eq_str(arg, "shape-clamp"))    { probe_shape_clamp(); return 1; }
     return 0;
 }
