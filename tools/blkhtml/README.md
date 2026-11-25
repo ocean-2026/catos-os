@@ -54,12 +54,35 @@ warning 且退出 0。
 参数：`--json`（机读结果）、`--ce`（CE 投影口径）、
 `--bin --recs R --strings S`（对 `recs.bin/strings.bin` 做 P1 复核）。
 
-- 规则 ID：`C1 G1 G2 B1 B2 R1 S1 S2 D1 T1 L1 O1 P1`；诊断行首带 `[<ID>]`
+- 规则 ID：`C1 C2 G1 G2 B1 B2 R1 S1 S2 D1 T1 L1 O1 P1`；cap2 映射诊断
+  `M-CAP2-01..23`，cap3 形态诊断 `E_RADIUS_N_BAD` / `E_RADIUS_SHAPE_BAD` /
+  `WARN_RADIUS_N_RANGE`，形态规则 `R-7.5-01..03`；诊断行首带 `[<ID>]`
   前缀，`--json` 结果每条含 `rule` 字段，便于 CI 过滤。
 - `--spec-audit [--md <path>]`：审计规范 md 中的内核符号引用（`A-9-01` 文件
   存在 / `A-9-02` 符号在该文件 / `A-9-03` 未跨文件误引 / `A-9-04` 文档仍引用
-  `blk_spec` 字段）；任一 FAIL 退出 1，末尾打印 `SPEC_AUDIT fail=N total=M`。
-  行号提示漂移只打 WARN，不判错。
+  `blk_spec` 字段）；cap2/cap3 一致性 `A-9-05` 属性名三处不漂移 / `A-9-06`
+  字段名两处不漂移 / `A-9-07` 枚举映射一致 / `A-9-08` 默认值一致 /
+  `A-9-09` 诊断规则 ID 就位 / `A-9-10` 新 kind 枚举一致；任一 FAIL 退出 1，
+  末尾打印 `SPEC_AUDIT fail=N total=M`。行号提示漂移只打 WARN，不判错。
+
+## cap2 / cap3 能力扩展（v0.3）
+
+命名纪律：**HTML 属性名以《HTML 原型开发规范 v3》为权威**，内核字段名以冻结
+表为准（`FROZEN.md` §6），两者映射唯一；转换器 / 校验器 / `schema.json` / 规范
+md 四处逐字一致，由 `A-9-05..10` 复核。
+
+- cap2 属性：`data-alpha` `data-alpha-mode` `data-elevation` `data-radius`
+  （+ `data-radius-tl/tr/br/bl`）`data-border-sides` `data-wrap`
+  `data-ellipsis` `data-font` `data-bold` `data-tabular` `data-line-h`
+  `data-anim` `data-ease` `data-anim-props` `data-anchor` `data-prefer`
+  `data-max-h` `data-icon` `data-tint` `data-scrollbar` `data-scroll`
+  `data-theme="hc"`；自定义标签 `<c-popover>`（`BLK_POPOVER=15`）、
+  `<c-icon>`（`BLK_ICON=16`）。
+- cap3 形态：`data-radius-shape="arc|squircle|g2"` → `corner_shape`；
+  `data-squircle-n="4.5|5"` → `corner_n`（单位 0.1，仅 SQUIRCLE 有效）。
+  形态整块级别，与逐角半径正交；CE `ce_blk_rec2_t` 只下发 `corner_shape`。
+- 越界 / 枚举不匹配 / 引用解析失败一律带规则 ID 诊断，**禁止静默降级**；
+  `data-alpha` 0–1 比例与 0–255 绝对值判别见规范 §4.12.2。
 
 ## 退出码与常见诊断
 
@@ -81,7 +104,9 @@ python3 tests/run_tests.py        # 或 python3 -m unittest discover -s tests
 ```
 
 覆盖：40 字节记录布局与 pad0、text_off 偏移与 `-1` 语义、串池去重、贴边四角
-归零、UNSUPPORTED 非 0 退出、PNG 解码与尺寸、design/app 像素差异、fixture 全链路，以及回归用例、`--spec-audit` 审计与诊断 ID 前缀单测。
+归零、UNSUPPORTED 非 0 退出、PNG 解码与尺寸、design/app 像素差异、fixture 全链路，
+cap2/cap3 全部属性 / 标签 / 枚举映射 / 边界值 / 诊断 ID 与 C2 值域，以及回归用例、
+`--spec-audit` 审计（含 A-9-05..10）与诊断 ID 前缀单测。
 
 ## 语义与判定理由
 

@@ -80,7 +80,49 @@ QEMU 截图对照只允许拿同口径比：`app`↔style=app，`calm`↔style=c
 - QEMU：`qemu-system-i386`（`/home/user/.local/bin` 与 `/home/user/bin` 均在 PATH）；HMP 截图驱动参考 `tests/qemu_regress.py` + `tests/qemu_driver.py`（`sendkey` + `screendump`，端口按套件固定，**按 PID 杀进程**，别 `pkill -f qemu`）。
 - 护栏：`python3 kernel_v25/tools/check_link_layout.py <kernel.pe> --strict`（要传 PE 路径；不传会 `nm` 报错）。
 
-## 6. 模块与命名（不要新增第 5 个脚本之外的入口）
+## 6. cap2 / cap3 冻结字段映射（v0.3，append-only）
+
+> 命名纪律：**HTML 属性名以《HTML 原型开发规范 v3》为权威**，内核字段名以本表冻结值为准；两者映射唯一，不在工具线侧另立命名。完整五列总账见 `docs/HTML-块树-转换规范.md` §4.12 / §4.12.5；`schema.json :: cap2/cap3` 与 `blkcommon.py :: CAP2_FIELDS / CAP3_FIELDS` 同表镜像，审计 A-9-05..10 复核。
+
+### 6.1 cap2 字段冻结表
+
+| 内核字段 | 类型 | 取值 / 默认 | HTML 属性 |
+|---|---|---|---|
+| `alpha` | u8 | 0=未声明(≡255)；0–1 比例 / 0–255 绝对值 | `data-alpha` |
+| `alpha_mode` | u8 | 0=ordered16 / 1=none，默认 0 | `data-alpha-mode` |
+| `elevation` | u8 | 0..5（flat/raised/hover/float/overlay/modal），默认 0 | `data-elevation` |
+| `corner_tl/tr/br/bl` | u8 | 0..63px / 128=pill / 255=auto / 0=inherit | `data-radius`、`data-radius-tl/tr/br/bl` |
+| `border_sides` | u8 | bit0 l / bit1 r / bit2 t / bit3 b；省略 0=全边 | `data-border-sides` |
+| `wrap_lines` | u8 | 0 / 1..6 / 255=auto，默认 0 | `data-wrap` |
+| `ellipsis` | u8 | 0=none / 1=char / 2=word，默认 0 | `data-ellipsis` |
+| `font_size` | u8 | 1=8/caption 2=16/body 3=24/title 4=32/display；0=令牌默认 | `data-font` |
+| `font_bold` | u8 | 0/1，默认 0 | `data-bold` |
+| `font_tabular` | u8 | 0/1，默认 0 | `data-tabular` |
+| `line_h` | u8 | 0=令牌默认；>0 px | `data-line-h` |
+| `anim_ms` | u16 | 0=无动画；档 48/96/144/192/288 | `data-anim` |
+| `anim_ease` | u8 | 0 none / 1 linear / 2 in / 3 out / 4 inout / 5 out-back / 6 in-back / 7 step | `data-ease` |
+| `anim_mask` | u8 | bit0 x / bit1 y / bit2 w / bit3 h / bit4 alpha / bit5 elevation | `data-anim-props` |
+| `anchor_id` | u32 | 0=父框；元素 id 解析结果 | `<c-popover> data-anchor` |
+| `pop_prefer` | u8 | up1 / down2 / left4 / right8，可组合，默认 0 | `<c-popover> data-prefer` |
+| `pop_max_h` | u16 | 0=不限 | `<c-popover> data-max-h` |
+| `icon` | u8 | 0..255，默认 0；kind=BLK_ICON(16) | `data-icon` |
+| `tint_role` | u8 | 0 未指定 / 1 fg / 2 bg / 3 accent / 4 border | `data-tint` |
+| `scrollbar` | u8 | 0=auto / 1=always / 2=never | `data-scrollbar` |
+| `scroll_axis` | u8 | 0=auto / 1 x / 2 y / 3 both | `data-scroll` |
+| `hc_force` | u8 | 0/1，默认 0；1=本子树 HC（radius=0 / border=2） | `data-theme="hc"` |
+
+### 6.2 cap3 形态字段冻结表
+
+| 内核字段 | 类型 | 取值 / 默认 | HTML 属性 |
+|---|---|---|---|
+| `corner_shape` | u8 | 0=arc（默认）/ 1=squircle；`g2` 为 squircle 别名 | `data-radius-shape` |
+| `corner_n` | u8 | 0=默认 50（5.0）；单位 0.1，仅 SQUIRCLE 有效；越界钳 50 + `WARN_RADIUS_N_RANGE`；非数值 `E_RADIUS_N_BAD` | `data-squircle-n` |
+
+- 形态整块级别，与逐角 `corner_tl/tr/br/bl` 正交：形态整块统一（R-7.5-01），半径仍可逐角。
+- CE 侧 `ce_blk_rec2_t` 只下发 `corner_shape`，**不下发** `corner_n`。
+- 禁止 `data-radius="g2 16"` 这类关键字塞数值属性；形态只走 `data-radius-shape` / `data-squircle-n`。
+
+## 7. 模块与命名（不要新增第 5 个脚本之外的入口）
 
 ```
 tools/blkhtml/
@@ -97,7 +139,7 @@ tools/blkhtml/
 纯 Python 3 标准库，**零第三方依赖**；PNG 由 `zlib`+`struct` 手写（不装 Pillow）。
 所有脚本 `--help` 可用、非 0 退出码表示失败、诊断走 stderr 或 `--json`。
 
-## 7. 提交与证据
+## 8. 提交与证据
 
 - 分支 `feat/blkhtml`，工具 + 文档一起 commit；日志/截图落 `artifacts/gui-tools/`（**不进仓库根**）。
 - 交付前必须：`validate.py` 全绿（5 样例）；`check_link_layout.py --strict` RC=0（若改了内核源）。
