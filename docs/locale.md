@@ -44,3 +44,25 @@
 ## 已知卡点
 
 本机 QEMU 无 PCnet/e1000，联机 curl/SSH 冒烟无法在此环境拉起（沿 3C-1 记录）；locale 路径不依赖网络。
+
+## 第二轮（块1）尝试记录 —— 整体 deferred，未入库
+
+第二轮曾尝试落地 LC_CTYPE 转换、千分位格式化与 `strftime`，编译 / strict 通过但真机
+未取证，已全部回滚；WIP 备份在探针 scratch（非 git 跟踪）。现状如下，恢复时据此继续：
+
+- **LC_CTYPE 覆盖范围（草案）**：生成脚本遍历 GB2312 符号区 A1–A9 + 一级汉字区
+  B0–D7，共 4470 条；**二级汉字区 D8–F7 不收录**，查表返回 `-1 EILSEQ`。二级缺失
+  属明确回退行为，不是静默错码。产物为脚本生成的紧凑双升序表（源码 + 生成后的
+  `.inc`），不手写几万项。
+- **未落地项与卡点**：
+  - GBK↔UTF-8 表 / 槽 96 `gbk_to_utf8`、97 `utf8_to_gbk`：随回滚撤销；恢复前置是
+    先核对 CE→内核 syscall 门（int80 / 门入口）到底保存哪些寄存器。
+  - `printf("%'d")` 千分位：内核 / CE 原本没有 libc 数字格式化器，CE 数字输出只有
+    syscall `print_int`/`print_hex`；格式化器探针首版 #PF（varargs 读格式串崩），改
+    显式参数后回到 `ce_main` 的 `sstrcmp` 循环 `movzbl (%ebx,%eax,1)`、`ebx=0`（栈
+    缓冲指针丢失）。**未证实方向**：CE→内核 syscall thunk 可能不保留 callee-saved
+    `ebx`。定位寄存器保存清单前不重写格式化器。
+  - LC_TIME `strftime`（`%Y %m %d %H %M %S %b %a %j %p`）：CE 侧 `ce_strftime`
+    草案在备份中，未真机比对；固定时间戳 `2026-11-26 02:43:00` UTC+8 逐条比对的
+    探针未跑通。
+  - 盘上 mmap 数据表：未做，如实标注 deferred（当前全部内存表）。

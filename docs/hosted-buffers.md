@@ -83,6 +83,40 @@ per-task 槽位，**不是共享单缓冲**。本轮未把它们嵌进 `task_t`�
 > 自己的槽；真正要迁进 `task_t` 结构体、按进程 / 线程对象归属，随 3B 堆 per-process
 > 一起做。
 
+### 3B 回填（块3，feat/hosted b6d）：缓冲迁入 `task_t` 的尝试与撤回
+
+本轮块3 先把上列数组整体迁入 `task_t` 结构体（类型 / 常量移入 `task.h`，引用由
+静态数组改 `t->xxx`），全量 ISO / strict 通过、`heap.ce` 探针 PASS，但真机 vprobe
+出现 **fr / cat / fw 三例回归（7/3）**，复跑稳定复现；基线回滚后 vprobe 10/10 恢复。
+单独只保留「堆根 per-process」改动（见 §3.1）后 vprobe 10/10、E3 2/2、F11 9/9、
+threads / preempt / heap 全绿，**回归定位为缓冲结构体迁移本身，与堆根改动无关**。
+
+未定位根因：`SYS_CAT` 处理器用的是函数内 `static char b[4096]`、不依赖迁入的
+`task_t` 缓冲，cat 却同样失败；`task.o` bss 净增约 32KB（与「数组整体平移应净零」
+不符），怀疑是 `task_t` 扩容 / 静态数组平移导致内核静态表或页布局越界。该迁移**撤回**，
+仍列 deferred（§5），复做前需先核对 `task_t` 布局对齐与 `MAX_TASKS` 槽位静态表偏移。
+
+### 3.1 共享堆分配器 per-process（块3，已交付）
+
+堆 arena（地址空间 / VMA / `heap_end`）在 `thread_create()` 里已按指针共享给同进程
+工作线程；本轮把内核 freelist 头 `heap_free_root` 的归属也改为 per-process：
+
+| 项 | 基线（per-tid 槽） | 块3（per-process） |
+|---|---|---|
+| 根槽解析 | `heap_free_root[t->tid]` | `heap_owner(t)->tid`：沿 `parent` 链回溯到主线程槽；单线程任务即自身 |
+| `sys_alloc` | 写 / 扫当前 tid 槽 | 写 / 扫 owner 槽 |
+| `sys_free` | 挂回当前 tid 槽 | 挂回 owner 槽 |
+| `thread_create` | 把 parent 槽根拷进 worker 新槽 | worker 自有槽留空，分配 / 释放时统一经 `heap_owner()` 解析 |
+
+语义：`malloc/free` 按进程计，同进程两线程交错 alloc/free 命中同一 freelist；跨进程
+仍各自独立。`.bss` 未因结构体增长（`_bss_end=0x02119a18`，相对基线 `0x02118a18`
+的 +0x1000 来自内置 `heap.ce` 镜像，非堆代码）。
+
+探针 `extapp/heap.c`（内置 `/bin/heap.ce`）：主线程持一块 64B base，两 worker 各跑
+K=200 次 `alloc(48)` / 填 worker 专属 pattern / free；join 后主线程 free base 再
+alloc 复用。真机结果：`worker=0 alloc=200 oom=0`、`worker=1 alloc=200 oom=0`、
+`c0=200 c1=200 bad0=0 bad1=0`，`HEAP PASS`。
+
 ## 4. 冒烟与回归（3C-1 构建）
 
 - `threads.ce` 多线程：`THREAD PASS`，`sum=10`、fault join ret=1，无线程间串扰。
@@ -96,6 +130,8 @@ per-task 槽位，**不是共享单缓冲**。本轮未把它们嵌进 `task_t`�
 
 - 多 socket / 多会话并发模型：UDP / SSH scratch 改 kvheap 按实例分配、关闭释放；
   `tcp` / `tcps` 连接对象扩容为连接表。
-- `ls_buf` / `e3_*_buf` 从静态 per-tid 数组迁入 `task_t` 结构体。
-- 共享堆分配器 per-process；`dl_mods` 句柄表归属与加锁。
+- `ls_buf` / `e3_*_buf` 从静态 per-tid 数组迁入 `task_t` 结构体（**块3 曾尝试，
+  真机 vprobe fr/cat/fw 回归 7/3，已撤回；根因未定位，见 §3B 回填**）。
+- ~~共享堆分配器 per-process~~（块3 已交付，见 §3.1）；`dl_mods` 句柄表归属与加锁
+  仍 deferred。
 - 内核态可抢占（3C）：抢占点 + 关抢占区计数，解除 netstack/ssh/dl 的非抢占假设。

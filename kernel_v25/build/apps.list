@@ -45,3 +45,4 @@ t1
 threads
 preempt
 locale
+heap

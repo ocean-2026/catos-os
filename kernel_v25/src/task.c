@@ -1189,9 +1189,19 @@ static int heap_ensure(task_t *t, uint32_t vaddr) {
     return heap_ensure_range(t, vaddr & ~0xFFFu, 1);
 }
 
-/* freelist head kept in the kernel (task_t has no spare field: use a
- * static table indexed by tid) */
+/* freelist head kept in the kernel, shared by all threads of one process.
+ * Worker threads reference the main thread's slot: the heap arena (space /
+ * vm / heap_end) is already shared by pointer in thread_create(), so the
+ * free-list head must be process-shared too -- a block freed by one worker
+ * has to be reachable from the other worker's allocation scan. */
 static uint32_t heap_free_root[MAX_TASKS];
+
+/* Walk the parent chain back to the main thread; its slot is the process
+ * root index.  Legacy single-thread tasks are their own owner. */
+static task_t *heap_owner(task_t *t) {
+    while (t->is_thread && t->parent) t = t->parent;
+    return t;
+}
 
 /* called once on the first SYS_ALLOC to carve out the heap VMA.
  *
@@ -1225,9 +1235,9 @@ static void *sys_alloc(task_t *t, uint32_t size) {
         base->size = USER_HEAP_MAX - (t->heap_end - USER_HEAP_BASE)
                      - sizeof(heap_hdr_t);
         base->next = 0;
-        heap_free_root[t->tid] = t->heap_end;
+        heap_free_root[heap_owner(t)->tid] = t->heap_end;
     }
-    uint32_t *pp = &heap_free_root[t->tid];
+    uint32_t *pp = &heap_free_root[heap_owner(t)->tid];
     while (*pp) {
         heap_hdr_t *h = (heap_hdr_t *)*pp;
         if (h->size >= size) {
@@ -1286,8 +1296,8 @@ static void sys_free(task_t *t, void *p) {
      * (offset 4 of heap_hdr_t), written via the physical alias. */
     if (validate_uaddr(t, h, sizeof(heap_hdr_t)) != 0) return;
     heap_hdr_put32(t, h, (uint32_t)offsetof(heap_hdr_t, next),
-                   heap_free_root[t->tid]);
-    heap_free_root[t->tid] = h;
+                   heap_free_root[heap_owner(t)->tid]);
+    heap_free_root[heap_owner(t)->tid] = h;
 }
 
 /* ---- ls snapshot ---------------------------------------------------------- */
@@ -3344,7 +3354,8 @@ static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
     t->space = parent->space;
     t->vm = parent->vm;
     t->heap_end = parent->heap_end;
-    heap_free_root[slot] = heap_free_root[parent->tid];
+    /* heap free-list head is process-shared: resolved through heap_owner(),
+     * the worker's own slot entry is unused. */
     t->uid = parent->uid;
     t->gid = parent->gid;
     t->caps = parent->caps;
