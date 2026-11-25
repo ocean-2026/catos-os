@@ -103,6 +103,22 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
 - 门禁：E3 2/2、F11 9/9、链接布局 `--strict` RC=0。vprobe 在本环境基线即出现 post-`fr` 用例
   超时空屏（基线同复现，判为环境性 flake，非本次回归）。
 
+#### ACPI PM1 关机复核（feat/smp 追加）
+
+- 两个实质修复：(a) FADT `PM1a_CNT_BLK`/`PM1b_CNT_BLK` 偏移由误写的 0x48/0x4C 更正为
+  0x40/0x44——ACPI 1.0 FADT 在 0x38/0x3C 放 PM1 EVT 块、0x40/0x44 放 CNT 块，旧代码读到的
+  是 PM2_CNT/PM_TMR（0），ACPI 路径从未触发。(b) `power.c` 物理守卫由 `paging_phys_top()`
+  （帧分配器上界）改为 `paging_map_top()`（identity PSE 窗口上界）：FADT 位于高位保留 RAM，在
+  分配器上界之上但在映射窗口内，旧守卫直接拒读。
+- 新增 `poweroff` shell 别名（与 `shutdown` 同 dispatch / CAP_SYS 权限 / 两个命令名 allowlist）；
+  `acpi_pm1()` 把 PM1a/PM1b 暴露到 `acpi` 诊断；`acpi_poweroff()` 作为 FADT PM1 路径入口，
+  `power.c` 固定端口（0x604/0xB004/0x4004）保留为 ACPI 表缺失时的 legacy 兜底。
+- 实测 QEMU 6.2：`-smp 2` `poweroff` 后 qemu 自行退出 rc=0，串口
+  `[acpi] poweroff SLP_TYP=0 PM1a=0x604 PM1b=0`（SLP_TYP 先取 `_S5` 扫描值，退路 5、7）；
+  `-smp 1` 起机到提示行不回退。VMware/UEFI 真机复核仍待（云端禁关机）。
+- 不做：DSDT AML `_S5_` 解释器（沿用字节扫描取首个小整数，取不到回退 5）；ACPI 1.0 FADT 无
+  ResetReg GAS，复位块仍标注不可用。
+
 ### SMP 拓扑观测（部分落地，AP/多核调度 deferred）
 
 - 新增 `src/smp.c` / `include/smp.h` + shell `smp` 诊断命令。只读观测：MADT CPU 列表、

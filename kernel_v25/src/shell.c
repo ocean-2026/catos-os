@@ -357,7 +357,7 @@ static void cmd_help(void) {
     help_row("Shift / F2", "toggle pinyin IME; 1-9 pick, Up/Down select, Space confirm");
     help_row("reboot",      "warm reboot the machine");
     help_row("hang",        "halt the CPU (QEMU: close window)");
-    help_row("shutdown",    "power off via ACPI PM1_CNT (root/CAP_SYS; honest reboot fallback)");
+    help_row("shutdown|poweroff", "power off via ACPI PM1_CNT (root/CAP_SYS; honest reboot fallback)");
     help_row("bsod|blue",   "render the full-screen crash report (--no-reboot for test)");
     help_row("panicmode",   "show/set post-crash action: reboot|halt (/etc/panicmode)");
 
@@ -1693,7 +1693,7 @@ static const char *BUILTIN_NAMES[] = {
     "unalias", "clear", "cls", "gfx", "gui",
     "svgainfo", "text", "style", "rgb", "palette", "display", "size",
     "useredit", "usb", "vdiag", "echo", "about", "autostart", "uname",
-    "date", "mem", "reboot", "hang", "shutdown", "dir", "ls", "cd", "mkdir",
+    "date", "mem", "reboot", "hang", "shutdown", "poweroff", "dir", "ls", "cd", "mkdir",
     "rm", "cp", "mv", "format", "edit", "run", "sudo",
     "whoami", "id", "lsuser", "users", "caps", "login", "su", "useradd",
     "userdel", "passwd", "chcaps", "chmod", "chown", "history", "ps",
@@ -6788,7 +6788,7 @@ static const char *sh_cmds[] = {
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
     "setenv","rain","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
-    "users","vdiag","whoami","yes","shutdown","theme","hive","reg","colors",  /* v2.72 */
+    "users","vdiag","whoami","yes","shutdown","poweroff","theme","hive","reg","colors",  /* v2.72 */
 };
 #define SH_NCMDS ((int)(sizeof(sh_cmds) / sizeof(sh_cmds[0])))
 
@@ -7408,7 +7408,7 @@ static void shell_exec(char *cmd, char *arg) {
                 vga_write(trs("reboot: permission denied (need CAP_SYS or CAP_REBOOT)\n", "reboot: 权限不足 (need CAP_SYS or CAP_REBOOT)\n"));
         }
         else if (!strcmp_(cmd, "hang"))      cmd_hang();
-        else if (!strcmp_(cmd, "shutdown")) {
+        else if (!strcmp_(cmd, "shutdown") || !strcmp_(cmd, "poweroff")) {
             if (g_uid == UID_ROOT || (g_caps & CAP_SYS))
                 cmd_shutdown();
             else

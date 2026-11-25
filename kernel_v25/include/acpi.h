@@ -57,6 +57,7 @@ uint32_t       acpi_fadt_phys(void);
 /* FADT reset register (GAS).  Returns 1 when a pure I/O-space reset block
  * is described; port and value are filled in that case. */
 int            acpi_reset_block(uint16_t *port, uint8_t *value);
+int            acpi_pm1(uint32_t *pm1a, uint32_t *pm1b);
 
 void           acpi_dump(void);                 /* shell `acpi` diagnostic */
 

@@ -39,5 +39,6 @@ int  power_shutdown(void);      /* 0 = the write was issued, -1 = unsupported */
 int  power_shutdown_ports(void); /* legacy fixed-port fallback */
 const char *power_last_method(void);
 int  power_has_acpi(void);
+int  acpi_poweroff(void);        /* FADT PM1_CNT write; -1 = unsupported */
 
 #endif /* POWER_H */

@@ -26,6 +26,9 @@ static uint16_t reset_port;
 static uint8_t  reset_value;
 static int      have_reset;
 
+static uint32_t pm1a_cnt, pm1b_cnt;
+static int      have_pm1;
+
 /* ---- physical-access guard ------------------------------------------- */
 static int phys_ok(uint32_t p, uint32_t len) {
     uint32_t top = paging_map_top();
@@ -141,7 +144,7 @@ static void parse_madt(uint32_t madt) {
 
 /* ---- FADT reset block -------------------------------------------------- */
 static void parse_fadt(uint32_t fadt) {
-    if (!phys_ok(fadt, 0x40)) return;
+    if (!phys_ok(fadt, 0x50)) return;
     const uint8_t *f = phys_ptr(fadt);
     /* FADT +0x38: RESET_REG GAS (space u8, width u8, offset u8, size u8,
      * address u64); +0x40: RESET_VALUE u8.  Only a pure I/O block is usable
@@ -156,6 +159,12 @@ static void parse_fadt(uint32_t fadt) {
             have_reset = 1;
         }
     }
+    /* PM1 control/event blocks (ACPI 2.0 FADT layout): PM1_EVT_LEN u8 +0x38,
+     * PM1a_CNT_BLK u32 +0x48, PM1b_CNT_BLK u32 +0x4C.  I/O-space ports
+     * only; memory-space counts as absent. */
+    pm1a_cnt = *(const uint32_t *)(f + 0x40);
+    pm1b_cnt = *(const uint32_t *)(f + 0x44);
+    if (pm1a_cnt && pm1a_cnt <= 0xFFFF) have_pm1 = 1;
 }
 
 static void ser_dec(uint32_t v);
@@ -198,6 +207,13 @@ int acpi_reset_block(uint16_t *port, uint8_t *value) {
     if (!have_reset) return 0;
     if (port) *port = reset_port;
     if (value) *value = reset_value;
+    return 1;
+}
+
+int acpi_pm1(uint32_t *pm1a, uint32_t *pm1b) {
+    if (!have_pm1) return 0;
+    if (pm1a) *pm1a = pm1a_cnt;
+    if (pm1b) *pm1b = pm1b_cnt;
     return 1;
 }
 
@@ -253,5 +269,9 @@ void acpi_dump(void) {
         vga_write(" value="); wdec(reset_value); vga_write("\n");
     } else {
         vga_write("  reset: no I/O reset block in FADT\n");
+    }
+    if (have_pm1) {
+        vga_write("  PM1: a="); wh(pm1a_cnt);
+        vga_write(" b="); wh(pm1b_cnt); vga_write("\n");
     }
 }
