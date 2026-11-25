@@ -12,6 +12,9 @@
  *   anim-outback  12 帧采样：末帧落目标、存在过冲帧并回弹
  *   anim-interrupt 中途改目标 -> 收敛到新目标
  *   anim-reduced   开关后一帧直达目标
+ *   sb-wheel      滚轮一格 = 3 行行高；CE 回读 ev_kind=4 wheel_dx/dy
+ *   sb-drag       拖 thumb 到轨道 50% / 越界 120% -> 半程 / 上限钳制
+ *   sb-edge       内容高 0、thumb 最小尺寸两例不崩不除零，钳回边界
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -22,6 +25,7 @@
 #include "gfx24.h"
 #include "render.h"
 #include "serial_log.h"
+#include "ce.h"
 
 extern volatile uint32_t timer_ticks;
 
@@ -439,6 +443,202 @@ static int case_anim_reduced(const char *arg) {
     return 1;
 }
 
+/* ---- sb-wheel / sb-drag / sb-edge：滚动条生产路径探针 --------------------- */
+
+/* decl.c 探针专用入口（内核自检；与 cap2p_ce.c 同口径）。 */
+extern int      decl_ce_probe_commit(int tid, const void *recs, int n,
+                                     const char *strings, int slen,
+                                     uint32_t rec_size);
+extern int      decl_ce_probe_poll2(int tid, ce_blk_event2_t *ev);
+extern block_id decl_ce_probe_local_to_global(int tid, int lid);
+extern void     decl_ce_probe_cleanup(int tid);
+/* input.c 探针注入钩子：复用真实命中 / 滚轮 / 拖拽路径。 */
+extern void     gui_inject_wheel(int x, int y, int dz);
+
+static void sb_rec2_init(ce_blk_rec2_t *r, int id, int parent, uint8_t kind) {
+    for (unsigned i = 0; i < sizeof(*r); i++) ((uint8_t *)r)[i] = 0;
+    r->base.id = id; r->base.parent = parent;
+    r->base.kind = kind; r->base.layer = LAYER_WORK;
+    r->base.req_w = -1; r->base.req_h = -1;
+    r->base.text_off = -1; r->base.pix_off = -1;
+    r->base.pix_w = 0; r->base.pix_h = 0; r->base.res = -1;
+    r->cap_ver = CE_BLK_REC2_VER;
+}
+
+/* 搭一棵归属于 tid 的纵向滚动面板：vw×vh 视口，内部子块高 ch_h（0 = 无子块）。 */
+static block *sb_probe_panel(int tid, int vw, int vh, int ch_h) {
+    ce_blk_rec2_t r;
+    sb_rec2_init(&r, 1, 0, BLK_COLUMN);
+    if (decl_ce_probe_commit(tid, &r, 1, "", 0,
+                             (uint32_t)sizeof(ce_blk_rec2_t)) != 0)
+        return 0;
+    block_id gid = decl_ce_probe_local_to_global(tid, 1);
+    block *b = btable_get(gid);
+    if (!b) return 0;
+    b->overflow = OVF_SCROLL;
+    b->scrollbar = 1; b->scroll_axis = 2;
+    b->req_w = vw; b->req_h = vh;
+    b->x = 40; b->y = 40; b->w = vw; b->h = vh;
+    if (ch_h > 0) {
+        blk_spec ch = mk_spec(LAYER_CONTENT, vw, ch_h);
+        ch.px_x = 0; ch.px_y = 0;
+        b_rect(gid, &ch);
+    }
+    layout_run();
+    gui_frame();
+    return b;
+}
+
+/* thumb 纵向几何（复刻 sb.c y_thumb，探针只取数不写死像素）。 */
+static void sb_thumb_y(block *b, int ch, int track, int *ty, int *th) {
+    int view = b->h;
+    int ratio = ch > view ? view * 255 / ch : 255;
+    int len = track * ratio / 255;
+    if (len < 16) len = 16;
+    if (len > track) len = track;
+    int maxs = ch - view;
+    int frac = maxs > 0 ? b->scroll_y * (track - len) / maxs : 0;
+    *ty = b->y + frac;
+    *th = len;
+}
+
+/* sb-wheel：滚轮 1 格 -> thumb 位移 = 3 行 × 行高；CE 侧回读 ev_kind=4。 */
+static int case_sb_wheel(const char *arg) {
+    (void)arg;
+    if (!probe_enter()) { line_head("sb-wheel"); ser_write("FAIL enter=0\n"); return 1; }
+    int tid = 6;
+    decl_ce_probe_cleanup(tid);
+    block *b = sb_probe_panel(tid, 120, 80, 220);
+    if (!b) {
+        line_head("sb-wheel"); ser_write("FAIL panel=0\n");
+        probe_leave(); return 1;
+    }
+
+    const struct style *tok = gui_active_style();
+    int line = tok->line_h ? tok->line_h : 16;
+    int want = 3 * line;
+    int before = b->scroll_y;
+    gui_inject_wheel(b->x + b->w / 2, b->y + b->h / 2, 1);
+    int after = b->scroll_y;
+
+    ce_blk_event2_t ev;
+    for (unsigned i = 0; i < sizeof(ev); i++) ((uint8_t *)&ev)[i] = 0;
+    int got = decl_ce_probe_poll2(tid, &ev);
+    int ev_ok = got == 1 && ev.ev_kind == 4 &&
+                ev.wheel_dx == 0 && ev.wheel_dy == 3;
+    int ok = (after - before) == want && ev_ok;
+
+    line_head("sb-wheel");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" delta="); wi(after - before);
+    ser_write(" want="); wi(want);
+    ser_write(" ev="); wi(got);
+    ser_write(" kind="); wi(ev.ev_kind);
+    ser_write(" dx="); wi(ev.wheel_dx);
+    ser_write(" dy="); wi(ev.wheel_dy);
+    ser_putc('\n');
+    decl_ce_probe_cleanup(tid);
+    probe_leave();
+    return 1;
+}
+
+/* sb-drag：拖 thumb 到轨道 50% -> 半程；甩到轨道外 120% -> 钳到上限。 */
+static int case_sb_drag(const char *arg) {
+    (void)arg;
+    if (!probe_enter()) { line_head("sb-drag"); ser_write("FAIL enter=0\n"); return 1; }
+    int tid = 7;
+    decl_ce_probe_cleanup(tid);
+    int vw = 120, vh = 80, ch_h = 220;
+    block *b = sb_probe_panel(tid, vw, vh, ch_h);
+    if (!b) {
+        line_head("sb-drag"); ser_write("FAIL panel=0\n");
+        probe_leave(); return 1;
+    }
+    int maxs = ch_h - vh;
+
+    int my, mh; sb_thumb_y(b, ch_h, vh, &my, &mh);
+    int grab = mh / 2;
+    int px = b->x + b->w - 3;
+    gui_inject_press(px, my + grab);
+
+    /* 半程：thumb 顶 = 轨道顶 + 半程 × (track-len)/maxs，指针再加抓取偏移。 */
+    int half = maxs / 2;
+    int mid_y = b->y + half * (vh - mh) / maxs + grab;
+    gui_inject_move(px, mid_y);
+    int s_half = b->scroll_y;
+
+    /* 越界 120%：指针甩到轨道下方之外，必须钳到上限 maxs。 */
+    gui_inject_move(px, b->y + vh + vh / 5);
+    int s_top = b->scroll_y;
+    gui_inject_release();
+
+    int ok = s_half == half && s_top == maxs;
+    line_head("sb-drag");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" half="); wi(s_half);
+    ser_write(" top="); wi(s_top);
+    ser_write(" maxs="); wi(maxs);
+    ser_write(" thumb="); wi(mh);
+    ser_putc('\n');
+    decl_ce_probe_cleanup(tid);
+    probe_leave();
+    return 1;
+}
+
+/* sb-edge：内容高为 0、thumb 最小尺寸两例不崩、不除零，越界钳回边界。 */
+static int case_sb_edge(const char *arg) {
+    (void)arg;
+    if (!probe_enter()) { line_head("sb-edge"); ser_write("FAIL enter=0\n"); return 1; }
+    int tid = 8;
+    decl_ce_probe_cleanup(tid);
+
+    /* 例①：内容高为 0（无子块）。滚轮 + 按下 / 拖出轨道 / 松开，保持原位 0。 */
+    block *b0 = sb_probe_panel(tid, 120, 80, 0);
+    int e0_wheel = -1, e0_drag = -1;
+    if (b0) {
+        gui_inject_wheel(b0->x + b0->w / 2, b0->y + b0->h / 2, 1);
+        e0_wheel = b0->scroll_y;
+        gui_inject_press(b0->x + b0->w - 3, b0->y + b0->h / 2);
+        gui_inject_move(b0->x + b0->w - 3, b0->y + b0->h + 40);
+        gui_inject_release();
+        e0_drag = b0->scroll_y;
+    }
+
+    /* 例②：thumb 最小尺寸（内容超高，thumb 钳到 16px）。甩出上下两端 -> 0 / maxs。 */
+    decl_ce_probe_cleanup(tid);
+    int vh = 80, ch_h = 800;
+    block *b1 = sb_probe_panel(tid, 120, vh, ch_h);
+    int maxs = ch_h - vh;
+    int e1_low = -1, e1_high = -1, mh = -1;
+    if (b1) {
+        int my, len; sb_thumb_y(b1, ch_h, vh, &my, &len);
+        mh = len;
+        int grab = len / 2;
+        int px = b1->x + b1->w - 3;
+        gui_inject_press(px, my + grab);
+        gui_inject_move(px, b1->y - 40);            /* 甩出轨道上端 */
+        e1_low = b1->scroll_y;
+        gui_inject_move(px, b1->y + vh + 40);       /* 甩出轨道下端 */
+        e1_high = b1->scroll_y;
+        gui_inject_release();
+    }
+
+    int ok = b0 && b1 && e0_wheel == 0 && e0_drag == 0 &&
+             e1_low == 0 && e1_high == maxs && mh == 16;
+    line_head("sb-edge");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" empty_wheel="); wi(e0_wheel);
+    ser_write(" empty_drag="); wi(e0_drag);
+    ser_write(" min_low="); wi(e1_low);
+    ser_write(" min_high="); wi(e1_high);
+    ser_write(" maxs="); wi(maxs);
+    ser_write(" thumb="); wi(mh);
+    ser_putc('\n');
+    decl_ce_probe_cleanup(tid);
+    probe_leave();
+    return 1;
+}
+
 int cap2_probe_interact(const char *arg) {
     if (!arg) return 0;
     if (eq_str(arg, "pop-down"))       return case_down(arg);
@@ -452,5 +652,8 @@ int cap2_probe_interact(const char *arg) {
     if (eq_str(arg, "anim-outback"))   return case_anim_outback(arg);
     if (eq_str(arg, "anim-interrupt"))  return case_anim_interrupt(arg);
     if (eq_str(arg, "anim-reduced"))    return case_anim_reduced(arg);
+    if (eq_str(arg, "sb-wheel"))        return case_sb_wheel(arg);
+    if (eq_str(arg, "sb-drag"))         return case_sb_drag(arg);
+    if (eq_str(arg, "sb-edge"))         return case_sb_edge(arg);
     return 0;
 }
