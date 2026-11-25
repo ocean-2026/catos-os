@@ -219,10 +219,10 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
   `8ac9d54b6b2f482a7b8753177d8714567c0af2a2e4208bb6d03e4f68abfa08a1`（67,108,864 B），未改动。
 
 ### 7.3 main 合并一致性（ff-only）
-- main 已合并：main=`77f0ec0ed177f20343ba75a825db1b7427e80a36`，tree=`eeb946b8708f8625a55dca3e6d23dbad6ace1294`，
-  两侧 commit 与 tree hash 逐一比对相同。本轮含 TLS 状态码透传源码 delta，双 ISO 已据此重出：
+- 当前 main = feat/gui-blocks = `3a3c3b226fec498219c2538df81d0f404d3c39ba`，tree=`683e87a22a418f8af8910247000a3a094fd73148`，两侧比对相同。
+- 源码/ISO 基线提交 `77f0ec0ed177f20343ba75a825db1b7427e80a36`，tree=`eeb946b8708f8625a55dca3e6d23dbad6ace1294`；其后 `3a3c3b2` 仅改 REPORT 文档，`kernel_v25/` 源码未动，故双 ISO 仍对得上 `77f0ec0` 源码，无需再重打：
   release `catos-v2.80.iso` `37c3f11c…47009` / test `catos-v2.80-test.iso` `6ce35635…021add`。
-- 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；`ls-remote` 确认 main 与 feat/gui-blocks 同值 `77f0ec0`。
+- 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；`ls-remote` 确认 main 与 feat/gui-blocks 同值。
 - 历史留档：上一批 `605ea25` 基线双 ISO（`c6c2d19f…26db1f` / `8533f41e…31e88`）当时与 main 一致、无需重打；`444b413`/`504f3ba` 为纯文档提交。
 
 ## 8. 未决 / 已知限制 / 实测清单
