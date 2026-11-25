@@ -127,6 +127,16 @@ static block *sb_drag_block;
 static uint8_t sb_drag_axis;     /* 0 none 1=x 2=y */
 static int     sb_drag_grab;     /* 按下点距 thumb 起点的偏移 */
 
+/* input.c 接线用：当前被拖动的滚动条块（0 = 无拖动态）。 */
+block *sb_drag_target(void) { return sb_drag_block; }
+
+/* 会话重建 / 进桌面复位：与 input.c 的拖拽捕获一起归零。 */
+void sb_state_reset(void) {
+    sb_drag_block = 0;
+    sb_drag_axis = 0;
+    sb_drag_grab = 0;
+}
+
 int sb_mouse(block *b, int x, int y, uint8_t phase) {
     if (!b || b->overflow != OVF_SCROLL || !sb_visible(b)) return 0;
 
@@ -159,7 +169,9 @@ int sb_mouse(block *b, int x, int y, uint8_t phase) {
     }
 
     if (phase == 2) {               /* release */
-        if (sb_drag_block == b) { sb_drag_block = 0; sb_drag_axis = 0; }
+        if (sb_drag_block == b) {
+            sb_drag_block = 0; sb_drag_axis = 0; sb_drag_grab = 0;
+        }
         return 1;
     }
 
@@ -171,7 +183,11 @@ int sb_mouse(block *b, int x, int y, uint8_t phase) {
         int top = y - sb_drag_grab;
         int track = b->h;
         int maxs = ch - b->h;
-        int frac = track > mh ? (top - b->y) * maxs / (track - mh) : 0;
+        /* 三种边界不除零 / 不越界：内容高 <= 视口（maxs<=0）、thumb 占满轨道
+         * （track<=mh）、拖出轨道两端；无溢出时保持原位 0。 */
+        int frac = 0;
+        if (maxs > 0 && track > mh)
+            frac = (top - b->y) * maxs / (track - mh);
         if (frac < 0) frac = 0;
         if (maxs > 0 && frac > maxs) frac = maxs;
         b->scroll_y = (int16_t)frac;
@@ -180,7 +196,9 @@ int sb_mouse(block *b, int x, int y, uint8_t phase) {
         int left = x - sb_drag_grab;
         int track = b->w;
         int maxs = cw - b->w;
-        int frac = track > mw ? (left - b->x) * maxs / (track - mw) : 0;
+        int frac = 0;
+        if (maxs > 0 && track > mw)
+            frac = (left - b->x) * maxs / (track - mw);
         if (frac < 0) frac = 0;
         if (maxs > 0 && frac > maxs) frac = maxs;
         b->scroll_x = (int16_t)frac;
