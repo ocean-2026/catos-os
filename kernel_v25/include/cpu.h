@@ -19,6 +19,7 @@
 #define SEL_UCODE 0x1B   /* ring3, GDT index 3 */
 #define SEL_UDATA 0x23   /* ring3, GDT index 4 */
 #define SEL_TSS   0x28
+#define SEL_TLS   0x33   /* ring3, GDT index 6: per-thread TLS data descriptor */
 
 /* ---- interrupt frame (pushed by the stubs in cpu.s) ----
  * Order from low to high address = actual push order:
@@ -39,6 +40,7 @@ extern uint8_t gdt_ptr[6];
 extern uint16_t idt_limit;
 
 void     cpu_gdt_load(void);          /* lgdt + ltr */
+void     gdt_tls_set_base(uint32_t base);   /* rewrite TLS descriptor (index 6) base */
 void     cpu_idt_load(void);          /* lidt */
 void     cpu_idle_halt(void);         /* sti; hlt (atomically wait for IRQ) */
 

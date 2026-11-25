@@ -21,9 +21,15 @@ static void *worker(void *arg) {
     for (int i = 0; i < N; i++) s += own[i];
 
     catos_api_t *a = __ce_api;
+    /* per-thread errno: write a distinct non-zero value, read it back from
+     * this thread's own TLS; a crosstalk would show another worker's value. */
+    int *e = __tls_errno();
+    *e = (int)id + 1;
+    int eback = *e;
     a->write("threads: tid="); a->print_int(a->gettid());
     a->write(" i="); a->print_int(N);
-    a->write(" errno=0 own="); a->print_int((int)id);
+    a->write(" errno="); a->print_int(eback);
+    a->write(" own="); a->print_int((int)id);
     a->write(" sum="); a->print_int((int)s);
     a->write("\n");
     (void)s;

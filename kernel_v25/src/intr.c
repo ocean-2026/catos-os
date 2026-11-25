@@ -29,7 +29,7 @@
 
 /* gdt/idt slots are reserved at the bottom of .bss by pe.ld (see KEY_TABLES
  * in tools/check_link_layout.py); do not define storage here. */
-extern uint64_t gdt[6];
+extern uint64_t gdt[7];
 
 static void gdt_set(int i, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt[i] =
@@ -39,6 +39,13 @@ static void gdt_set(int i, uint32_t base, uint32_t limit, uint8_t access, uint8_
         ((uint64_t)((limit >> 16) & 0x0F) << 48) |
         ((uint64_t)(gran & 0x0F) << 52) |
         ((uint64_t)((base >> 24) & 0xFF) << 56);
+}
+
+/* Rewrite the per-thread TLS data descriptor (index 6) base.  Legacy 32-bit
+ * %gs addressing resolves the base from the GDT descriptor, not the GS_BASE
+ * MSR, so the TLS base lives here and is refreshed on every context switch. */
+void gdt_tls_set_base(uint32_t base) {
+    gdt_set(6, base, 0xFFF, 0xF2, 0xC0);
 }
 
 /* descriptors in cpu.s: { uint16_t limit; uint32_t base; } */
@@ -285,6 +292,7 @@ void intr_init(void) {
     gdt_set(3, 0, 0xFFFFF, 0xFA, 0xCF);      /* ring3 code */
     gdt_set(4, 0, 0xFFFFF, 0xF2, 0xCF);      /* ring3 data */
     gdt_set(5, (uint32_t)&tss, sizeof(tss_t) - 1, 0x89, 0x00);
+    gdt_set(6, 0, 0xFFF, 0xF2, 0xC0);          /* ring3 TLS data, base set per switch */
 
     tss.ss0 = 0x10;
     tss.iomap_base = sizeof(tss_t);

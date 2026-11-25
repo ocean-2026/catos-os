@@ -20,28 +20,34 @@ exit / join / detach。实现见 `src/task.c` 线程子系统块（`thread_creat
 | 用户栈 | 16 KiB | 扩展 arena 匿名 VMA（guard 在前） |
 | TLS 用户页 | 4 KiB | 扩展 arena 匿名 VMA，**用户可写映射**（supervisor-only 的 KV 堆窗口不能当 TLS） |
 
-TLS 页布局（32 位字）：`[0]=tid`、`[4]=errno（创建置 0）`、`[8]=0xC0FFEE` canary。
+TLS 页布局（32 位字）：`[0]=tid`、`[4]=errno（创建置 0）`、`[8]=0xC0FFEE` canary、
+`[12]=本页自基址 VA`（ring3 无 rdmsr，靠它反推 errno 槽地址）。
 
-### TLS 走 MSR（不新增 GDT 描述符 / LDT）
+### TLS 走 GDT ring3 数据描述符（索引 6，`SEL_TLS=0x33`）
 
-- 特征门：`cpu_msr_supported()` 读 CPUID leaf1 EDX bit5 判 MSR 支持；不支持时
-  `tls_apply()` 静默跳过（LDT fallback 未接线，见已知边界）。
-- `IA32_GS_BASE = 0xC0000100`：`tls_apply(next)` 在 `schedule_to` 每次切换时
-  `wrmsr` 写 `next->tls_va`；无 TLS 的任务写 0。`IA32_KERNEL_GS_BASE = 0xC0000101`
-  已定义暂未用。
+- 实测：legacy 32 位保护模式下 `%gs` 寻址从 **GDT 描述符基址**解析段基址，
+  不采用 FS/GS_BASE MSR（wrmsr 方案在真机 #PF 被否定，保留教训勿回退）。
+- GDT 由 6 项扩到 7 项；索引 6 为 ring3 可写数据描述符（access `0xF2`，gran
+  `0xC0`，limit 0xFFF=4 KiB）。`gdt_tls_set_base(base)` 改写该描述符高低基址半字。
+- `tls_apply(t)` 在**三条切换路径**上都被调用：协作式 `schedule_to`、tick 抢占
+  返回 `sched_timer_tick`、syscall 退出抢占 `preempt_at_syscall_exit`；无 TLS 的
+  任务（main/idle）写基址 0。线程帧 `gs=SEL_TLS`，其余 `ds/es/fs/ss=SEL_UDATA`。
+- 早期踩坑：两条直接 `cur_task=pick` 的抢占路径漏调 `tls_apply`，导致首个工作
+  线程的描述符基址仍为 0，ring3 读 `%gs:12` 落 `cr2=0xc` #PF；已补齐两处。
 
 ### ring3 帧构造
 
 cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈顶手搭
 `int_frame_t`：`eip=entry`、`cs=SEL_UCODE`、`eflags=0x202`（IF=1）、`esp=用户栈顶`、
-`ss=SEL_UDATA`、`ds/es/fs/gs=SEL_UDATA`；状态 `T_READY`、`resume_frame=1`、
+`ss=SEL_UDATA`、`ds/es/fs=SEL_UDATA`、`gs=SEL_TLS`；状态 `T_READY`、`resume_frame=1`、
 `is_thread=1`、`proc=parent->proc`、`parent=parent`。
 
 ### 退出 / 回收状态机
 
 - `thread_exit_current(retval)`：写 `thread_ret`；只 `vma_munmap` 自身用户栈与 TLS
   页，**绝不** `task_space_destroy` 拆共享 space。非 detached 置 ZOMBIE 并唤醒
-  `waiter`；detached 置 ZOMBIE（其 kvheap 内核栈回收 deferred，见边界）。
+  `waiter`；detached 置 ZOMBIE，由下一次 `thread_create` 上下文的
+  `thread_sweep_zombies()` 扫回并 `thread_reap`（见 3C-2）。
 - `thread_join(tid)`：找不到 / 非线程返回 `-22` EINVAL；非 zombie 则 `waiter=caller`、
   caller 阻塞 `T_WAIT_CHILD` 后 `reschedule()`；唤醒后取 `thread_ret`，调
   `thread_reap` 释放 kvheap 内核栈并置 `T_UNUSED`。
@@ -59,18 +65,39 @@ cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈�
 - 三门禁回归（不回归基线）：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
 - strict 布局门禁 RC=0，`_bss_end=0x02117a40`；无新增大 `.bss` 数组。
 
-### 已知边界（本轮 deferred，列入 3B/3C）
+## 3C-2：线程欠账收口（已落地，实机实测）
 
-- **内核态仍非抢占**：PIT ISR 只抢占 ring3；ring0 协作式让出。多线程本轮只保证不崩
-  隔离，不要求内核可抢占。
-- **detached 内核栈 deferred 回收**：detached 线程退出置 ZOMBIE 但未在自身运行栈上
-  立即释放 kvheap 内核栈；探针阶段 slot 占用 ≤16，泄漏在 3B/收尾处理。
-- **TLS errno 的 CE 用户态访问器缺失**：内核已写 TLS `[4]=0`，但 CE 侧尚无
-  `__tls_errno` 取址 / `mov %gs:off` 直读 thunk；探针 `errno=0` 为占位。
+- **CE `__tls_errno()` 访问器**：`extapp/ce_app.h` 内联 `int *__tls_errno(void)`，
+  `movl %%gs:12` 取本线程 TLS 自基址，返回 `base+4`（errno 槽）。CE 侧 errno
+  写/读均走此访问器；`threads.c` worker 写真 errno=`id+1` 再读回，打印
+  `errno=<readback>`，各线程互不串。主进程线程无 TLS 页，禁止在 `ce_main` 调用。
+- **detached 内核栈回收**：新增 `thread_sweep_zombies()`，只扫
+  `is_thread && detached && T_ZOMBIE && kstack_va` 的槽，在 `thread_create` 开头从
+  另一任务上下文 `thread_reap` 归还 kvheap 内核栈 extent；原先 deferred 泄漏至此
+  收口（回收时机仍为下一次建线程，不在退出自身栈上释放）。
+- **TLS 承载方式切换**：由被实测否定的 GS_BASE MSR 方案改为 GDT 索引 6 ring3
+  描述符（详见上文「TLS 走 GDT ring3 数据描述符」）。
+
+### 实机证据（3C-2 构建）
+
+- `threads.ce`：4 worker join retval 1/2/3/4，`sum=10`；detached worker
+  `own=7` 读回 `errno=8`（=7+1，未串到其他 worker 值）；fault worker join 得 1；
+  终态 `THREAD PASS`，RC=0。
+- 三门禁回归：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a00`（较 3A 净减 64 B；GDT 描述符多占
+  的 8 B 在 `_gdt` 预留区内部，不计净 bss 增长）。
+
+### 已知边界（本轮 deferred，列入 3B/后续）
+
+- **内核态仍非抢占**：PIT ISR 只抢占 ring3；ring0 协作式让出。真抢占最小版列入
+  第三块（tick 置 `need_resched`，返回用户态前检查切换，关键段 `preempt_disable/
+  enable` 包裹）。
 - **共享堆分配器未 per-process**：`heap_free_root` 仍按 slot 拷自父进程；线程内
   `malloc/free` 路径的归属/加锁列入 3B。
-- 按 tid 索引的静态缓冲（`ls_buf`、`e3_*_buf` 等）在多线程下的串扰属 3B。
-- MSR 不支持的 CPU 上 LDT TLS fallback 未接线；`kvheap inuse` 打点无对应 syscall 槽。
+- 按 tid 索引的静态缓冲（`ls_buf`、`e3_*_buf` 等）已在 3C-1 核对为按 tid 槽位，
+  迁入 `task_t` 属 3B；其余多线程串扰见 `docs/hosted-buffers.md`。
+- `kvheap inuse` 打点无对应 syscall 槽；detached 栈回收仍依赖下一次建线程触发，
+  无线程创建时不主动回收。
 
 ## 3A-2：`task_t` proc/thread 拆分脚手架（行为零变化）
 

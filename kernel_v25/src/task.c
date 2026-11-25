@@ -473,6 +473,7 @@ uint32_t sched_timer_tick(int_frame_t *f) {
     c->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    tls_apply(pick);
     cpu_cr3_write(pick->space.dir);
     tss_set_kstack(pick->kstack_top);
     return pick->ksp;                     /* stub swaps esp -> resumes pick */
@@ -1520,6 +1521,7 @@ static void preempt_at_syscall_exit(int_frame_t *f) {
     me->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    tls_apply(pick);
     cpu_frame_resume(pick->ksp, pick->space.dir, pick->kstack_top);
 }
 
@@ -3239,36 +3241,19 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
  * own TLS user page.  The thread exit path NEVER calls task_space_destroy:
  * the shared space belongs to the process and outlives every worker.
  *
- * TLS is exposed to ring3 through the IA32_GS_BASE MSR (0xC0000100); the
- * GS selector stays SEL_UDATA, the MSR supplies the segment base.  If the
- * CPU lacks MSR support (CPUID leaf1 EDX bit5) the wrmsr is skipped; the
- * LDT-descriptor fallback is documented in docs/threading.md and not wired
- * this slice.
+ * TLS is exposed to ring3 through a dedicated ring3 data descriptor at GDT
+ * index 6 (SEL_TLS).  Legacy 32-bit %gs addressing resolves the segment base
+ * from the GDT descriptor, not the FS/GS_BASE MSR, so the descriptor base is
+ * rewritten here on every context switch; a task without a TLS gets base 0.
  */
-#define MSR_IA32_GS_BASE         0xC0000100u
-#define MSR_IA32_KERNEL_GS_BASE  0xC0000101u
 #define THREAD_KSTACK_SZ         8192u
 #define THREAD_STACK_SZ          16384u
 #define THREAD_TLS_SZ            4096u
 
-static int cpu_msr_supported(void) {
-    static int cached = -1;
-    if (cached >= 0) return cached;
-    uint32_t a, b, c, d;
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
-    cached = (int)((d >> 5) & 1u);          /* EDX bit 5: MSR */
-    return cached;
-}
-
-static void wrmsr32(uint32_t msr, uint32_t val) {
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"(val), "d"(0));
-}
-
-/* Point GS_BASE at the incoming task's TLS block (0 for a task without one).
+/* Repoint the TLS descriptor at the incoming task's TLS block (0 when none).
  * Called from the scheduler on every switch. */
 static void tls_apply(task_t *t) {
-    if (!cpu_msr_supported()) return;
-    wrmsr32(MSR_IA32_GS_BASE, t ? t->tls_va : 0);
+    gdt_tls_set_base(t ? t->tls_va : 0);
 }
 
 /* Reap a thread's thread-only kernel resources and release the slot.  The
@@ -3289,9 +3274,24 @@ static void thread_reap(task_t *t) {
     t->state = T_UNUSED;
 }
 
+/* Reap leftover detached zombies: a detached thread has no joiner, so its
+ * kvheap kernel stack cannot be freed on its own running stack.  Swept from
+ * another task's context (thread_create) once a new thread slots in; only
+ * detached zombies are touched -- a joined zombie still belongs to its caller's
+ * reap path. */
+static void thread_sweep_zombies(void) {
+    for (int i = 1; i < MAX_TASKS; i++) {
+        task_t *z = &tasks[i];
+        if (z->is_thread && z->detached && z->state == T_ZOMBIE && z->kstack_va)
+            thread_reap(z);
+    }
+}
+
 static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
     if (!parent || parent->ring0) return -12;     /* no ring0 thread spawn yet */
     if (!entry) return -22;
+
+    thread_sweep_zombies();
 
     int slot = -1;
     for (int i = 1; i < MAX_TASKS; i++)
@@ -3328,12 +3328,14 @@ static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
     if (!stk) { ser_write("thr: stack mmap OOM\n"); goto fail_kstack; }
     t->thr_stack_va = stk;
 
-    /* private TLS user page: [0]=tid [4]=errno [8]=canary */
+    /* private TLS user page: [0]=tid [4]=errno [8]=canary [12]=self base VA.
+     * The self base lets ring3 take the errno slot address without an MSR read
+     * (rdmsr is ring0 only): read %gs:12, add 4. */
     uint32_t tls = vma_mmap_anon(t, THREAD_TLS_SZ, 1);
     if (!tls) { ser_write("thr: tls mmap OOM\n"); goto fail_stack; }
     t->tls_va = tls;
     {
-        uint32_t tl[3] = { (uint32_t)slot, 0u, 0xC0FFEEu };
+        uint32_t tl[4] = { (uint32_t)slot, 0u, 0xC0FFEEu, tls };
         if (copy_to_user(t, (void *)tls, tl, sizeof(tl)) != 0) {
             ser_write("thr: tls copy EFAULT\n"); goto fail_tls;
         }
@@ -3354,7 +3356,8 @@ static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
     fr->eflags = 0x202;                    /* IF set */
     fr->esp = usp;
     fr->ss = SEL_UDATA;
-    fr->ds = fr->es = fr->fs = fr->gs = SEL_UDATA;
+    fr->ds = fr->es = fr->fs = SEL_UDATA;
+    fr->gs = SEL_TLS;                    /* %gs -> this thread's TLS descriptor */
 
     t->tid = slot;
     t->ring0 = 0;
@@ -3410,9 +3413,9 @@ static void thread_exit_current(int retval) {
     }
 
     if (t->detached) {
-        /* No joiner: reclaim directly.  The kernel stack free is deferred to
-         * the next slot reuse / sweep this slice (detached kstack leak noted
-         * in docs); mark zombie so no join attaches. */
+        /* No joiner: the kernel stack cannot be freed on its own running
+         * stack.  Mark zombie; thread_sweep_zombies() reaps it from the next
+         * thread_create context. */
         t->state = T_ZOMBIE;
     } else {
         t->state = T_ZOMBIE;
