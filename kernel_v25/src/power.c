@@ -5,6 +5,7 @@
 #include "power.h"
 #include "io.h"
 #include "paging.h"
+#include "serial_log.h"
 
 static uint32_t rsdp_phys;
 static uint32_t fadt_phys;
@@ -20,7 +21,10 @@ static const char *last_method = "none";
  * ACPI tables live in RAM, but a bogus/partial pointer must never be
  * dereferenced: that is exactly the "trust nothing" rule. */
 static int phys_ok(uint32_t p, uint32_t len) {
-    uint32_t top = paging_phys_top();
+    /* FADT lives in high reserved RAM above the allocator bound but inside
+     * the identity-mapped PSE window -- guard against paging_map_top(), not
+     * the allocator mem_top (mirror acpi.c). */
+    uint32_t top = paging_map_top();
     if (!top) return 0;
     if (p == 0) return 0;
     if (p >= top) return 0;
@@ -134,8 +138,8 @@ static int acpi_probe(void) {
     const uint8_t *f = phys_ptr(fadt_phys);
     uint32_t len = *(const uint32_t *)(f + 4);
     if (len < 0x50) return 0;                 /* need PM1a/PM1b CNT fields */
-    pm1a_cnt = *(const uint32_t *)(f + 0x48);
-    pm1b_cnt = *(const uint32_t *)(f + 0x4C);
+    pm1a_cnt = *(const uint32_t *)(f + 0x40);
+    pm1b_cnt = *(const uint32_t *)(f + 0x44);
     /* v2.76: FADT SMI_CMD (0x30) + ACPI_ENABLE (0x34).  ACPI 2.0 firmware
      * boots in LEGACY mode (PM1_CNT.SCI_EN clear) and IGNORES PM1_CNT
      * writes until the OS asks for ACPI mode; that is why a VMware guest
@@ -179,6 +183,9 @@ int power_shutdown(void) {
 
     acpi_enable_mode();
     int typa = s5_slp_typa();
+    ser_write("[acpi] poweroff SLP_TYP="); ser_hex("", (uint32_t)typa);
+    ser_write(" PM1a="); ser_hex("", pm1a_cnt);
+    ser_write(" PM1b="); ser_hex("", pm1b_cnt); ser_write("\n");
     /* v2.76: write ONE value -- the firmware's \_S5 SLP_TYP -- instead of
      * sweeping 0..7.  Writing SLP_EN with an unrelated SLP_TYP is not a
      * harmless no-op on every chipset: some decode a wrong type as a
@@ -210,3 +217,7 @@ int power_shutdown_ports(void) {
 }
 
 const char *power_last_method(void) { return last_method; }
+
+/* ACPI-owned entry point (platform line D4/ACPI shutdown): the FADT PM1_CNT
+ * write path.  power_shutdown_ports() remains the legacy ACPI-less fallback. */
+int acpi_poweroff(void) { return power_shutdown(); }
