@@ -914,6 +914,24 @@ void decl_dump_pid(int tid) {
     ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 
+/* deskev 门禁用：转储所有 CE（owner != 0）块的实时几何，供驱动定位
+ * 按钮/输入框矩形。只读，不改任何状态。 */
+void decl_dump_ce_rects(void) {
+    uint32_t cap = btable_capacity();
+    for (uint32_t id = 1; id <= cap; id++) {
+        block *b = btable_get((block_id)id);
+        if (!b || b->id == 0 || b->owner == 0) continue;
+        ser_write("GUI:deskev pid="); decl_dec((int)b->owner);
+        ser_write(" id="); decl_dec((int)b->id);
+        ser_write(" kind="); decl_dec((int)b->kind);
+        ser_write(" x="); decl_dec(b->x);
+        ser_write(" y="); decl_dec(b->y);
+        ser_write(" w="); decl_dec(b->w);
+        ser_write(" h="); decl_dec(b->h);
+        ser_putc('\n');
+    }
+}
+
 int decl_event_poll(struct task *t, ce_blk_event_t *ev, int timeout_ms) {
     (void)timeout_ms;
     int tid = t ? t->tid : -1;
@@ -1060,6 +1078,7 @@ int decl_text_width(const char *s) {
 static void decl_cleanup_tid(int tid) {
     struct pid_meta *p = ps_get(tid);
     if (!p) return;
+    ib_reset_if_owner(tid);
     if (p->root) {
         tree_free_subtree(btable_get(p->root));
         block *b = btable_get(p->root);
