@@ -304,3 +304,12 @@ dispatch(2,7,5)=35`，`dltest: PASS`。`combo()` 经 PLT 调 `lib_add`、读导�
 - 固定基址要求同程序多库地址互不重叠；
 - 只有显式 `dlclose`，无依赖闭包卸载；
 - 仍是 CSO1 自有格式，不等同 PE/ELF 导入表语义。
+
+## 2C-3 / 2C-4 实现补充（2026-11-25）
+
+- **共享键**：`(cluster, block)`，**不含 pid/tid**；同一键复用同一物理帧，只读映射进各任务 PDE9（PTE `RW=0`，装库期临时可写、装完翻只读）。
+- **切段规则**：`[0, text_end)` 共享只读；`[text_end, data_end)` 每进程私有副本，且二次装入时私有段**单独重跑重定位**；跨页边界不对齐的页归**私有**。
+- **引用计数**：首个任务装入建池并 refcnt=1，后续任务 +1；末次 `dlclose` 或进程被 `task_cleanup` 回收时减引用，归零则逐页释放并打印 `pages/refcnt` 序列。
+- **RELATIVE(8)**：引擎支持 `*slot = base + 槽内旧值`；本工具链的自然产物未被链接器 emit，故用**合成 rela 表**取证（`rel8.so`/`rel8test.ce`，日志 `gate-dynlink2-relative.log`，命中 `slot02710118`）。
+- **双进程证据**：`share_parent` 用 spawn + 两根 pipe（ready 子→父、release 父→子）保证两进程同时驻留；A 建池帧 `pa02855000`，B 打印 `(shared)` 同帧；close 序列 `refcnt 2->1->0`、`release pages=1`。
+- **已知边界**：`wait` 对已自动回收的子进程返回 -1（既有内核回收竞态），探针按串口 refcnt/帧号为准。
