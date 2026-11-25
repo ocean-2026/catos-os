@@ -126,6 +126,33 @@ cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈�
 - `kvheap inuse` 打点无对应 syscall 槽；detached 栈回收仍依赖下一次建线程触发，
   无线程创建时不主动回收。
 
+### 抢占保护矩阵（块2）
+
+口径：**阻塞等待点本身就是抢占点**（显式 `reschedule`/让出，不持 `preempt_depth`）；
+**IRQ 处理**只在极短临界区关计数，且必须在 EOI 前恢复，任何可能睡眠/重入的调用不得
+包在里面；`preempt_disable/enable` 仅用于不阻塞的短提交段。ring0 仍是协作式，计数只是
+预埋（见上「已知边界」）。
+
+| 模块 / 函数 | 类型 | 理由 | 恢复点 / 让出方式 |
+|---|---|---|---|
+| task.c `schedule_to(next)` | 调度点（显式让出） | 保存当前上下文切到 `next`；协作式切换 | 被调度回时从保存的 eip/栈/TLS 继续 |
+| task.c `reschedule()` | 抢占点 | `pick_ready` 选下一个；无可运行则进 idle | 同上，下一次被选中继续 |
+| task.c `thread_join(caller,tid)` | 阻塞等待点 | caller 置 `T_WAIT_CHILD` 后 `reschedule()` 让出；子线程退出路径回收并唤醒 waiter | 唤醒后继续取 `thread_ret` 返回 |
+| task.c `sched_timer_tick`（PIT ISR） | IRQ 抢占点（仅 ring3） | ISR 内不切 ring0；ring3 且 `preempt_depth==0` 才置 `need_resched` | ISR 返回后由 tick 返回 / syscall 退出路径消费 |
+| task.c `preempt_at_syscall_exit` | 抢占点 | syscall 返回用户态前检查 `need_resched` 与计数 | 切回后继续用户态取 syscall 结果 |
+| task.c `preempt_disable/enable/depth` | 临界区计数 | `depth>0` 推迟切换，归零后消费 | `preempt_enable` 归零后 |
+| dl.c `dl_close` / `dl_close_all` / `dl_open` 句柄表提交段 | 临界区 | 读写 `dl_mods` 记录需一致；dl 路径无阻塞等待，计数可函数内平衡 | `preempt_enable` 后函数内继续 |
+| netstack.c `net_tcp_recv(buf,max,ticks)` 等待循环 | 阻塞等待点（抢占点） | 每轮 `net_poll()` + `task_maybe_yield()` 显式让出；**不持** `preempt_depth`（持计数跨让出永不回落） | 收到数据 / 超时 / 连接关闭后继续拷贝 |
+| netstack.c `net_tcp_srecv` / `net_tcp_srecv_all` | 阻塞等待点 | 循环经 recv 让出 | 收满 `n` 字节或出错后继续 |
+| netstack.c `arp_handle` / `tcp_handle` / `udp_handle`（NIC IRQ） | IRQ 短临界区 | 中断上下文，只做报文解析 / 入队；不睡眠、不重入；EOI 前退出 | IRQ 返回 |
+| netstack.c 校验和 / 地址解析辅助 | 不可抢占 | 纯计算，无共享写 | — |
+| ssh.c `ssh_recv_packet` / 握手收发循环 | 阻塞等待点 | 经 `net_tcp_srecv_all` 让出；会话缓冲归属会话对象（3C-1） | 收齐报文后继续状态机 |
+| ssh.c 会话状态机字段处理 | 不可抢占（单会话内） | 无跨会话共享写 | — |
+
+> 注：netstack/ssh 的阻塞段**未**包 `preempt_depth`——它们含阻塞 recv 等待循环，持计数跨
+> reschedule 会导致计数永不回落；要包计数必须先把阻塞点拆成「短临界段 + 显式让出」。
+> 联机 recv/SSH 阻塞路径本机 QEMU 无 PCnet/e1000，未真机取证（见文末未取证项）。
+
 ## 3A-2：`task_t` proc/thread 拆分脚手架（行为零变化）
 
 本轮只做结构边界落地，**不接新槽、不迁字段**：
