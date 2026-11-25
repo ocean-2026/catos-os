@@ -446,6 +446,39 @@ static void shot_e3_input_build(const char *state) {
     ser_write(" len="); ser_dec(len); ser_write(" pos="); ser_dec(pos); ser_write("\n");
 }
 
+/* E2-⑤ z-order：下层大卡 + 上层小卡重叠。base 仅下层（基线）；stack 两层同叠。
+ * 重叠区取样应取到上层（bar 色）；base 原重叠区与下层非重叠区同色、diff=0。 */
+static block_id e2z_lo, e2z_hi;
+static void shot_e2_z_build(const char *state) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec lo = spec_panel(LAYER_WORK, 280, 160, 1);
+    e2z_lo = b_rect(F, &lo);
+    block *lp = btable_get(e2z_lo); lp->x = 160; lp->y = 160; lp->moved = 1;
+
+    e2z_hi = 0;
+    if (!(state && !strcmp_probe(state, "base"))) {
+        blk_spec hi = spec_panel(LAYER_WORK, 160, 80, 1);
+        hi.role_bg = ROLE_BAR;
+        e2z_hi = b_rect(F, &hi);
+        block *hp = btable_get(e2z_hi); hp->x = 280; hp->y = 200; hp->moved = 1;
+    }
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+
+    block *L = btable_get(e2z_lo), *H = btable_get(e2z_hi);
+    ser_write("GUI:e2-z state="); ser_write(state ? state : "stack");
+    ser_write(" lo ");
+    if (L) { ser_dec(L->x); ser_write(","); ser_dec(L->y); ser_write(",");
+             ser_dec(L->w); ser_write(","); ser_dec(L->h); }
+    ser_write(" hi ");
+    if (H) { ser_dec(H->x); ser_write(","); ser_dec(H->y); ser_write(",");
+             ser_dec(H->w); ser_write(","); ser_dec(H->h); }
+    ser_write("\n");
+}
+
 /* C 轮组 1：父卡 r16 内嵌两子块——C1 贴左+贴顶，C2 贴右+贴底（对照）。
  * 自由层绝对定位，8pt 网格；父卡 pad=0，内容框即整框。 */
 static void shot_flush_inset_build(void) {
@@ -2298,6 +2331,8 @@ void gui_shell_cmd(const char *arg) {
     const char *e1_res_state = 0;
     int e3_input = 0;
     const char *e3_input_state = 0;
+    int e2_z = 0;
+    const char *e2_z_state = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
@@ -2316,6 +2351,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-e1-outline")) { e1_outline = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-e1-residue")) { e1_residue = 1; probe_no_sample = 1; e1_res_state = rest ? rest : "idle"; }
     else if (!strcmp_probe(word, "shot-e3-input")) { e3_input = 1; probe_no_sample = 1; e3_input_state = rest ? rest : "idle"; }
+    else if (!strcmp_probe(word, "shot-e2-z")) { e2_z = 1; probe_no_sample = 1; e2_z_state = rest ? rest : "stack"; }
     else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-hpair"))  { probe_flush_hpair = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-vgroup")) { probe_flush_vgroup = 1; probe_no_sample = 1; }
@@ -2384,6 +2420,7 @@ void gui_shell_cmd(const char *arg) {
     if (e1_outline)   { shot_e1_outline_build(); gui_frame(); }
     if (e1_residue)   { shot_e1_residue_build(e1_res_state); gui_frame(); }
     if (e3_input)     { shot_e3_input_build(e3_input_state); gui_frame(); }
+    if (e2_z)         { shot_e2_z_build(e2_z_state); gui_frame(); }
     if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
     if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }
     if (probe_flush_vgroup) { shot_flush_vgroup_build(); gui_frame(); }
