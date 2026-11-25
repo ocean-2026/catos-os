@@ -489,6 +489,12 @@ static int decl_apply2(struct pid_meta *p, const ce_blk_rec2_t *r, int n,
         blk->pop_max_h    = d->pop_max_h;
         blk->corner_shape = d->corner_shape;
 
+        /* 生产路径建档点：声明了动画（anim_ms>0 且 anim_mask!=0）即按声明值
+         * kick。anim_kick 内部对 ease==0 / reduced_motion 自洽空转；已在途的
+         * 同 id 槽按可中断接管语义续跑（起点=当前帧值）。这里只在建档/整批
+         * 重建时触发一次，帧循环（compose.c）不重复 kick。 */
+        if (blk->anim_ms > 0 && blk->anim_mask != 0) anim_kick(blk);
+
         /* 锚点：同批 local id 解析为全局块 id；既有子树锚点保留全局 id。 */
         uint32_t anchor = d->anchor_id;
         if (anchor != 0) {
