@@ -60,8 +60,10 @@
   - `printf("%'d")` 千分位：内核 / CE 原本没有 libc 数字格式化器，CE 数字输出只有
     syscall `print_int`/`print_hex`；格式化器探针首版 #PF（varargs 读格式串崩），改
     显式参数后回到 `ce_main` 的 `sstrcmp` 循环 `movzbl (%ebx,%eax,1)`、`ebx=0`（栈
-    缓冲指针丢失）。**未证实方向**：CE→内核 syscall thunk 可能不保留 callee-saved
-    `ebx`。定位寄存器保存清单前不重写格式化器。
+    缓冲指针丢失）。**已核对**：int 0x80 入口 `pushal`/`popal` 保存并恢复全部通用
+    寄存器（含 ebx），syscall thunk 不 clobber ebx；该假设排除。下一嫌疑在 CE 侧
+    （`-fno-pic` 下编译器把指针分到 ebx、新 `ce_fmt.h` 代码改动了寄存器分配 /
+    栈帧），需反汇编 locale.ce 核对 prologue 与指针加载，再重写格式化器。
   - LC_TIME `strftime`（`%Y %m %d %H %M %S %b %a %j %p`）：CE 侧 `ce_strftime`
     草案在备份中，未真机比对；固定时间戳 `2026-11-26 02:43:00` UTC+8 逐条比对的
     探针未跑通。
