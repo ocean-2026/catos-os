@@ -1,8 +1,9 @@
 # CatOS HTML/CSS → 块树转换规范
 
-> 版本：v0.2 · 状态：草案（待冻结） · 基线：`89584c4`
+> 版本：v0.3 · 状态：草案（待冻结） · 基线：`89584c4` · cap2 契约：`feat/blk-cap2` `754d82c`
 > 适用范围：把受控 HTML/CSS 输入映射为 CatOS 内核块树的全部规则、边界、断言与验收口径。
 > 本文是该映射的唯一真源；随仓库附带的转换脚本、预览脚本、校验脚本均为可弃的参考实现，其字段表与诊断码以本文为准。
+> v0.3 起新增 cap2 能力扩展（§4.12）：**HTML 属性名以《HTML 原型开发规范 v3》为命名权威，内核字段名以冻结表为准，两者映射唯一**；工具线四处（本文 / `schema.json` / `blkcommon.py` / `html2blk.py`）逐字一致，由审计 A-9-05..10 复核。
 
 ## 0. 定位：三层真源关系
 
@@ -278,7 +279,7 @@ int ce_main(int argc, char **argv) {
 |---|---|---|---|---|---|
 | `corner_radius[4]` | 逐角半径（tl/tr/br/bl），单位 px；贴边角取 0，判定见 `块化GUI-设计规格.md §14.1` | 全 0：按现有 calm 短边阶梯取整档半径 | 旧 `blk_spec` 不含该字段时，绘制路径回退现有 `corner_radius` 阶梯；旧二进制提交后渲染不变 | `kernel_v25/src/gui/paint.c::fill_round`；`kernel_v25/src/gui/paint.c::corner_restore` | 逐角半径在贴边角为 0；自由边半径落在阶梯档内（对应 R1） |
 | `border_mask` | 描边侧别位掩码（L/R/T/B），解决共享边 2px 双线；合并规则见 `块化GUI-设计规格.md §14.3` | 全 1（四边）：等同现有整框描边 | 旧记录缺省全 1，`gui_draw_border` 行为不变；位 0 的侧别不画描边 | `kernel_v25/src/gui/paint.c::body_border`；`kernel_v25/src/gui/paint.c::gui_draw_border` | 贴边侧 `border_mask` 位为 0；共享边只保留 1px `line` 色分隔线（对应 S1、D1） |
-| `anim_ms` | 过渡时长（毫秒）；0 = 无动画，位置瞬移 | 0：等同基线 `kernel_v25/include/gui/tokens.h` 预留字段恒 0 的行为 | 旧记录缺省 0，绘制 / 帧循环不产生过渡；非 0 才走过渡路径 | 帧循环消费点待 gui-fix 定稿（基线无消费者，未核实） | `anim_ms=0` 时两帧之间无中间帧；非 0 时长不超过声明值 |
+| `anim_ms` | 过渡时长（毫秒）；0 = 无动画，位置瞬移 | 0：等同基线 `kernel_v25/include/gui/tokens.h` 预留字段恒 0 的行为 | 旧记录缺省 0，绘制 / 帧循环不产生过渡；非 0 才走过渡路径 | 基线帧循环消费点待 gui-fix 定稿（基线无消费者，未核实）；v0.3 cap2 映射 `data-anim` → `anim_ms`，消费点动画包预生成帧表（§4.12.1） | `anim_ms=0` 时两帧之间无中间帧；非 0 时长不超过声明值 |
 | `show_in_taskbar` | 开始菜单 / 任务栏可见性 | 1（可见）：等同基线默认入栏行为 | 旧记录缺省 1；置 0 仅影响栏位收录，不影响块树本身 | 任务栏 / 开始菜单构建路径（符号待 gui-fix 定稿，未核实） | 置 0 的块不出现在任务栏与开始菜单条目 |
 | `place` | 落位模式：`inline`（流式）/ `float`（自由浮层）/ `anchor`（锚定父框） | `inline`：等同现有 COLUMN/ROW/STACK 流式求解 | 旧记录缺省 `inline`，`layout_node` 现有分支不变；`float/anchor` 走新增自由布局分支 | `kernel_v25/src/gui/layout.c::layout_node`；`kernel_v25/src/gui/layout.c::layout_free_child` | `float` 子块不参与父容器主轴流动；`anchor` 子块按锚点落位 |
 | `flip` | 镜像方向（水平 / 垂直 / 无） | 无：等同现有 1:1 blit 与文本绘制 | 旧记录缺省无镜像；非无值时 blit / 文本路径按方向翻转 | `kernel_v25/src/gui/paint.c::gui_blit24`；`kernel_v25/src/gui/paint.c::gui_draw_text`（消费者待落地） | 镜像块像素关于中轴对称；文本镜像行为在未落地前按未核实处理 |
@@ -465,7 +466,7 @@ int ce_main(int argc, char **argv) {
 
 #### 4.8.1 允许标签
 
-`div / span / button / input(type=text) / img / hr / br`。其余标签进入 §7 丙类。
+`div / span / button / input(type=text) / img / hr / br`；v0.3 cap2 追加 `c-popover`（`BLK_POPOVER=15`）、`c-icon`（`BLK_ICON=16`），见 §4.12。其余标签进入 §7 丙类。
 
 #### 4.8.2 允许 CSS 属性白名单
 
@@ -538,7 +539,7 @@ HTML 元素上的 `data-blk-*` 属性是样式白名单之外唯一的显式覆�
 
 | 中间层枚举 | 取值 | 内核常量 | 定义位置 |
 |---|---|---|---|
-| `kind` | `root/column/row/stack/text/rect/image/surface/spacer/divider/canvas/free/button/input/term` | `BLK_ROOT … BLK_TERM`（0…14） | `kernel_v25/include/gui/block.h::blk_kind` |
+| `kind` | `root/column/row/stack/text/rect/image/surface/spacer/divider/canvas/free/button/input/term/popover/icon` | `BLK_ROOT … BLK_ICON`（0…16）；cap2 追加 `BLK_POPOVER=15`、`BLK_ICON=16` | `kernel_v25/include/gui/block.h::blk_kind` |
 | `layer` | `bg/content/work/chrome/overlay/toast` | `LAYER_BG=0 / LAYER_CONTENT=100 / LAYER_WORK=200 / LAYER_CHROME=3000 / LAYER_OVERLAY=4000 / LAYER_TOAST=5000` | `kernel_v25/include/gui/block.h` |
 | `overflow` | `clip/visible/scroll` | `OVF_CLIP=0 / OVF_VISIBLE=1 / OVF_SCROLL=2` | `kernel_v25/include/gui/block.h` |
 | `anchor` | `L/R/T/B/HCENTER/VCENTER` | `ANC_L=0x1 / ANC_R=0x2 / ANC_T=0x4 / ANC_B=0x8 / ANC_HCENTER=0x10 / ANC_VCENTER=0x20` | `kernel_v25/include/gui/block.h` |
@@ -554,6 +555,83 @@ HTML 元素上的 `data-blk-*` 属性是样式白名单之外唯一的显式覆�
 - **FREE**：子块不参与父容器主轴流动；按 §4.4 顺序求解。`bleed` 子块对齐父整框，其余对齐父内容框，见 `kernel_v25/src/gui/layout.c::child_box` (L101)。
 - **`grid_snap`**：只在 calm 档生效，归整 padding/gap 到 `{4,8,12,16,24}`；不做坐标 8pt 对齐，1px 描边不动。见 `kernel_v25/src/gui/layout.c::grid_snap` (L35)。
 - **min/max**：只夹尺寸，不回写坐标；越界交溢出策略处理。
+
+### 4.12 cap2 能力扩展（v0.3，M-CAP2-*）
+
+> **命名纪律**：HTML 属性名逐字采用《HTML 原型开发规范 v3》清单（本节左列，命名权威）；块字段名逐字照抄 cap2 冻结表（`feat/blk-cap2` `754d82c`，禁改）。两者映射唯一，不在工具线侧另立命名。内核消费点符号随 cap2 内核线落地；基线 `89584c4` 源码尚未含这些消费者，本节字段名以冻结表为准，工具线只照抄、不反推。
+>
+> **诊断纪律**：下列属性取值越界 / 枚举不匹配 / 引用解析失败，一律以对应 `M-CAP2-xx` 规则 ID 记入 diagnostics 并非 0 退出（`--allow-lossy` 才降级 warning）；**禁止静默降级**。默认值列即「属性省略时」的内核缺省行为。
+
+#### 4.12.1 字段映射总账（五列）
+
+| HTML 属性 | 块字段 | 内核消费点 | 默认 / 兼容 | 断言 ID |
+|---|---|---|---|---|
+| `data-alpha` | `alpha:u8` | 渲染包 `blk_alpha_of` / `blk_cov` | 0 = 未声明（≡255）；0–1 比例 / 0–255 绝对值，判别见 §4.12.2 | M-CAP2-01 · `cap2-alpha64/128/192` |
+| `data-alpha-mode` | `alpha_mode:u8` | 渲染包 present 量化 | 0 = `ordered16`；1 = `none` | M-CAP2-02 · `cap2-alpha64/128/192` |
+| `data-elevation` | `elevation:u8` | 渲染包 9-slice 阴影 | 0 = `flat`（无阴影）；名称 `flat/raised/hover/float/overlay/modal` 与 0..5 一一对应 | M-CAP2-03 · `cap2-shadow-slices` |
+| `data-radius` | `corner_tl/corner_tr/corner_br/corner_bl:u8` | 渲染包逐角掩码 | 0 = `inherit`（不显式，等价省略 / 旧默认）；单值四角同值，四值按 TL TR BR BL；`pill`=128，`auto`=255 | M-CAP2-04 · `cap2-corner-per/pill/concentric` |
+| `data-radius-tl` | `corner_tl:u8` | 渲染包逐角掩码 | 覆盖左上角；值域同 `data-radius` | M-CAP2-05 · `cap2-corner-per` |
+| `data-radius-tr` | `corner_tr:u8` | 渲染包逐角掩码 | 覆盖右上角；值域同 `data-radius` | M-CAP2-05 · `cap2-corner-per` |
+| `data-radius-br` | `corner_br:u8` | 渲染包逐角掩码 | 覆盖右下角；值域同 `data-radius` | M-CAP2-05 · `cap2-corner-per` |
+| `data-radius-bl` | `corner_bl:u8` | 渲染包逐角掩码 | 覆盖左下角；值域同 `data-radius` | M-CAP2-05 · `cap2-corner-per` |
+| `data-border-sides` | `border_sides:u8` | 渲染包 `body_border` | 省略 = 0 = 全边；bit0=l / bit1=r / bit2=t / bit3=b | M-CAP2-06 · `cap2-border-sides` |
+| `data-wrap` | `wrap_lines:u8` | 文本包 `txt_wrap_lines` | 0 = 不折行；`1..6` = 同值行数；`auto`=255（≤6 自适应） | M-CAP2-07 · `cap2-wrap1/wrap2/wrapauto` |
+| `data-ellipsis` | `ellipsis:u8` | 文本包 | 0 = `none`；1 = `char`；2 = `word` | M-CAP2-08 · `cap2-ellipsis-char/word` |
+| `data-font` | `font_size:u8` | 文本包 `txt_font_h` | 0 = 令牌默认（16/body 档）；`8`/`caption`→1，`16`/`body`→2，`24`/`title`→3，`32`/`display`→4 | M-CAP2-09 · `cap2-font8/16/24/32` |
+| `data-bold` | `font_bold:u8` | 文本包伪粗 | 0 = 常规；1 = 伪粗；缺省 0 | M-CAP2-10 · `cap2-bold` |
+| `data-tabular` | `font_tabular:u8` | 文本包等宽数字 | 0 = 比例数字；1 = 等宽；缺省 0 | M-CAP2-11 · `cap2-tabular` |
+| `data-line-h` | `line_h:u8` | 文本包行高 | 0 = 令牌默认；>0 显式 px 行高 | M-CAP2-12 · `cap2-wrap*` 行高 |
+| `data-anim` | `anim_ms:u16` | 动画包预生成帧表 | 0 = 无动画；档值 `48/96/144/192/288` | M-CAP2-13 · `cap2-anim-outback` |
+| `data-ease` | `anim_ease:u8` | 动画包 | 0 = `none`；1 `linear` / 2 `in` / 3 `out` / 4 `inout` / 5 `out-back` / 6 `in-back` / 7 `step` | M-CAP2-14 · `cap2-anim-outback` |
+| `data-anim-props` | `anim_mask:u8` | 动画包 | 0 = 无可动画属性；bit0 x / bit1 y / bit2 w / bit3 h / bit4 alpha / bit5 elevation | M-CAP2-15 · `cap2-anim-interrupt` |
+| `<c-popover>` `data-anchor` | `anchor_id:u32` | 浮层包 `pop_layout` | 0 = 父框；值为锚元素 `id` 解析出的块 id；解析不到命中元素报 M-CAP2-16 | M-CAP2-16 · `cap2-pop-*` |
+| `<c-popover>` `data-prefer` | `pop_prefer:u8` | 浮层包 | 0 = `down|right`；up1 / down2 / left4 / right8，可组合位或 | M-CAP2-17 · `cap2-pop-down/up/left/right` |
+| `<c-popover>` `data-max-h` | `pop_max_h:u16` | 浮层包内部滚动 | 0 = 不限；>0 最大高 px，超出内部滚动 | M-CAP2-18 · `cap2-pop-scroll` |
+| `data-icon` | `kind=BLK_ICON(16)` + `icon:u8` | `icon_draw` | 图标号 0..255，缺省 0；带该属性的元素落 `icon` 块 | M-CAP2-19 · `cap2-icon-tint` |
+| `data-tint` | `tint_role:u8` | `icon_draw` | 0 = 未指定；1 `fg` / 2 `bg` / 3 `accent` / 4 `border` | M-CAP2-20 · `cap2-icon-tint` |
+| `data-scrollbar` | `scrollbar:u8` | 渲染包 `sb_visible` / `sb_paint` | 0 = `auto`；1 = `always`；2 = `never` | M-CAP2-21 · `cap2-sb-paint` |
+| `data-scroll` | `scroll_axis:u8` | 滚动条 | 省略 0 = `auto`；1 `x` / 2 `y` / 3 `both` | M-CAP2-22 · `cap2-sb-wheel` |
+| `data-theme="hc"` | `hc_force:u8=1` | 令牌 / 渲染 | 0 = 跟随活动主题；1 = 本子树按 HC 规则渲染（radius=0 / border=2），只影响本子树 | M-CAP2-23 · `cap2-hc-override` |
+
+#### 4.12.2 `data-alpha` 比例 / 绝对值判别规则（M-CAP2-01）
+
+- 值含小数点 → 按比例解析，取值域 `0..1`：`alpha = round(v * 255)`；`0.5 → 128`。
+- 纯整数 `0` → 未声明，写 `alpha=0`（与内核口径一致：0 ≡ 255 不透明）。
+- 纯整数 `1`（≤1）→ 视为比例 1，写 `255`；纯整数 `2..255` → 绝对值原样写入。
+- 比例 >1、绝对值 >255、不可解析 → M-CAP2-01 诊断，不进产物。
+
+#### 4.12.3 标签与位掩码口径
+
+- `<c-popover>` → 块 `kind=BLK_POPOVER(15)`；子树按两趟 measure→place 求解，8px 安全边距，四向翻转 + 钳制（消费点 `pop_layout`）。`data-anchor` 取元素 `id`（可带 `#` 前缀），整树建好后第二趟解析为块 id；引用不存在的元素 → M-CAP2-16，**禁止静默落 0 冒充父框锚定**。
+- `<c-icon>` 与带 `data-icon` 的元素 → 块 `kind=BLK_ICON(16)`，`icon:u8` 为图标号；`data-tint` 着色角色见上表。
+- 位掩码属性（`border_sides / anim_mask / pop_prefer`）多值以 `,`、`|` 或空白分隔，位或组合；出现表外侧别 / 属性名 → 对应 M-CAP2-06 / M-CAP2-15 / M-CAP2-17 诊断。
+- `data-radius` 哨兵：`pill`=128（全圆角胶囊）、`auto`=255（同心圆角，子半径 = 父半径 − padding）、`inherit`=0（不显式，等价省略 / 旧默认；内核暂无真正「继承父半径」值，见 FROZEN §5 已知限制）。逐角像素值域 0..63；`data-radius-tl/tr/br/bl` 覆盖对应角，优先级高于 `data-radius` 简写。
+- `data-theme="hc"` 只置 `hc_force=1` 于当前块并向下作用于本子树；HC 下阴影全部关断、改用 1px 边框（冻结文档 §5）。
+
+#### 4.12.4 与既有字段的关系
+
+- 旧设计态 `radius` 字典（§4.9）保留为中间层落点；cap2 逐角值（0..63 / 128 / 255 / 0）写入同一字典，内核目标字段为 `corner_tl/tr/br/bl:u8`。旧档值 `0/8/12/16/24` 仍兼容（均落在 0..63 内）。
+- `font.scale`（§4.7，1/2 两档）与 `font_size`（cap2 四档）并存：未声明 `data-font` 时行为不变；声明 `data-font` 后 `font_size` 进内置页全字段路径。
+- cap2 属性不改变 CE 槽 72 投影口径：超集字段仍只进内置页 `blk_spec` 全字段路径（§2.4），CE 通道扩容依赖 `ce_blk_rec2_t`（冻结契约，另线落地）。
+
+#### 4.12.5 cap3 命名增量：角形态（v0.3，已评审定稿，append-only 冻结）
+
+> **正交关系**：形态是整块级别，与 cap2 逐角 `corner_tl/tr/br/bl` 正交——形态整块统一，半径仍可逐角。CE 侧 `ce_blk_rec2_t` 只下发 `corner_shape`，**不下发** `corner_n`。
+>
+> **命名纪律**：禁止用 `data-radius="g2 16"` 这类关键字塞数值属性；形态只走本节两个专属属性。`g2` 在转换器内视为 `squircle` 别名。
+
+| HTML 属性 | 块字段 | 内核消费点 | 默认 / 兼容 | 断言 ID |
+|---|---|---|---|---|
+| `data-radius-shape` | `corner_shape:u8` | 渲染包逐角掩码 / 形态采样 | 0 = `arc`（ARC 默认）；1 = `squircle`（SQUIRCLE）；`g2` = `squircle` 别名 | E_RADIUS_SHAPE_BAD · R-7.5-01 / 02 / 03 |
+| `data-squircle-n` | `corner_n:u8` | 渲染包 squircle 指数（仅 SQUIRCLE 有效） | 0 = 默认 50（5.0）；单位 0.1（`4.5`→45，`5`→50）；越界钳到 50 并报 `WARN_RADIUS_N_RANGE`；非数值指数报 `E_RADIUS_N_BAD` | E_RADIUS_N_BAD · R-7.5-02 / 03 |
+
+**形态规则（冻结断言）**：
+
+- **R-7.5-01** 形态整块统一：同一棵子树内 `corner_shape` 不得逐角混用 ARC / SQUIRCLE；逐角只调半径，不调形态。
+- **R-7.5-02** 面积采样覆盖率与解析指数误差 ≤ 1/255。
+- **R-7.5-03** ARC 与 SQ5 角中间段差 ≥ 3/255，证明几何确实不同。
+
+ARC 形态下 `corner_n` 不写入；`corner_n` 仅 SQUIRCLE 形态有效。
 
 ---
 
@@ -665,15 +743,29 @@ v1 默认态：`kernel_v25/include/gui/tokens.h` 预留字段 `radius / elevatio
 
 ### 7.2 三态分表
 
+#### 7.2.0 已支持（cap2 v0.3 落地，自甲 / 丙 / 有损表移出）
+
+下列条目在 v0.2 登记为「不可表达 / 仅 2 档 / 无动效 / 浮层自算」；cap2 契约（`feat/blk-cap2` `754d82c`）落地后已由 §4.12 声明属性表达，内核消费点与断言 ID 如下。原 U-* / L-* 编号保留作追溯，不再按不支持项拒绝。
+
+| 原条目 | cap2 表达（§4.12） | 内核消费点 | 断言 ID |
+|---|---|---|---|
+| 半透明不可表达（原 U-7.2-03，`opacity < 1`） | `data-alpha` / `data-alpha-mode` → `alpha` / `alpha_mode` | 渲染包 `blk_alpha_of` / `blk_cov`；present 量化 | `cap2-alpha64/128/192` |
+| 多行文本不可表达（原 U-7.2-04，自动折行） | `data-wrap` / `data-ellipsis` → `wrap_lines` / `ellipsis` | 文本包 `txt_wrap_lines` | `cap2-wrap1/wrap2/wrapauto`、`cap2-ellipsis-char/word` |
+| 阴影仅 2 档（原 L-7.3-02 档位受限） | `data-elevation` → `elevation` 0..5 六档 | 渲染包 9-slice 阴影 | `cap2-shadow-slices` |
+| 无动效 / 缓动（原 U-7.2-05，`transition` / `animation`） | `data-anim` / `data-ease` / `data-anim-props` → `anim_ms` / `anim_ease` / `anim_mask` | 动画包预生成帧表 | `cap2-anim-outback`、`cap2-anim-interrupt` |
+| 浮层要应用自算（锚定 / 朝向 / 限高） | `<c-popover>` `data-anchor` / `data-prefer` / `data-max-h` → `anchor_id` / `pop_prefer` / `pop_max_h` | 浮层包 `pop_layout` | `cap2-pop-*`、`cap2-pop-scroll` |
+
+> 注：CSS `opacity` / `transition` / `animation` 本身仍不在受控 CSS 白名单（§4.8.2）；上述能力只经 §4.12 的 `data-*` 声明入口表达。HC 下阴影关断改用 1px 边框，`hc_force` 只作用本子树。
+
 #### 7.2.1 甲：内核结构性不可表达
 
 | ID | 项 | 判定理由 | 依赖（字段 / 条款） | 验收 |
 |---|---|---|---|---|
 | U-7.2-01 | `border-radius` 逐角半径 / 非阶梯半径 | 绘制路径四角共用同一档半径与掩码，无 tl/tr/br/bl 分别取值分支；贴边角无法独立归零 | 等 §3.3 / §3.4 `corner_radius[4]`；判定见 `块化GUI-设计规格.md §14.1` | R1；逐角半径落地后贴边角为 0 |
 | U-7.2-02 | `box-shadow` 侧别（贴边侧抑制投影） | `paint_halo` 固定四边画 halo，无按边抑制分支；接缝处无法取消投影 | 等与 `border_mask` 同批的侧别掩码（`shadow_mask`，字段名待 gui-fix 定稿）；见 `块化GUI-设计规格.md §14.3` | S2；贴边侧无阴影暗带 |
-| U-7.2-03 | `opacity < 1`（半透明） | 绘制为不透明 RGB24 直填，无 alpha 混合通道；颜色为 `0x00RRGGBB` 不透明值 | 等渲染合成层 alpha 通道；字段待 gui-fix 定稿（§3 未列定） | 落地前仅 `opacity:1` 允许 |
-| U-7.2-04 | 多行文本自动折行 | `BLK_TEXT` 单行不换行，无折行布局路径；超宽只做 ellipsis / clip | 等文本折行字段（候选 `text_wrap`，字段名待定稿）+ 布局折行路径 | T1；折行落地前长文本走 ellipsis |
-| U-7.2-05 | `transition` / `animation` | `anim_ms` 预留字段恒 0，帧循环无过渡求解；基线无动画路径 | 等 §3.3 `anim_ms` | `anim_ms=0` 时无中间帧 |
+| U-7.2-03 | ~~`opacity < 1`（半透明）~~ **v0.3 已支持**，见 §7.2.0：`data-alpha` / `data-alpha-mode` | 基线 RGB24 直填无 alpha 通道；cap2 渲染包补 alpha 混合与 ordered16 抖动 | cap2 `alpha` / `alpha_mode` 字段（冻结表 §4.12.1） | `cap2-alpha64/128/192` |
+| U-7.2-04 | ~~多行文本自动折行~~ **v0.3 已支持**，见 §7.2.0：`data-wrap` / `data-ellipsis` | 基线 `BLK_TEXT` 单行；cap2 文本包补 1..6 行 / auto 折行与字符 / 词省略 | cap2 `wrap_lines` / `ellipsis` 字段（冻结表 §4.12.1） | `cap2-wrap1/wrap2/wrapauto`、`cap2-ellipsis-char/word` |
+| U-7.2-05 | ~~`transition` / `animation`~~ **v0.3 已支持**，见 §7.2.0：`data-anim` / `data-ease` / `data-anim-props` | 基线 `anim_ms` 预留恒 0；cap2 动画包补帧表 / 七缓动 / 属性掩码 | cap2 `anim_ms` / `anim_ease` / `anim_mask` 字段（冻结表 §4.12.1） | `cap2-anim-outback`、`cap2-anim-interrupt` |
 | U-7.2-06 | `position:fixed` / `position:sticky` | 无屏幕锚定与滚动吸附的落位模式；现有 FREE 仅锚定父框 | 等 §3.3 `place`（`float/anchor` 模式） | `fixed` 语义落地前按未核实处理 |
 | U-7.2-07 | CE 通道几何 / 样式（FREE/BUTTON/INPUT 提交、颜色、padding/gap/align/anchor） | 记录十二成员不含几何与样式（§2.3）；kind 白名单止于 `BLK_CANVAS`；布局 / 颜色 / 样式落地即丢 | 等 §3.4 `ce_blk_rec2_t` v2 记录块；缺口 3 | P1；v2 扩容前 CE 路线只保树形 / 文本 / 句柄 |
 
@@ -716,7 +808,7 @@ v1 默认态：`kernel_v25/include/gui/tokens.h` 预留字段 `radius / elevatio
 | ID | 设计态原值 | 内核压缩结果 | 允许的误差上界 | 兜底断言 |
 |---|---|---|---|---|
 | L-7.3-01 | 任意逐角 / 任意 px 圆角 | 退化为 calm 短边阶梯 8/12/16/24；非 calm 档恒直角 | 半径偏差 ≤ 最近阶梯档间距的半档；角部邻域像素差异计入 calm 档残差预算 | R1；§5.5 阶梯表 |
-| L-7.3-02 | 双层 / 任意边阴影 | 固定 halo：WORK 单层接触层（黑 18% @ y+1）；OVERLAY / TOAST 双层（黑 18% @ y+1，黑 10% @ y+3/y+4）；无逐边 | 阴影只出现在自由边；贴边侧阴影暗带宽度 0 | S2；`kernel_v25/src/gui/paint.c::paint_halo` (L296) |
+| L-7.3-02 | 双层 / 任意边阴影（**v0.3 档位部分已支持**：`data-elevation` 六档 9-slice 阴影，见 §7.2.0；逐边抑制仍未支持，见 U-7.2-02） | 基线固定 halo：WORK 单层接触层（黑 18% @ y+1）；OVERLAY / TOAST 双层（黑 18% @ y+1，黑 10% @ y+3/y+4）；无逐边 | 阴影只出现在自由边；贴边侧阴影暗带宽度 0 | S2；`kernel_v25/src/gui/paint.c::paint_halo` (L296)；`cap2-shadow-slices` |
 | L-7.3-03 | 百分比定位 / 尺寸 | 1/1000 千分位取整；整数除法 `aw * pct / 1000` | 单边取整误差 ≤ 1px | B1/B2 |
 | L-7.3-04 | 任意字号 | 只保留 `scale=1`（12px 口径）/ `scale=2`（16px 口径）两档；其它字号报 `UNSUPPORTED_FONT_SIZE` | 档间不插值；字形宽高按档值 | T1 |
 | L-7.3-05 | 任意颜色 | 优先映射到令牌角色（fg/bg/panel/bar/border/line/accent）；无法映射时取最近档；带 alpha 颜色不进入此项 | 色差在最近角色档内；固化色不跟随主题 | §4.7.1 表 |
@@ -764,13 +856,14 @@ UNSUPPORTED .fade opacity 0.6
 | **T1** | 文本按 §4.7.2 度量必须能落在自身内容矩形内；放不下则必须声明 `text_overflow=ellipsis` | 缩短文本 / 放宽几何 / 声明 ellipsis |
 | **L1** | `layer` 取值合法（§4.10 表）；走 CE 投影时只允许 `work(200)`，依据 `kernel_v25/src/gui/decl.c::validate` (L179) | 改层值；CE 路线去掉非 work 层 |
 | **O1** | `overflow=scroll` 时 `scroll.x/y` 不得超过内容实际溢出范围 | 收窄滚动偏移 |
+| **C2** | cap2 字段值域（v0.3）：各 `alpha/elevation/radius/wrap_lines/ellipsis/font_size/anim_ms/anim_ease/anim_mask/pop_prefer/pop_max_h/icon/tint_role/scrollbar/scroll_axis` 取值落在 §4.12.1 冻结表域内；位掩码只置表内位 | 按 §4.12.1 值域修正 cap2 属性 |
 | **P1** | 产物二进制：`text_off/pix_off` 落在串池内（`0 <= off < slen` 或 `-1`）；`recs` 长度 = `40 * n`（步长 = `sizeof(ce_blk_rec_t)`，`kernel_v25/src/gui/decl.c::decl_commit` (L329)）；`pad0=0`；`pix_off` 恒 `-1`。复核方式：逐条解包十二成员（§1.2 偏移列），校验 `text_off` 指向的 NUL 串长度 ≤ 4096 B、串池总长 ≤ 32768 B；记录顺序与中间层树序一致，父记录先于子记录 | 重算串池偏移 / 步长 / 填充位 |
 
 #### 8.1.2 映射规则与不支持项 ID
 
 | 类别 | 编号区间 | 判定方法 | 失败时怎么修 |
 |---|---|---|---|
-| 映射规则 | `M-4.1-01` … `M-4.11` | 逐条核对 HTML/CSS 输入到中间层字段的落点是否符合 §4 表 | 按 §4 对应行修正映射分支 |
+| 映射规则 | `M-4.1-01` … `M-4.11`；cap2 扩展 `M-CAP2-01` … `M-CAP2-23`（§4.12）；cap3 形态规则 `R-7.5-01` … `R-7.5-03`，诊断 `E_RADIUS_N_BAD` / `E_RADIUS_SHAPE_BAD` / `WARN_RADIUS_N_RANGE`（§4.12.5） | 逐条核对 HTML/CSS 输入到中间层字段的落点是否符合 §4 表；cap2/cap3 属性越界 / 枚举不匹配 / 引用解析失败必须带对应规则 ID 诊断 | 按 §4 / §4.12 对应行修正映射分支 |
 | 甲类不可表达 | `U-7.2-01` … `U-7.2-07` | 核对依赖字段是否已在 §3 落地；未落地前不得进入产物 | 移除该声明或改用替代写法 |
 | 乙类暂不支持 | `U-7.2-08` … `U-7.2-12` | 核对是否已扩展；未扩展前按 warning / 替代写法处理 | 按 §7.2.2 扩展环节补齐 |
 | 丙类永久不支持 | `U-7.2-13` … `U-7.2-29` | 核对是否命中丙类语义；命中即拒绝 | 按 §7.2.3 替代写法重写 |
@@ -784,6 +877,12 @@ UNSUPPORTED .fade opacity 0.6
 | **A-9-02** | §4.10 枚举值、§4.3.2 档位、§4.7.1 令牌值、§1.7 配额与头文件 / 令牌源码逐字一致 | 同步表值；令牌以 `kernel_v25/src/gui/tokens.c` 为准 |
 | **A-9-03** | §7.2.1 甲类每条可回指 §3 字段名或 §14 条款号；对不上的不得归甲类 | 调整三态归类或补登 §3 字段 |
 | **A-9-04** | §9 各样例 `recs.bin` 步长 40B/条、`pad0=0`、`pix_off=-1`、串池 NUL 结尾且 ≤ 32768 B | 重算产物二进制 |
+| **A-9-05** | cap2 每个 HTML 属性名在本文、`schema.json`、`html2blk.py` 三处逐字一致（命名不漂移；v3 清单为权威） | 同步三处属性名 |
+| **A-9-06** | cap2 每个内核字段名在本文与 `schema.json` 两处一致（冻结表口径，禁改） | 同步字段名 |
+| **A-9-07** | cap2 枚举映射（`alpha_mode/elevation/ease/font_size/ellipsis/tint/scrollbar/scroll_axis/anim_props/pop_prefer/border_sides`）冻结表 ↔ schema ↔ 本文一致，枚举键均收录 | 同步枚举键值 |
+| **A-9-08** | cap2 各字段默认值与冻结表一致（省略 = 表内缺省） | 同步默认值 |
+| **A-9-09** | 每个 cap2 数值 / 枚举属性在转换器内有对应 `M-CAP2-xx` 诊断分支，规则 ID 同时收录于本文 | 补齐诊断分支与规则 ID |
+| **A-9-10** | `popover=15` / `icon=16` kind 枚举在 `schema.json`、`blkcommon.py`、本文三处一致 | 同步 kind 枚举 |
 
 ### 8.2 spec-audit 语义与 CI 用法
 
@@ -1235,6 +1334,7 @@ sh kernel_v25/build.sh iso
 |---|---|---|---|
 | v0.1 | 基线 `89584c4` | 工作记录稿：HTML/JSON → 块树映射、内核事实摘录、首轮样例证据 | 参考实现轮次 |
 | v0.2 | 2026-11-25 | 定位重写（三层真源，工具降为可弃参考实现）；新增 §3 `blk_spec` v2 演进计划；§7 三态判定（甲 / 乙 / 丙）+ 有损表；规则 ID 体系（M-* / U-* / L-7.3-* / A-9-*）；断言可复核化（`path::symbol` 双标注）；§9 五个端到端样例附录；规范表全部内联，去除对外部契约文件的权威外挂 | 规范定稿 |
+| v0.3 | 2026-11-25 | cap2 能力扩展：新增 §4.12 字段映射总账（26 个 v3 属性 + `c-popover` / `c-icon` 两标签，规则 `M-CAP2-01..23`）；§7.2.0「已支持」表迁移半透明 / 多行折行 / 六档阴影 / 动效缓动 / 浮层锚定；kind 追加 `BLK_POPOVER=15` / `BLK_ICON=16`；校验新增 C2 值域断言；审计新增 A-9-05..10（属性 / 字段 / 枚举 / 默认值 / 诊断 ID / kind 三处一致性）；cap3 形态增量 §4.12.5（`data-radius-shape` / `data-squircle-n` → `corner_shape` / `corner_n`，规则 `R-7.5-01..03`，诊断 `E_RADIUS_N_BAD` / `WARN_RADIUS_N_RANGE`）；HTML 属性名以 v3 规范为权威、内核字段名以冻结表为准，映射唯一 | cap2 契约线（`feat/blk-cap2` `754d82c`）；cap3 命名已评审定稿 |
 
 ### 10.2 文档债定义与登记位置
 
