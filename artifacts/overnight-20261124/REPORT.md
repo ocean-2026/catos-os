@@ -5,7 +5,7 @@
 > 不写「已并入 / 已验收」。desk 线（`BLK_BUTTON/BLK_INPUT/BLK_TERM`、Settings
 > `gui style` corner、`gui term`）**尚未合入**本分支。
 >
-> 分支：`feat/gui-blocks`；HEAD `605ea25`。TLS 野站与浏览器 v0.1 的真站结果以
+> 分支：`feat/gui-blocks`；HEAD `4d74ca7`（源码/ISO 基线 `502d203`）。TLS 野站与浏览器 v0.1 的真站结果以
 > 用户线 / 独立工树实测为基线，本合并树复跑结果见 §4 / §5 的 `PENDING` 标注。
 
 ## 1. 合并提交链（feat/gui-blocks）
@@ -25,15 +25,18 @@
 | `8fea31e` | fix(link/paging) | GDT/TSS/IDT 固定槽位 + 任务帧恢复（修 ring3 三重故障） | `33d074e` |
 | `08db94e` | test(trace) | spawn/sched 面包屑（`CATOS_SPAWN_TRACE` 默认 0，不进 release 行为） | `8fea31e` |
 | `605ea25` | fix(link) | `.bss` 跨 arena 由 fatal 降为 warn，仅 KEY_TABLES 保持致命 | `08db94e` |
+| `77f0ec0` | fix(tls) | HTTPS 状态码透传（`status_out` 接入 https 分支） | `605ea25` |
+| `502d203` | feat(acpi) | 仅 cherry-pick `94f3ba1`：PM1_CNT 偏移/守卫修复 + `poweroff` 别名；纯加法 `paging_map_top()` 访问器 | `77f0ec0` |
+| `4d74ca7` | docs | 全局待办总表回填（debt 线 `8012c37`，仅搬表文件） | `502d203` |
 
 > desk 线 `feat/gui-desk` `c2ad71a` **未合并**；`feat/tls-chacha-wip=732abc6` 为用户线备份，
 > 未单独合并、未 reset。stb PNG/JPEG 接入仍阻塞于 32 位软浮点运行时，未入构建。
 > 本地三个修复/测试提交（`8fea31e`/`08db94e`/`605ea25`）**尚未 push**。
 
-## 2. 三门禁结果（当前 HEAD `77f0ec0`，test 镜像实测）
+## 2. 三门禁结果（0930 当前 HEAD `502d203`，test 镜像实测；0647/0850 历史留档见下）
 
-测试镜像：`kernel_v25/catos-v2.80-test.iso`（`GUI_AUTOSTART=0`，停 prompt），
-sha256 `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add`。
+**0647/0850 历史留档**测试镜像：`kernel_v25/catos-v2.80-test.iso`（`GUI_AUTOSTART=0`，停 prompt），
+0850 批次 sha256 `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add`（现 `-stale3`）。
 2 核 TCG，严格串行一次一个 qemu。
 
 | 门禁 | 结果 | 耗时 | stdout 证据（artifacts/gui-blocks/） |
@@ -50,6 +53,10 @@ sha256 `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add`。
 
 **0850 复跑（HTTPS 状态码透传新构建，test 镜像 `6ce35635…021add`）**：vprobe **10/10** 154.5s `gate-vprobe-full-0850.log`；E3 **2/2** 80.2s `gate-e3-full-0850.log`；
 F11 **9/9** 161.8s `gate-f11-full-0850.log`；`check_link_layout.py --strict` **RC=0**。本次源码 delta 仅 TLS 状态码透传（§4.2），GUI/console/ring3 路径未改。
+
+**0930 复跑（ACPI 关机 cherry-pick `502d203` 新构建，test 镜像 `1cf2f08e…addd8`）**：vprobe **10/10** 157.1s `gate-vprobe-full-0930.log`；E3 **2/2** 80.1s `gate-e3-full-0930.log`；
+F11 **9/9** 161.8s `gate-f11-full-0930.log`；`check_link_layout.py --strict` **RC=0**。本轮源码 delta 仅 ACPI 关机（`power.c`/`shell.c`/`power.h`）+ 纯加法 `paging_map_top()` 访问器（`paging.c`/`paging.h`）；
+污染核验 `git diff --stat 77f0ec0 -- kernel_v25/src/tls.c kernel_v25/src/tls_aes.c kernel_v25/src/netstack.c kernel_v25/src/gui` **为空**，TLS/browser/ring3 修因语义未退。
 
 ## 3. 串口探针（合并树实测 PASS）
 
@@ -199,11 +206,14 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
 
 | 变体 | 编译开关 | 用途 | 文件名 | sha256 | 字节数 |
 |---|---|---|---|---|---|
-| 调试/门禁版 | `GUI_AUTOSTART=0`（默认），开机停 prompt | vprobe/E3/F11 与探针目标 | `catos-v2.80-test.iso` | `6ce35635f8492982f0737c4610ae289cf47c095732423bd7510d261a6d021add` | 12,079,104 |
-| 桌面自启动版 | `GUI_AUTOSTART=1`，盘内无 `/etc/autostart` 时内置默认进块桌面 | 交付盘（配对种子盘） | `catos-v2.80.iso` | `37c3f11ce9b0cabcfd3f67525c29ab6f150bff32b4fec9fbb27a16f5b3847009` | 12,079,104 |
+| 调试/门禁版 | `GUI_AUTOSTART=0`（默认），开机停 prompt | vprobe/E3/F11 与探针目标 | `catos-v2.80-test.iso` | `1cf2f08ecda65032fef19368294e6a18e7dcdd4a07e2486f6c3712b2e5adbdd8` | 12,079,104 |
+| 桌面自启动版 | `GUI_AUTOSTART=1`，盘内无 `/etc/autostart` 时内置默认进块桌面 | 交付盘（配对种子盘） | `catos-v2.80.iso` | `c6ebc9d3656e6adec74862eb551ec0deb391adebdce5338b24f841d1246099fe` | 12,079,104 |
 
 - **源码基线对照（历史留档）**：上一批双 ISO（test `8533f41e…31e88` / release `c6c2d19f…26db1f`）对应内核源码 == `605ea25` 的 `kernel_v25/`；
-  其后 `444b413`、`504f3ba` 仅改 REPORT 文档，源码未动。本轮 HTTPS 状态码透传在 `605ea25` 之后新增一处源码 delta（§4.2），双 ISO 已据此重出，sha 见上表。
+  其后 `444b413`、`504f3ba` 仅改 REPORT 文档，源码未动。本轮 HTTPS 状态码透传在 `605ea25` 之后新增一处源码 delta（§4.2），双 ISO 已据此重出。
+- **0930 源码基线（当前上表双盘）**：内核源码基线提交 `502d20343b595ca629a2521e1ffc3ae013969c04`，tree=`20e607577b24815b91a018b6e2739705bd197c39`；
+  其后 `4d74ca7` 为待办总表纯文档提交，`kernel_v25/` 源码未再变。ACPI 改动触碰了源码，旧 `77f0ec0` 基线双 ISO 已按口径改名 `-stale3`，未拿旧盘冒充。
+  说明：CE 应用嵌入存在构建间少量字节方差（kernel.bin ~1.352 MB），门禁判据挂在源码树而非逐字节镜像；上表 sha 为最终落位盘。
 - 构建：`cd kernel_v25 && sh build.sh iso`；自启动变体 `GUI_AUTOSTART=1 sh build.sh iso`。
 - 自启动优先级（`shell.c:7784` 起）：盘内 `/etc/autostart` 存在（非空）→ 执行它；否则编译开关
   `GUI_AUTOSTART=1` → 进块桌面；否则停 shell。门禁/探针镜像必须停 prompt，故固定 `GUI_AUTOSTART=0`。
@@ -214,16 +224,36 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
     `catos-v2.80-test-stale.iso` `c3447bfb…7ee`）。
   - `-stale2`：上一批 `605ea25` 源码基线的交付盘（`catos-v2.80-stale2.iso` `c6c2d19f…26db1f` /
     `catos-v2.80-test-stale2.iso` `8533f41e…31e88`），被本轮新构建替换后改名，原名不再保留。
+  - `-stale3`：`77f0ec0`（TLS 状态码透传）源码基线交付盘（`catos-v2.80-stale3.iso` `37c3f11c…47009` /
+    `catos-v2.80-test-stale3.iso` `6ce35635…021add`），被 0930 ACPI 基线新构建替换后改名。
   - artifacts 归档目录下同名旧盘已被新 ISO 覆盖，无残留同名旧盘。
 - 交付盘现场 `--seed-autostart` 生成；`kernel_v25/catos_disk.img` 已 checkout 回 HEAD，sha256
   `8ac9d54b6b2f482a7b8753177d8714567c0af2a2e4208bb6d03e4f68abfa08a1`（67,108,864 B），未改动。
 
 ### 7.3 main 合并一致性（ff-only）
-- 当前 main 与 feat/gui-blocks 同值（ff-only，无 merge commit）；77f0ec0 之后均为 REPORT 纯文档提交，`kernel_v25/` 源码未再变动。
-- 源码/ISO 基线提交 `77f0ec0ed177f20343ba75a825db1b7427e80a36`，tree=`eeb946b8708f8625a55dca3e6d23dbad6ace1294`；双 ISO 对得上该基线源码，无需再重打：
-  release `catos-v2.80.iso` `37c3f11c…47009` / test `catos-v2.80-test.iso` `6ce35635…021add`。
+- 当前 main 与 feat/gui-blocks 同值（ff-only，无 merge commit）；`502d203` 之后 `4d74ca7`（待办总表）、`979a181`（REPORT）均为纯文档提交，`kernel_v25/` 源码未再变动。
+- 源码/ISO 基线提交 `502d20343b595ca629a2521e1ffc3ae013969c04`，tree=`20e607577b24815b91a018b6e2739705bd197c39`；双 ISO 对得上该基线源码：
+  release `catos-v2.80.iso` `c6ebc9d3…aba9f` / test `catos-v2.80-test.iso` `1cf2f08e…addd8`。
 - 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；`ls-remote` 确认 main 与 feat/gui-blocks 同值。
-- 历史留档：上一批 `605ea25` 基线双 ISO（`c6c2d19f…26db1f` / `8533f41e…31e88`）当时与 main 一致、无需重打；`444b413`/`504f3ba` 为纯文档提交。
+- 历史留档：`77f0ec0` 基线双 ISO（`37c3f11c…47009` / `6ce35635…021add`）已改名 `-stale3`；更早 `605ea25` 基线双 ISO（`c6c2d19f…26db1f` / `8533f41e…31e88`）为 `-stale2`。
+
+### 7.4 0930 收口决策留档
+
+**① ACPI 仅 cherry-pick，未整体合并 `feat/smp`**
+- 只从 `feat/smp` 的 `94f3ba1` 搬 ACPI 关机：PM1_CNT 端口偏移 `0x48/0x4C → 0x40/0x44`；守卫由 `paging_phys_top()` 改为 `paging_map_top()`（身份映射 PSE 窗口上界，可高于分配器上界）；关机串口打点；`acpi_poweroff()` 包装；shell `poweroff` 作为 `shutdown` 别名。落本线提交 `502d203`。
+- **未整体 merge `feat/smp`**：其 merge-base 是旧基 `76d0f646`，整体合并会回退本线已交付的 TLS 状态码透传（`77f0ec0`）、browser v0.1、ring3 镜像 US 位修因（`8fea31e`）等语义，故只做选择性 cherry-pick。
+- **排除项**：`6e99d5e` AHCI 骨架（`ahci.c`/`ata.c`/`build.sh`，IDENTIFY/DMA 未打通）未带；`acpi.c`/`acpi.h` 是 smp 线的 MADT/CPU/IOAPIC/PM1 解析器孤文件，本线无对应接线，未迁入（`94f3ba1` 原提交所称 "acpi_pm1 诊断" 部分未随迁）。
+- **paging 移植边界**：smp 的 `paging.c` 同时删掉了本线 `task_page_is_user()`（ring3 US 位修因，`8fea31e`），不能整体搬；本线只做纯加法——新增静态 `map_top` 与只读访问器 `paging_map_top()`，`task_page_is_user()` 原样保留。
+
+**② 待办总表回填入 main**
+- `git checkout feat/debt -- docs/全局待办总表.md`（只搬这一个文件），提交 `4d74ca7`（debt 线基准 `8012c37`）。
+- 核对口径：只回填总表、未改六份文档正文；闭合项（✅）带修复说明与提交/探针证据；数周级项（VMware 真机复测 #6）与 64 位内核引导（#7）保留 ☐/🔶 并标注 deferred 理由。
+- `git branch --contains 8012c37` 仍只显示 `feat/debt` 属正常：文件内容已搬到 main，历史提交对象不随文件搬运。
+
+**③ AHCI D4 🔶 实测值**
+- 本线未编入 AHCI 驱动：`build.sh` 源表只有 `ata.c`，无 `ahci.c`/`ahci.h`；shell 无 `ahci` 命令。存储仍为 IDE/ATAPI，PIO 16-bit `inw` 逐扇区搬运（`ata_read` 已按 count 下发多扇区命令，但未上总线主 DMA / `insl` 32-bit 批量）。
+- 实测（H7 重型盘 IO 基线）：顺序读 14.79 → 15.35 MB/s，xfer 64% PIO `insw` 搬 4 MiB + wait 35%；无 AHCI 端口复位 / IDENTIFY 成功 / DMA 完成中断记录。
+- AHCI 骨架来自 smp `6e99d5e`，本轮未搬；本线无 AHCI 门禁探针，上述为现有 IDE/PIO 路径实测，AHCI 打通留待带金属盘矩阵与 DMA 回归环境的轮次。
 
 ## 8. 未决 / 已知限制 / 实测清单
 
@@ -248,7 +278,7 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
 10. **已知限制（写实）**：
     - PNG/JPEG 软浮点阻塞；
     - SMP AP / 多核调度 deferred；
-    - AHCI IDENTIFY ABRT 未通；
+    - AHCI 未接入：仅 IDE/ATAPI PIO，IDENTIFY/DMA 未打通（见 §7.4③）；
     - calm 示例块几何左偏约 40 px；
     - CBC `0xC027` Finished 首条 decode_error（不影响 AEAD 野站通路）。
 11. **未做**：`D:\CatOs` 本地同步：主机下线，未做。
