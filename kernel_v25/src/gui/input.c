@@ -34,6 +34,9 @@ block *gui_hover_target(void) { return hover_block; }
 static int       (*key_hook)(int code, void *ud);
 static void     *key_ud;
 
+/* popover.c 内部入口（gui_int.h 冻结清单之外）。 */
+extern void pop_bridge_note(int x, int y);
+
 void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
     key_hook = fn;
     key_ud = ud;
@@ -172,6 +175,8 @@ static void focus_set(block *b) {
 }
 
 static void on_press(int x, int y) {
+    /* 点在最上层浮层矩形外：先关闭浮层并回投 dismiss，本帧不再向下下发点击。 */
+    if (pop_dismiss_at(x, y)) return;
     block *b = hit_test(x, y);
     if (!b) return;
     /* 菜单模态：点下层空白只关闭菜单，不下发命中。 */
@@ -289,6 +294,7 @@ void gui_pump_input(void) {
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
             if (drag_mode != DRAG_NONE) on_release();
             else hover_block = hit_test(e.x, e.y);
+            pop_bridge_note(e.x, e.y);
         } else if (drag_block) {
             on_drag_move(e.x, e.y);
         }
@@ -299,6 +305,7 @@ void gui_pump_input(void) {
     }
     if (k == 27) {
         if (gui_sak_esc()) return;             /* SAK 面板优先消费 Esc */
+        if (pop_esc()) return;                  /* Esc 先关最上层浮层 */
         if (gui_menu_is_open()) gui_menu_close();  /* Esc 先关菜单 */
         else exit_requested = 1;                   /* Esc 退回文本控制台 */
     }
