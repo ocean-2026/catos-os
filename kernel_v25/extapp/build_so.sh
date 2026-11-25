@@ -49,6 +49,12 @@ CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check \
 echo "== building $NAME.so =="
 "$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$SRC" -o "build/${NAME}_so.o"
 "$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c so_stub.c -o build/so_stub.o
+# Modern GCC emits a .comment section below the image base; strip it before
+# linking so objcopy -O binary does not pad the flat image up to it.
+for o in "${NAME}_so" so_stub; do
+    "$OBJCOPY" --remove-section=.comment --remove-section=.note.GNU-stack \
+        "build/$o.o" 2>/dev/null || true
+done
 
 # Generate a private linker script pinned at the requested base.
 LD_SCRIPT="build/${NAME}.so.ld"
@@ -65,11 +71,9 @@ LD_SCRIPT="build/${NAME}.so.ld"
     echo "}"
 } > "$LD_SCRIPT"
 
-if "$NM" "build/${NAME}_so.o" 2>/dev/null | grep -q ' so_entry$'; then
-    ENTRY=so_entry
-else
-    ENTRY=_so_entry
-fi
+# so_stub.o defines so_entry(); the CSO1 loader never jumps to it (libraries
+# are entered through dlsym()'s resolved exports), but ld wants a defined -e.
+ENTRY=so_entry
 "$LD" -m i386pe --disable-reloc-section -T "$LD_SCRIPT" -e "$ENTRY" \
     "build/${NAME}_so.o" build/so_stub.o -o "build/${NAME}.so.pe"
 
@@ -77,8 +81,11 @@ API=$("$NM" "build/${NAME}.so.pe" | awk '/[DR] _*__ce_api$/{print $1; exit}')
 if [ -z "$API" ]; then
     APIPARM=none
 else
-    APIPARM=$("$PY" -c "print('%x' % (int('$API',16) - int('$BASE',16)))")
+    APIPARM="0x$("$PY" -c "print('%x' % (int('$API',16) - int('$BASE',16)))")"
 fi
+
+BSS=$("$OBJDUMP" -h "build/${NAME}.so.pe" | awk '/\.bss/{print $3; exit}')
+if [ -z "$BSS" ]; then BSS=0; else BSS="0x$BSS"; fi
 
 "$OBJCOPY" -R .bss "build/${NAME}.so.pe" "build/${NAME}.nobss.so.pe"
 "$OBJCOPY" -O binary "build/${NAME}.nobss.so.pe" "build/${NAME}.so.bin"
@@ -96,10 +103,10 @@ if [ -n "$EXPORTS" ]; then
             echo "ERROR: export symbol $SYM not found in $NAME.so"; exit 1
         fi
         if [ -n "$SPECS" ]; then SPECS="$SPECS,"; fi
-        SPECS="$SPECS$EXPNAME=$VMA"
+        SPECS="$SPECS$EXPNAME=0x$VMA"
     done
 fi
 
 "$PY" "$CEBASE/build/mkso.py" "build/${NAME}.so.bin" \
-    "$CEBASE/$OUTREL/$NAME.so" "$BASE" "$APIPARM" "$SPECS"
+    "$CEBASE/$OUTREL/$NAME.so" "$BASE" "$BSS" "$APIPARM" "$SPECS"
 echo "OK -> $OUTREL/$NAME.so"

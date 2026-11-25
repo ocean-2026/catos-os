@@ -213,15 +213,17 @@ int copy_from_user(task_t *t, void *dst, const void *src, uint32_t len) {
 uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
     if (!t || len == 0) return 0;
     /* first-fit gap scan over the (start-sorted) VMA list, restricted
-     * to the extension arena; the returned base needs room for the
-     * guard pages plus len, page-aligned */
+     * to the anonymous part of the extension arena; the CSO1 library
+     * zone (USER_LIB_BASE..USER_LIB_END) sits above and is excluded.
+     * The returned base needs room for the guard pages plus len,
+     * page-aligned */
     uint32_t want = VMA_GUARD_SZ + ((len + 0xFFFu) & ~0xFFFu);
     uint32_t cur = USER_EXT_BASE;
     while (1) {
-        uint32_t next = USER_EXT_END;
+        uint32_t next = USER_LIB_BASE;
         for (vma_t *x = t->vm; x; x = x->next)
             if (x->start >= cur && x->start < next) next = x->start;
-        if (next - cur >= want && cur + want <= USER_EXT_END) {
+        if (next - cur >= want && cur + want <= USER_LIB_BASE) {
             uint32_t base = cur;
             vma_t *nv = vma_new(base, base + want, VMA_ANON, writable ? 1 : 0);
             if (!nv) return 0;
@@ -230,19 +232,19 @@ uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
             t->vm = vma_insert(t->vm, nv);
             return base + VMA_GUARD_SZ;
         }
-        if (next >= USER_EXT_END) return 0;     /* arena exhausted */
+        if (next >= USER_LIB_BASE) return 0;     /* anon arena exhausted */
         cur = next;
         /* skip past the whole VMA that starts at cur */
         for (vma_t *x = t->vm; x; x = x->next)
             if (x->start == cur && x->end > cur) { cur = x->end; break; }
-        if (cur >= USER_EXT_END) return 0;
+        if (cur >= USER_LIB_BASE) return 0;
     }
 }
 
 int vma_munmap(task_t *t, uint32_t addr, uint32_t len) {
     if (!t || len == 0) return -22;
-    if (addr < USER_EXT_BASE || addr + ((len + 0xFFFu) & ~0xFFFu) > USER_EXT_END)
-        return -22;                             /* only ext-arena mappings */
+    if (addr < USER_EXT_BASE || addr + ((len + 0xFFFu) & ~0xFFFu) > USER_LIB_BASE)
+        return -22;                             /* only ext-arena anon mappings */
     uint32_t start = addr & ~0xFFFu;
     uint32_t end   = addr + ((len + 0xFFFu) & ~0xFFFu);
     /* the whole range must lie inside ONE mapping we created */

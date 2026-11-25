@@ -252,6 +252,18 @@ typedef struct catos_api {
     int      (*blk_image_load)(const char *path);
     int      (*blk_image_free)(int res);
     int      (*blk_text_width)(const char *s);
+
+    /* ---- Stage 2B: file-backed mapping (append-only; mirror 77-79) ------ */
+    /* Reserved: the file-backed path needs an fd handle table the CE layer
+     * does not expose yet; dispatch returns -8 ENOSYS.  Old binaries NULL. */
+    uint32_t (*file_mmap)(int fd, uint32_t len, int prot, int flags); /* 77 */
+    int      (*mprotect)(uint32_t addr, uint32_t len, int prot);      /* 78 */
+    int      (*munmap_shared)(uint32_t addr, uint32_t len);           /* 79 */
+
+    /* ---- Stage 2A: CSO1 shared object (append-only; mirror 80-82) ------ */
+    int      (*dlopen)(const char *path);            /* 80 */
+    void *   (*dlsym)(int handle, const char *name); /* 81 */
+    int      (*dlclose)(int handle);                 /* 82 */
 } catos_api_t;
 
 /* install the API (called once at boot) */

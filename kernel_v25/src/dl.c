@@ -17,11 +17,10 @@
 #include "fs.h"
 #include "vga.h"
 
-/* One static staging buffer, reused by every dlopen().  The kernel is
- * non-preemptive inside a syscall, so no locking is needed.  Keeping it
- * in BSS (rather than on the 8 KiB kernel stack) avoids a stack overflow. */
-static uint8_t cso_file_buf[CSO_MAX_FILE];
-
+/* One descriptor table, fixed size.  The kernel is non-preemptive inside a
+ * syscall, so no locking is needed.  There is NO large static staging
+ * buffer here: the file is read in chunks through a single on-demand frame
+ * (allocated in dl_open and freed before return), keeping .bss small. */
 static dl_module_t dl_mods[MAX_DL_MODULES];
 static int dl_next_handle = 1;
 
@@ -52,12 +51,13 @@ int dl_open(struct task *t, const char *path) {
     if (fs_resolve_file(path, 0, &fsize) != 0 || fsize == 0) return DL_ERR_NOENT;
     if (fsize > CSO_MAX_FILE) return DL_ERR_INVAL;
 
-    int got = fs_read_at(path, (char *)cso_file_buf, 0, (int)fsize);
-    if (got < (int)sizeof(cso_header_t)) return DL_ERR_INVAL;
-    fsize = (uint32_t)got;
+    /* Read just the 32-byte header into a small stack buffer first. */
+    uint8_t hb[sizeof(cso_header_t)];
+    if (fs_read_at(path, (char *)hb, 0, (int)sizeof(hb)) < (int)sizeof(hb))
+        return DL_ERR_INVAL;
 
     cso_header_t h;
-    for (uint32_t i = 0; i < sizeof(h); i++) ((uint8_t *)&h)[i] = cso_file_buf[i];
+    for (uint32_t i = 0; i < sizeof(h); i++) ((uint8_t *)&h)[i] = hb[i];
     if (h.magic[0] != CSO_MAGIC0 || h.magic[1] != CSO_MAGIC1 ||
         h.magic[2] != CSO_MAGIC2 || h.magic[3] != CSO_MAGIC3)
         return DL_ERR_INVAL;
@@ -90,17 +90,25 @@ int dl_open(struct task *t, const char *path) {
         if (!dl_mods[i].used) { slot = i; break; }
     if (slot < 0) return DL_ERR_FULL;
 
-    /* Copy export entries + name blob into one kernel frame. */
+    /* Read the export entries + name blob straight into one kernel frame. */
     uint32_t meta_bytes = image_off - h.export_off;
     if (meta_bytes == 0 || meta_bytes > 4096) return DL_ERR_INVAL;
     uint8_t *meta = (uint8_t *)kzalloc_frame();
     if (!meta) return DL_ERR_NOMEM;
-    for (uint32_t i = 0; i < meta_bytes; i++)
-        meta[i] = cso_file_buf[h.export_off + i];
+    if (fs_read_at(path, (char *)meta, (int)h.export_off, (int)meta_bytes)
+        < (int)meta_bytes) {
+        frame_free((uint32_t)meta);
+        return DL_ERR_INVAL;
+    }
+
+    /* One on-demand staging frame for the image chunk copy; freed before
+     * dl_open returns.  No large static staging buffer lives in .bss. */
+    uint8_t *st = (uint8_t *)kzalloc_frame();
+    if (!st) { frame_free((uint32_t)meta); return DL_ERR_NOMEM; }
 
     /* Map the image/bss span into this task's PDE 9 page table. */
     vma_t *v = vma_new(h.base, h.base + span, VMA_LIB, 1);
-    if (!v) { frame_free((uint32_t)meta); return DL_ERR_NOMEM; }
+    if (!v) { frame_free((uint32_t)meta); frame_free((uint32_t)st); return DL_ERR_NOMEM; }
     for (uint32_t off = 0; off < span; off += 4096) {
         uint32_t pa = (uint32_t)kzalloc_frame();       /* zeroed == bss */
         if (!pa || task_map_page(&t->space, h.base + off, pa, 1) != 0) {
@@ -110,22 +118,38 @@ int dl_open(struct task *t, const char *path) {
                 task_unmap_page(&t->space, h.base + o);
             vma_free(v);
             frame_free((uint32_t)meta);
+            frame_free((uint32_t)st);
             return DL_ERR_NOMEM;
         }
     }
     t->vm = vma_insert(t->vm, v);
 
-    /* Copy the image bytes through the task's page tables. */
+    /* Copy the image bytes through the task's page tables, one 4 KiB chunk
+     * at a time via the staging frame. */
+    int img_ok = 1;
     for (uint32_t off = 0; off < h.image_size; ) {
         uint32_t va = h.base + off;
         uint32_t pa = task_virt_to_phys(&t->space, va);
-        if (!pa) break;
+        if (!pa) { img_ok = 0; break; }
         uint32_t n = 4096 - (va & 0xFFFu);
         if (n > h.image_size - off) n = h.image_size - off;
+        if (fs_read_at(path, (char *)st, (int)(image_off + off), (int)n) < (int)n) {
+            img_ok = 0; break;
+        }
         uint8_t *dst = (uint8_t *)(pa + (va & 0xFFFu));
-        for (uint32_t i = 0; i < n; i++) dst[i] = cso_file_buf[image_off + off + i];
+        for (uint32_t i = 0; i < n; i++) dst[i] = st[i];
         off += n;
     }
+    if (!img_ok) {
+        for (uint32_t off = 0; off < span; off += 4096)
+            task_unmap_page(&t->space, h.base + off);
+        t->vm = vma_remove(t->vm, v);
+        vma_free(v);
+        frame_free((uint32_t)meta);
+        frame_free((uint32_t)st);
+        return DL_ERR_INVAL;
+    }
+    frame_free((uint32_t)st);
 
     /* Inject the vsyscall table pointer, exactly as the CE01 loader does.
      * The value is the SAME fixed VA in every task (VS_TABLE = 0x2080800),

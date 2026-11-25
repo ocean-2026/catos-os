@@ -28,6 +28,7 @@
 #include "hw.h"
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
+#include "dl.h"      /* Stage 2A: CSO1 fixed-base shared object */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
@@ -503,6 +504,7 @@ static void task_cleanup(task_t *t) {
     fpu_task_cleanup(t);                  /* Stage 1: drop FPU ownership */
     cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
     decl_task_cleanup(t);                 /* P3: reclaim declarative subtree */
+    dl_close_all(t);                      /* Stage 2A: free CSO1 library meta frames */
 #ifdef CATOS_BENCH
     uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
 #endif
@@ -846,6 +848,11 @@ enum {
     /* P3 CE 声明式 ABI（append-only，槽 72..76） */
     SYS_DECL_COMMIT, SYS_DECL_EVENT_POLL,
     SYS_DECL_IMAGE_LOAD, SYS_DECL_IMAGE_FREE, SYS_DECL_TEXT_WIDTH,
+    /* Stage 2B: file-backed mapping (append-only, slots 77..79).
+     * Reserved; dispatch returns -8 ENOSYS pending the fd handle table. */
+    SYS_FILE_MMAP, SYS_MPROTECT, SYS_MUNMAP_SHARED,
+    /* Stage 2A: CSO1 fixed-base shared object (append-only, slots 80..82). */
+    SYS_DLOPEN, SYS_DLSYM, SYS_DLCLOSE,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -920,6 +927,8 @@ static void build_vsyscall_page(uint8_t *page) {
         /*66*/0, /*67*/0, /*68*/0,               /* mouse_x/y/buttons: no args */
         /*69*/3, /*70*/1, /*71*/1,               /* canvas create/present/destroy */
         /*72*/4, /*73*/2, /*74*/1, /*75*/1, /*76*/1, /* decl commit/poll/load/free/textw */
+        /*77*/4, /*78*/3, /*79*/2,                 /* file_mmap / mprotect / munmap_shared */
+        /*80*/1, /*81*/2, /*82*/1,                 /* dlopen / dlsym / dlclose */
     };
     uint32_t taddr[SYS_COUNT];
     e.p = page;
@@ -2380,6 +2389,39 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)decl_text_width(buf);
         break;
     }
+    /* ---- Stage 2B: file-backed mapping (deferred, ENOSYS) ------------- */
+    /* The CE layer exposes path-based file access, not an fd handle table.
+     * A file_mmap(fd, ...) needs that handle layer first; the slots are
+     * reserved append-only and return -8 ENOSYS until it lands. */
+    case SYS_FILE_MMAP:
+    case SYS_MPROTECT:
+    case SYS_MUNMAP_SHARED:
+        ret = (uint32_t)-8;                 /* ENOSYS */
+        break;
+    /* ---- Stage 2A: CSO1 fixed-base shared object --------------------- */
+    case SYS_DLOPEN: {
+        char path[FS_NAME_MAX];
+        if (a1 == 0 || copy_from_user(t, path, (const void *)a1,
+                                       FS_NAME_MAX - 1) != 0) {
+            ret = (uint32_t)-14; break;
+        }
+        path[FS_NAME_MAX - 1] = 0;
+        ret = (uint32_t)dl_open(t, path);
+        break;
+    }
+    case SYS_DLSYM: {
+        char nm[128];
+        if (a2 == 0 || copy_from_user(t, nm, (const void *)a2,
+                                      sizeof(nm) - 1) != 0) {
+            ret = 0; break;
+        }
+        nm[sizeof(nm) - 1] = 0;
+        ret = (uint32_t)dl_sym(t, (int)a1, nm);
+        break;
+    }
+    case SYS_DLCLOSE:
+        ret = (uint32_t)dl_close(t, (int)a1);
+        break;
     default: ret = (uint32_t)-8; break;
     }
 #ifdef CATOS_BENCH
