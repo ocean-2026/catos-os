@@ -92,6 +92,11 @@ int ib_key(int code, void *ud) {
     case KB_END:   ib_pos = ib_len; break;
     case 10:                                              /* Enter 提交 */
         if (ib_submit) ib_submit(ib_root, ib_buf);
+        /* CE 归属块：把提交文本回传到声明式事件通道（内核桌面回调不受影响）。 */
+        {
+            block *b = btable_get(ib_root);
+            if (b && b->owner != 0) decl_post_input(b, ib_buf);
+        }
         return 1;
     case 27:  return 1;                                   /* Esc 仅消费，不退桌面 */
     default:
