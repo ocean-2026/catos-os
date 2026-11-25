@@ -10,17 +10,10 @@
 
 static void layout_node(block *b, int ax, int ay, int aw, int ah);
 
-static int text_len(const char *s) {
-    int n = 0;
-    if (!s) return 0;
-    while (*s++) n++;
-    return n;
-}
-
 static int leaf_natural_w(block *b) {
     if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
-        return 8 * (int)sc * text_len(b->text);
+        return txt_measure_w(b->text, b->font_size, sc, b->font_tabular);
     }
     if (b->kind == BLK_INPUT) return 80;
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
@@ -41,14 +34,27 @@ static int grid_snap(int v) {
 }
 
 static int leaf_natural_h(block *b) {
-    if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON ||
-        b->kind == BLK_INPUT) {
+    if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON) {
+        uint8_t sc = b->st.scale ? b->st.scale : 1;
+        int h;
+        if (b->wrap_lines == 0) {
+            /* 旧口径：单行块高 = 字高（wrap=0/16 像素回归硬门禁）。 */
+            h = txt_font_h(b->font_size, sc);
+        } else {
+            int maxw = b->req_w > 0 ? b->req_w : 1000000;
+            h = txt_wrapped_h(b->text, b->font_size, sc, b->font_tabular,
+                              maxw, b->wrap_lines, b->ellipsis, b->line_h);
+        }
+        if (gui_style_calm() && b->kind != BLK_TEXT && h < 24) {
+            /* 控件高 24（16 字形 + 上下各 4） */
+            h = 24;
+        }
+        return h;
+    }
+    if (b->kind == BLK_INPUT) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
         int h = 16 * (int)sc;
-        if (gui_style_calm() && b->kind != BLK_TEXT) {
-            /* 控件高 24（16 字形 + 上下各 4） */
-            h = h < 24 ? 24 : h;
-        }
+        if (gui_style_calm()) h = h < 24 ? 24 : h;
         return h;
     }
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
