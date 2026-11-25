@@ -226,6 +226,9 @@ void tasks_init(void) {
     tasks[0].ring0 = 1;
     tasks[0].resume_frame = 0;
     tasks[0].parent = 0;
+    tasks[0].proc = 0; tasks[0].is_thread = 0; tasks[0].detached = 0;
+    tasks[0].tls_va = 0; tasks[0].thr_stack_va = 0; tasks[0].thread_ret = 0;
+    tasks[0].waiter = 0; tasks[0].kstack_va = 0;
     tasks[0].space.pt = 0;
     tasks[0].space.dir = 0;
     tasks[0].vm = 0;                           /* ring0: no user VMA list */
@@ -3327,6 +3330,10 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->bg_mode = 0;
     t->daemon = 0;              /* v2.54: detached-service flag */
     t->pending_sig = 0;          /* v2.52: clear stale pending signal */
+    /* 3A-2: reset thread-side scaffolding on slot reuse (single-thread proc). */
+    t->proc = 0; t->is_thread = 0; t->detached = 0;
+    t->tls_va = 0; t->thr_stack_va = 0; t->thread_ret = 0;
+    t->waiter = 0; t->kstack_va = 0;
     t->log_head = 0;
     t->log_tail = 0;
     t->log_lost = 0;

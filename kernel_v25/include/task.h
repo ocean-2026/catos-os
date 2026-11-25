@@ -53,6 +53,13 @@ typedef enum {
 #define UID_ROOT   0
 #define UID_USER   100
 
+/* 3A-2: process descriptor.  Owns the address space and all process-shared
+ * resources (page space, VMA list, heap root, fd table, pipe/console/log
+ * ownership).  The main thread embeds one; worker threads reference it.
+ * Full field migration from task_t lands with the 3A-3 thread path; this
+ * forward declaration only lets task_t hold the back-pointer. */
+struct proc;
+
 typedef struct task {
     int         tid;
     int         state;
@@ -74,6 +81,21 @@ typedef struct task {
     int         pending_sig;    /* v2.52: last delivered signal, 0 = none   */
     uint32_t    heap_end;       /* user heap break                     */
     vma_t      *vm;             /* VMA list for this task (NULL if ring0)*/
+
+    /* ---- 3A-2 proc/thread split scaffolding --------------------------
+     * Existing single-thread tasks map onto the new model as: main thread ==
+     * sole thread, owning an implicit process.  The process-shared fields
+     * (space/vm/heap/fd/pipe/console/log) still live in task_t this step;
+     * they move under `proc` when worker threads (3A-3) share an address
+     * space.  The thread-side fields below are placeholders wired up in 3A-3. */
+    struct proc *proc;          /* owning process; NULL = implicit self proc */
+    int         is_thread;      /* 0 = main thread/process, 1 = worker thread */
+    int         detached;       /* 1 = join not required, auto-reap on exit */
+    uint32_t    tls_va;         /* per-thread TLS block VA (3A-3)          */
+    uint32_t    thr_stack_va;   /* worker user-stack VMA base (3A-3)       */
+    int         thread_ret;      /* join retval                              */
+    struct task *waiter;        /* task blocked in thread_join on this one  */
+    uint32_t    kstack_va;      /* kvheap kernel stack VA (3A-3); 0 = legacy static */
     /* Stage 1 FPU: 512-byte coprocessor save area, 16-byte aligned for
      * fxsave.  fpu_used=1 means fpu_save holds live state that may need
      * restoring; owned lazily (see fpu.h). */

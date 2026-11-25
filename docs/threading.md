@@ -1,5 +1,20 @@
 # 用户态多线程（Stage 3，feat/hosted）
 
+## 3A-2：`task_t` proc/thread 拆分脚手架（行为零变化）
+
+本轮只做结构边界落地，**不接新槽、不迁字段**：
+
+- `task.h` 前向声明 `struct proc`（进程描述符，持地址空间 / VMA / 堆根 / fd 表 /
+  管道/控制台/日志归属）；`task_t` 作为线程描述符，新增进程回指 `proc` 与线程侧
+  占位字段：`is_thread / detached / tls_va / thr_stack_va / thread_ret / waiter /
+  kstack_va`。
+- 既有进程（shell、spawn 出来的 CE 任务）按"单线程进程"映射：`proc=0` 表示隐式
+  自持进程，`is_thread=0`。槽位复用与 `tasks_init` 都复位这些字段。
+- 进程共享字段（`space/vm/heap_end/out_pipe/.../log_buf`）本轮**仍留在 `task_t`**；
+  待 3A-3 工作线程真正共享地址空间时再迁入 `proc`，避免在无活线程路径时搬迁 150+
+  处引用。
+- 回归：strict RC=0（`_bss_end=0x02116a40`）；`dltest` PASS、`mmapfd` MMAP PASS。
+
 ## 3A-1：页后备虚拟连续堆（kvheap，已落地）
 
 在拆 proc/thread 之前先打好通用内核堆地基。实现见 `src/kvheap.c` /
