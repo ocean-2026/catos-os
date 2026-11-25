@@ -361,6 +361,8 @@ typedef struct catos_api {
      * cache hits, what=2 refcnt of the cached page covering arg (a user VA;
      * -1 if none).  Returns the requested value as an unsigned word. */
     uint32_t (*fcache_stat)(int what, uint32_t arg);                              /*92*/
+    /* Stage 3 block 3: scheduler switch count for the calling task (no args). */
+    uint32_t (*thread_switches)(void);                                              /*93*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

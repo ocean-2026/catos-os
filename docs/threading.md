@@ -87,11 +87,38 @@ cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈�
 - strict 布局门禁 RC=0，`_bss_end=0x02117a00`（较 3A 净减 64 B；GDT 描述符多占
   的 8 B 在 `_gdt` 预留区内部，不计净 bss 增长）。
 
-### 已知边界（本轮 deferred，列入 3B/后续）
+## 第三块：真抢占最小版（已落地，实机实测）
 
-- **内核态仍非抢占**：PIT ISR 只抢占 ring3；ring0 协作式让出。真抢占最小版列入
-  第三块（tick 置 `need_resched`，返回用户态前检查切换，关键段 `preempt_disable/
-  enable` 包裹）。
+- **抢占嵌套计数**：`task.c` 新增 `preempt_depth_v` 与 `preempt_disable()` /
+  `preempt_enable()` / `preempt_depth()`（单核，普通 int 即可，无需原子）。tick 抢占
+  与 syscall 退出抢占两条路径在 `preempt_depth_v > 0` 时把切换推迟（置
+  `need_resched`，不立即切走），计数归零后再消费。
+- **调度切换计数**：`task_t` 新增 `switches` 字段，每次被调度器选中自增；新增 ABI
+  槽 **93** `thread_switches(void)`（nargs 0）返回当前任务的切换次数。
+- **关键段包裹（本轮只接 dl.c）**：`dl_close` / `dl_close_all` / `dl_open` 的句柄表
+  提交段用 `preempt_disable/enable` 包住 `dl_mods` 记录读写；dl.c 无阻塞等待，
+  计数可在函数内平衡。
+- **探针 `preempt.ce`**：两个纯计算 worker 忙循环，各自读自身 `switches` 前后差值；
+  两个 worker 差值均 >0 才 `PREEMPT PASS`，证明忙线程在 tick 边界被切走并切回，不崩。
+
+### 实机证据（第三块构建）
+
+- `preempt.ce`：`d0=1 d1=1`，两 worker 各被调度切回 ≥1 次，`PREEMPT PASS`，RC=0。
+- 回归 `threads.ce`：`THREAD PASS`，RC=0。
+- 三门禁回归：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a00`（与 3C-2 持平；`switches` 字段计入
+  既有 `tasks[]` 槽位，无新增大 `.bss` 数组）。
+
+### 已知边界（本轮 deferred）
+
+- **ring0 仍非异步抢占**：本轮只把 tick/syscall 退出的切换纳入抢占计数门控，ring0
+  代码依旧协作式让出；`preempt_disable/enable` 是为将来真正的内核可抢占预埋的计数，
+  此刻不产生异步内核切换。
+- **netstack.c / ssh.c 关键段未包计数**：这两个模块的 syscall 入口含阻塞 recv 等待
+  循环（`net_tcp_recv` / `net_tcp_srecv_all` / SSH 收发等待），持 `preempt_depth`
+  跨 reschedule 会导致计数永不回落；包计数必须等阻塞点拆成「短临界段 + 显式让出」
+  后再做。其 NIC IRQ 处理路径（`arp_handle`/`tcp_handle`/`udp_handle`）本身在中断
+  上下文，不参与计数。连接/会话记录在 3C-1 已归属到连接/会话对象。
 - **共享堆分配器未 per-process**：`heap_free_root` 仍按 slot 拷自父进程；线程内
   `malloc/free` 路径的归属/加锁列入 3B。
 - 按 tid 索引的静态缓冲（`ls_buf`、`e3_*_buf` 等）已在 3C-1 核对为按 tid 槽位，

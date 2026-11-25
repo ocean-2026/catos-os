@@ -503,6 +503,7 @@ int dl_open(struct task *t, const char *path) {
         }
     }
 
+    preempt_disable();
     dl_module_t *m = &dl_mods[slot];
     m->used        = 1;
     m->handle      = dl_next_handle++;
@@ -512,6 +513,7 @@ int dl_open(struct task *t, const char *path) {
     m->span        = span;
     m->export_cnt  = h.export_cnt;
     m->sh          = sh;
+    preempt_enable();
 
     /* Run constructors in order after relocations are applied. */
     dl_call_array(t, sh, sh->init_off, sh->init_cnt, "init_array");
@@ -589,16 +591,20 @@ static void dl_detach(struct task *t, dl_module_t *m) {
 
 int dl_close(struct task *t, int handle) {
     if (!t) return DL_ERR_BADH;
+    preempt_disable();
     dl_module_t *m = dl_find(handle, t->tid);
-    if (!m) return DL_ERR_BADH;
+    if (!m) { preempt_enable(); return DL_ERR_BADH; }
     dl_detach(t, m);
+    preempt_enable();
     return DL_OK;
 }
 
 void dl_close_all(struct task *t) {
     if (!t) return;
+    preempt_disable();
     for (int i = 0; i < MAX_DL_MODULES; i++) {
         if (!dl_mods[i].used || dl_mods[i].owner_tid != t->tid) continue;
         dl_detach(t, &dl_mods[i]);
     }
+    preempt_enable();
 }

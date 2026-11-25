@@ -123,6 +123,14 @@ static uint8_t idle_stack[4096] __attribute__((aligned(16)));
 static int     tasks_on;
 static uint32_t idle_ticks_v;      /* ticks burned in the idle loop */
 static volatile int need_resched;
+/* preempt nesting depth: >0 inside a kernel critical section; the tick and
+ * syscall-exit paths defer rescheduling until it drops back to 0.  Single core,
+ * so a plain int suffices (no atomic). */
+static volatile int preempt_depth_v;
+
+void preempt_disable(void) { preempt_depth_v++; }
+void preempt_enable(void)  { if (preempt_depth_v > 0) preempt_depth_v--; }
+int  preempt_depth(void)   { return preempt_depth_v; }
 
 /* one 8 KiB kernel stack per ring3 slot, in .bss */
 static uint8_t task_kstacks[MAX_TASKS - 1][8192] __attribute__((aligned(16)));
@@ -292,6 +300,7 @@ static void schedule_to(task_t *next) {
         g_sp_resume_tsc[next->tid] = perf_now();
 #endif
     next->state = T_RUNNING;
+    next->switches++;
     tls_apply(next);              /* Stage 3A-3: point GS_BASE at its TLS block */
     fpu_on_switch();              /* Stage 1: lazy FPU, incoming task traps #NM */
 #if CATOS_SPAWN_TRACE
@@ -455,8 +464,10 @@ uint32_t sched_timer_tick(int_frame_t *f) {
     task_tick_wake();
     if (!tasks_on) return (uint32_t)f;
     task_t *c = cur_task;
-    /* preempt only when the timer interrupted ring3 user code directly */
-    if (!c || c->ring0 || c == &idle_task_v || (f->cs & 3) != 3) {
+    /* preempt only when the timer interrupted ring3 user code directly and no
+     * kernel critical section is holding off preemption. */
+    if (!c || c->ring0 || c == &idle_task_v || (f->cs & 3) != 3 ||
+        preempt_depth_v > 0) {
         need_resched = 1;
         return (uint32_t)f;
     }
@@ -473,6 +484,7 @@ uint32_t sched_timer_tick(int_frame_t *f) {
     c->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    pick->switches++;
     tls_apply(pick);
     cpu_cr3_write(pick->space.dir);
     tss_set_kstack(pick->kstack_top);
@@ -886,6 +898,8 @@ enum {
     /* Stage 2B: CE fd handle table (append-only, slots 87..91). */
     SYS_FD_OPEN, SYS_FD_CLOSE, SYS_FD_READ, SYS_FD_WRITE, SYS_FD_LSEEK,
     SYS_FCACHE_STAT,
+    /* Stage 3 block 3: per-task scheduler switch counter (slot 93, no args). */
+    SYS_THREAD_SWITCHES,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -965,6 +979,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*83*/2, /*84*/1, /*85*/1, /*86*/1,       /* thread_create/exit/join/detach */
         /*87*/2, /*88*/1, /*89*/3, /*90*/3, /*91*/3, /* open/close/read/write/lseek */
         /*92*/2,                                    /* fcache_stat(what,arg) */
+        /*93*/0,                                    /* thread_switches() */
     };
     uint32_t taddr[SYS_COUNT];
     /* Overflow segment: thunks that do not fit segment A go into the gap
@@ -1508,6 +1523,7 @@ static void preempt_at_syscall_exit(int_frame_t *f) {
     /* the frame on this kernel stack doubles as the saved context; the
      * task resumes via cpu_frame_resume into ring3 later, with the
      * syscall return value already stored in frame->eax */
+    if (preempt_depth_v > 0) return;          /* still inside a critical section */
     task_t *pick = 0;
     for (int k = 1; k <= MAX_TASKS && !pick; k++) {
         task_t *tt = &tasks[(cur_task->tid + k) % MAX_TASKS];
@@ -1521,6 +1537,7 @@ static void preempt_at_syscall_exit(int_frame_t *f) {
     me->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    pick->switches++;
     tls_apply(pick);
     cpu_frame_resume(pick->ksp, pick->space.dir, pick->kstack_top);
 }
@@ -2510,6 +2527,9 @@ void isr_syscall(int_frame_t *f) {
         if (a1 == 0) ret = fcache_stat_pages();
         else if (a1 == 1) ret = fcache_stat_hits();
         else ret = (uint32_t)fcache_refcnt_at(a2);
+        break;
+    case SYS_THREAD_SWITCHES:
+        ret = t->switches;
         break;
     default: ret = (uint32_t)-8; break;
     }

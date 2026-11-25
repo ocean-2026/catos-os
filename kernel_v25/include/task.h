@@ -105,6 +105,7 @@ typedef struct task {
     int         ls_count;       /* entries in the snapshot  */
     int         ls_step;        /* next index for LS_NEXT   */
     uint32_t    cpu_ticks;      /* timer ticks charged to this task */
+    uint32_t    switches;       /* times this task was picked up by the scheduler */
     /* v2.5: output / input redirection targets (minimal fd abstraction).
      * out_pipe>=0: SYS_WRITE goes to the pipe; else out_file[0] set:
      * SYS_WRITE appends/truncates that file; else vga.
@@ -128,6 +129,15 @@ typedef struct task {
 
 /* ---- lifecycle ------------------------------------------------------- */
 void     tasks_init(void);
+
+/* Minimal preempt-nesting count (single core).  Critical sections that touch
+ * shared kernel state wrap their body in preempt_disable()/preempt_enable();
+ * the timer tick and syscall-exit reschedule only fire when the depth is 0.
+ * This kernel remains cooperatively scheduled in ring0 -- the count defers a
+ * pending reschedule until the section drops, it does not make ring0 preemptive. */
+void     preempt_disable(void);
+void     preempt_enable(void);
+int      preempt_depth(void);
 task_t  *task_current(void);
 int      tasks_ready(void);
 int      task_spawn_ce(const char *path, int argc, char **argv, int uid);
