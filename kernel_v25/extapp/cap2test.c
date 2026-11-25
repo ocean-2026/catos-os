@@ -105,6 +105,13 @@ int ce_main(int argc, char **argv) {
                                (uint32_t)sizeof(ce_blk_rec2_t));
     }
 
+    /* Negative path: an illegal rec_size must be rejected with
+     * E_DECL_BADREC (-39); the committed subtree must stay untouched. */
+    int badrec = 0;
+    if (api->blk_commit2) {
+        badrec = api->blk_commit2(r, 3, pool, (int)sizeof(pool), 77);
+    }
+
     /* ---- 3. poll events: click then input ----------------------------- */
     int click_got = 0, input_got = 0;
     int click_id = 0, click_x = 0, click_y = 0;
@@ -168,10 +175,12 @@ int ce_main(int argc, char **argv) {
     }
 
     /* ---- verdict ------------------------------------------------------ */
-    int ok = caps_ok && rc2 == 0 && click_got && input_got && rc1 == 0;
+    int ok = caps_ok && rc2 == 0 && click_got && input_got &&
+             rc1 == 0 && badrec == -39 /* E_DECL_BADREC */;
 
     ce_write("CAP2TEST caps="); put_hex(caps);
     ce_write(" rc2="); put_int(rc2);
+    ce_write(" badrec="); put_int(badrec);
     ce_write(" click="); put_int(click_got);
     ce_write(" id="); put_int(click_id);
     ce_write(" x="); put_int(click_x);
