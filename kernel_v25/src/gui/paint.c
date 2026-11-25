@@ -10,6 +10,7 @@
 #include "gui/tokens.h"
 #include "gfx24.h"
 #include "render_be.h"
+#include "paging.h"
 
 #define CLIP_DEPTH 8
 typedef struct { int x0, y0, x1, y1; } clip_rect_t;
@@ -71,6 +72,12 @@ static int clip_rect(int *x, int *y, int *w, int *h) {
     return *w > 0 && *h > 0;
 }
 
+/* 当前正在绘制的块：blit 路径据此取覆盖率（签名冻结，靠绘制期线程态传递）。 */
+static const block *paint_cur;
+
+static void blend_px(int x, int y, uint32_t color, int cov);
+static int  cap2_shape_declared(const block *b);
+
 void gui_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
     x -= trans_x(); y -= trans_y();
     if (!clip_rect(&x, &y, &w, &h)) return;
@@ -83,6 +90,23 @@ void gui_blit24_stride(const uint8_t *src, int x, int y, int w, int h,
     x -= trans_x(); y -= trans_y();
     int ox = x, oy = y;
     if (!clip_rect(&x, &y, &w, &h)) return;
+    /* cap2：带 alpha / 圆角的位图按覆盖率逐像素混合，不得整块覆盖。 */
+    if (paint_cur && (paint_cur->alpha || cap2_shape_declared(paint_cur))) {
+        for (int j = 0; j < h; j++) {
+            int dy = y + j;
+            for (int i = 0; i < w; i++) {
+                int dx = x + i;
+                const uint8_t *s = src +
+                    ((uint32_t)(oy + j) * (uint32_t)stride +
+                     (uint32_t)(ox + i)) * 3u;
+                uint32_t sc = ((uint32_t)s[0] << 16) |
+                              ((uint32_t)s[1] <<  8) | (uint32_t)s[2];
+                int cov = blk_cov((block *)paint_cur, dx, dy);
+                blend_px(dx, dy, sc, cov);
+            }
+        }
+        return;
+    }
     /* 裁剪后源指针按原始步进（stride 列）偏移到被保留的子矩形起点。 */
     const uint8_t *s = src +
         ((uint32_t)(y - oy) * (uint32_t)stride + (uint32_t)(x - ox)) * 3u;
@@ -203,28 +227,41 @@ static int     calm_mask_ready;
 
 static uint32_t fifth_pow(int v) { uint32_t x = (uint32_t)v; return x*x*x*x*x; }
 
+/*
+ * cap3: 面积采样重写入口 —— 单个象限 r×r 覆盖率表的唯一生成点。
+ *
+ * 表布局：UL 象限 row-major，out[dy*r+dx] ∈ [0,255]；255=块内，0=角外，
+ * 过渡带单调回落。档位/尺寸由调用方参数化（calm 旧档 8..24；cap2 逐角档 4..64）。
+ *
+ * shape_n：超椭圆阶数 ×10；50 = n=5.0（现行 calm 路径，逐像素不变）。
+ * cap3 落地 ARC / SQ5 / SQ45 三套面积采样表时，只替换本函数内部按 shape_n
+ * 分派的实现，外部入口签名、表布局与调用点保持不变；本包不实现 cap3 表型。
+ */
+static void corner_mask_build(int radius, int shape_n, uint8_t *out) {
+    (void)shape_n;                              /* cap3: 按 shape_n 分派三套表 */
+    uint32_t rn = fifth_pow(radius);
+    uint32_t inner = rn * 80u / 100u;           /* 80% 以内全不透明 */
+    for (int dy = 0; dy < radius; dy++)
+        for (int dx = 0; dx < radius; dx++) {
+            /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
+            uint32_t u = (uint32_t)(radius - dx), v = (uint32_t)(radius - dy);
+            uint32_t t = fifth_pow(u) + fifth_pow(v);
+            uint8_t cov;
+            if (t <= inner)        cov = 255;
+            else if (t >= rn)      cov = 0;
+            else {
+                uint32_t rem = rn - t;
+                uint32_t span = rn - inner;
+                cov = (uint8_t)(span ? 255u * rem / span : 0);
+            }
+            out[dy * radius + dx] = cov;
+        }
+}
+
 static void calm_masks_init(void) {
     if (calm_mask_ready) return;
-    for (int ri = 0; ri < CALM_R_N; ri++) {
-        int r = CALM_RADII[ri];
-        uint32_t r5 = fifth_pow(r);
-        uint32_t inner = r5 * 80u / 100u;   /* 80% 以内全不透明 */
-        for (int dy = 0; dy < r; dy++)
-            for (int dx = 0; dx < r; dx++) {
-                /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
-                uint32_t u = (uint32_t)(r - dx), v = (uint32_t)(r - dy);
-                uint32_t t = fifth_pow(u) + fifth_pow(v);
-                uint8_t cov;
-                if (t <= inner)        cov = 255;
-                else if (t >= r5)      cov = 0;
-                else {
-                    uint32_t rem = r5 - t;
-                    uint32_t span = r5 - inner;
-                    cov = (uint8_t)(span ? 255u * rem / span : 0);
-                }
-                calm_mask[ri][dy][dx] = cov;
-            }
-    }
+    for (int ri = 0; ri < CALM_R_N; ri++)
+        corner_mask_build(CALM_RADII[ri], 50, (uint8_t *)calm_mask[ri]);
     calm_mask_ready = 1;
 }
 
@@ -363,7 +400,222 @@ static void corner_ris(block *b, int base,
     *br = corner_ri(base, fr || fb);
 }
 
+/* ================= cap2：alpha 继承 / 抖动 / 逐角圆角 ==================== */
+
+static const uint8_t BAYER44[16] = {
+    0,  8,  2, 10,
+   12,  4, 14,  6,
+    3, 11,  1,  9,
+   15,  7, 13,  5
+};
+
+uint8_t blk_alpha_of(block *b) {
+    uint32_t a = 255;
+    for (block *c = b; c; c = c->parent) {
+        uint32_t ca = c->alpha ? c->alpha : 255;
+        a = a * ca / 255u;
+    }
+    return a ? (uint8_t)a : 1;
+}
+
+/* 单像素 alpha 覆盖率：mode 0 = ordered16（Bayer 二值抖动 16 档）；
+ * mode 1 = none（四舍五入最近档，不抖动）。 */
+static int alpha_cov_px(uint8_t alpha, uint8_t mode, int x, int y) {
+    if (alpha >= 255) return 255;
+    if (mode == 1) {
+        int q = ((uint32_t)alpha * 15u + 127u) / 255u;
+        return (int)((uint32_t)q * 255u / 15u);
+    }
+    int level = (int)((uint32_t)alpha * 15u / 255u);
+    int t = BAYER44[((y & 3) << 2) | (x & 3)];
+    return t <= level ? 255 : 0;
+}
+
+/* 逐角覆盖率表：分档 {4..64}，启动期在页后备堆生成（静态数组 ≤4KiB 红线）。 */
+#define CAP2_R_N 8
+static const int CAP2_RADII[CAP2_R_N] = { 4, 8, 12, 16, 24, 32, 48, 64 };
+static uint8_t *cap2_mask[CAP2_R_N];
+static int      cap2_mask_ready;
+
+static void cap2_masks_init(void) {
+    if (cap2_mask_ready) return;
+    for (int ri = 0; ri < CAP2_R_N; ri++) {
+        int r = CAP2_RADII[ri];
+        uint8_t *m = (uint8_t *)kzalloc_frame();
+        if (!m) { cap2_mask_ready = 1; return; }
+        cap2_mask[ri] = m;
+        corner_mask_build(r, 50, m);            /* cap3 替换点：见 corner_mask_build */
+    }
+    cap2_mask_ready = 1;
+}
+
+static int cap2_bucket(int r) {
+    for (int i = 0; i < CAP2_R_N; i++)
+        if (CAP2_RADII[i] >= r) return i;
+    return CAP2_R_N - 1;
+}
+
+static int hc_forced(block *b) {
+    const struct style *tok = gui_active_style();
+    return tok->radius_hc_zero || b->hc_force;
+}
+
+static int cap2_shape_declared(const block *b) {
+    return b->corner_tl || b->corner_tr || b->corner_br || b->corner_bl;
+}
+
+static uint8_t corner_raw(block *b, int k) {
+    switch (k) {
+    case 0: return b->corner_tl;
+    case 1: return b->corner_tr;
+    case 2: return b->corner_bl;
+    default:return b->corner_br;
+    }
+}
+
+static int parent_radius(block *p, int k) {
+    if (!p) return 0;
+    uint8_t raw = corner_raw(p, k);
+    int w = p->w, h = p->h;
+    int lim = (w < h ? w : h) / 2;
+    if (raw == 128) { int r = (w < h ? w : h) / 2; return r > 64 ? 64 : r; }
+    if (raw == 255) {
+        if (!calm_on()) return 0;
+        return CALM_RADII[calm_r_index(w, h)];
+    }
+    if (raw) return raw > 63 ? 63 : (raw > lim ? lim : raw);
+    return 0;
+}
+
+static int resolve_corner(block *b, int k, int w, int h, int flush) {
+    if (hc_forced(b)) return 0;
+    uint8_t raw = corner_raw(b, k);
+    if (raw == 0) return 0;
+    int lim = (w < h ? w : h) / 2;
+    if (raw == 128) {
+        int r = (w < h ? w : h) / 2;
+        return r > 64 ? 64 : (r < 0 ? 0 : r);
+    }
+    if (raw == 255) {
+        if (!calm_on() || flush) return 0;
+        int r = CALM_RADII[calm_r_index(w, h)];
+        block *p = b->parent;
+        if (p) {
+            int pr = parent_radius(p, k);
+            int pad = 0;
+            if (k == 0 || k == 2) pad = p->pad_l ? p->pad_l : p->pad_t;
+            else                  pad = p->pad_r ? p->pad_r : p->pad_t;
+            if (pr > 0) {
+                int cr = pr - pad;
+                if (cr < r) r = cr;
+            }
+        }
+        if (r > lim) r = lim;
+        return r > 0 ? r : 0;
+    }
+    int r = raw > 63 ? 63 : raw;
+    if (r > lim) r = lim;
+    return r;
+}
+
+static void cap2_resolve(block *b, int r[4]) {
+    int w = b->w, h = b->h;
+    int fl, fr, ft, fb;
+    flush_edges(b, &fl, &fr, &ft, &fb);
+    int flush[4] = { fl || ft, fr || ft, fl || fb, fr || fb };
+    for (int k = 0; k < 4; k++)
+        r[k] = resolve_corner(b, k, w, h, flush[k]);
+}
+
+static int cap2_corner_cov(int r, int col, int row, int w, int h, int k) {
+    if (r <= 0) return 255;
+    int bi = cap2_bucket(r);
+    int R = CAP2_RADII[bi];
+    uint8_t *m = cap2_mask[bi];
+    if (!m) return 255;
+    int dy, dx;
+    switch (k) {
+    case 0: dy = row;                 dx = col; break;
+    case 1: dy = row;                 dx = R - 1 - (col - (w - r)); break;
+    case 2: dy = R - 1 - (h - 1 - row); dx = col; break;
+    default:dy = R - 1 - (h - 1 - row); dx = R - 1 - (col - (w - r)); break;
+    }
+    if (dy < 0) dy = 0;
+    if (dy >= R) dy = R - 1;
+    if (dx < 0) dx = 0;
+    if (dx >= R) dx = R - 1;
+    return m[dy * R + dx];
+}
+
+static int cap2_shape_cov(block *b, int r[4], int col, int row) {
+    int w = b->w, h = b->h;
+    int k = -1;
+    if (row < r[0] && col < r[0])                k = 0;
+    else if (row < r[1] && col >= w - r[1])      k = 1;
+    else if (row >= h - r[2] && col < r[2])      k = 2;
+    else if (row >= h - r[3] && col >= w - r[3]) k = 3;
+    if (k < 0) return 255;
+    return cap2_corner_cov(r[k], col, row, w, h, k);
+}
+
+uint8_t blk_cov(block *b, int x, int y) {
+    if (!b) return 0;
+    if (x < b->x || y < b->y || x >= b->x + b->w || y >= b->y + b->h) return 0;
+    uint8_t a = blk_alpha_of(b);
+    int r[4];
+    cap2_resolve(b, r);
+    int rounded = r[0] || r[1] || r[2] || r[3];
+    if (a == 255 && !rounded) return 255;       /* 快速路径：逐像素不变 */
+    int cov = alpha_cov_px(a, b->alpha_mode, x, y);
+    if (!rounded) return (uint8_t)cov;
+    int cc = cap2_shape_cov(b, r, x - b->x, y - b->y);
+    return (uint8_t)((uint32_t)cov * (uint32_t)cc / 255u);
+}
+
+void blk_px_blend(int x, int y, uint32_t color, int cov) {
+    blend_px(x, y, color, cov);
+}
+
+/* cap2 覆盖率填充：alpha × 逐角圆角，逐像素合成。 */
+static void fill_round_cap2(block *b, int r[4], uint32_t color) {
+    int w = b->w, h = b->h;
+    if (w <= 0 || h <= 0) return;
+    uint8_t a = blk_alpha_of(b);
+    int rounded = r[0] || r[1] || r[2] || r[3];
+    if (a == 255 && !rounded) { gui_fill_rect(b->x, b->y, w, h, color); return; }
+    cap2_masks_init();
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            int cov = alpha_cov_px(a, b->alpha_mode, b->x + col, b->y + row);
+            if (cov && rounded) {
+                int cc = cap2_shape_cov(b, r, col, row);
+                cov = cov * cc / 255;
+            }
+            blend_px(b->x + col, b->y + row, color, cov);
+        }
+    }
+}
+
+static void body_fill_cap2(block *b, uint32_t color) {
+    int r[4];
+    cap2_resolve(b, r);
+    fill_round_cap2(b, r, color);
+}
+
+static void body_border_cap2(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
+    if (bw < 1) return;
+    int r[4];
+    cap2_resolve(b, r);
+    fill_round_cap2(b, r, color);
+    block inner = *b;
+    inner.x += bw; inner.y += bw;
+    inner.w -= 2 * bw; inner.h -= 2 * bw;
+    if (inner.w > 0 && inner.h > 0)
+        fill_round_cap2(&inner, r, bg);
+}
+
 static void body_fill(block *b, uint32_t color) {
+    if (cap2_shape_declared(b) || b->alpha) { body_fill_cap2(b, color); return; }
     if (calm_shape_eligible(b)) {
         calm_masks_init();
         int tl, tr, bl, br;
@@ -376,6 +628,7 @@ static void body_fill(block *b, uint32_t color) {
 
 static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
     if (bw < 1) return;
+    if (cap2_shape_declared(b) || b->alpha) { body_border_cap2(b, color, bg, bw); return; }
     if (calm_shape_eligible(b)) {
         calm_masks_init();
         int tl, tr, bl, br;
@@ -428,12 +681,17 @@ static void paint_halo(block *b) {
 
 void paint_node(block *b) {
     if (!b || !b->visible) return;
+    const block *prev_cur = paint_cur;
+    paint_cur = b;
 
     uint32_t fg = resolve_color(b, 0);
     uint32_t bg = resolve_color(b, 1);
     uint32_t accent = resolve_color(b, 2);
 
     paint_halo(b);
+
+    /* cap2：elevation 九宫阴影（画在块体之外，先于本体绘制）。 */
+    sh_paint(b, b->elevation);
 
     switch (b->kind) {
     case BLK_RECT:
@@ -528,6 +786,7 @@ void paint_node(block *b) {
 
     b->dirty_paint = 0;
     b->snap = 0;
+    paint_cur = prev_cur;
 }
 
 /* 平面遍历入口：脏叶子可能挂在未脏的祖先容器下（祖先本帧 snap=0，未走
