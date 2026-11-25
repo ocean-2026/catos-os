@@ -62,6 +62,7 @@ FILES = [("/bin/%s.ce" % name,
 FILES += [
     ("/bin/hello.elf",           os.path.join(ROOT, "extapp", "bin", "hello.elf")),
     ("/bin/libmath.so",          os.path.join(ROOT, "extapp", "bin", "libmath.so")),
+    ("/bin/rel8.so",             os.path.join(ROOT, "extapp", "bin", "rel8.so")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]

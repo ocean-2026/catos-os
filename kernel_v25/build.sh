@@ -115,6 +115,12 @@ build_shared_libs() {
 echo "== building CSO2 shared objects (extapp) =="
 sh extapp/build_so.sh libmath.c bin 0x2700000 \
     add=lib_add,sub=lib_sub,mul=lib_mul,gcd=lib_gcd,version=lib_version,hello=lib_hello,combo=lib_combo,seed=lib_seed,dispatch=lib_dispatch
+# Synthetic R_386_RELATIVE(8) probe lib: build the PIC .so, then hand-insert
+# one RELATIVE rela entry targeting rel8_slot (see build/mkrel8.py).
+sh extapp/build_so.sh rel8.c bin 0x2710000 val=rel8_val
+SLOT=$("$NM" extapp/build/rel8.so.elf | awk '/ D rel8_slot$/{print $1; exit}')
+[ -z "$SLOT" ] && { echo "ERROR: rel8_slot not found"; exit 1; }
+"$PY" extapp/build/mkrel8.py extapp/bin/rel8.so extapp/bin/rel8.so "0x$SLOT"
 }
 
 # Every target consumes the CE images that gen_builtin.py / mkdisk.py
