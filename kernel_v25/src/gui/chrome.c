@@ -266,6 +266,33 @@ static void shot_free_float_build(void) {
     b_rect(F, &badge);
 }
 
+/* 探针场景标志（仅 shot-* 开屏档使用，不进产品默认桌面）。 */
+static int probe_no_sample;     /* 不建示例面板，避免压住待测窗口顶角 */
+static int probe_menu_raise;    /* 菜单上移，避开任务栏裁切 BL/BR */
+
+/* 探针控件卡：一张卡片内放一个按钮与一个输入框，供 r12 / r8 档角部采样。
+ * 自由层绝对定位，对齐 shot_free_interact_build 范式，不依赖 column 布局。 */
+static void shot_controls_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec card = spec_panel(LAYER_WORK, 320, 160, 1);
+    block_id C = b_rect(F, &card);
+    block *cp = btable_get(C);
+    cp->x = 140; cp->y = 120; cp->moved = 1;
+
+    blk_spec btn = spec_panel(LAYER_WORK, 120, 24, 1);
+    block_id B = b_button(F, &btn, "Button");
+    block *bp = btable_get(B);
+    bp->x = 156; bp->y = 140; bp->moved = 1;
+
+    blk_spec inp = spec_panel(LAYER_WORK, 180, 24, 1);
+    block_id I = b_input(F, &inp, 0);
+    block *ip = btable_get(I);
+    ip->x = 156; ip->y = 184; ip->moved = 1;
+    layout_run();
+}
+
 /* 样例五：左手柄缩放像素断言。BAR 块初始 (230,90,160,100)，拖左手柄
  * 左移到 180：左边界随动，右边界保持 390 不动（min 80 / max 300）。 */
 static void shot_free_interact_build(void) {
@@ -445,7 +472,7 @@ void gui_demo_build(void) {
     block_id bg_id = b_rect(root_id, &bg);
     btable_get(bg_id)->bleed = 1;
 
-    demo_add_sample();
+    if (!probe_no_sample) demo_add_sample();
 
     /* 任务栏：全出血贴底，宽 = 屏宽，交叉轴 END 钉下边缘。 */
     blk_spec bar_tb = spec_panel(LAYER_CHROME, GFX24_W, 32, 0);
@@ -538,7 +565,7 @@ void gui_menu_open(void) {
     menu_root = b_column(root_id, &menu);
     block *mr = btable_get(menu_root);
     mr->x = 12;
-    mr->y = 396;
+    mr->y = probe_menu_raise ? 80 : 396;
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
 
     block_id menu_ids[32];
@@ -1817,6 +1844,7 @@ void gui_shell_cmd(const char *arg) {
      * shot-crop（D7 超框裁剪）/ shot-drag（11b 拖拽残影）；
      * 组件态：shot-notepad / shot-canvas / shot-files / shot-images。 */
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
+    int shot_controls = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
@@ -1827,7 +1855,9 @@ void gui_shell_cmd(const char *arg) {
     const char *rest = 0;
     char word[24];
     split_word(arg, word, sizeof(word), &rest);
-    if (!strcmp_probe(word, "shot-menu"))  shot_menu = 1;
+    if (!strcmp_probe(word, "shot-menu"))  { shot_menu = 1; probe_menu_raise = 1; }
+    else if (!strcmp_probe(word, "shot-controls")) { shot_controls = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-empty")) { probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-light")) shot_tok = TOK_LIGHT;
     else if (!strcmp_probe(word, "shot-hc"))    shot_tok = TOK_HIGH_CONTRAST;
     else if (!strcmp_probe(word, "shot-reset")) shot_reset = 1;
@@ -1840,12 +1870,12 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
-    else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
+    else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-canvas"))  { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "shot-files"))   { app_open = APP_FILEMGR; app_path[0] = 0; }
     else if (!strcmp_probe(word, "shot-images"))  { app_open = APP_IMAGES; app_path[0] = 0; }
-    else if (!strcmp_probe(word, "shot-browser")) { app_open = APP_BROWSER; app_path[0] = 0; }
-    else if (!strcmp_probe(word, "shot-settings")) { app_open = APP_SETTINGS; }
+    else if (!strcmp_probe(word, "shot-browser")) { app_open = APP_BROWSER; app_path[0] = 0; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-settings")) { app_open = APP_SETTINGS; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "notepad")) { app_open = APP_NOTEPAD; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "canvas"))   { app_open = APP_CANVAS; }
     else if (!strcmp_probe(word, "files"))    { app_open = APP_FILEMGR; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
@@ -1878,6 +1908,7 @@ void gui_shell_cmd(const char *arg) {
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
     if (shot_style >= 0) gui_style_set(shot_style);
     if (shot_menu) gui_menu_open();
+    if (shot_controls) { shot_controls_build(); gui_frame(); }
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();
     if (free_dash)  shot_free_dash_build();

@@ -314,3 +314,15 @@ diff = 0（时钟区除外）；整屏触碰像素相对 480000 显著小于整�
   块内 4 点 + 中心填充色、法线序列无尖峰、父层单渲染帧同坐标 diff = 0，
   外加几何存在性：绝对角点 ≠ 填充色、距角心 r-1 内点 = 填充色。
 
+### 16.4 收尾轮实测补充（dark / calm，探针场景）
+- 探针专用开屏档（不进产品默认桌面）：`gui shot-controls calm dark` 建一张卡片内含
+  BLK_BUTTON 120×24 与 BLK_INPUT 180×24；`gui shot-empty calm dark` 出干净参照帧；
+  `shot-settings/notepad/browser/menu` 抑制示例面板或上移菜单。
+- **实测缺口（待下一轮修绘制，本轮不改）**：按钮、输入栏在 calm 档**未吃到圆角**，
+  角点 = 填充色，crop 为带边框直角矩形；工厂 `b_button`/`b_input` 未显式置 `corner_mode`，
+  其绘制路径是否绕过 `calm_shape_eligible` 掩码需核查。
+- 外框类（Settings/Notepad/浏览器/菜单）四角角点实测为 bg/过渡色，圆角存在；代码按短边
+  落 r24 档（≥128），与 16.1 目标 r16 存在档位差距，留待档位调优轮处理。
+- 嵌套 flush 正文体（Settings/Notepad 正文卡片）按 16.2 规则方角，几何角点=填充色，
+  属规则结果；圆角证据取外框根块，填充色证据取正文体，分两份 JSON 留存。
+
