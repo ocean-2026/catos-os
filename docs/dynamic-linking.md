@@ -215,39 +215,87 @@ MMAP PASS
 - 8 MiB 用户区上限见上节：最多 4 库 / 512 KiB 共享 `.text`；若撞墙先扩 VMA 规划
   并写明新上限，不偷抬基址。
 
-## Stage 2C block ①：内核 relocate 引擎
+## Stage 2C block ①②：内核 relocate 引擎 + CSO2 rela 封包
 
 ### 支持的 R_386 重定位类型
 
 | type | 名称 | 语义 | 槽内写入 |
 |---|---|---|---|
-| 1 | `R_386_32` | 绝对地址（数据绝对指针） | `*slot = sym_val + addend` |
+| 1 | `R_386_32` | 绝对地址（数据/函数指针表） | `*slot = sym_val + addend` |
 | 2 | `R_386_PC32` | 相对调用 / 跳转 | `*slot = sym_val - loc_va - 4 + addend` |
 | 6 | `R_386_GLOB_DAT` | GOT 数据项（对象/变量引用） | `*slot = sym_val + addend` |
 | 7 | `R_386_JMP_SLOT` | PLT 函数槽 | `*slot = sym_val + addend` |
+| 8 | `R_386_RELATIVE` | 基址相对修正（本地符号指针） | `*slot = base + 槽内旧值` |
 
-其余类型由 `dl_reloc_apply()` 显式拒绝，返回 `DL_ERR_RELOC = -8`（ENOEXEC
-语义：镜像含内核不支持的重定位），并向 COM1 打点 `dl reloc reject
-type=<hex>`；**不静默跳过**任何槽。
+类型 8 为裁决批准放行：PIC `-shared` 库必然 emit 基址相对修正，不支持
+就无法装入真 PIC 库。其余类型由 `dl_reloc_apply()` 显式拒绝，返回
+`DL_ERR_RELOC = -8`（ENOEXEC 语义：镜像含内核不支持的重定位），并向 COM1
+打点 `dl reloc reject type=<hex>`；**不静默跳过**任何槽。
+
+### 符号与导出条目语义
+
+- 导出条目由「函数偏移」扩成**通用符号偏移**（函数/变量一致）：`dlsym`
+  返回的指针统一为 `base + sym_off`；槽位 ABI（80/81/82 入参出参）未动。
+- CSO2 rela 的 `sym_idx` **1-based**：0 表示空符号（RELATIVE/无符号），
+  导出表下标 = `sym_idx - 1`。这是为了与 ELF 惯例「符号表 0 号为空」对齐，
+  避免把首号导出误判成空符号。
 
 ### 引擎复用（同一条 relocate 路径）
 
 - **CSO2 `dlopen` 路径**：拷镜像、注入 vsyscall 表指针后，遍历 CSO2 rela
-  表（12 B/条 `{r_offset, r_info, r_addend}`）；`r_info` 低 16 位为 type、高
-  16 位为 sym_idx；符号按导出表解析（`sym_val = base + ex[sym].func_off`），
-  逐条过引擎。槽偏移越界、sym 越界同样拒绝。
+  表（12 B/条 `{r_offset, r_info, r_addend}`）；`r_info` 低 16 位为 type、
+  高 16 位为 1-based sym_idx；符号按导出表解析（`sym_val = base + sym_off`），
+  逐条过引擎。`R_386_RELATIVE` 的 addend 取槽内旧值，其余符号类 addend=0。
+  槽偏移越界、sym 越界同样拒绝。每条成功补丁打点
+  `reloc: type=<t> sym=<name> patched=0x<va>`，RELATIVE 打
+  `reloc: type=8 slot=0x… base=0x…`。
 - **ELF 可执行路径（`spawn_load_elf`）**：节头扫描 `.rel.dyn` / `.rel.plt`
   （`SHT_REL=9`）与 `.dynsym`（`SHT_DYNSYM=11`）；REL 条目 8 B
-  `{r_offset, r_info}`；`R_386_32` 的 addend 从槽内现值读取（REL 无显式
-  addend），其余类型 addend=0；解析后同样调 `dl_reloc_apply()`，拒绝返回
-  `-8`。当前内置 `hello.elf` 无动态节，走节表缺失的 no-op 早返回。
+  `{r_offset, r_info}`；解析后同样调 `dl_reloc_apply()`，拒绝返回 `-8`。
+  当前内置 `hello.elf` 无动态节，走节表缺失的 no-op 早返回。
 
-### 本块边界（未实机跑过的部分）
+### 封包器口径（mkso.py，主机无 pyelftools）
 
-- 四类重定位的实机补丁由块②产出的「必须重定位」库（导出变量 + GOT 调导出
-  函数）验证；本块仅证明零重定位既有镜像（`dltest.ce` / `mmap.ce`）无回归。
-- `init_array` / `fini_array` 的调用接线（按顺序调构造、末次 `dlclose` 调
-  析构）在后续块落地；本块只把偏移/计数存入模块描述符。
+- 库由 `gcc -m32 -ffreestanding -fPIC` 编译、`ld -m elf_i386 -shared` 链接
+  到 vaddr 0；`objcopy -O binary` 出平镜像（文件偏移 == 链接 vaddr）。
+- `readelf -r` 文本解析 `.rel.dyn/.rel.plt`：列 `Offset Info Type
+  Sym.Value Sym.Name`；类型名映射到上表码。`nm`（全 symtab，非 `-D`）取
+  导出符号定义偏移——动态表对可 preemptible 函数可能报 st_value 0。
+- 符号名带 `@…` 版本后缀时截到 `@` 前；`nm` 交叉校验缺失符号。reloc
+  目标符号不在导出表（除内部保留的 `__ce_api` 槽）即 fail fast。
+- `__ce_api` 作为隐藏内部条目挂在导出表末尾（无名），供其 GLOB_DAT 解析，
+  不被 `dlsym` 暴露。
+
+### init_array / fini_array
+
+`dl_open` 在重定位完成后按顺序调用 `init_array`；`dl_close` 在解映射前调用
+`fini_array`。每条 fnptr 先校验落在模块 span 内，越界跳过并打点。当前内置
+库数组为空（cnt=0），调用路径走 no-op。
+
+### 块②实机证据（libmath.so / dltest.ce）
+
+`readelf -r` 含 `R_386_GLOB_DAT`（`lib_seed`、`__ce_api`）与
+`R_386_JUMP_SLOT`（`lib_add`）；运行期串口打点：
+
+```
+reloc: type=1 sym=add  patched=0x2700404
+reloc: type=1 sym=sub  patched=0x2700408
+reloc: type=6 sym=seed patched=0x27004a4
+reloc: type=6 sym=     patched=0x27004a8
+reloc: type=7 sym=add  patched=0x27004b8
+```
+
+`dltest` 输出：`seed=7 combo(5)=12 dispatch(0,7,5)=12 dispatch(1,7,5)=2
+dispatch(2,7,5)=35`，`dltest: PASS`。`combo()` 经 PLT 调 `lib_add`、读导出
+变量 `seed`；`dispatch()` 走重定位后的只读函数指针表——证明 PLT/GOT 补丁
+真生效，不是直接调用或只拷镜像。
+
+### 本块未覆盖
+
+- 本库链接器对本地函数指针选择了 `R_386_32` 而非 `R_386_RELATIVE(8)`，
+  type 8 引擎分支已实现但本轮未被实机触发；`R_386_PC32(2)` 由库内直接
+  相对调用覆盖（链接期已解析，不进 rela 表）。
+- `hello.ce` 回归由 ③④ 三门禁覆盖。
 
 ## 限制
 

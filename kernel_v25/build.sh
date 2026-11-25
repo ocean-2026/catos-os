@@ -112,9 +112,9 @@ done < build/pkg.list
 # base and mkso.py wraps the CSO1 header + export table.  These land in
 # extapp/bin and are embedded to /bin by gen_builtin.py below.
 build_shared_libs() {
-echo "== building CSO1 shared objects (extapp) =="
+echo "== building CSO2 shared objects (extapp) =="
 sh extapp/build_so.sh libmath.c bin 0x2700000 \
-    add=lib_add,sub=lib_sub,mul=lib_mul,gcd=lib_gcd,version=lib_version,hello=lib_hello
+    add=lib_add,sub=lib_sub,mul=lib_mul,gcd=lib_gcd,version=lib_version,hello=lib_hello,combo=lib_combo,seed=lib_seed,dispatch=lib_dispatch
 }
 
 # Every target consumes the CE images that gen_builtin.py / mkdisk.py

@@ -44,11 +44,14 @@
 #define CSO2_VERSION 2u
 
 /* R_386 relocation types (mirror ELF32 i386 codes).  2C-2 implements
- * 1/2/6/7; every other code is rejected explicitly by the loader. */
+ * 1/2/6/7/8; every other code is rejected explicitly by the loader.
+ * Type 8 R_386_RELATIVE is a base-relative fixup (`*slot = base + old`),
+ * which a PIC -shared library always emits; approved for support. */
 #define R_386_32        1u
 #define R_386_PC32      2u
 #define R_386_GLOB_DAT  6u
 #define R_386_JMP_SLOT  7u
+#define R_386_RELATIVE  8u
 
 #define CSO_NO_API   0xFFFFFFFFu
 
@@ -89,7 +92,7 @@ typedef struct {
 
 typedef struct {
     uint32_t name_off;              /* offset into the name blob */
-    uint32_t func_off;              /* offset from the library base VA */
+    uint32_t sym_off;               /* offset from the library base VA (function or data symbol) */
 } cso_export_t;                     /* 8 bytes */
 
 typedef struct {

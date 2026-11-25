@@ -68,12 +68,36 @@ int dl_reloc_apply(struct task_space *sp, uint32_t base, uint32_t img_size,
     case R_386_PC32:
         val = sym_val - loc_va - 4u + (uint32_t)addend;
         break;
+    case R_386_RELATIVE:
+        /* Base-relative fixup: slot holds the link-time offset; relocate
+         * to the runtime base.  addend carries the pre-relocation slot value. */
+        val = base + (uint32_t)addend;
+        break;
     default:
         /* Unsupported reloc type: reject, do not silently skip. */
         return DL_ERR_RELOC;
     }
     *slot = val;
     return DL_OK;
+}
+
+/* Invoke a constructor/destructor array (init_array / fini_array) in order.
+ * Each entry is a fnptr VA inside the module span; out-of-span entries are
+ * rejected (skipped with a COM1 note) rather than branched through. */
+static void dl_call_array(struct task *t, const dl_module_t *m,
+                          uint32_t off, uint32_t cnt, const char *what) {
+    if (!cnt) return;
+    for (uint32_t i = 0; i < cnt; i++) {
+        uint32_t slot_va = m->base + off + i * 4;
+        uint32_t pa = task_virt_to_phys(&t->space, slot_va);
+        if (!pa) { ser_write("dl "); ser_write(what); ser_write(" slot missing\n"); return; }
+        uint32_t fn = *(uint32_t *)pa;
+        if (fn < m->base || fn >= m->base + m->span) {
+            ser_write("dl "); ser_write(what); ser_write(" bad fnptr\n");
+            return;
+        }
+        ((void (*)(void))fn)();
+    }
 }
 
 int dl_open(struct task *t, const char *path) {
@@ -248,6 +272,7 @@ int dl_open(struct task *t, const char *path) {
             return DL_ERR_INVAL;
         }
         cso_export_t *ex = (cso_export_t *)meta;
+        const char *names = (const char *)(meta + h.export_cnt * sizeof(cso_export_t));
         int rel_ok = 1;
         for (uint32_t i = 0; i < h.rela_cnt; i++) {
             cso_rela_t *r =
@@ -256,18 +281,39 @@ int dl_open(struct task *t, const char *path) {
             uint32_t sym  = r->r_info >> 16;
             if (r->r_offset >= h.image_size) { rel_ok = 0; break; }
             uint32_t symval = 0;
+            const char *symname = "";
             if (sym) {
-                if (sym >= h.export_cnt) { rel_ok = 0; break; }
-                symval = h.base + ex[sym].func_off;
+                uint32_t idx = sym - 1;     /* rela sym_idx is 1-based; 0 = null */
+                if (idx >= h.export_cnt) { rel_ok = 0; break; }
+                symval = h.base + ex[idx].sym_off;
+                symname = names + ex[idx].name_off;
+            }
+            /* RELATIVE(8) carries its addend in the pre-relocation slot;
+             * symbolic fixups resolve to sym_val with addend 0. */
+            int32_t addend = r->r_addend;
+            if (type == R_386_RELATIVE) {
+                uint32_t pa0 = task_virt_to_phys(&t->space, h.base + r->r_offset);
+                if (pa0) addend = (int32_t) * (uint32_t *)pa0;
             }
             if (dl_reloc_apply(&t->space, h.base, h.image_size,
                                 r->r_offset, type, symval,
-                                r->r_addend) != DL_OK) {
+                                addend) != DL_OK) {
                 ser_write("dl reloc reject type=");
                 ser_hex("reloc", type);
                 rel_ok = 0;
                 break;
             }
+            uint32_t patched = h.base + r->r_offset;
+            ser_write("reloc: type=");
+            ser_hex("t", type);
+            if (type == R_386_RELATIVE) {
+                ser_write(" slot="); ser_hex("slot", patched);
+                ser_write(" base="); ser_hex("base", h.base);
+            } else {
+                ser_write(" sym="); ser_write(symname);
+                ser_write(" patched="); ser_hex("va", patched);
+            }
+            ser_write("\n");
         }
         frame_free((uint32_t)relaf);
         if (!rel_ok) {
@@ -300,6 +346,9 @@ int dl_open(struct task *t, const char *path) {
     m->fini_off    = h.fini_array_off;
     m->fini_cnt    = h.fini_array_cnt;
     m->refcnt      = 1;
+
+    /* Run constructors in order after relocations are applied. */
+    dl_call_array(t, m, m->init_off, m->init_cnt, "init_array");
     return m->handle;
 }
 
@@ -316,8 +365,8 @@ void *dl_sym(struct task *t, int handle, const char *name) {
         if (ex[i].name_off >= m->meta_bytes) continue;
         const char *nm = names + ex[i].name_off;
         if (!dl_streq(nm, name)) continue;
-        if (ex[i].func_off >= m->span) return 0;        /* out of bounds */
-        return (void *)(m->base + ex[i].func_off);
+        if (ex[i].sym_off >= m->span) return 0;        /* out of bounds */
+        return (void *)(m->base + ex[i].sym_off);
     }
     return 0;
 }
@@ -326,6 +375,9 @@ int dl_close(struct task *t, int handle) {
     if (!t) return DL_ERR_BADH;
     dl_module_t *m = dl_find(handle, t->tid);
     if (!m) return DL_ERR_BADH;
+
+    /* Run destructors before the image is unmapped. */
+    dl_call_array(t, m, m->fini_off, m->fini_cnt, "fini_array");
 
     vma_t *v = vma_find(t->vm, m->base);
     if (v && v->kind == VMA_LIB && v->start == m->base) {
