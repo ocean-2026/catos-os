@@ -370,6 +370,55 @@ static void shot_e1_outline_build(void) {
     ser_write("\n");
 }
 
+/* E1-② 点击残留：标题带 / nav 项 / 正文 / 任务栏 Start 四切片。
+ * idle 帧不注入；其余变体在 layout 后单点命中目标块并释放，串口上报各块矩形，
+ * 断言主体区(y<568)未涉及块 diff=0、无块尺寸方块残留。 */
+static block_id e1_res_title, e1_res_nav, e1_res_body;
+static void shot_e1_residue_build(const char *state) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec t = spec_panel(LAYER_WORK, 300, 28, 1);
+    e1_res_title = b_row(F, &t);
+    block *tp = btable_get(e1_res_title); tp->x = 200; tp->y = 80; tp->moved = 1;
+    b_text(e1_res_title, 0, "Title");
+
+    blk_spec n = spec_panel(LAYER_WORK, 140, 28, 1);
+    e1_res_nav = b_row(F, &n);
+    block *np = btable_get(e1_res_nav); np->x = 40; np->y = 130; np->moved = 1;
+    b_text(e1_res_nav, 0, "Nav");
+
+    blk_spec d = spec_panel(LAYER_WORK, 300, 120, 1);
+    e1_res_body = b_rect(F, &d);
+    block *dp = btable_get(e1_res_body); dp->x = 200; dp->y = 130; dp->moved = 1;
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+
+    block *T = btable_get(e1_res_title), *N = btable_get(e1_res_nav), *D = btable_get(e1_res_body);
+    if (state && !strcmp_probe(state, "title")) {
+        gui_inject_press(T->x + T->w / 2, T->y + T->h / 2); gui_inject_release();
+    } else if (state && !strcmp_probe(state, "nav")) {
+        gui_inject_press(N->x + N->w / 2, N->y + N->h / 2); gui_inject_release();
+    } else if (state && !strcmp_probe(state, "body")) {
+        gui_inject_press(D->x + D->w / 2, D->y + D->h / 2); gui_inject_release();
+    } else if (state && !strcmp_probe(state, "start")) {
+        gui_inject_press(20, 584); gui_inject_release();
+    }
+
+    ser_write("GUI:e1-residue state="); ser_write(state ? state : "idle");
+    ser_write(" title ");
+    if (T) { ser_dec(T->x); ser_write(","); ser_dec(T->y); ser_write(",");
+             ser_dec(T->w); ser_write(","); ser_dec(T->h); }
+    ser_write(" nav ");
+    if (N) { ser_dec(N->x); ser_write(","); ser_dec(N->y); ser_write(",");
+             ser_dec(N->w); ser_write(","); ser_dec(N->h); }
+    ser_write(" body ");
+    if (D) { ser_dec(D->x); ser_write(","); ser_dec(D->y); ser_write(",");
+             ser_dec(D->w); ser_write(","); ser_dec(D->h); }
+    ser_write("\n");
+}
+
 /* C 轮组 1：父卡 r16 内嵌两子块——C1 贴左+贴顶，C2 贴右+贴底（对照）。
  * 自由层绝对定位，8pt 网格；父卡 pad=0，内容框即整框。 */
 static void shot_flush_inset_build(void) {
@@ -2218,6 +2267,8 @@ void gui_shell_cmd(const char *arg) {
     int shot_controls = 0;
     int e1_btn = 0, e1_outline = 0;
     const char *e1_state = 0;
+    int e1_residue = 0;
+    const char *e1_res_state = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
@@ -2234,6 +2285,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-controls-card")) { shot_controls = 1; probe_no_sample = 1; probe_card_only = 1; }
     else if (!strcmp_probe(word, "shot-e1-btn")) { e1_btn = 1; probe_no_sample = 1; e1_state = rest ? rest : "idle"; }
     else if (!strcmp_probe(word, "shot-e1-outline")) { e1_outline = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-e1-residue")) { e1_residue = 1; probe_no_sample = 1; e1_res_state = rest ? rest : "idle"; }
     else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-hpair"))  { probe_flush_hpair = 1;  probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-flush-vgroup")) { probe_flush_vgroup = 1; probe_no_sample = 1; }
@@ -2300,6 +2352,7 @@ void gui_shell_cmd(const char *arg) {
     if (shot_controls) { shot_controls_build(); gui_frame(); }
     if (e1_btn)       { shot_e1_btn_build(e1_state); gui_frame(); }
     if (e1_outline)   { shot_e1_outline_build(); gui_frame(); }
+    if (e1_residue)   { shot_e1_residue_build(e1_res_state); gui_frame(); }
     if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
     if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }
     if (probe_flush_vgroup) { shot_flush_vgroup_build(); gui_frame(); }
