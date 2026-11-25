@@ -56,6 +56,7 @@ struct pid_meta {
     int      stat_damage;           /* 落地置脏布局标记数 */
     int      stat_frames;            /* 成功落地提交批次数 */
     int      toast_hints;           /* 系统侧非法声明提示次数 */
+    uint32_t dropped;               /* 事件队列满队累计丢弃条数（#B 可观测） */
 };
 
 /* 当前焦点所属声明式应用；-1 = 焦点归还内核。跨应用焦点链 #33。 */
@@ -680,6 +681,12 @@ int decl_ce_probe_count(int tid) {
     return p ? p->count : 0;
 }
 
+/* 探针/诊断可读：本 pid 事件队列累计丢弃条数（满队丢最旧策略，见 enqueue2）。 */
+int decl_ce_probe_dropped(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    return p ? (int)p->dropped : -1;
+}
+
 /* ---- 事件轮询 ------------------------------------------------------------ */
 
 /* 旧 type → cap2 ev_kind 映射（未映射的旧类型 ev_kind 留 0）。 */
@@ -694,9 +701,18 @@ static uint8_t ev_kind_from_type(int16_t type) {
     }
 }
 
+/* 满队策略：丢最旧腾位（overwrite head），新事件优先入队；被淘汰的队头
+ * 最旧事件不再回传。丢弃累计到 p->dropped 并串口打点，绝不静默丢失。
+ * （备选“保留丢新”语义等价于计数后直接 return，本包选定丢最旧：新事件
+ * 不被背积压的旧事件堵在门外。） */
 static void enqueue2(struct pid_meta *p, ce_blk_event2_t *e) {
     int next = (p->evt + 1) % DECL_EVQ;
-    if (next == p->evh) return;
+    if (next == p->evh) {
+        p->evh = (p->evh + 1) % DECL_EVQ;   /* 淘汰队头最旧事件 */
+        p->dropped++;
+        ser_write("GUI:ev overflow pid="); decl_dec(p->tid);
+        ser_write(" dropped="); decl_dec(p->dropped); ser_putc('\n');
+    }
     e->seq = ++p->seq;
     p->evq[p->evt] = *e;
     p->evt = next;
@@ -919,6 +935,7 @@ void decl_dump_pid(int tid) {
     ser_write(" events="); decl_dec(p->stat_events);
     ser_write(" damage="); decl_dec(p->stat_damage);
     ser_write(" toast="); decl_dec(p->toast_hints);
+    ser_write(" dropped="); decl_dec(p->dropped);
     ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 

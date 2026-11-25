@@ -29,6 +29,7 @@ extern int      decl_ce_probe_poll2(int tid, ce_blk_event2_t *ev);
 extern void     decl_ce_probe_cleanup(int tid);
 extern block_id decl_ce_probe_local_to_global(int tid, int lid);
 extern int      decl_ce_probe_count(int tid);
+extern int      decl_ce_probe_dropped(int tid);
 
 /* ---- 串口小工具 ---------------------------------------------------------- */
 
@@ -350,6 +351,47 @@ static int case_elev_reject(void) {
     return 1;
 }
 
+/* ---- evq-overflow：满队丢最旧，dropped 计数可读，第 9 条去向可观测 ------ */
+
+static int case_evq_overflow(void) {
+    int tid = 7;
+    decl_ce_probe_cleanup(tid);
+
+    ce_blk_rec2_t recs[2];
+    rec2_init(&recs[0], 1, 0, BLK_COLUMN, -1);
+    rec2_init(&recs[1], 2, 1, BLK_BUTTON, -1);
+    int rc = decl_ce_probe_commit(tid, recs, 2, "", 0,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        verdict("evq-overflow", 0, "commit failed");
+        return 1;
+    }
+    block *b = btable_get(decl_ce_probe_local_to_global(tid, 2));
+    if (!b) {
+        verdict("evq-overflow", 0, "block missing");
+        return 1;
+    }
+
+    /* 同一 pid 连造 9 条事件、全程不 poll：队列深 8，第 9 条必须触发溢出。 */
+    for (int i = 0; i < 9; i++) decl_post_click(b, i, 0);
+
+    int dropped = decl_ce_probe_dropped(tid);
+
+    /* 回读剩余事件：收到条数 + 丢弃条数必须等于 9，第 9 条去向可观测。 */
+    int received = 0;
+    ce_blk_event2_t ev;
+    while (decl_ce_probe_poll2(tid, &ev) == 1) received++;
+
+    int ok = dropped >= 1 && received + dropped == 9;
+    ser_write("GUI:cap2-evq-overflow ");
+    ser_write(ok ? "PASS" : "FAIL");
+    ser_write(" dropped="); p_dec(dropped);
+    ser_write(" received="); p_dec(received);
+    ser_write(" total=9");
+    ser_putc('\n');
+    return 1;
+}
+
 int cap2_probe_ce(const char *arg) {
     if (!arg) return 0;
     if (streq(arg, "ce-caps"))          return case_caps();
@@ -358,5 +400,6 @@ int cap2_probe_ce(const char *arg) {
     if (streq(arg, "ce-popover-anchor")) return case_popover();
     if (streq(arg, "ce-rec1-compat"))   return case_rec1_compat();
     if (streq(arg, "elev-reject"))       return case_elev_reject();
+    if (streq(arg, "evq-overflow"))     return case_evq_overflow();
     return 0;
 }
