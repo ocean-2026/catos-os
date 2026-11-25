@@ -142,9 +142,23 @@ static void fill_reg_fis(uint8_t *fis, uint8_t cmd, uint8_t feature,
     fis[14] = 0x02;                       /* control: nIEN=1, SRST=0 */
 }
 
-/* Issue one command on slot 0 of a port.  Returns 0 ok / -1 error. */
-static int ahci_exec(ahci_port_t *pt, uint8_t cmd, uint32_t lba,
-                     uint16_t count, void *buf, int write) {
+/* Dump port error state to serial: PxCI / PxTFD (status+error byte) / PxIS
+ * (interrupt/error bits) / PxSERR / PxSIG.  Read before clearing anything. */
+static void ahci_dump_state(uint8_t p, const char *tag) {
+    uint32_t ci   = pr_rd(p, P_CI);
+    uint32_t tfd  = pr_rd(p, P_TFD);
+    uint32_t is   = pr_rd(p, P_IS);
+    uint32_t serr = pr_rd(p, P_SERR);
+    uint32_t sig  = pr_rd(p, P_SIG);
+    ser_write("[ahci] "); ser_write(tag);
+    ser_hex(" CI=", ci); ser_hex(" TFD=", tfd);
+    ser_hex(" IS=", is); ser_hex(" SERR=", serr);
+    ser_hex(" SIG=", sig); ser_write("\n");
+}
+
+/* One attempt at slot 0.  Returns 0 ok / -1 error. */
+static int ahci_exec_once(ahci_port_t *pt, uint8_t cmd, uint32_t lba,
+                          uint16_t count, void *buf, int write) {
     uint8_t p = pt->port;
     ahci_cmdhdr_t *hdr = (ahci_cmdhdr_t *)pt->cmd_list_pa;   /* identity */
     ahci_cmdtbl_t *tbl = (ahci_cmdtbl_t *)pt->cmd_tbl_pa;
@@ -176,16 +190,33 @@ static int ahci_exec(ahci_port_t *pt, uint8_t cmd, uint32_t lba,
     pr_wr(p, P_CI, 1u << 0);                             /* issue slot 0 */
 
     /* poll until command collected */
-    int timed = 0;
     for (int t = 0; t < 10000000; t++) {
         if (!(pr_rd(p, P_CI) & 1u)) break;
-        if (t == 9999999) timed = 1;
     }
     uint32_t ci  = pr_rd(p, P_CI);
     uint32_t tfd = pr_rd(p, P_TFD);
     if (ci & 1u) return -1;                   /* timeout */
     if (tfd & TFD_ERR) return -1;
     return 0;
+}
+
+/* Issue one command on slot 0; on error dump state, clear SERR/IS and retry
+ * once.  Returns 0 ok / -1 error. */
+static int ahci_exec(ahci_port_t *pt, uint8_t cmd, uint32_t lba,
+                     uint16_t count, void *buf, int write) {
+    uint8_t p = pt->port;
+    int rc = ahci_exec_once(pt, cmd, lba, count, buf, write);
+    if (rc == 0) return 0;
+
+    ahci_dump_state(p, "err1");
+    /* clear SERR (write-1-to-clear) and IS, then a single retry */
+    pr_wr(p, P_SERR, 0xFFFFFFFFu);
+    pr_wr(p, P_IS,   0xFFFFFFFFu);
+    for (int t = 0; t < 200000; t++)
+        if (!(pr_rd(p, P_TFD) & TFD_BSY)) break;
+    rc = ahci_exec_once(pt, cmd, lba, count, buf, write);
+    if (rc != 0) ahci_dump_state(p, "err2");
+    return rc;
 }
 
 static int ahci_identify(ahci_port_t *pt) {

@@ -145,9 +145,11 @@ P2：用户态 libc 雏形、自举环闭环（cc_self 编译自身）、LFN 长
   CI 轮询、TFD BSY/DRQ/ERR 等待。
 - **遗留（未打通，🔶 部分）**：QEMU 6.2 上 `-device ahci,... -device ide-hd,...,bus=ahci.0`，
   HBA/ABAR/PI/PHY 正常（ABAR `0xfebf1000`，PI `0x3f`，端口0 SSTS `0x113`），但
-  `IDENTIFY DEVICE`(0xEC) 下发后 PxTFD 错误字节=0x01(ABRT)、DMA 缓冲全零；READ/WRITE DMA EXT
-  (0x25/0x35) 未验证。命令被 HBA 收走（PxCI 清 0）但设备拒命令；根因未定位，怀疑命令表/PRDT
-  帧落在用户 arena 物理切片(0x28xxxxx) 导致 DMA/别名异常，或 FIS/命令头布局细节有误。
+  `IDENTIFY DEVICE`(0xEC) 下发后实测 `PxTFD=0x130`（DRQ、错误字节 `0x01`=ABRT，ERR bit0）、
+  `PxSIG=0x00000101`、`PxIS=0`、DMA 缓冲全零；READ/WRITE DMA EXT (0x25/0x35) 未验证。
+  命令被 HBA 收走（PxCI 清 0）但设备拒命令。本轮补诊断/重试：错误路径转储 `PxCI/PxTFD/PxIS/
+  PxSERR/PxSIG`，清 `PxSERR`+`PxIS` 后单次重发，重发仍 ABRT；根因数周级、不再深挖（疑命令表/PRDT
+  帧地址或 H2D FIS 布局细节）。
 - 兼容：无 AHCI 控制器时 `ahci` 命令打印 `no AHCI controller`；legacy IDE PIO 路径未回退
   （`-drive if=ide` 读样本盘 `/samples` 正常列出 4 个文件）。
 - 门禁：当前构建 E3 2/2、F11 9/9、链接布局 `--strict` RC=0；vprobe 环境性 flake（基线同现）。
