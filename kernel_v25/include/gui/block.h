@@ -165,6 +165,11 @@ typedef struct {
     uint16_t pop_max_h;             /* 0=不限；超出则浮层内部滚动 */
     uint8_t  icon;                  /* BLK_ICON 内置图标号 */
     uint8_t  tint_role;             /* 0=不自着色 1=fg 2=bg 3=accent 4=border */
+
+    /* ---- cap3 角形态扩展（append-only；与 cap2 逐角半径正交） ----
+     * 整块四角形态统一，不允许逐角混用（规则 R-7.5-03）。 */
+    uint8_t  corner_shape;          /* 0=ARC（默认）1=SQUIRCLE */
+    uint8_t  corner_n;              /* 0=默认 n=5.0；仅 SQUIRCLE 有效；其它值钳到 50 + WARN_RADIUS_N_RANGE */
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -223,6 +228,7 @@ typedef struct block {
     uint8_t  pop_prefer;
     uint16_t pop_max_h;
     uint8_t  icon, tint_role;
+    uint8_t  corner_shape, corner_n;    /* cap3：0=ARC / 1=SQUIRCLE；n 单位 0.1（50=5.0） */
     /* POPOVER 运行时：最近一次锚点矩形 + 内容自然高（供翻转/滚动范围） */
     int32_t  pop_ax, pop_ay, pop_aw, pop_ah;
     int32_t  pop_content_h;
