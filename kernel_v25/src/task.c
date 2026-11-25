@@ -13,6 +13,7 @@
 
 #include "task.h"
 #include <stddef.h>
+#include "fpu.h"
 #include "usb.h"
 #include "io.h"
 #include "vga.h"
@@ -279,6 +280,7 @@ static void schedule_to(task_t *next) {
         g_sp_resume_tsc[next->tid] = perf_now();
 #endif
     next->state = T_RUNNING;
+    fpu_on_switch();              /* Stage 1: lazy FPU, incoming task traps #NM */
 #if CATOS_SPAWN_TRACE
     {
         ser_write("[SCHED] tid="); ser_hex("", next->tid);
@@ -498,6 +500,7 @@ static void task_cleanup(task_t *t) {
     uint64_t _cd = perf_now(); g_sp.vma += _cd - _cc;
 #endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
+    fpu_task_cleanup(t);                  /* Stage 1: drop FPU ownership */
     cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
     decl_task_cleanup(t);                 /* P3: reclaim declarative subtree */
 #ifdef CATOS_BENCH
@@ -2992,7 +2995,8 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
     t->resume_frame = 0;
     t->space.pt = 0;
     t->space.dir = 0;
-    t->vm = 0;
+    t->vm = 0;                           /* ring0: no user VMA list */
+    t->fpu_used = 0;
     t->wake_tick = 0;
     t->exit_code = 0;
     t->parent = cur_task;
@@ -3336,6 +3340,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->parent = cur_task;
     t->pgid = slot;              /* v2.52: standalone job owns its group */
     t->heap_end = USER_HEAP_BASE;
+    t->fpu_used = 0;
     heap_free_root[slot] = 0;
     t->ls_count = 0;
     t->ls_step = 0;

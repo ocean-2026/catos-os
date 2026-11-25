@@ -19,6 +19,7 @@
 #include "svga.h"       /* IRQ0 FIFO refresh for VMware SVGA II */
 #include "mouse.h"      /* v2.57 PS/2 aux mouse, IRQ12 top half */
 #include "task.h"
+#include "fpu.h"
 #include "usb.h"
 #include "diag.h"       /* last-fault record for the faultinfo command */
 #include "bsod.h"       /* v2.59 full-screen crash report on ring0 fault */
@@ -182,6 +183,26 @@ void isr_exception(int_frame_t *f) {
         for (;;) __asm__ volatile ("hlt");
     }
     ser_exc_log(f);                 /* #115: breadcrumb survives any reset */
+
+    /* #NM (vector 7): coprocessor not available.  Lazy FPU switch -- restore
+     * the current task's state and clts, then resume.  A ring0 #NM means the
+     * soft-float kernel itself executed an FPU instruction: that is a kernel
+     * bug, fall through to the ring0 BSOD path below. */
+    if (f->intno == 7) {
+        if ((f->cs & 3) == 3) {
+            fpu_nm_trap(task_current());
+            return;
+        }
+        ser_write("[fpu] ring0 #NM (kernel FPU misuse) -> bsod\n");
+    }
+
+    /* #AC (vector 17): alignment check.  Non-fatal policy matches the
+     * generic isolation rule: ring3 task is terminated with an error,
+     * ring0 panics with CR2/EIP.  Breadcrumb logged here; routing below. */
+    if (f->intno == 17) {
+        ser_write("[intr] #AC alignment check\n");
+    }
+
     if ((f->cs & 3) == 3) {
         /* ring3 fault:
          *   - Page fault (INT 0x0E) may be recoverable via lazy VMA mapping.

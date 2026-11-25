@@ -13,6 +13,7 @@
 #include "ce.h"
 #include "net.h"
 #include "task.h"
+#include "fpu.h"
 #include "hw.h"
 #include "snd.h"        /* v2.11 SB16 info / self-test commands */
 #include "gfx24.h"      /* v2.12 24bpp truecolour drawing surface */
@@ -403,6 +404,7 @@ static void cmd_help(void) {
     help_row("unset K",     "delete variable; $K / ${K} / $? expand in typed lines");
     help_row("PATH",        "show PATH; drives bare-NAME lookup (default /bin)");
     help_row("hwinfo",      "full hardware dump (CPU/mem/disk/NIC/PCI)");
+    help_row("fpu",         "FPU capability / CR0-CR4 / save-restore roundtrip");
 
     help_head("audio (SB16 ISA / ES1370-1371 PCI, POSIX options)");
     help_row("sndinfo [OPT]", "audio info: -h -v -l -p -c -d N -w -j -s -q -t (long forms too)");
@@ -2693,8 +2695,17 @@ static void cmd_netcfg(char *arg) {
 }
 
 /* ---------- hwinfo: full hardware-properties dump ---------- */
-static void cmd_hwinfo(void) {
-    static char buf[3072];
+/* Stage 1 FPU: coprocessor capability / CR0-CR4 / roundtrip self-test. */
+static void cmd_fpu(void) {
+    static char buf[512];
+    int n = fpu_diag(buf, sizeof(buf));
+    if (n <= 0) { vga_write("fpu: nothing\n"); return; }
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    buf[n] = 0;
+    vga_write(buf);
+}
+
+static void cmd_hwinfo(void) {    static char buf[3072];
     int n = hw_summary(buf, sizeof(buf));
     if (n <= 0) { vga_write(trs("hwinfo: nothing\n", "hwinfo：无信息\n")); return; }
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
@@ -6794,6 +6805,7 @@ static const char *sh_cmds[] = {
     "bsod","blue","panicmode",
     "groupadd","groups","daemon","history","id","jobs","kill","lang","log","login","ls","lsuser","mem","mkdir","mount","mv","umount",
     "netcfg","netdiag","pkg","passwd","ping","ps","reboot","rm","rmdir","run","sshd",
+    "fpu",
     "setenv","rain","sl","sndinfo","sndtest","stop","style","su","sudo","text","top",
     "head","tail","wc","tree","touch","udp","uname","unalias","unset","uptime","usb","useradd","userdel","useredit",
     "users","vdiag","whoami","yes","shutdown","poweroff","theme","hive","reg","colors",  /* v2.72 */
@@ -7516,6 +7528,7 @@ static void shell_exec(char *cmd, char *arg) {
         else if (!strcmp_(cmd, "bg"))         cmd_bg(arg);
         else if (!strcmp_(cmd, "stop"))        cmd_stop(arg);
         else if (!strcmp_(cmd, "hwinfo"))      cmd_hwinfo();
+        else if (!strcmp_(cmd, "fpu"))         cmd_fpu();
         else if (!strcmp_(cmd, "sndinfo"))     cmd_sndinfo(arg);
         else if (!strcmp_(cmd, "sndregs"))     cmd_sndregs();   /* v2.72 */
         else if (!strcmp_(cmd, "fprobe"))      cmd_fprobe();    /* v2.72 */

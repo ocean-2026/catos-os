@@ -74,6 +74,11 @@ typedef struct task {
     int         pending_sig;    /* v2.52: last delivered signal, 0 = none   */
     uint32_t    heap_end;       /* user heap break                     */
     vma_t      *vm;             /* VMA list for this task (NULL if ring0)*/
+    /* Stage 1 FPU: 512-byte coprocessor save area, 16-byte aligned for
+     * fxsave.  fpu_used=1 means fpu_save holds live state that may need
+     * restoring; owned lazily (see fpu.h). */
+    uint8_t     fpu_save[512] __attribute__((aligned(16)));
+    int         fpu_used;
     /* ls syscall snapshot (one listing at a time per task) */
     int         ls_count;       /* entries in the snapshot  */
     int         ls_step;        /* next index for LS_NEXT   */
