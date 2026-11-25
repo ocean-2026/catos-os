@@ -1,0 +1,69 @@
+{
+  "iso": "/home/user/work/gui-blocks/kernel_v25/catos-v2.80-test.iso",
+  "fingerprint": {
+    "path": "/home/user/work/gui-blocks/kernel_v25/catos-v2.80-test.iso",
+    "sha256": "8533f41e4635c367cfee9efa89ea8550377d6c96001c15dcb51b0668df731e88",
+    "bytes": 12079104
+  },
+  "results": [
+    {
+      "case": "example",
+      "kind": "net",
+      "url": "http://example.com/",
+      "verdict": "PASS",
+      "elapsed": 46.52297255199983,
+      "note": "records=1 WARN: no DHCP 10.0.2.15 in serial",
+      "log": "/home/user/work/artifacts/gui-blocks/probes/logs/browser/br-example.log",
+      "shot": "/home/user/work/artifacts/gui-blocks/probes/shots/browser/br-example.png",
+      "pixel": "PASS",
+      "pixel_detail": "RESULT=PASS",
+      "latest": {
+        "bytes": "577",
+        "nodes": "10",
+        "blocks": "4",
+        "ms": "1290",
+        "status": "200",
+        "active": "1",
+        "result": "1"
+      }
+    },
+    {
+      "case": "sample",
+      "kind": "offline",
+      "url": "sample://local",
+      "verdict": "PASS",
+      "elapsed": 45.20261176899999,
+      "note": "records=1 offline",
+      "log": "/home/user/work/artifacts/gui-blocks/probes/logs/browser/br-sample.log",
+      "shot": "/home/user/work/artifacts/gui-blocks/probes/shots/browser/br-sample.png",
+      "pixel": "PASS",
+      "pixel_detail": "RESULT=PASS",
+      "latest": {
+        "bytes": "300",
+        "nodes": "12",
+        "blocks": "12",
+        "ms": "0",
+        "status": "0",
+        "active": "1",
+        "result": "1"
+      }
+    },
+    {
+      "case": "https",
+      "kind": "https",
+      "url": "https://example.com/",
+      "verdict": "SKIP",
+      "elapsed": 46.80519917400011,
+      "note": "NOT-SUPPORTED: no GUI:br marker; HTTPS rendering pending TLS fix (WARN: no DHCP 10.0.2.15 in serial)",
+      "log": "/home/user/work/artifacts/gui-blocks/probes/logs/browser/br-https.log",
+      "shot": "/home/user/work/artifacts/gui-blocks/probes/shots/browser/br-https.png",
+      "pixel": "PASS",
+      "pixel_detail": "RESULT=PASS",
+      "latest": {}
+    }
+  ],
+  "counters": {
+    "PASS": 2,
+    "SKIP": 1
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "iso": "/home/user/work/gui-blocks/kernel_v25/catos.iso",
+  "hosts": [
+    {
+      "host": "https://example.com",
+      "role": "required",
+      "status": 200,
+      "bytes": 577,
+      "expected_status": 200,
+      "verdict": "PASS",
+      "shot": "/home/user/work/gui-blocks/artifacts/d2-tls/wild_example_com.ppm"
+    },
+    {
+      "host": "https://www.baidu.com",
+      "role": "secondary",
+      "status": null,
+      "bytes": 227,
+      "expected_status": 200,
+      "verdict": "FAIL",
+      "shot": "/home/user/work/gui-blocks/artifacts/d2-tls/wild_www_baidu_com.ppm"
+    }
+  ],
+  "serial": {
+    "tls_rec_msgs": true,
+    "tls_wild_status_200": true,
+    "lines": [
+      "TLS:rec msgs=1 port=443 host=example.com",
+      "TLS:rec msgs=1 port=443 host=example.com",
+      "TLS:rec msgs=1 port=443 host=example.com",
+      "TLS:warn ske_sig skip host=example.com",
+      "TLS:rec msgs=1 port=443 host=example.com",
+      "TLS:wild status=200 bytes=577",
+      "TLS:rec msgs=1 port=443 host=www.baidu.com",
+      "TLS:rec msgs=1 port=443 host=www.baidu.com",
+      "TLS:rec msgs=1 port=443 host=www.baidu.com",
+      "TLS:warn ske_sig skip host=www.baidu.com",
+      "TLS:rec msgs=1 port=443 host=www.baidu.com",
+      "TLS:wild status=200 bytes=227"
+    ]
+  },
+  "verdict": "PASS"
+}
