@@ -107,6 +107,7 @@ int       cap2_probe_cmd(const char *arg);
 int       cap2_probe_render(const char *arg);
 int       cap2_probe_text(const char *arg);
 int       cap2_probe_interact(const char *arg);
+int       cap2_probe_ce(const char *arg);
 
 /* input.c（探针注入钩子，复用真实命中/拖拽路径） */
 void      gui_inject_press(int x, int y);

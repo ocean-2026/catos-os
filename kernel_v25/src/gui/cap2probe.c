@@ -11,5 +11,6 @@ int cap2_probe_cmd(const char *arg) {
     if (cap2_probe_render(arg))   return 1;
     if (cap2_probe_text(arg))     return 1;
     if (cap2_probe_interact(arg)) return 1;
+    if (cap2_probe_ce(arg))       return 1;
     return 0;
 }
