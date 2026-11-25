@@ -446,10 +446,21 @@ static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
         int erase_r = fr && !cr;
         int erase_t = ft || ct;
         int erase_b = fb && !cb;
-        if (erase_t) gui_fill_rect(b->x, b->y, b->w, bw, bg);
-        if (erase_b) gui_fill_rect(b->x, b->y + b->h - bw, b->w, bw, bg);
-        if (erase_l) gui_fill_rect(b->x, b->y, bw, b->h, bg);
-        if (erase_r) gui_fill_rect(b->x + b->w - bw, b->y, bw, b->h, bg);
+        /* 擦除条带收进未擦除侧边框之内：水平条带两端留给未擦除的左/右边框列，
+         * 垂直条带两端留给未擦除的上/下边框行；两侧都擦除时端部一并擦除。
+         * 避免贴边擦除把相邻侧边框的端像素盖掉（vgroup 组内接缝外沿 1px 缺口）。 */
+        int t_x0 = erase_l ? b->x : b->x + bw;
+        int t_x1 = erase_r ? b->x + b->w : b->x + b->w - bw;
+        if (erase_t && t_x1 > t_x0)
+            gui_fill_rect(t_x0, b->y, t_x1 - t_x0, bw, bg);
+        if (erase_b && t_x1 > t_x0)
+            gui_fill_rect(t_x0, b->y + b->h - bw, t_x1 - t_x0, bw, bg);
+        int l_y0 = erase_t ? b->y : b->y + bw;
+        int l_y1 = erase_b ? b->y + b->h : b->y + b->h - bw;
+        if (erase_l && l_y1 > l_y0)
+            gui_fill_rect(b->x, l_y0, bw, l_y1 - l_y0, bg);
+        if (erase_r && l_y1 > l_y0)
+            gui_fill_rect(b->x + b->w - bw, l_y0, bw, l_y1 - l_y0, bg);
     } else {
         gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
     }
