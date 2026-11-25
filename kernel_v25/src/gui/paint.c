@@ -216,54 +216,139 @@ int gui_text_trim(const char *txt, int max_w, uint8_t scale,
     return len;
 }
 
-/* ---- Calm & soft：角部离线掩码（超椭圆 n≈5，查表填像素，无逐像素浮点） ---- */
+/* ---- cap3：角部离线掩码（ARC / SQ5 / SQ45 三套，4×4 子采样面积覆盖率） ---- */
 
 #define CALM_R_N 4
 static const int CALM_RADII[CALM_R_N] = { 8, 12, 16, 24 };
-/* 覆盖率掩码 cov∈[0,255]：角象限逐像素；255=块内，0=角外（保留父表面原值），
- * 过渡带内随超椭圆距离单调回落（无锯齿弧）。 */
-static uint8_t calm_mask[CALM_R_N][24][24];
-static int     calm_mask_ready;
 
-static uint32_t fifth_pow(int v) { uint32_t x = (uint32_t)v; return x*x*x*x*x; }
+/* cap3 形态下标：0=ARC（n=2.0 圆），1=SQ5（n=5.0 超椭圆，旧 calm 档位），
+ * 2=SQ45（n=4.5 超椭圆）。每套 4 档 × 24×24，合计 3×2304 B .bss。 */
+#define CAP3_ARC   0
+#define CAP3_SQ5   1
+#define CAP3_SQ45  2
+#define CAP3_N_SHAPE 3
+static const int CAP3_N10[CAP3_N_SHAPE] = { 20, 50, 45 };  /* 阶数 ×10 */
+
+static uint8_t cap3_tab[CAP3_N_SHAPE][CALM_R_N][24][24];
+static uint8_t cap3_built;                  /* 位图：bit<shape> 已生成 */
+static int     cap3_warn_n_range;           /* WARN_RADIUS_N_RANGE 计数 */
+
+/* Q16 整数平方根：输入 x ≤ 2^32，输出 floor(sqrt(x))（Q16 域 0..65535）。 */
+static uint32_t q16_sqrt(uint32_t x) {
+    uint32_t r = 0, b = 1u << 16;
+    while (b) {
+        uint32_t t = r + b;
+        if ((uint64_t)t * t <= (uint64_t)x) r = t;
+        b >>= 1;
+    }
+    return r;
+}
+
+/* 单个子样本是否在超椭圆内部：|u|^n + |v|^n <= r^n（纯整数，无浮点/SSE）。
+ * u8/v8/r8 均为 1/8 px 单位；n10 = 阶数 ×10（20/45/50）。 */
+static int cap3_inside(int u8, int v8, int r8, int n10) {
+    if (u8 < 0) u8 = -u8;
+    if (v8 < 0) v8 = -v8;
+    if (n10 == 20) {
+        uint64_t a = (uint64_t)u8 * (uint64_t)u8;
+        uint64_t b = (uint64_t)v8 * (uint64_t)v8;
+        uint64_t rr = (uint64_t)r8 * (uint64_t)r8;
+        return a + b <= rr;
+    }
+    /* Q16 归一化：F = |u|/r ∈ [0,65535]。 */
+    uint32_t fu = (uint32_t)u8 * 65535u / (uint32_t)r8;
+    uint32_t fv = (uint32_t)v8 * 65535u / (uint32_t)r8;
+    uint32_t pu, pv;
+    uint32_t u2 = (fu * fu) >> 16, v2 = (fv * fv) >> 16;
+    if (n10 == 50) {
+        uint32_t u4 = (u2 * u2) >> 16, v4 = (v2 * v2) >> 16;
+        pu = (u4 * fu) >> 16;
+        pv = (v4 * fv) >> 16;
+    } else { /* 45：n=4.5 = u^4 · sqrt(u) */
+        uint32_t u4 = (u2 * u2) >> 16, v4 = (v2 * v2) >> 16;
+        pu = (u4 * q16_sqrt(fu << 16)) >> 16;
+        pv = (v4 * q16_sqrt(fv << 16)) >> 16;
+    }
+    return pu + pv <= 65535u;
+}
 
 /*
- * cap3: 面积采样重写入口 —— 单个象限 r×r 覆盖率表的唯一生成点。
+ * cap3: 面积采样重写入口 —— 单个 r×r 覆盖率表的唯一生成点。
  *
- * 表布局：UL 象限 row-major，out[dy*r+dx] ∈ [0,255]；255=块内，0=角外，
- * 过渡带单调回落。档位/尺寸由调用方参数化（calm 旧档 8..24；cap2 逐角档 4..64）。
+ * 表布局：UL 象限 row-major，out[dy*r+dx] ∈ [0,255]；255=块内，0=角外。
+ * 每像素 4×4=16 个子样本（八分量中点），按形态方程判定后取计数/16 量化。
+ * 档位/尺寸由调用方参数化（calm 旧档 8..24；cap2 逐角档 4..64）。
  *
- * shape_n：超椭圆阶数 ×10；50 = n=5.0（现行 calm 路径，逐像素不变）。
- * cap3 落地 ARC / SQ5 / SQ45 三套面积采样表时，只替换本函数内部按 shape_n
- * 分派的实现，外部入口签名、表布局与调用点保持不变；本包不实现 cap3 表型。
+ * shape_n：超椭圆阶数 ×10；20 = n=2.0（ARC），45 = n=4.5，50 = n=5.0。
  */
 static void corner_mask_build(int radius, int shape_n, uint8_t *out) {
-    (void)shape_n;                              /* cap3: 按 shape_n 分派三套表 */
-    uint32_t rn = fifth_pow(radius);
-    uint32_t inner = rn * 80u / 100u;           /* 80% 以内全不透明 */
+    static const int OFF[4] = { 1, 3, 5, 7 };   /* 1/8 px 子样本中点 */
+    int r8 = radius * 8;
     for (int dy = 0; dy < radius; dy++)
         for (int dx = 0; dx < radius; dx++) {
-            /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在圆外。 */
-            uint32_t u = (uint32_t)(radius - dx), v = (uint32_t)(radius - dy);
-            uint32_t t = fifth_pow(u) + fifth_pow(v);
-            uint8_t cov;
-            if (t <= inner)        cov = 255;
-            else if (t >= rn)      cov = 0;
-            else {
-                uint32_t rem = rn - t;
-                uint32_t span = rn - inner;
-                cov = (uint8_t)(span ? 255u * rem / span : 0);
+            int count = 0;
+            for (int sy = 0; sy < 4; sy++) {
+                int y8 = dy * 8 + OFF[sy];
+                for (int sx = 0; sx < 4; sx++) {
+                    int x8 = dx * 8 + OFF[sx];
+                    /* 角象限：u/v 为到圆心 (r,r) 的距离，角点 (0,0) 在形外。 */
+                    if (cap3_inside(radius * 8 - x8, radius * 8 - y8,
+                                    r8, shape_n))
+                        count++;
+                }
             }
-            out[dy * radius + dx] = cov;
+            out[dy * radius + dx] = (uint8_t)(count * 255 / 16);
         }
 }
 
-static void calm_masks_init(void) {
-    if (calm_mask_ready) return;
+/* 惰性生成指定形态的整套 calm 档位表；已生成则直接返回（built_mask 位图控制）。 */
+static void cap3_ensure(int shape) {
+    if (cap3_built & (1u << shape)) return;
     for (int ri = 0; ri < CALM_R_N; ri++)
-        corner_mask_build(CALM_RADII[ri], 50, (uint8_t *)calm_mask[ri]);
-    calm_mask_ready = 1;
+        corner_mask_build(CALM_RADII[ri], CAP3_N10[shape],
+                          (uint8_t *)cap3_tab[shape][ri]);
+    cap3_built |= (uint8_t)(1u << shape);
 }
+
+/* 由块声明解析形态：非 SQUIRCLE 一律 ARC；SQUIRCLE 的 corner_n 仅认 0/45/50，
+ * 其它值钳到 50（SQ5）并记一次 WARN_RADIUS_N_RANGE。返回表形态下标，*n10 带出阶数。
+ * 告警按块去重：同一(块, 越界 n) 只计一次，避免逐像素重复累加。 */
+static const block *warn_last_b;
+static uint8_t      warn_last_n;
+
+static int cap3_shape_of(const block *b, int *n10) {
+    if (b->corner_shape != 1) { *n10 = 20; return CAP3_ARC; }
+    uint8_t n = b->corner_n;
+    if (n == 45) { *n10 = 45; return CAP3_SQ45; }
+    if (n == 0 || n == 50) { *n10 = 50; return CAP3_SQ5; }
+    if (warn_last_b != b || warn_last_n != n) {
+        cap3_warn_n_range++;
+        warn_last_b = b;
+        warn_last_n = n;
+    }
+    *n10 = 50; return CAP3_SQ5;
+}
+
+/* ---- 探针导出（cap2p_render.c 自行 extern 声明；不入 gui_int.h） ---- */
+
+void gui_cap3_generator(int radius, int shape_n, uint8_t *out) {
+    corner_mask_build(radius, shape_n, out);
+}
+
+const uint8_t *gui_cap3_table(int shape, int ri) {
+    if (shape < 0 || shape >= CAP3_N_SHAPE || ri < 0 || ri >= CALM_R_N)
+        return 0;
+    cap3_ensure(shape);
+    return (const uint8_t *)cap3_tab[shape][ri];
+}
+
+void gui_cap3_build(int shape) {
+    if (shape >= 0 && shape < CAP3_N_SHAPE) cap3_ensure(shape);
+}
+
+uint32_t gui_cap3_built_mask(void) { return cap3_built; }
+int      gui_cap3_warn_count(void) { return cap3_warn_n_range; }
+
 
 /* ---- 覆盖率合成：out = under*(1-cov) + color*cov，under 为当前父表面结果 ---- */
 
@@ -347,12 +432,15 @@ static int corner_cov(int ri, int r, int col, int row,
     switch (corner) {
     case 0: dy = row;            dx = col;            break;  /* TL */
     case 1: dy = row;            dx = r - 1 - (col - (w - r)); break; /* TR */
-    case 2: dy = r - 1 - (h - 1 - row); dx = col;    break;  /* BL */
-    default:dy = r - 1 - (h - 1 - row); dx = r - 1 - (col - (w - r)); break; /* BR */
+    case 2: dy = (h - 1 - row); dx = col;    break;  /* BL */
+    default:dy = (h - 1 - row); dx = r - 1 - (col - (w - r)); break; /* BR */
     }
     if (dy < 0 || dy >= r || dx < 0 || dx >= r) return 255;
-    return calm_mask[ri][dy][dx];
+    return cap3_tab[CAP3_SQ5][ri][dy][dx];
 }
+
+/* 旧 calm 自动阶梯路径：沿用 n=5.0（SQ5）档位表，惰性生成。 */
+static void calm_masks_init(void) { cap3_ensure(CAP3_SQ5); }
 
 /* 逐角覆盖率填充：角带逐像素混合，中段不透明直写；cov=0 保留父表面原值。 */
 static void fill_round(block *b, int ri_tl, int ri_tr, int ri_bl, int ri_br,
@@ -431,22 +519,24 @@ static int alpha_cov_px(uint8_t alpha, uint8_t mode, int x, int y) {
     return t <= level ? 255 : 0;
 }
 
-/* 逐角覆盖率表：分档 {4..64}，启动期在页后备堆生成（静态数组 ≤4KiB 红线）。 */
+/* 逐角覆盖率表：分档 {4..64}，按形态惰性在页后备堆生成（静态数组 ≤4KiB 红线）。
+ * cap3：三套形态各一份堆表；首帧用到某形态才为该形态分配 8 档。 */
 #define CAP2_R_N 8
 static const int CAP2_RADII[CAP2_R_N] = { 4, 8, 12, 16, 24, 32, 48, 64 };
-static uint8_t *cap2_mask[CAP2_R_N];
-static int      cap2_mask_ready;
+static uint8_t *cap2_mask[CAP3_N_SHAPE][CAP2_R_N];
+static uint8_t  cap2_built;                     /* 位图：bit<shape> 堆表已生成 */
 
-static void cap2_masks_init(void) {
-    if (cap2_mask_ready) return;
+static void cap2_masks_init(int shape) {
+    if (shape < 0 || shape >= CAP3_N_SHAPE) return;
+    if (cap2_built & (1u << shape)) return;
     for (int ri = 0; ri < CAP2_R_N; ri++) {
         int r = CAP2_RADII[ri];
         uint8_t *m = (uint8_t *)kzalloc_frame();
-        if (!m) { cap2_mask_ready = 1; return; }
-        cap2_mask[ri] = m;
-        corner_mask_build(r, 50, m);            /* cap3 替换点：见 corner_mask_build */
+        if (!m) { cap2_mask[shape][ri] = 0; continue; }
+        cap2_mask[shape][ri] = m;
+        corner_mask_build(r, CAP3_N10[shape], m);
     }
-    cap2_mask_ready = 1;
+    cap2_built |= (uint8_t)(1u << shape);
 }
 
 static int cap2_bucket(int r) {
@@ -527,18 +617,18 @@ static void cap2_resolve(block *b, int r[4]) {
         r[k] = resolve_corner(b, k, w, h, flush[k]);
 }
 
-static int cap2_corner_cov(int r, int col, int row, int w, int h, int k) {
+static int cap2_corner_cov(int shape, int r, int col, int row, int w, int h, int k) {
     if (r <= 0) return 255;
     int bi = cap2_bucket(r);
     int R = CAP2_RADII[bi];
-    uint8_t *m = cap2_mask[bi];
+    uint8_t *m = cap2_mask[shape][bi];
     if (!m) return 255;
     int dy, dx;
     switch (k) {
     case 0: dy = row;                 dx = col; break;
     case 1: dy = row;                 dx = R - 1 - (col - (w - r)); break;
-    case 2: dy = R - 1 - (h - 1 - row); dx = col; break;
-    default:dy = R - 1 - (h - 1 - row); dx = R - 1 - (col - (w - r)); break;
+    case 2: dy = (h - 1 - row); dx = col; break;
+    default:dy = (h - 1 - row); dx = R - 1 - (col - (w - r)); break;
     }
     if (dy < 0) dy = 0;
     if (dy >= R) dy = R - 1;
@@ -555,7 +645,11 @@ static int cap2_shape_cov(block *b, int r[4], int col, int row) {
     else if (row >= h - r[2] && col < r[2])      k = 2;
     else if (row >= h - r[3] && col >= w - r[3]) k = 3;
     if (k < 0) return 255;
-    return cap2_corner_cov(r[k], col, row, w, h, k);
+    int n10;
+    int shape = cap3_shape_of(b, &n10);
+    cap3_ensure(shape);
+    cap2_masks_init(shape);
+    return cap2_corner_cov(shape, r[k], col, row, w, h, k);
 }
 
 uint8_t blk_cov(block *b, int x, int y) {
@@ -583,7 +677,10 @@ static void fill_round_cap2(block *b, int r[4], uint32_t color) {
     uint8_t a = blk_alpha_of(b);
     int rounded = r[0] || r[1] || r[2] || r[3];
     if (a == 255 && !rounded) { gui_fill_rect(b->x, b->y, w, h, color); return; }
-    cap2_masks_init();
+    int n10;
+    int shape = cap3_shape_of(b, &n10);
+    cap3_ensure(shape);
+    cap2_masks_init(shape);
     for (int row = 0; row < h; row++) {
         for (int col = 0; col < w; col++) {
             int cov = alpha_cov_px(a, b->alpha_mode, b->x + col, b->y + row);
