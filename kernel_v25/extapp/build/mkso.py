@@ -134,6 +134,39 @@ def parse_symtab(elf_path):
     return sym
 
 
+# Section -> span class for the RO/RW split (2C-3 block ③).  The flat binary
+# lays sections out at their link-time vaddr, so ELF Addr doubles as the
+# binary offset.
+RO_SECTIONS = (".text", ".plt", ".rodata")
+RW_SECTIONS = (".data", ".got", ".got.plt", ".ce_api")
+
+
+def parse_sections(elf_path):
+    """Return (text_end, data_end) as offsets from vaddr 0.  text_end is the
+    end of the last RO section; data_end the end of the last RW section.
+    A missing class defaults to 0."""
+    import re
+    try:
+        out = subprocess.check_output(["readelf", "-S", elf_path],
+                                      stderr=subprocess.STDOUT, text=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        die("readelf -S failed on %s: %s" % (elf_path, e))
+    ro_end = rw_end = 0
+    # [Nr] Name Type Addr Off Size ...
+    rx = re.compile(r"\[\s*\d+\]\s+(\S+)\s+\S+\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)")
+    for line in out.splitlines():
+        m = rx.search(line)
+        if not m:
+            continue
+        name, addr_s, size_s = m.group(1), m.group(2), m.group(3)
+        end = int(addr_s, 16) + int(size_s, 16)
+        if name in RO_SECTIONS:
+            ro_end = max(ro_end, end)
+        elif name in RW_SECTIONS:
+            rw_end = max(rw_end, end)
+    return ro_end, rw_end
+
+
 def main():
     if len(sys.argv) != 8:
         print("usage: mkso.py in.elf in.bin out.so base bss_size api_offset specs")
@@ -164,6 +197,13 @@ def main():
             die("api_offset 0x%x + 4 > image size %d" % (api, img))
 
     symtab = parse_symtab(elf_path)
+    text_end, data_end = parse_sections(elf_path)
+    if text_end > img:
+        die("text_end 0x%x outside image %d" % (text_end, img))
+    if data_end > img:
+        data_end = img
+    if data_end < text_end:
+        data_end = text_end
 
     # Parse export specs: expname=internal_symbol (ELF linked at vaddr 0).
     exports = []  # (dlsym_name, internal_name, sym_off)
@@ -239,8 +279,8 @@ def main():
         "<IIIIIIIIIIIIIII",
         VERSION, base, img, bss, api, export_off, len(exports),
         rela_off, len(rela),
-        0,            # text_end (RO span end; filled by 2C-3 split)
-        img,          # data_end (.data end = whole image for now)
+        text_end,     # text_end (RO span end; whole pages below it shared)
+        data_end,     # data_end (.data end; rest through image private)
         0, 0,         # init_array_off / cnt
         0, 0,         # fini_array_off / cnt
     )

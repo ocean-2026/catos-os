@@ -18,6 +18,11 @@
 
 catos_api_t *__ce_api __attribute__((section(".ce_api")));
 
+/* Read-only pad: pushes .text+.rodata past the first 4 KiB boundary so the
+ * shared RO pool has a whole pure-code frame to map read-only into multiple
+ * tasks (block ③ evidence).  Content is never read at runtime. */
+const uint8_t lib_ro_pad[4200] = { 1 };
+
 /* Exported variable: its address is taken through the GOT (GLOB_DAT). */
 int lib_seed = 7;
 

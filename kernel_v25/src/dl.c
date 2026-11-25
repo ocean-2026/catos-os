@@ -1,15 +1,25 @@
-/* dl.c -- CSO1 runtime shared-object loader (v2.47).
+/* dl.c -- CSO2 runtime shared-object loader (v2.48).
  *
- * Implements dlopen()/dlsym()/dlclose() as kernel syscalls.  A CSO1 module
- * is linked at a fixed VA inside USER_LIB_BASE..USER_LIB_END, so loading is
- * a straightforward "map frames at that base and copy the image" operation
- * -- no relocation pass is needed.  Each task gets its own copy of the
- * frames; task_space_destroy() reclaims them on exit.
+ * Implements dlopen()/dlsym()/dlclose() as kernel syscalls.  A CSO2 module
+ * is linked at a fixed VA inside USER_LIB_BASE..USER_LIB_END; the kernel maps
+ * its flat image there and applies the extracted relocations.
+ *
+ * 2C-3 block ③: the read-only span [0,text_end) is a GLOBAL shared frame
+ * pool.  The pool key is the source file's first cluster (NOT the task/pid):
+ * the same library opened by several tasks reuses one set of RO physical
+ * frames, mapped read-only (PTE RW=0) into each opener's PDE 9.  The
+ * [text_end,data_end) .data span and the .bss stay private per task.  A page
+ * that straddles the text_end boundary is kept private (a frame cannot be
+ * shared read-only for part of it and writable for the rest).
+ *
+ * Library-level refcount: the first opener builds the pool, every later
+ * opener increments it, and the last dlclose (or task cleanup) drops it to
+ * zero, at which point the shared RO frames and metadata are released.
  *
  * Security: every field of the on-disk header is validated before it is
  * trusted.  The image/bss span must fit in the library zone, the export
  * table and name blob must lie inside the file and inside one 4 KiB kernel
- * metadata frame, and dlsym() range-checks every function offset.
+ * metadata frame, and dlsym() range-checks every symbol offset.
  */
 
 #include "dl.h"
@@ -23,6 +33,7 @@
  * buffer here: the file is read in chunks through a single on-demand frame
  * (allocated in dl_open and freed before return), keeping .bss small. */
 static dl_module_t dl_mods[MAX_DL_MODULES];
+static dl_shared_t dl_sh[MAX_DL_MODULES];
 static int dl_next_handle = 1;
 
 static int dl_streq(const char *a, const char *b) {
@@ -43,6 +54,25 @@ static dl_module_t *dl_find_base(uint32_t base, int tid) {
         if (dl_mods[i].used && dl_mods[i].base == base &&
             dl_mods[i].owner_tid == tid) return &dl_mods[i];
     return 0;
+}
+
+static dl_shared_t *dl_sh_find(uint32_t cluster) {
+    for (int i = 0; i < MAX_DL_MODULES; i++)
+        if (dl_sh[i].used && dl_sh[i].cluster == cluster) return &dl_sh[i];
+    return 0;
+}
+
+static dl_shared_t *dl_sh_alloc(void) {
+    for (int i = 0; i < MAX_DL_MODULES; i++)
+        if (!dl_sh[i].used) return &dl_sh[i];
+    return 0;
+}
+
+/* A page is shared read-only only when the WHOLE page lies below text_end.
+ * A page that straddles the boundary (text_end not page-aligned) stays
+ * private: one frame cannot carry both a shared-RO and a private-RW view. */
+static int dl_page_ro(uint32_t text_end, uint32_t off) {
+    return text_end != 0 && off + 0x1000u <= text_end;
 }
 
 /* ---- shared relocation engine (block ①) ------------------------------ */
@@ -84,20 +114,72 @@ int dl_reloc_apply(struct task_space *sp, uint32_t base, uint32_t img_size,
 /* Invoke a constructor/destructor array (init_array / fini_array) in order.
  * Each entry is a fnptr VA inside the module span; out-of-span entries are
  * rejected (skipped with a COM1 note) rather than branched through. */
-static void dl_call_array(struct task *t, const dl_module_t *m,
+static void dl_call_array(struct task *t, const dl_shared_t *sh,
                           uint32_t off, uint32_t cnt, const char *what) {
     if (!cnt) return;
     for (uint32_t i = 0; i < cnt; i++) {
-        uint32_t slot_va = m->base + off + i * 4;
+        uint32_t slot_va = sh->base + off + i * 4;
         uint32_t pa = task_virt_to_phys(&t->space, slot_va);
         if (!pa) { ser_write("dl "); ser_write(what); ser_write(" slot missing\n"); return; }
         uint32_t fn = *(uint32_t *)pa;
-        if (fn < m->base || fn >= m->base + m->span) {
+        if (fn < sh->base || fn >= sh->base + sh->span) {
             ser_write("dl "); ser_write(what); ser_write(" bad fnptr\n");
             return;
         }
         ((void (*)(void))fn)();
     }
+}
+
+/* Walk the shared rela table and apply the fixups to this task's mapped
+ * pages.  On a subsequent open (first_load == 0) relocs targeting the shared
+ * RO span are skipped: those slots were already patched into the shared
+ * frame when the pool was built, and the fixed load base makes the value
+ * identical in every task. */
+static int dl_apply_relocs(struct task *t, dl_shared_t *sh, int first_load) {
+    if (!sh->rela_cnt) return 1;
+    cso_export_t *ex = (cso_export_t *)sh->meta;
+    const char *names = (const char *)(sh->meta + sh->export_cnt * sizeof(cso_export_t));
+    for (uint32_t i = 0; i < sh->rela_cnt; i++) {
+        cso_rela_t *r = (cso_rela_t *)(sh->rela + i * sizeof(cso_rela_t));
+        uint32_t type = r->r_info & 0xFFFFu;
+        uint32_t sym  = r->r_info >> 16;
+        if (r->r_offset >= sh->image_size) return 0;
+        if (!first_load && r->r_offset < sh->text_end) continue;
+
+        uint32_t symval = 0;
+        const char *symname = "";
+        if (sym) {
+            uint32_t idx = sym - 1;     /* rela sym_idx is 1-based; 0 = null */
+            if (idx >= sh->export_cnt) return 0;
+            symval = sh->base + ex[idx].sym_off;
+            symname = names + ex[idx].name_off;
+        }
+        /* RELATIVE(8) carries its addend in the pre-relocation slot;
+         * symbolic fixups resolve to sym_val with addend 0. */
+        int32_t addend = r->r_addend;
+        if (type == R_386_RELATIVE) {
+            uint32_t pa0 = task_virt_to_phys(&t->space, sh->base + r->r_offset);
+            if (pa0) addend = (int32_t) * (uint32_t *)pa0;
+        }
+        if (dl_reloc_apply(&t->space, sh->base, sh->image_size,
+                            r->r_offset, type, symval, addend) != DL_OK) {
+            ser_write("dl reloc reject type=");
+            ser_hex("reloc", type);
+            return 0;
+        }
+        uint32_t patched = sh->base + r->r_offset;
+        ser_write("reloc: type=");
+        ser_hex("t", type);
+        if (type == R_386_RELATIVE) {
+            ser_write(" slot="); ser_hex("slot", patched);
+            ser_write(" base="); ser_hex("base", sh->base);
+        } else {
+            ser_write(" sym="); ser_write(symname);
+            ser_write(" patched="); ser_hex("va", patched);
+        }
+        ser_write("\n");
+    }
+    return 1;
 }
 
 int dl_open(struct task *t, const char *path) {
@@ -175,63 +257,147 @@ int dl_open(struct task *t, const char *path) {
         if (!dl_mods[i].used) { slot = i; break; }
     if (slot < 0) return DL_ERR_FULL;
 
-    /* Read the export entries + name blob straight into one kernel frame. */
+    dl_shared_t *sh = dl_sh_find(clus);
+    int first_load = (sh == 0);
+
+    /* ---- metadata + rela frames (shared, owned by the pool) ------------- */
+    uint8_t *meta = 0;
+    uint8_t *relaf = 0;
     uint32_t meta_bytes = image_off - h.export_off;
-    if (meta_bytes == 0 || meta_bytes > 4096) return DL_ERR_INVAL;
-    uint8_t *meta = (uint8_t *)kzalloc_frame();
-    if (!meta) return DL_ERR_NOMEM;
-    if (fs_read_at(path, (char *)meta, (int)h.export_off, (int)meta_bytes)
-        < (int)meta_bytes) {
-        frame_free((uint32_t)meta);
-        return DL_ERR_INVAL;
+    if (first_load) {
+        sh = dl_sh_alloc();
+        if (!sh) return DL_ERR_FULL;
+        if (meta_bytes == 0 || meta_bytes > 4096) return DL_ERR_INVAL;
+        meta = (uint8_t *)kzalloc_frame();
+        if (!meta) return DL_ERR_NOMEM;
+        if (fs_read_at(path, (char *)meta, (int)h.export_off, (int)meta_bytes)
+            < (int)meta_bytes) {
+            frame_free((uint32_t)meta);
+            return DL_ERR_INVAL;
+        }
+        if (h.rela_cnt) {
+            uint32_t relab = h.rela_cnt * sizeof(cso_rela_t);
+            relaf = (uint8_t *)kzalloc_frame();
+            if (!relaf) { frame_free((uint32_t)meta); return DL_ERR_NOMEM; }
+            if (fs_read_at(path, (char *)relaf, (int)h.rela_off, (int)relab)
+                < (int)relab) {
+                frame_free((uint32_t)relaf);
+                frame_free((uint32_t)meta);
+                return DL_ERR_INVAL;
+            }
+        }
+    } else {
+        /* Reuse the shared metadata/rela; reject if this file disagrees with
+         * the pooled image (same cluster, different layout = tamper/dupe). */
+        if (sh->base != h.base || sh->span != span ||
+            sh->image_size != h.image_size || sh->text_end != h.text_end) {
+            return DL_ERR_INVAL;
+        }
+        meta = sh->meta;
+        relaf = sh->rela;
     }
 
     /* One on-demand staging frame for the image chunk copy; freed before
-     * dl_open returns.  No large static staging buffer lives in .bss. */
+     * dl_open returns. */
     uint8_t *st = (uint8_t *)kzalloc_frame();
-    if (!st) { frame_free((uint32_t)meta); return DL_ERR_NOMEM; }
+    if (!st) {
+        if (first_load) {
+            if (relaf) frame_free((uint32_t)relaf);
+            frame_free((uint32_t)meta);
+        }
+        return DL_ERR_NOMEM;
+    }
 
     /* Map the image/bss span into this task's PDE 9 page table. */
     vma_t *v = vma_new(h.base, h.base + span, VMA_LIB, 1);
-    if (!v) { frame_free((uint32_t)meta); frame_free((uint32_t)st); return DL_ERR_NOMEM; }
-    for (uint32_t off = 0; off < span; off += 4096) {
-        uint32_t pa = (uint32_t)kzalloc_frame();       /* zeroed == bss */
-        if (!pa || task_map_page(&t->space, h.base + off, pa, 1) != 0) {
-            if (pa) frame_free(pa);
-            /* unmap the pages already installed */
-            for (uint32_t o = 0; o < off; o += 4096)
-                task_unmap_page(&t->space, h.base + o);
-            vma_free(v);
+    if (!v) {
+        frame_free((uint32_t)st);
+        if (first_load) {
+            if (relaf) frame_free((uint32_t)relaf);
             frame_free((uint32_t)meta);
-            frame_free((uint32_t)st);
-            return DL_ERR_NOMEM;
         }
+        return DL_ERR_NOMEM;
+    }
+
+    int ro_idx = 0;
+    int map_ok = 1;
+    for (uint32_t off = 0; off < span; off += 4096) {
+        int ro = dl_page_ro(h.text_end, off);
+        uint32_t pa;
+        if (ro && !first_load) {
+            /* Reuse the pooled RO frame, mapped read-only. */
+            if (ro_idx >= sh->ro_cnt) { map_ok = 0; break; }
+            pa = sh->ro_pa[ro_idx++];
+            if (task_map_page(&t->space, h.base + off, pa, 0) != 0) { map_ok = 0; break; }
+        } else {
+            pa = (uint32_t)kzalloc_frame();       /* zeroed == bss */
+            if (!pa) { map_ok = 0; break; }
+            if (task_map_page(&t->space, h.base + off, pa, 1) != 0) {
+                frame_free(pa); map_ok = 0; break;
+            }
+            if (ro) {
+                if (first_load) {
+                    if (sh->ro_cnt >= DL_MAX_RO_PAGES) { map_ok = 0; break; }
+                    sh->ro_pa[sh->ro_cnt++] = pa;
+                }
+                ro_idx++;
+            }
+        }
+    }
+    if (!map_ok) {
+        for (uint32_t o = 0; o < span; o += 4096) {
+            int ro = dl_page_ro(h.text_end, o);
+            if (ro && !first_load) task_scrub_page(&t->space, h.base + o);
+            else task_unmap_page(&t->space, h.base + o);
+        }
+        vma_free(v);
+        frame_free((uint32_t)st);
+        if (first_load) {
+            for (int i = 0; i < sh->ro_cnt; i++) frame_free(sh->ro_pa[i]);
+            sh->ro_cnt = 0;
+            if (relaf) frame_free((uint32_t)relaf);
+            frame_free((uint32_t)meta);
+        }
+        return DL_ERR_NOMEM;
     }
     t->vm = vma_insert(t->vm, v);
 
     /* Copy the image bytes through the task's page tables, one 4 KiB chunk
-     * at a time via the staging frame. */
+     * at a time via the staging frame.  On a subsequent open only the
+     * private [text_end,image_size) portion needs copying; the shared RO
+     * frames already hold the pooled image. */
+    uint32_t copy_from = first_load ? 0 : h.text_end;
     int img_ok = 1;
-    for (uint32_t off = 0; off < h.image_size; ) {
+    for (uint32_t off = copy_from; off < h.image_size; ) {
         uint32_t va = h.base + off;
         uint32_t pa = task_virt_to_phys(&t->space, va);
         if (!pa) { img_ok = 0; break; }
         uint32_t n = 4096 - (va & 0xFFFu);
         if (n > h.image_size - off) n = h.image_size - off;
-        if (fs_read_at(path, (char *)st, (int)(image_off + off), (int)n) < (int)n) {
-            img_ok = 0; break;
-        }
-        uint8_t *dst = (uint8_t *)(pa + (va & 0xFFFu));
+        int rd = fs_read_at(path, (char *)st, (int)(image_off + off), (int)n);
+        if (rd < (int)n) { img_ok = 0; break; }
+        /* task_virt_to_phys already includes the page offset; do not add it
+         * a second time (first-load chunks happen to start on a page boundary,
+         * which hid this on block ①). */
+        uint8_t *dst = (uint8_t *)pa;
         for (uint32_t i = 0; i < n; i++) dst[i] = st[i];
         off += n;
     }
     if (!img_ok) {
-        for (uint32_t off = 0; off < span; off += 4096)
-            task_unmap_page(&t->space, h.base + off);
+        for (uint32_t o = 0; o < span; o += 4096) {
+            int ro = dl_page_ro(h.text_end, o);
+            if (ro && !first_load) task_scrub_page(&t->space, h.base + o);
+            else task_unmap_page(&t->space, h.base + o);
+        }
         t->vm = vma_remove(t->vm, v);
         vma_free(v);
-        frame_free((uint32_t)meta);
         frame_free((uint32_t)st);
+        if (first_load) {
+            for (int i = 0; i < sh->ro_cnt; i++) frame_free(sh->ro_pa[i]);
+            sh->ro_cnt = 0;
+            if (relaf) frame_free((uint32_t)relaf);
+            frame_free((uint32_t)meta);
+        }
         return DL_ERR_INVAL;
     }
     frame_free((uint32_t)st);
@@ -245,84 +411,95 @@ int dl_open(struct task *t, const char *path) {
         if (pa) *(uint32_t *)pa = 0x2080800u;           /* CATOS_VS_TABLE */
     }
 
-    /* ---- relocation pass (block ①) ------------------------------------
-     * Walk the CSO2 rela table, resolve each symbol against the export
-     * table, and apply through the shared engine.  Unsupported types are
-     * rejected explicitly (DL_ERR_RELOC) with the type dumped to COM1; the
-     * loader never silently skips a slot. */
-    if (h.rela_cnt) {
-        uint32_t relab = h.rela_cnt * sizeof(cso_rela_t);
-        uint8_t *relaf = (uint8_t *)kzalloc_frame();
-        if (!relaf) {
-            for (uint32_t off = 0; off < span; off += 4096)
-                task_unmap_page(&t->space, h.base + off);
-            t->vm = vma_remove(t->vm, v);
-            vma_free(v);
-            frame_free((uint32_t)meta);
-            return DL_ERR_NOMEM;
+    /* ---- relocation pass (block ① / ③) -------------------------------- */
+    /* On the first load the shared bookkeeping that the reloc pass reads
+     * (meta, rela, export count, span geometry) must be attached to the pool
+     * before dl_apply_relocs walks it. */
+    if (first_load) {
+        sh->base        = h.base;
+        sh->span        = span;
+        sh->image_size  = h.image_size;
+        sh->text_end    = h.text_end;
+        sh->data_end    = h.data_end;
+        sh->meta        = meta;
+        sh->meta_bytes  = meta_bytes;
+        sh->rela        = relaf;
+        sh->rela_cnt    = h.rela_cnt;
+        sh->export_cnt  = h.export_cnt;
+    }
+    if (!dl_apply_relocs(t, sh, first_load)) {
+        for (uint32_t o = 0; o < span; o += 4096) {
+            int ro = dl_page_ro(h.text_end, o);
+            if (ro && !first_load) task_scrub_page(&t->space, h.base + o);
+            else task_unmap_page(&t->space, h.base + o);
         }
-        if (fs_read_at(path, (char *)relaf, (int)h.rela_off, (int)relab)
-            < (int)relab) {
-            frame_free((uint32_t)relaf);
-            for (uint32_t off = 0; off < span; off += 4096)
-                task_unmap_page(&t->space, h.base + off);
-            t->vm = vma_remove(t->vm, v);
-            vma_free(v);
+        t->vm = vma_remove(t->vm, v);
+        vma_free(v);
+        if (first_load) {
+            for (int i = 0; i < sh->ro_cnt; i++) frame_free(sh->ro_pa[i]);
+            sh->ro_cnt = 0;
+            if (relaf) frame_free((uint32_t)relaf);
             frame_free((uint32_t)meta);
-            return DL_ERR_INVAL;
         }
-        cso_export_t *ex = (cso_export_t *)meta;
-        const char *names = (const char *)(meta + h.export_cnt * sizeof(cso_export_t));
-        int rel_ok = 1;
-        for (uint32_t i = 0; i < h.rela_cnt; i++) {
-            cso_rela_t *r =
-                (cso_rela_t *)(relaf + i * sizeof(cso_rela_t));
-            uint32_t type = r->r_info & 0xFFFFu;
-            uint32_t sym  = r->r_info >> 16;
-            if (r->r_offset >= h.image_size) { rel_ok = 0; break; }
-            uint32_t symval = 0;
-            const char *symname = "";
-            if (sym) {
-                uint32_t idx = sym - 1;     /* rela sym_idx is 1-based; 0 = null */
-                if (idx >= h.export_cnt) { rel_ok = 0; break; }
-                symval = h.base + ex[idx].sym_off;
-                symname = names + ex[idx].name_off;
-            }
-            /* RELATIVE(8) carries its addend in the pre-relocation slot;
-             * symbolic fixups resolve to sym_val with addend 0. */
-            int32_t addend = r->r_addend;
-            if (type == R_386_RELATIVE) {
-                uint32_t pa0 = task_virt_to_phys(&t->space, h.base + r->r_offset);
-                if (pa0) addend = (int32_t) * (uint32_t *)pa0;
-            }
-            if (dl_reloc_apply(&t->space, h.base, h.image_size,
-                                r->r_offset, type, symval,
-                                addend) != DL_OK) {
-                ser_write("dl reloc reject type=");
-                ser_hex("reloc", type);
-                rel_ok = 0;
-                break;
-            }
-            uint32_t patched = h.base + r->r_offset;
-            ser_write("reloc: type=");
-            ser_hex("t", type);
-            if (type == R_386_RELATIVE) {
-                ser_write(" slot="); ser_hex("slot", patched);
-                ser_write(" base="); ser_hex("base", h.base);
-            } else {
-                ser_write(" sym="); ser_write(symname);
-                ser_write(" patched="); ser_hex("va", patched);
-            }
+        return DL_ERR_RELOC;
+    }
+
+    /* After the first load has patched the pooled RO span, flip those PTEs
+     * read-only (RW=0).  The frame was mapped writable only for the load
+     * copy/reloc window. */
+    if (first_load) {
+        for (int i = 0; i < sh->ro_cnt; i++)
+            task_map_page(&t->space, h.base + (uint32_t)i * 4096,
+                          sh->ro_pa[i], 0);
+        /* evidence: dump each pooled RO frame's physical number. */
+        for (int i = 0; i < sh->ro_cnt; i++) {
+            ser_write("dl ro frame=");
+            ser_hex("pa", sh->ro_pa[i]);
+            ser_write(" base="); ser_hex("base", h.base);
+            ser_write(" task="); ser_hex("tid", (uint32_t)t->tid);
             ser_write("\n");
         }
-        frame_free((uint32_t)relaf);
-        if (!rel_ok) {
-            for (uint32_t off = 0; off < span; off += 4096)
-                task_unmap_page(&t->space, h.base + off);
-            t->vm = vma_remove(t->vm, v);
-            vma_free(v);
-            frame_free((uint32_t)meta);
-            return DL_ERR_RELOC;
+    }
+
+    if (first_load) {
+        sh->used        = 1;
+        sh->cluster     = clus;
+        sh->base        = h.base;
+        sh->span        = span;
+        sh->image_size  = h.image_size;
+        sh->bss_size    = h.bss_size;
+        sh->text_end    = h.text_end;
+        sh->data_end    = h.data_end;
+        sh->api_offset  = h.api_offset;
+        sh->rela_off    = h.rela_off;
+        sh->rela_cnt    = h.rela_cnt;
+        sh->init_off    = h.init_array_off;
+        sh->init_cnt    = h.init_array_cnt;
+        sh->fini_off    = h.fini_array_off;
+        sh->fini_cnt    = h.fini_array_cnt;
+        sh->fsize       = fsize;
+        sh->image_off   = image_off;
+        sh->meta        = meta;
+        sh->meta_bytes  = meta_bytes;
+        sh->rela        = relaf;
+        sh->export_cnt  = h.export_cnt;
+        for (uint32_t i = 0; i < FS_NAME_MAX - 1 && path[i]; i++)
+            sh->path[i] = path[i];
+        sh->path[FS_NAME_MAX - 1] = 0;
+        sh->refcnt      = 1;
+    } else {
+        sh->refcnt++;
+        ser_write("dl open shared base=");
+        ser_hex("base", h.base);
+        ser_write(" refcnt="); ser_hex("n", (uint32_t)sh->refcnt);
+        ser_write(" task="); ser_hex("tid", (uint32_t)t->tid);
+        ser_write("\n");
+        for (int i = 0; i < sh->ro_cnt; i++) {
+            ser_write("dl ro frame=");
+            ser_hex("pa", sh->ro_pa[i]);
+            ser_write(" base="); ser_hex("base", h.base);
+            ser_write(" task="); ser_hex("tid", (uint32_t)t->tid);
+            ser_write(" (shared)\n");
         }
     }
 
@@ -334,61 +511,87 @@ int dl_open(struct task *t, const char *path) {
     m->base        = h.base;
     m->span        = span;
     m->export_cnt  = h.export_cnt;
-    m->meta        = meta;
-    m->meta_bytes  = meta_bytes;
-    m->cluster     = clus;
-    m->text_end    = h.text_end;
-    m->data_end    = h.data_end;
-    m->rela_off    = h.rela_off;
-    m->rela_cnt    = h.rela_cnt;
-    m->init_off    = h.init_array_off;
-    m->init_cnt    = h.init_array_cnt;
-    m->fini_off    = h.fini_array_off;
-    m->fini_cnt    = h.fini_array_cnt;
-    m->refcnt      = 1;
+    m->sh          = sh;
 
     /* Run constructors in order after relocations are applied. */
-    dl_call_array(t, m, m->init_off, m->init_cnt, "init_array");
+    dl_call_array(t, sh, sh->init_off, sh->init_cnt, "init_array");
     return m->handle;
 }
 
 void *dl_sym(struct task *t, int handle, const char *name) {
     if (!t || !name || !*name) return 0;
     dl_module_t *m = dl_find(handle, t->tid);
-    if (!m) return 0;
+    if (!m || !m->sh) return 0;
+    dl_shared_t *sh = m->sh;
 
-    const cso_export_t *ex = (const cso_export_t *)m->meta;
-    const char *names = (const char *)(m->meta + m->export_cnt * sizeof(cso_export_t));
-    if (m->meta_bytes < m->export_cnt * sizeof(cso_export_t)) return 0;
+    const cso_export_t *ex = (const cso_export_t *)sh->meta;
+    const char *names = (const char *)(sh->meta + sh->export_cnt * sizeof(cso_export_t));
+    if (sh->meta_bytes < sh->export_cnt * sizeof(cso_export_t)) return 0;
 
-    for (uint32_t i = 0; i < m->export_cnt; i++) {
-        if (ex[i].name_off >= m->meta_bytes) continue;
+    for (uint32_t i = 0; i < sh->export_cnt; i++) {
+        if (ex[i].name_off >= sh->meta_bytes) continue;
         const char *nm = names + ex[i].name_off;
         if (!dl_streq(nm, name)) continue;
-        if (ex[i].sym_off >= m->span) return 0;        /* out of bounds */
-        return (void *)(m->base + ex[i].sym_off);
+        if (ex[i].sym_off >= sh->span) return 0;        /* out of bounds */
+        return (void *)(sh->base + ex[i].sym_off);
     }
     return 0;
+}
+
+/* Detach this task's mapping of `m`: run destructors, scrub the shared RO
+ * PTEs (frames stay in the pool), free this task's private frames, drop the
+ * refcount, and release the pool only when the last opener leaves. */
+static void dl_detach(struct task *t, dl_module_t *m) {
+    dl_shared_t *sh = m->sh;
+    if (!sh) { m->used = 0; return; }
+
+    /* Run destructors before the image is unmapped. */
+    dl_call_array(t, sh, sh->fini_off, sh->fini_cnt, "fini_array");
+
+    vma_t *v = vma_find(t->vm, m->base);
+    if (v && v->kind == VMA_LIB && v->start == m->base) {
+        for (uint32_t off = 0; off < m->span; off += 4096) {
+            int ro = dl_page_ro(sh->text_end, off);
+            if (ro) {
+                task_scrub_page(&t->space, m->base + off);  /* keep pooled frame */
+            } else {
+                task_unmap_page(&t->space, m->base + off); /* free private frame */
+            }
+        }
+        t->vm = vma_remove(t->vm, v);
+        vma_free(v);
+    }
+
+    sh->refcnt--;
+    ser_write("dl close base=");
+    ser_hex("base", m->base);
+    ser_write(" refcnt="); ser_hex("n", (uint32_t)sh->refcnt);
+    ser_write(" task="); ser_hex("tid", (uint32_t)t->tid);
+    ser_write("\n");
+
+    if (sh->refcnt <= 0) {
+        /* Last opener: release the pooled RO frames and shared metadata. */
+        for (int i = 0; i < sh->ro_cnt; i++) frame_free(sh->ro_pa[i]);
+        if (sh->meta)  frame_free((uint32_t)sh->meta);
+        if (sh->rela)  frame_free((uint32_t)sh->rela);
+        ser_write("dl release base=");
+        ser_hex("base", m->base);
+        ser_write(" pages="); ser_hex("n", (uint32_t)sh->ro_cnt);
+        ser_write(" refcnt=0\n");
+        sh->used = 0;
+        sh->meta = 0;
+        sh->rela = 0;
+        sh->ro_cnt = 0;
+    }
+    m->used = 0;
+    m->sh = 0;
 }
 
 int dl_close(struct task *t, int handle) {
     if (!t) return DL_ERR_BADH;
     dl_module_t *m = dl_find(handle, t->tid);
     if (!m) return DL_ERR_BADH;
-
-    /* Run destructors before the image is unmapped. */
-    dl_call_array(t, m, m->fini_off, m->fini_cnt, "fini_array");
-
-    vma_t *v = vma_find(t->vm, m->base);
-    if (v && v->kind == VMA_LIB && v->start == m->base) {
-        for (uint32_t off = 0; off < m->span; off += 4096)
-            task_unmap_page(&t->space, m->base + off); /* frees frames */
-        t->vm = vma_remove(t->vm, v);
-        vma_free(v);
-    }
-    if (m->meta) frame_free((uint32_t)m->meta);
-    m->used = 0;
-    m->meta = 0;
+    dl_detach(t, m);
     return DL_OK;
 }
 
@@ -396,9 +599,6 @@ void dl_close_all(struct task *t) {
     if (!t) return;
     for (int i = 0; i < MAX_DL_MODULES; i++) {
         if (!dl_mods[i].used || dl_mods[i].owner_tid != t->tid) continue;
-        if (dl_mods[i].meta) frame_free((uint32_t)dl_mods[i].meta);
-        dl_mods[i].meta = 0;
-        dl_mods[i].used = 0;
+        dl_detach(t, &dl_mods[i]);
     }
-    /* The user pages are reclaimed by task_space_destroy() in task_cleanup. */
 }

@@ -493,6 +493,10 @@ static void task_cleanup(task_t *t) {
      * PTEs BEFORE task_space_destroy walks the PT, so a cached shared frame
      * is not freed out from under the cache. */
     fcache_cleanup_task(t);
+    /* Stage 2C-3: detach shared-library mappings BEFORE task_space_destroy
+     * walks the PT, so a pooled read-only RO frame is scrubbed (PTE dropped)
+     * rather than freed out from under the shared pool. */
+    dl_close_all(t);
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
@@ -509,7 +513,6 @@ static void task_cleanup(task_t *t) {
     fpu_task_cleanup(t);                  /* Stage 1: drop FPU ownership */
     cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
     decl_task_cleanup(t);                 /* P3: reclaim declarative subtree */
-    dl_close_all(t);                      /* Stage 2A: free CSO1 library meta frames */
 #ifdef CATOS_BENCH
     uint64_t _ce = perf_now(); g_sp.pipe += _ce - _cd;
 #endif
