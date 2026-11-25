@@ -83,6 +83,11 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->pop_max_h = s->pop_max_h;
     b->icon = s->icon;
     b->tint_role = s->tint_role;
+    /* cap3：角形态（整块统一；显式非 SQUIRCLE 才参与形态切换） */
+    if (b->corner_shape != s->corner_shape || b->corner_n != s->corner_n)
+        geo_changed = 1;
+    b->corner_shape = s->corner_shape;
+    b->corner_n = s->corner_n;
 
     if (s->fg != INHERIT_COLOR)     b->st.fg = s->fg;
     if (s->bg != INHERIT_COLOR)     b->st.bg = s->bg;

@@ -124,7 +124,9 @@ typedef struct {
     uint16_t pop_max_h;
     uint32_t anchor_id;     /* 本应指回同批已提交的块 id */
     uint8_t  pop_prefer;
-    uint8_t  pad_[3];
+    /* cap3：角形态（CE 只给默认 n=5.0，不下发 corner_n） */
+    uint8_t  corner_shape;  /* 0=ARC 1=SQUIRCLE */
+    uint8_t  pad_[2];
 } ce_blk_rec2_t;
 #define CE_BLK_REC2_VER 1
 

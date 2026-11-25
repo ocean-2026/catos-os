@@ -1738,8 +1738,14 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
         if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
         /* cap2 能力扩展探针族：`gui cap2-<case>`（cap2probe.c 分派三包） */
-        if (arg[0]=='c'&&arg[1]=='a'&&arg[2]=='p'&&arg[3]=='2'&&arg[4]=='-') {
-            cap2_probe_cmd(arg + 5); return;
+        {
+            int n = 0;
+            while (arg[n] && n < 5) n++;
+            if (n == 5 && arg[0]=='c' && arg[1]=='a' && arg[2]=='p' &&
+                arg[3]=='2' && arg[4]=='-') {
+                cap2_probe_cmd(arg + 5);
+                return;
+            }
         }
         {
             char w2[24]; const char *r2 = 0;
