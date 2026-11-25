@@ -30,6 +30,7 @@
 #include "vma.h"     /* for vma_t */
 #include "dl.h"      /* Stage 2A: CSO1 fixed-base shared object */
 #include "fcache.h"  /* Stage 2B: fd table + read-only file page cache */
+#include "kvheap.h"  /* Stage 3A-1: page-backed kernel heap (per-thread stacks) */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
@@ -272,6 +273,12 @@ static task_t *pick_ready(void) {
     return 0;
 }
 
+static void tls_apply(task_t *t);
+static int  thread_create(task_t *parent, uint32_t entry, uint32_t arg);
+static void thread_exit_current(int retval) __attribute__((noreturn));
+static int  thread_join(task_t *caller, int tid);
+static int  thread_detach(int tid);
+
 /* enter `next` from ring0 context; never call from an ISR.
  * NOTE: this is intentionally NOT noreturn - the cpu_switch_to path
  * returns when this task is rescheduled later, and GCC must keep the
@@ -285,6 +292,7 @@ static void schedule_to(task_t *next) {
         g_sp_resume_tsc[next->tid] = perf_now();
 #endif
     next->state = T_RUNNING;
+    tls_apply(next);              /* Stage 3A-3: point GS_BASE at its TLS block */
     fpu_on_switch();              /* Stage 1: lazy FPU, incoming task traps #NM */
 #if CATOS_SPAWN_TRACE
     {
@@ -2459,12 +2467,19 @@ void isr_syscall(int_frame_t *f) {
     case SYS_DLCLOSE:
         ret = (uint32_t)dl_close(t, (int)a1);
         break;
-    /* ---- Stage 3A: user threads (reserved; shared-space path pending) -- */
+    /* ---- Stage 3A-3: user threads (shared address space) -------------- */
     case SYS_THREAD_CREATE:
+        ret = (uint32_t)thread_create(t, a1, a2);
+        break;
     case SYS_THREAD_EXIT:
+        thread_exit_current((int)a1);          /* noreturn */
+        ret = 0;
+        break;
     case SYS_THREAD_JOIN:
+        ret = (uint32_t)thread_join(t, (int)a1);
+        break;
     case SYS_THREAD_DETACH:
-        ret = (uint32_t)-8;                 /* ENOSYS */
+        ret = (uint32_t)thread_detach((int)a1);
         break;
     /* ---- Stage 2B: CE fd handle table -------------------------------- */
     case SYS_FD_OPEN: {
@@ -3214,6 +3229,223 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
         t->name[i] = 0;
     }
     return slot;
+}
+
+/* ---- Stage 3A-3: user threads (shared address space) ---------------------
+ *
+ * A worker thread reuses an existing task slot but SHARES the parent's
+ * address space (dir/pt/pt2 + VMA list); it gets its own kernel stack
+ * (kvheap), its own 16 KiB user stack (anonymous, guard page ahead) and its
+ * own TLS user page.  The thread exit path NEVER calls task_space_destroy:
+ * the shared space belongs to the process and outlives every worker.
+ *
+ * TLS is exposed to ring3 through the IA32_GS_BASE MSR (0xC0000100); the
+ * GS selector stays SEL_UDATA, the MSR supplies the segment base.  If the
+ * CPU lacks MSR support (CPUID leaf1 EDX bit5) the wrmsr is skipped; the
+ * LDT-descriptor fallback is documented in docs/threading.md and not wired
+ * this slice.
+ */
+#define MSR_IA32_GS_BASE         0xC0000100u
+#define MSR_IA32_KERNEL_GS_BASE  0xC0000101u
+#define THREAD_KSTACK_SZ         8192u
+#define THREAD_STACK_SZ          16384u
+#define THREAD_TLS_SZ            4096u
+
+static int cpu_msr_supported(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+    cached = (int)((d >> 5) & 1u);          /* EDX bit 5: MSR */
+    return cached;
+}
+
+static void wrmsr32(uint32_t msr, uint32_t val) {
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(val), "d"(0));
+}
+
+/* Point GS_BASE at the incoming task's TLS block (0 for a task without one).
+ * Called from the scheduler on every switch. */
+static void tls_apply(task_t *t) {
+    if (!cpu_msr_supported()) return;
+    wrmsr32(MSR_IA32_GS_BASE, t ? t->tls_va : 0);
+}
+
+/* Reap a thread's thread-only kernel resources and release the slot.  The
+ * shared process space / VMA list are left untouched.  Must run in a
+ * context other than the thread being reaped (its kvheap kernel stack is
+ * freed here). */
+static void thread_reap(task_t *t) {
+    if (t->kstack_va) {
+        kvmfree((void *)t->kstack_va);
+        t->kstack_va = 0;
+    }
+    t->kstack_top = 0;
+    t->ksp = 0;
+    t->resume_frame = 0;
+    t->thr_stack_va = 0;
+    t->tls_va = 0;
+    t->waiter = 0;
+    t->state = T_UNUSED;
+}
+
+static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
+    if (!parent || parent->ring0) return -12;     /* no ring0 thread spawn yet */
+    if (!entry) return -22;
+
+    int slot = -1;
+    for (int i = 1; i < MAX_TASKS; i++)
+        if (tasks[i].state == T_UNUSED) { slot = i; break; }
+    if (slot < 0) return -12;
+
+    task_t *t = &tasks[slot];
+
+    /* Share the parent's address space and process-shared state FIRST, so
+     * the anon mmap / user copy below map pages through the live parent
+     * directory instead of this slot's stale zeroed space. */
+    t->space = parent->space;
+    t->vm = parent->vm;
+    t->heap_end = parent->heap_end;
+    heap_free_root[slot] = heap_free_root[parent->tid];
+    t->uid = parent->uid;
+    t->gid = parent->gid;
+    t->caps = parent->caps;
+    t->out_pipe = parent->out_pipe;
+    t->in_pipe = parent->in_pipe;
+    t->out_file[0] = 0;
+    t->out_append = parent->out_append;
+    t->bg_mode = parent->bg_mode;
+
+    /* kernel stack from the kvheap (8 KiB, zeroed) */
+    uint8_t *ksk = kvmalloc(THREAD_KSTACK_SZ, 16);
+    if (!ksk) { ser_write("thr: kstack OOM\n"); return -12; }
+    for (uint32_t i = 0; i < THREAD_KSTACK_SZ; i++) ksk[i] = 0;
+    t->kstack_va = (uint32_t)ksk;
+    t->kstack_top = (uint32_t)ksk + THREAD_KSTACK_SZ;
+
+    /* private user stack, anonymous in the extension arena (guard ahead) */
+    uint32_t stk = vma_mmap_anon(t, THREAD_STACK_SZ, 1);
+    if (!stk) { ser_write("thr: stack mmap OOM\n"); goto fail_kstack; }
+    t->thr_stack_va = stk;
+
+    /* private TLS user page: [0]=tid [4]=errno [8]=canary */
+    uint32_t tls = vma_mmap_anon(t, THREAD_TLS_SZ, 1);
+    if (!tls) { ser_write("thr: tls mmap OOM\n"); goto fail_stack; }
+    t->tls_va = tls;
+    {
+        uint32_t tl[3] = { (uint32_t)slot, 0u, 0xC0FFEEu };
+        if (copy_to_user(t, (void *)tls, tl, sizeof(tl)) != 0) {
+            ser_write("thr: tls copy EFAULT\n"); goto fail_tls;
+        }
+    }
+
+    /* cdecl frame: [esp]=return stub, [esp+4]=arg */
+    uint32_t usp = stk + THREAD_STACK_SZ;
+    usp -= 8;
+    uint32_t stub = VS_EXIT_STUB;
+    k2u_copy(&t->space, usp, &stub, 4);
+    k2u_copy(&t->space, usp + 4, &arg, 4);
+
+    int_frame_t *fr = (int_frame_t *)(t->kstack_top - sizeof(int_frame_t) - 16);
+    uint8_t *fb = (uint8_t *)fr;
+    for (uint32_t i = 0; i < sizeof(int_frame_t); i++) fb[i] = 0;
+    fr->eip = entry;
+    fr->cs = SEL_UCODE;
+    fr->eflags = 0x202;                    /* IF set */
+    fr->esp = usp;
+    fr->ss = SEL_UDATA;
+    fr->ds = fr->es = fr->fs = fr->gs = SEL_UDATA;
+
+    t->tid = slot;
+    t->ring0 = 0;
+    t->state = T_READY;
+    t->ksp = (uint32_t)fr;
+    t->resume_frame = 1;
+    t->parent = parent;
+    t->proc = parent->proc;
+    t->is_thread = 1;
+    t->detached = 0;
+    t->thread_ret = 0;
+    t->waiter = 0;
+    t->exit_code = 0;
+    t->wake_tick = 0;
+    t->fpu_used = 0;
+    t->pgid = parent->pgid;
+    t->ls_count = 0;
+    t->ls_step = 0;
+    t->cpu_ticks = 0;
+    {
+        t->name[0] = 't'; t->name[1] = 'h'; t->name[2] = 'r';
+        t->name[3] = (char)('0' + (slot % 10)); t->name[4] = 0;
+    }
+    ser_write("thr: create ok tid="); ser_hex("", (uint32_t)slot);
+    ser_hex(" stk=", stk); ser_hex(" tls=", tls); ser_write("\n");
+    return slot;
+
+fail_tls:
+    vma_munmap(t, tls, THREAD_TLS_SZ);
+fail_stack:
+    vma_munmap(t, stk, THREAD_STACK_SZ);
+fail_kstack:
+    kvmfree((void *)ksk);
+    t->kstack_va = 0;
+    return -12;
+}
+
+/* Worker thread exit.  Unmaps only this thread's user stack + TLS page; the
+ * shared space stays intact.  The kvheap kernel stack is freed at reap
+ * (join / detach), never while running on it. */
+static void thread_exit_current(int retval) {
+    task_t *t = cur_task;
+    t->thread_ret = retval;
+    t->exit_code = retval;
+
+    if (t->thr_stack_va) {
+        vma_munmap(t, t->thr_stack_va, THREAD_STACK_SZ);
+        t->thr_stack_va = 0;
+    }
+    if (t->tls_va) {
+        vma_munmap(t, t->tls_va, THREAD_TLS_SZ);
+        t->tls_va = 0;
+    }
+
+    if (t->detached) {
+        /* No joiner: reclaim directly.  The kernel stack free is deferred to
+         * the next slot reuse / sweep this slice (detached kstack leak noted
+         * in docs); mark zombie so no join attaches. */
+        t->state = T_ZOMBIE;
+    } else {
+        t->state = T_ZOMBIE;
+        if (t->waiter) {
+            t->waiter->state = T_READY;
+            t->waiter = 0;
+        }
+    }
+    reschedule();
+    __builtin_unreachable();
+}
+
+static int thread_join(task_t *caller, int tid) {
+    task_t *th = task_by_tid(tid);
+    if (!th || !th->is_thread) return -22;          /* EINVAL: no such thread */
+
+    if (th->state != T_ZOMBIE) {
+        th->waiter = caller;
+        caller->state = T_WAIT_CHILD;
+        reschedule();
+        /* resumed: `th` has exited and is a zombie */
+    }
+    int rv = th->thread_ret;
+    thread_reap(th);
+    return rv;
+}
+
+static int thread_detach(int tid) {
+    task_t *th = task_by_tid(tid);
+    if (!th || !th->is_thread) return -22;
+    th->detached = 1;
+    if (th->state == T_ZOMBIE) thread_reap(th);
+    return 0;
 }
 
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
