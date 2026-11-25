@@ -172,9 +172,25 @@ idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧
 
 ## 下一步
 
-1. 3A 活路径：进程/线程拆分（`task_t` 加 `proc/is_thread/detached/tls_va/
-   thr_stack/thread_ret`），线程 create/exit/join/detach 接线，线程栈 VMA 分配与
-   退出局部回收，4 线程隔离探针实机 PASS。
-2. 3B：netstack/ssh 静态 scratch 与 dl 句柄表归属迁移 per-thread。
-3. 3C：内核态抢占点 + 关抢占区，先解除 netstack/ssh/dl 的非抢占假设。
-4. 四项全绿后版本号才走 v2.81；不动 v2.80 ISO/版本串。
+1. **3A-3 活路径（未编码，槽 83..86 仍返 ENOSYS）**：
+   - `thread_create(entry,arg)`：取空闲 slot，**共享**父进程 `space.dir/pt/pt2` 与
+     `vm` 链表（不 `task_space_create`）；内核栈从 kvheap 发 extent（8 KiB 起）；在
+     扩展 arena 匿名区映射独立用户栈 VMA（带 guard 页，懒装入）；建 TLS 块；在新内核
+     栈上手搭 `int_frame_t`（`eip=entry`、`esp=新用户栈且栈顶压 `arg`、`cs/ss` 用户
+     选择子、`resume_frame=1`），`is_thread=1`、`proc` 指向父进程描述符，`T_READY`。
+   - **TLS / GS.base**：现 GDT 仅 6 项（null/kcode/kdata/ucode/udata/tss），需为每线程
+     加一个 TLS 描述符（或 LDTR），`gs` 指向 TLS 块（errno 槽 + canary + 保留）；
+     线程切换时随上下文换装。
+   - `thread_exit(retval)`：记 `thread_ret`、清 TLS；工作线程只回收自身用户栈 VMA /
+     TLS / 内核栈 extent，**不**销毁共享 space/VMA/堆/管道/控制台；分离线程自动收尸，
+     否则留 zombie 等 join；唤醒 `waiter`。
+   - `thread_join(tid)`：阻塞至目标退出取 `retval`；`thread_detach(tid)`：置 `detached`，
+     退出自动回收。
+   - 调度切换已按 `next->space.dir` 切 CR3，共享目录指针即可；需复核 FPU 懒归属与
+     `ls_buf/e3_*_buf` 等按 tid 索引静态区在多线程下的串扰（3B 项）。
+2. **3A-4 四线程隔离探针**：`extapp/threads.c` → `/bin/threads.ce`；4 线程独立计数器 /
+   TLS errno+canary / 栈数组校验；主线程 join 全部取 retval 求和比对；detach 退出不崩；
+   杀一线程不连坐；打 `threads: tid/i/errno/sum`、`join ret=`、`kvheap inuse=`、`THREAD PASS`。
+3. 3B：netstack/ssh 静态 scratch 与 dl 句柄表归属迁移 per-thread。
+4. 3C：内核态抢占点 + 关抢占区，先解除 netstack/ssh/dl 的非抢占假设。
+5. 全绿后版本号才走 v2.81；不动 v2.80 ISO/版本串。
