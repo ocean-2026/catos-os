@@ -7,6 +7,7 @@
 用法：
     python3 validate.py page.blk.json [--json] [--ce]
     python3 validate.py --bin --recs recs.bin --strings strings.bin [--json]
+    python3 validate.py --spec-audit [--md <path>] [--json]
 
 纯 Python 3 标准库，零第三方依赖。
 """
@@ -14,10 +15,13 @@
 import argparse
 import json
 import os
+import re
 import struct
 import sys
 
 import blkcommon as bc
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 # CE 槽 72 可提交的 kind 区间（decl.c validate(): COLUMN..CANVAS）。
 # button(12)/input(13)/term(14) 一律拒收（E_DECL_BADREC = -39）。
@@ -45,8 +49,13 @@ class Report:
         return [r for r in self.results if r["status"] == "WARN"]
 
     def text_lines(self):
-        return ["%s %s %s %s" % (r["status"], r["rule"], r["object"],
-                                 r["detail"]) for r in self.results]
+        # 行首统一带规则 ID 前缀：`[C1] FAIL id=7 duplicate id`。
+        out = []
+        for r in self.results:
+            line = "[%s] %s %s %s" % (r["rule"], r["status"], r["object"],
+                                      r["detail"])
+            out.append(line.rstrip())
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +296,143 @@ def validate_bin(rep, recs_path, strings_path):
 
 
 # ---------------------------------------------------------------------------
+# --spec-audit：规范文档 ↔ 内核事实一致性审计（v0.2 引用格式）
+#
+# 边界（写死，避免以后误改成硬断言）：
+# - 只按【符号名】判对错；行号提示 (Lxxx) 永不参与判错，行号漂移只打 WARN。
+# - 本模块只读规范 md，不回写、不统一文档格式；格式问题以 FAIL/WARN 清单上报。
+# ---------------------------------------------------------------------------
+
+AUDIT_RULE_FILE = "A-9-01"    # 引用的文件存在（相对仓库根）
+AUDIT_RULE_SYMBOL = "A-9-02"  # 符号在该文件中作为独立标识符出现
+AUDIT_RULE_MISFILED = "A-9-03"  # 符号被跨文件误引（实际在别的源码文件）
+AUDIT_RULE_BLSPEC = "A-9-04"  # 文档至少引用一条 blk_spec 字段
+
+# 引用格式：`` `kernel_v25/src/gui/decl.c::validate()` ``，
+# 路径 = 相对仓库根；符号 = C 标识符；行号提示可在反引号内或反引号后。
+_REF_RE = re.compile(
+    r"`(?P<path>[A-Za-z0-9_./-]+\.(?:c|h|inc))::"
+    r"(?P<sym>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*\([^)]*\))?"
+    r"(?:\s*\(L(?P<line_in>\d+)\))?`"
+    r"(?:\s*\(L(?P<line_out>\d+)\))?"
+)
+
+# blk_spec 引用：`blk_spec.anchor`（字段写法）或裸 `` `blk_spec` `` 提及。
+# 退化防护：文档若连 blk_spec 都不再引用，说明内核事实已整体掉出文档。
+_BLSPEC_FIELD_RE = re.compile(r"\bblk_spec\b")
+
+_SRC_EXTS = (".c", ".h", ".inc")
+_SKIP_DIRS = {"__pycache__", "out", "samples", ".git", "node_modules"}
 
 
-def main(argv=None):
+def _repo_root():
+    """仓库根 = tools/blkhtml/ 的上两级。"""
+    return os.path.abspath(os.path.join(HERE, "..", ".."))
+
+
+def _iter_source_files(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            if fn.endswith(_SRC_EXTS):
+                yield os.path.join(dirpath, fn)
+
+
+def _symbol_locations(root, symbol):
+    """返回 {仓库相对路径: [行号, ...]}，仓库源码中出现该符号的位置。"""
+    pat = re.compile(r"\b" + re.escape(symbol) + r"\b")
+    hits = {}
+    for abs_path in _iter_source_files(root):
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        locs = [i + 1 for i, ln in enumerate(lines) if pat.search(ln)]
+        if locs:
+            hits[os.path.relpath(abs_path, root)] = locs
+    return hits
+
+
+def run_spec_audit(md_path, repo_root=None):
+    """解析规范 md 中的 `` `path::symbol` `` 引用并逐条断言。
+
+    返回 (results, blkspec_ok)；results 为 dict 列表，每条含
+    rule / status / path / symbol / detail / line_hint。
+    """
+    root = repo_root or _repo_root()
+    with open(md_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    results = []
+
+    def add(rule, status, path, symbol, detail, line_hint=None):
+        results.append({"rule": rule, "status": status, "path": path,
+                        "symbol": symbol, "detail": detail,
+                        "line_hint": line_hint})
+
+    refs = []
+    for m in _REF_RE.finditer(text):
+        refs.append((m.group("path"), m.group("sym"),
+                     m.group("line_in") or m.group("line_out")))
+
+    for path, sym, hint in refs:
+        abs_path = os.path.join(root, path)
+        if not os.path.isfile(abs_path):
+            add(AUDIT_RULE_FILE, "FAIL", path, sym,
+                "file not found: %s" % path, hint)
+            continue
+
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            src_lines = f.readlines()
+        pat = re.compile(r"\b" + re.escape(sym) + r"\b")
+        locs = [i + 1 for i, ln in enumerate(src_lines) if pat.search(ln)]
+
+        if locs:
+            add(AUDIT_RULE_SYMBOL, "PASS", path, sym, "", hint)
+            # 行号漂移只 WARN，永不判错。
+            if hint and int(hint) != locs[0]:
+                add(AUDIT_RULE_SYMBOL, "WARN", path, sym,
+                    "line hint drifted: expected L%s, symbol at L%d"
+                    % (hint, locs[0]), hint)
+            continue
+
+        # 符号不在引用文件：排查是否被跨文件误引。
+        others = {p: locs for p, locs in _symbol_locations(root, sym).items()
+                  if p != path}
+        if others:
+            where = ", ".join(sorted(others)[:3])
+            add(AUDIT_RULE_MISFILED, "FAIL", path, sym,
+                "symbol not found in %s; found in %s" % (path, where), hint)
+        else:
+            add(AUDIT_RULE_SYMBOL, "FAIL", path, sym,
+                "symbol not found in %s" % path, hint)
+
+    blkspec_ok = bool(_BLSPEC_FIELD_RE.search(text))
+    if not blkspec_ok:
+        add(AUDIT_RULE_BLSPEC, "FAIL", "", "",
+            "doc references no blk_spec; kernel facts may have dropped "
+            "out of the document")
+
+    return results, blkspec_ok
+
+
+def audit_text_lines(results):
+    lines = []
+    for r in results:
+        loc = "%s::%s" % (r["path"], r["symbol"]) if r["path"] else "(doc)"
+        hint = " (L%s)" % r["line_hint"] if r["line_hint"] else ""
+        line = "[%s] %s %s%s %s" % (r["rule"], r["status"], loc, hint,
+                                    r["detail"])
+        lines.append(line.rstrip())
+    return lines
+
+
+# ---------------------------------------------------------------------------
+
+
+def main(argv=None, repo_root=None):
     ap = argparse.ArgumentParser(description="blkhtml 规则校验")
     ap.add_argument("blkjson", nargs="?", help="输入 .blk.json")
     ap.add_argument("--json", action="store_true", help="机读 JSON 输出")
@@ -299,7 +442,26 @@ def main(argv=None):
                     help="对 recs.bin/strings.bin 做 P1 复核")
     ap.add_argument("--recs", help="recs.bin 路径（--bin）")
     ap.add_argument("--strings", help="strings.bin 路径（--bin）")
+    ap.add_argument("--spec-audit", action="store_true",
+                    help="审计规范 md 中的内核符号引用（A-9-01..04）")
+    ap.add_argument("--md", help="--spec-audit 使用的规范 md 路径")
     args = ap.parse_args(argv)
+
+    if args.spec_audit:
+        md_path = args.md or os.path.join(
+            repo_root or _repo_root(), "docs",
+            "HTML-块树-转换规范.md")
+        results, _ = run_spec_audit(md_path, repo_root=repo_root)
+        fail = sum(r["status"] == "FAIL" for r in results)
+        if args.json:
+            print(json.dumps({"failed": fail > 0, "fail": fail,
+                              "total": len(results), "results": results},
+                             ensure_ascii=False, indent=2))
+        else:
+            for line in audit_text_lines(results):
+                print(line)
+            print("SPEC_AUDIT fail=%d total=%d" % (fail, len(results)))
+        return 1 if fail > 0 else 0
 
     rep = Report()
 

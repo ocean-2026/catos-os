@@ -447,5 +447,109 @@ class TestEmitCCompileSmoke(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
 
 
+def _make_fake_repo(files):
+    d = tempfile.mkdtemp()
+    for rel, content in files.items():
+        p = os.path.join(d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+    return d
+
+
+DECL_C = "int validate(void) {\n    return 0;\n}\n"
+TOKENS_H = "#define FOO_ROLE 1\nstatic const int foo = 3;\n"
+
+
+class TestSpecAudit(unittest.TestCase):
+    """--spec-audit：规范 md 引用 ↔ 内核源码一致性断言（A-9-01..04）。"""
+
+    def _run(self, md, files):
+        d = _make_fake_repo(files)
+        md_path = os.path.join(d, "spec.md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md)
+        results, _ = validate.run_spec_audit(md_path, repo_root=d)
+        rc = validate.main(["--spec-audit", "--md", md_path], repo_root=d)
+        return results, rc
+
+    def test_all_pass_with_correct_refs(self):
+        md = ("# 规范草稿\n\n"
+              "引用 `kernel_v25/src/gui/decl.c::validate()`。\n\n"
+              "内置页字段见 `blk_spec.anchor`。\n")
+        results, rc = self._run(
+            md, {"kernel_v25/src/gui/decl.c": DECL_C,
+                 "kernel_v25/include/gui/tokens.h": TOKENS_H})
+        fails = [r for r in results if r["status"] == "FAIL"]
+        self.assertEqual(fails, [])
+        self.assertEqual(rc, 0)
+        self.assertTrue(any(r["rule"] == "A-9-02" and r["status"] == "PASS"
+                            for r in results))
+
+    def test_missing_symbol_rc1(self):
+        md = ("引用 `kernel_v25/src/gui/decl.c::no_such_symbol()`。\n\n"
+              "`blk_spec.anchor`\n")
+        results, rc = self._run(
+            md, {"kernel_v25/src/gui/decl.c": DECL_C,
+                 "kernel_v25/include/gui/tokens.h": TOKENS_H})
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(r["rule"] == "A-9-02" and r["status"] == "FAIL"
+                            and r["symbol"] == "no_such_symbol"
+                            for r in results))
+
+    def test_misfiled_symbol_rc1(self):
+        # foo 只在 tokens.h 出现，文档却引 decl.c::foo → A-9-03 跨文件误引。
+        md = ("引用 `kernel_v25/src/gui/decl.c::foo()`。\n\n"
+              "`blk_spec.anchor`\n")
+        results, rc = self._run(
+            md, {"kernel_v25/src/gui/decl.c": DECL_C,
+                 "kernel_v25/include/gui/tokens.h": TOKENS_H})
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(r["rule"] == "A-9-03" and r["status"] == "FAIL"
+                            and "tokens.h" in r["detail"]
+                            for r in results))
+
+    def test_drifted_line_hint_warns_not_fails(self):
+        # 符号实际在第 2 行；行号提示 L999 漂移 → WARN，不判 FAIL，RC=0。
+        md = ("引用 `kernel_v25/src/gui/decl.c::validate() (L999)`。\n\n"
+              "`blk_spec.anchor`\n")
+        results, rc = self._run(md, {"kernel_v25/src/gui/decl.c": DECL_C})
+        self.assertEqual(rc, 0)
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+        self.assertTrue(any(r["status"] == "WARN"
+                            and "line hint drifted" in r["detail"]
+                            for r in results))
+
+    def test_audit_results_carry_rule_field(self):
+        md = "引用 `kernel_v25/src/gui/decl.c::validate()`。\n`blk_spec.anchor`\n"
+        results, _ = self._run(md, {"kernel_v25/src/gui/decl.c": DECL_C})
+        for r in results:
+            self.assertIn("rule", r)
+
+
+class TestRuleIdPrefix(unittest.TestCase):
+    """诊断行首统一带 [规则ID] 前缀；--json 每条带 rule 字段。"""
+
+    def test_json_results_carry_rule_field(self):
+        rep = validate.Report()
+        validate.validate_tree(mini_tree(), rep)
+        payload = json.loads(json.dumps({"results": rep.results}))
+        self.assertTrue(payload["results"])
+        for r in payload["results"]:
+            self.assertIn("rule", r)
+
+    def test_fail_line_starts_with_rule_prefix(self):
+        tree = {"schema": "catos.blk/1.0", "root": {
+            "id": 0, "kind": "root", "layer": "work",
+            "rect": {"x": 0, "y": 0, "w": 160, "h": 80}, "children": [
+                {"id": 1, "kind": "rect", "layer": "work",
+                 "rect": {"x": 0, "y": 0, "w": 12, "h": 24}}]}}
+        rep = validate.Report()
+        validate.validate_tree(tree, rep)
+        g1 = [l for l in rep.text_lines() if "[G1]" in l]
+        self.assertTrue(g1)
+        self.assertTrue(any(l.startswith("[G1] FAIL") for l in g1))
+
+
 if __name__ == "__main__":
     unittest.main()
