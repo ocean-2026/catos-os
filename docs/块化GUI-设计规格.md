@@ -397,3 +397,32 @@ diff = 0（时钟区除外）；整屏触碰像素相对 480000 显著小于整�
 - 两档任务栏高度：默认 32（顶 y=568）、加高 48（顶 y=552）；3 主题 × 普通/加高/超高共 9 例，
   几何 D1–D4 **9/9 PASS**；交互自检 4 项全 PASS。明细见仓库外 `evidence-fix/00-composite/d-overlay/summary.md`。
 
+## 18. 基础缺陷与 Settings 外观修正（新增规格 · E 轮）
+
+> 本节为 E 轮追加的新增规格，append-only 字段，不改 §14–§17 既有口径。
+
+### 18.1 容器描边 `stroke`（E1-①）
+- 块 spec 与 block 各追加一份 append-only `stroke` 字段；`desc.c` apply_spec 镜像。
+- 容器分支（COLUMN/ROW/STACK/FREE/ROOT）在 `border_w` 非零时补 `body_border`；`stroke` 未设则不画环。
+- 可判定：设描边块四边取色 = 主题 border 色，内区域 = panel 色；未设块四边 = panel 色（无环）。三主题正反例均通过。
+
+### 18.2 按钮三态色阶（E1-③）
+- 按钮维护 `pressed_block` 静态槽与 hover/focus 态；注入钩子 `gui_inject_press_block/hover_block/hover`。
+- 色阶：闲置本体填充；hover 向白混 12%（`mix_white`）；pressed 向黑混 18%（`mix_black`）；聚焦反色优先。
+- 可判定：同点亮度单调 pressed < idle < hover，相邻态差 ≥2 级；连续两帧 hover 读数与像素一致。
+
+### 18.3 标题行两端分列（E4-⑦ / 08a）
+- 窗口/面板标题行（标签 + Close）`align_main = ALN_SPACE_BETWEEN`，标签居左、关闭钮居右，不再同 row 左端堆叠连写叠压。
+- Notepad 标签固定串 `"Notepad"`，文件路径留在状态行，不拼进标题。
+- 可判定：修复后两帧标题区 diff=0；标签 fg 墨迹完整成词。
+
+### 18.4 自绘 radio 图形（08c）
+- radio 由 ASCII 占位 `"( ) "/"(*)"` 改为自绘真图形：16×16 外环 border 色；选中态中心 8×8 accent 内点；
+  `usr` 存选项序号，render 回调 `st_radio_render`。
+- 可判定：选中环顶 = border 色、内点 = accent；未选环为空环无内点。
+
+### 18.5 E 轮实测（calm）
+- E1-① 三主题正反例 PASS；E1-③ 亮度 pressed=34 / idle=43 / hover=67；E4-⑦ 标题区 diff=0/13000；
+  08c 选中环顶 (85,90,102)、内点 (76,141,255)。C 轮回归 12 场景 × J1–J6 = 72/72 PASS。
+  明细见仓库外 `evidence-fix/05-e-basic/summary.md`。
+
