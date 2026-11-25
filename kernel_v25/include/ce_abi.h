@@ -143,6 +143,22 @@ typedef struct {
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
 /* system-call table: 61 slots, v2.11 */
+/* Stage 3 block 4: locale categories (mirror kernel locale.h). LC_COLLATE is
+ * explicitly unsupported. */
+#define LC_CTYPE_CAT     0
+#define LC_NUMERIC_CAT   1
+#define LC_TIME_CAT      2
+#define LC_MONETARY_CAT  3
+#define LC_COLLATE_CAT   4
+#define LC_ALL_CAT       5
+/* locale_query() selectors */
+#define LQ_NAME_Q        0
+#define LQ_DECIMAL_Q     1
+#define LQ_THOUSANDS_Q   2
+#define LQ_CURRENCY_Q    3
+#define LQ_MONTH_Q       100   /* + month 1..12 */
+#define LQ_WDAY_Q        200   /* + wday 0..6 */
+
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -363,6 +379,11 @@ typedef struct catos_api {
     uint32_t (*fcache_stat)(int what, uint32_t arg);                              /*92*/
     /* Stage 3 block 3: scheduler switch count for the calling task (no args). */
     uint32_t (*thread_switches)(void);                                              /*93*/
+    /* Stage 3 block 4: minimal locale. setlocale(category, name) -> 0/negative;
+     * locale_query(category, what, buf, len) copies a NUL-terminated locale
+     * string into buf. LC_COLLATE is unsupported (setlocale returns -22). */
+    int      (*setlocale)(int category, const char *name);                          /*94*/
+    int      (*locale_query)(int category, int what, char *buf, int len);            /*95*/
 } catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do

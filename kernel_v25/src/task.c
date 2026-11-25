@@ -12,6 +12,7 @@
  */
 
 #include "task.h"
+#include "locale.h"
 #include <stddef.h>
 #include "fpu.h"
 #include "usb.h"
@@ -900,6 +901,8 @@ enum {
     SYS_FCACHE_STAT,
     /* Stage 3 block 3: per-task scheduler switch counter (slot 93, no args). */
     SYS_THREAD_SWITCHES,
+    /* Stage 3 block 4: minimal locale (slots 94..95). */
+    SYS_SETLOCALE, SYS_LOCALE_QUERY,
     SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
@@ -980,6 +983,7 @@ static void build_vsyscall_page(uint8_t *page) {
         /*87*/2, /*88*/1, /*89*/3, /*90*/3, /*91*/3, /* open/close/read/write/lseek */
         /*92*/2,                                    /* fcache_stat(what,arg) */
         /*93*/0,                                    /* thread_switches() */
+        /*94*/2, /*95*/4,                          /* setlocale / locale_query */
     };
     uint32_t taddr[SYS_COUNT];
     /* Overflow segment: thunks that do not fit segment A go into the gap
@@ -2531,6 +2535,20 @@ void isr_syscall(int_frame_t *f) {
     case SYS_THREAD_SWITCHES:
         ret = t->switches;
         break;
+    case SYS_SETLOCALE: {
+        char nm[24];
+        if (u2k_str(nm, (const char *)a2, sizeof(nm)) != 0) { ret = (uint32_t)-3; break; }
+        ret = (uint32_t)locale_set((int)a1, nm);
+        break;
+    }
+    case SYS_LOCALE_QUERY: {
+        char tmp[32];
+        int rc = locale_query((int)a1, (int)a2, tmp, sizeof(tmp));
+        if (rc != 0) { ret = (uint32_t)rc; break; }
+        if (copy_to_user(t, (char *)a3, tmp, sizeof(tmp)) != 0)
+            { ret = (uint32_t)-3; break; }
+        ret = 0; break;
+    }
     default: ret = (uint32_t)-8; break;
     }
 #ifdef CATOS_BENCH
