@@ -89,12 +89,26 @@ static blk_spec st_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
 
 static void st_option_label(int i) {
     const char *name = (i == 0) ? "App custom" : "Calm & soft";
-    int sel = (style_calm ? 1 : 0) == i;
-    const char *mark = sel ? "(*) " : "( ) ";
     int o = 0;
-    while (*mark && o < 22) st_opt_txt[i][o++] = *mark++;
     while (*name && o < 23) st_opt_txt[i][o++] = *name++;
     st_opt_txt[i][o] = 0;
+}
+
+/* 08c：单选真图形——16×16 外环（border 色），选中时中心 8×8 内点（accent）。
+ * usr 存选项序号；不再用 ASCII "( )"/"(*)" 占位。 */
+static void st_radio_render(block_id id) {
+    block *b = btable_get(id);
+    if (!b) return;
+    const struct style *tok = gui_active_style();
+    int idx = (int)(intptr_t)b->usr;
+    int sel = (style_calm ? 1 : 0) == idx;
+    int x = b->x, y = b->y, w = b->w, h = b->h;
+    gui_draw_border(x, y, w, h, tok->border, 1);
+    if (sel) {
+        int dw = 8, dh = 8;
+        int dx = x + (w - dw) / 2, dy = y + (h - dh) / 2;
+        gui_fill_rect(dx, dy, dw, dh, tok->accent);
+    }
 }
 
 void st_refresh_options(void) {
@@ -147,6 +161,7 @@ void gui_settings_open(void) {
     title.role_bg = ROLE_BAR;
     title.bg = INHERIT_COLOR;
     title.align_cross = XALN_CENTER;
+    title.align_main = ALN_SPACE_BETWEEN;   /* 08a：Settings 左、Close 右，分列不叠 */
     block_id bar = b_row(st_root, &title);
     b_text(bar, 0, "Settings");
     blk_spec close = st_panel(LAYER_WORK, 56, ST_TITLE_H - 4, 1);
@@ -162,6 +177,7 @@ void gui_settings_open(void) {
 
     blk_spec cat = st_panel(LAYER_WORK, 96, 0, 0);
     cat.role_bg = ROLE_BAR; cat.bg = INHERIT_COLOR;
+    cat.pad_l = ST_PAD;    /* 08b：左内边距，首字母不被切 */
     block_id cat_id = b_column(body_id, &cat);
     blk_spec cat_row = st_panel(LAYER_WORK, 96, 24, 0);
     cat_row.role_fg = ROLE_ACCENT;
@@ -175,7 +191,15 @@ void gui_settings_open(void) {
         blk_spec row = st_panel(LAYER_WORK, 160, 24, 1);
         row.on_click = st_opt_click;
         row.z = (int32_t)i;
+        row.gap = ST_PAD;
         st_opt[i] = b_row(opts_id, &row);
+
+        blk_spec rad = st_panel(LAYER_WORK, 16, 16, 0);
+        rad.role_bg = ROLE_NONE; rad.bg = INHERIT_COLOR;
+        rad.render = st_radio_render;
+        rad.usr = (void *)(intptr_t)i;
+        b_rect(st_opt[i], &rad);
+
         b_text(st_opt[i], 0, st_opt_txt[i]);
     }
 
