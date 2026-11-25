@@ -270,6 +270,10 @@ static void shot_free_float_build(void) {
 static int probe_no_sample;     /* 不建示例面板，避免压住待测窗口顶角 */
 static int probe_menu_raise;    /* 菜单上移，避开任务栏裁切 BL/BR */
 static int probe_card_only;     /* 控件卡参照帧：只建卡片，不放按钮/输入栏 */
+static int probe_flush_inset;   /* C 轮：父卡内嵌贴左/贴顶 + 贴右/贴底对照子块 */
+static int probe_flush_hpair;   /* C 轮：两块横向紧贴，零缝，各自 r12 */
+static int probe_flush_vgroup;  /* C 轮：纵向按钮整组，仅外沿四角圆 */
+static int probe_flush_bleed;  /* C 轮：full-bleed 通栏底条，bleed=1 */
 
 /* 探针控件卡：一张卡片内放一个按钮与一个输入框，供 r12 / r8 档角部采样。
  * 自由层绝对定位，对齐 shot_free_interact_build 范式，不依赖 column 布局。 */
@@ -294,6 +298,86 @@ static void shot_controls_build(void) {
         ip->x = 156; ip->y = 184; ip->moved = 1;
     }
     layout_run();
+}
+
+/* C 轮组 1：父卡 r16 内嵌两子块——C1 贴左+贴顶，C2 贴右+贴底（对照）。
+ * 自由层绝对定位，8pt 网格；父卡 pad=0，内容框即整框。 */
+static void shot_flush_inset_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec par = spec_panel(LAYER_WORK, 320, 200, 1);
+    block_id P = b_rect(F, &par);
+    block *pp = btable_get(P);
+    pp->x = 80; pp->y = 80; pp->moved = 1;
+    pp->st.corner_radius = 16;
+
+    blk_spec c1 = spec_panel(LAYER_WORK, 120, 80, 1);
+    block_id C1 = b_rect(P, &c1);
+    block *c1p = btable_get(C1);
+    c1p->x = 80;  c1p->y = 80;  c1p->moved = 1;
+
+    blk_spec c2 = spec_panel(LAYER_WORK, 120, 80, 1);
+    block_id C2 = b_rect(P, &c2);
+    block *c2p = btable_get(C2);
+    c2p->x = 280; c2p->y = 200; c2p->moved = 1;
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+}
+
+/* C 轮组 2：两块横向紧贴，B.x = A.x + A.w（精确相等、零缝），各自 r12。 */
+static void shot_flush_hpair_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec a = spec_panel(LAYER_WORK, 160, 80, 1);
+    block_id A = b_rect(F, &a);
+    block *ap = btable_get(A);
+    ap->x = 80;  ap->y = 120; ap->moved = 1;
+    ap->st.corner_radius = 12;
+
+    blk_spec b = spec_panel(LAYER_WORK, 160, 80, 1);
+    block_id B = b_rect(F, &b);
+    block *bp = btable_get(B);
+    bp->x = 240; bp->y = 120; bp->moved = 1;
+    bp->st.corner_radius = 12;
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+}
+
+/* C 轮组 3：纵向按钮整组 4 行，行高 24、y 严格相接；仅整组最外沿四角圆，
+ * 组内相接边方角（同列兄弟紧贴由 flush_edges 判 flush）。 */
+static void shot_flush_vgroup_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    for (int i = 0; i < 4; i++) {
+        blk_spec r = spec_panel(LAYER_WORK, 160, 24, 1);
+        block_id id = b_button(F, &r, "Item");
+        block *p = btable_get(id);
+        p->x = 80; p->y = 100 + i * 24; p->moved = 1;
+    }
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+}
+
+/* C 轮组 4：full-bleed 通栏底条，左右顶满屏幕，bleed=1；左右角方角、
+ * 不新画弧，外侧沿用屏幕边。 */
+static void shot_flush_bleed_build(void) {
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+
+    blk_spec bar = spec_panel(LAYER_WORK, GFX24_W, 48, 0);
+    bar.role_bg = ROLE_BAR;
+    block_id Bar = b_rect(F, &bar);
+    block *bp = btable_get(Bar);
+    bp->x = 0; bp->y = 552; bp->moved = 1;
+    bp->bleed = 1;
+
+    layout_run();
+    mark_subtree_paint(gui_root_block());
 }
 
 /* 样例五：左手柄缩放像素断言。BAR 块初始 (230,90,160,100)，拖左手柄
@@ -1862,6 +1946,10 @@ void gui_shell_cmd(const char *arg) {
     if (!strcmp_probe(word, "shot-menu"))  { shot_menu = 1; probe_menu_raise = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls")) { shot_controls = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-controls-card")) { shot_controls = 1; probe_no_sample = 1; probe_card_only = 1; }
+    else if (!strcmp_probe(word, "shot-flush-inset"))  { probe_flush_inset = 1;  probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-flush-hpair"))  { probe_flush_hpair = 1;  probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-flush-vgroup")) { probe_flush_vgroup = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-flush-bleed")) { probe_flush_bleed = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-empty")) { probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-light")) shot_tok = TOK_LIGHT;
     else if (!strcmp_probe(word, "shot-hc"))    shot_tok = TOK_HIGH_CONTRAST;
@@ -1907,13 +1995,19 @@ void gui_shell_cmd(const char *arg) {
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
                       free_interact;
+    int flush_probe = probe_flush_inset || probe_flush_hpair ||
+                      probe_flush_vgroup || probe_flush_bleed;
     gui_begin();
-    if (!free_sample) gui_demo_build();
-    if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
+    if (!free_sample && !flush_probe) gui_demo_build();
+    if (shot_reset) { gui_reset(); if (!free_sample && !flush_probe) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
     if (shot_style >= 0) gui_style_set(shot_style);
     if (shot_menu) gui_menu_open();
     if (shot_controls) { shot_controls_build(); gui_frame(); }
+    if (probe_flush_inset)  { shot_flush_inset_build();  gui_frame(); }
+    if (probe_flush_hpair)  { shot_flush_hpair_build();  gui_frame(); }
+    if (probe_flush_vgroup) { shot_flush_vgroup_build(); gui_frame(); }
+    if (probe_flush_bleed)  { shot_flush_bleed_build();  gui_frame(); }
     if (shot_crop) shot_crop_build();
     if (shot_drag) shot_drag_build();
     if (free_dash)  shot_free_dash_build();

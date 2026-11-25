@@ -274,6 +274,11 @@ static void flush_edges(block *b, int *fl, int *fr, int *ft, int *fb) {
             if (s->y + s->h == b->y) *ft = 1;
             if (b->y + b->h == s->y) *fb = 1;
         }
+        /* 同行兄弟紧贴（横向零缝）：相接竖边整条方角。 */
+        if (s->y == b->y && s->y + s->h == b->y + b->h) {
+            if (s->x == b->x + b->w) *fr = 1;
+            if (b->x == s->x + s->w) *fl = 1;
+        }
     }
 }
 
@@ -399,6 +404,24 @@ static void body_fill(block *b, uint32_t color) {
     }
 }
 
+/* 兄弟块相接方向：cl/cr/ct/cb = 本块左/右/上/下边是否贴到兄弟。 */
+static void border_contacts(block *b, int *cl, int *cr, int *ct, int *cb) {
+    *cl = *cr = *ct = *cb = 0;
+    block *p = b->parent;
+    if (!p) return;
+    for (block *s = p->first_child; s; s = s->next_sibling) {
+        if (s == b) continue;
+        if (s->y == b->y && s->y + s->h == b->y + b->h) {
+            if (s->x == b->x + b->w) *cr = 1;
+            if (b->x == s->x + s->w) *cl = 1;
+        }
+        if (s->x == b->x && s->x + s->w == b->x + b->w) {
+            if (s->y == b->y + b->h) *cb = 1;
+            if (b->y == s->y + s->h) *ct = 1;
+        }
+    }
+}
+
 static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
     if (bw < 1) return;
     if (calm_shape_eligible(b)) {
@@ -413,6 +436,20 @@ static void body_border(block *b, uint32_t color, uint32_t bg, uint8_t bw) {
             if (inner.w > 0 && inner.h > 0)
                 fill_round(&inner, tl, tr, bl, br, bg);
         }
+        /* §14.3 贴边侧描边省略：贴父/屏幕边的一侧不画描边；与兄弟相接的
+         * 共享边只保留左/上兄弟那一条 1px 分隔线，右/下兄弟同侧描边擦除，
+         * 不形成 2px 双线。 */
+        int fl, fr, ft, fb, cl, cr, ct, cb;
+        flush_edges(b, &fl, &fr, &ft, &fb);
+        border_contacts(b, &cl, &cr, &ct, &cb);
+        int erase_l = fl || cl;
+        int erase_r = fr && !cr;
+        int erase_t = ft || ct;
+        int erase_b = fb && !cb;
+        if (erase_t) gui_fill_rect(b->x, b->y, b->w, bw, bg);
+        if (erase_b) gui_fill_rect(b->x, b->y + b->h - bw, b->w, bw, bg);
+        if (erase_l) gui_fill_rect(b->x, b->y, bw, b->h, bg);
+        if (erase_r) gui_fill_rect(b->x + b->w - bw, b->y, bw, b->h, bg);
     } else {
         gui_draw_border(b->x, b->y, b->w, b->h, color, bw);
     }
@@ -437,8 +474,9 @@ static void paint_halo(block *b) {
 
     int fl, fr, ft, fb;
     flush_edges(b, &fl, &fr, &ft, &fb);
-    /* 成组紧贴（上下接兄弟）或贴父上/下边：不投接触/投影层。 */
-    if (ft || fb) return;
+    /* 任一贴边侧（上下接兄弟/父边、左右接兄弟/父边）均不投影：
+     * 接缝处不得造假空隙或暗带，阴影只出现在自由边外侧。 */
+    if (fl || fr || ft || fb) return;
 
     uint32_t under = b->parent ? resolve_color(b->parent, 1)
                                : gui_active_style()->bg;
