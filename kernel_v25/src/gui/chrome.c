@@ -312,6 +312,7 @@ static void shot_controls_build(void) {
         ip->x = 156; ip->y = 184; ip->moved = 1;
     }
     layout_run();
+    mark_subtree_paint(gui_root_block());
 }
 
 /* E1-③ 探针：按钮三态同点采样（idle/hover/pressed 分帧注入，不触发点击/焦点反色）。 */
@@ -331,6 +332,7 @@ static void shot_e1_btn_build(const char *state) {
         gui_inject_press_block(e1_btn_id);
 
     layout_run();
+    mark_subtree_paint(gui_root_block());
     block *b = btable_get(e1_btn_id);
     ser_write("GUI:e1-btn rect ");
     if (b) { ser_dec(b->x); ser_write(","); ser_dec(b->y); ser_write(",");
@@ -355,6 +357,7 @@ static void shot_e1_outline_build(void) {
     b_text(e1_row_b, 0, "Plain");
 
     layout_run();
+    mark_subtree_paint(gui_root_block());
     block *A = btable_get(e1_row_a), *B = btable_get(e1_row_b);
     ser_write("GUI:e1-outline a ");
     if (A) { ser_dec(A->x); ser_write(","); ser_dec(A->y); ser_write(",");
@@ -362,11 +365,6 @@ static void shot_e1_outline_build(void) {
     ser_write(" b ");
     if (B) { ser_dec(B->x); ser_write(","); ser_dec(B->y); ser_write(",");
              ser_dec(B->w); ser_write(","); ser_dec(B->h); }
-    if (A) { ser_write(" dbg kind="); ser_dec(A->kind);
-             ser_write(" rolebg="); ser_dec(A->st.role_bg);
-             ser_write(" bg="); ser_dec(A->st.bg);
-             ser_write(" bw="); ser_dec(A->st.border_w);
-             ser_write(" vis="); ser_dec(A->visible); }
     ser_write("\n");
 }
 
