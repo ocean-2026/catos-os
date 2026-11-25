@@ -1,0 +1,322 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "fixture",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column"
+        },
+        "padding": {
+          "t": 8,
+          "r": 8,
+          "b": 8,
+          "l": 8
+        },
+        "req": {
+          "w": 800,
+          "h": 600
+        },
+        "fill": "panel",
+        "children": [
+          {
+            "id": 2,
+            "kind": "column",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "layout": {
+              "flow": "row",
+              "gap": 0
+            },
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "children": [
+              {
+                "id": 3,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 120,
+                  "h": 24
+                },
+                "fill": "bar",
+                "text": "One",
+                "children": [],
+                "rect": {
+                  "x": 8,
+                  "y": 8,
+                  "w": 120,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "T",
+                  "B"
+                ],
+                "ce": {
+                  "id": 3,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 120,
+                  "req_h": 24,
+                  "text_off": 0,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 4,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 120,
+                  "h": 24
+                },
+                "fill": "bar",
+                "text": "Two",
+                "children": [],
+                "rect": {
+                  "x": 128,
+                  "y": 8,
+                  "w": 120,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "T",
+                  "B"
+                ],
+                "ce": {
+                  "id": 4,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 120,
+                  "req_h": 24,
+                  "text_off": 4,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 5,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 120,
+                  "h": 24
+                },
+                "fill": "bar",
+                "text": "Three",
+                "children": [],
+                "rect": {
+                  "x": 248,
+                  "y": 8,
+                  "w": 120,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "R",
+                  "T",
+                  "B"
+                ],
+                "ce": {
+                  "id": 5,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 120,
+                  "req_h": 24,
+                  "text_off": 8,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 8,
+              "y": 8,
+              "w": 360,
+              "h": 24
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 1,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 6,
+            "kind": "column",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "layout": {
+              "flow": "column"
+            },
+            "padding": {
+              "t": 8,
+              "r": 8,
+              "b": 8,
+              "l": 8
+            },
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "children": [
+              {
+                "id": 7,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "CatOS block tree sample paragraph text.",
+                "children": [],
+                "rect": {
+                  "x": 16,
+                  "y": 40,
+                  "w": 312,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "R",
+                  "T",
+                  "B"
+                ],
+                "ce": {
+                  "id": 7,
+                  "parent": 6,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": 14,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 8,
+              "y": 32,
+              "w": 328,
+              "h": 32
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "ce": {
+              "id": 6,
+              "parent": 1,
+              "kind": 1,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 600
+        },
+        "flush_sides": [
+          "L",
+          "R",
+          "T",
+          "B"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 800,
+          "req_h": 600,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

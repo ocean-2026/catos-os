@@ -1,0 +1,6 @@
+blocks      : 20 (quota 256)
+text bytes  : 118 (quota 4096)
+pool bytes  : 87 (quota 32768)
+recs bytes  : 800 (40 bytes/rec)
+wrote samples/startmenu.recs.bin
+wrote samples/startmenu.strings.bin

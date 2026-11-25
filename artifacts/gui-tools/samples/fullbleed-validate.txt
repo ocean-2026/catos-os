@@ -1,0 +1,27 @@
+PASS C1 root root id=0
+PASS C1 count 6 blocks (quota 256)
+PASS C1 depth max depth 2 (quota 16)
+PASS G1 id=0 
+PASS G1 id=1 
+PASS G1 id=2 
+PASS G1 id=3 
+PASS G1 id=4 
+PASS G1 id=5 
+PASS G2 spacing 
+PASS B2 outer bounds 
+PASS B1 clip bounds 
+PASS R1 flush corners 
+PASS S1 flush stroke 
+PASS S2 flush shadow 
+PASS D1 shared edge 
+PASS T1 id=2 text_w=104 content_w=96 h=16
+PASS T1 id=4 text_w=136 content_w=128 h=16
+PASS T1 id=5 text_w=144 content_w=136 h=16
+PASS L1 id=0 layer=work
+PASS L1 id=1 layer=work
+PASS L1 id=2 layer=work
+PASS L1 id=3 layer=work
+PASS L1 id=4 layer=work
+PASS L1 id=5 layer=work
+PASS O1 scroll range 
+FAIL=0

@@ -1,0 +1,6 @@
+blocks      : 18 (quota 256)
+text bytes  : 79 (quota 4096)
+pool bytes  : 86 (quota 32768)
+recs bytes  : 720 (40 bytes/rec)
+wrote samples/settings.recs.bin
+wrote samples/settings.strings.bin

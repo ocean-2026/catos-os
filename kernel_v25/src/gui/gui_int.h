@@ -56,6 +56,9 @@ void      gui_set_key_hook(int (*fn)(int code, void *ud), void *ud);
 /* layout.c */
 void      layout_run(void);
 
+/* blkgen.c: built-in page built from a .blk.json fixture (full-fidelity) */
+int       blkgen_build(void);
+
 /* input.c（探针注入钩子，复用真实命中/拖拽路径） */
 void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);

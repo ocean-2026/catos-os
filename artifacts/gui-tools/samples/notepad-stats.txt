@@ -1,0 +1,6 @@
+blocks      : 9 (quota 256)
+text bytes  : 47 (quota 4096)
+pool bytes  : 51 (quota 32768)
+recs bytes  : 360 (40 bytes/rec)
+wrote samples/notepad.recs.bin
+wrote samples/notepad.strings.bin
