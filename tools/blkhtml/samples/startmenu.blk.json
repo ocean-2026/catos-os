@@ -1,0 +1,859 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "startmenu",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "free"
+        },
+        "padding": {
+          "t": 0,
+          "r": 0,
+          "b": 0,
+          "l": 0
+        },
+        "req": {
+          "w": 800,
+          "h": 600
+        },
+        "children": [
+          {
+            "id": 2,
+            "kind": "column",
+            "layer": "overlay",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "layout": {
+              "flow": "free"
+            },
+            "padding": {
+              "t": 8,
+              "r": 8,
+              "b": 8,
+              "l": 8
+            },
+            "req": {
+              "w": 256,
+              "h": 480
+            },
+            "px": {
+              "y": 8,
+              "x": 8
+            },
+            "fill": "panel",
+            "stroke": {
+              "w": 1,
+              "sides": [
+                "L",
+                "R",
+                "T",
+                "B"
+              ],
+              "color": null
+            },
+            "overflow": "scroll",
+            "anchor": [
+              "R",
+              "T"
+            ],
+            "children": [
+              {
+                "id": 3,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 0
+                },
+                "fill": "bar",
+                "text": "Notepad",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 16,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R",
+                  "T"
+                ],
+                "ce": {
+                  "id": 3,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 4,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 24
+                },
+                "fill": "bar",
+                "text": "Canvas demo",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 40,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 4,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 5,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 48
+                },
+                "fill": "bar",
+                "text": "Files",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 64,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 5,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 6,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 72
+                },
+                "fill": "bar",
+                "text": "Images",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 88,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 6,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 7,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 96
+                },
+                "fill": "bar",
+                "text": "Browser",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 112,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 7,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 8,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 120
+                },
+                "fill": "bar",
+                "text": "Settings",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 136,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 8,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 9,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 144
+                },
+                "fill": "bar",
+                "text": "Terminal",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 160,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 9,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 10,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 168
+                },
+                "fill": "bar",
+                "text": "Launch demo",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 184,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 10,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 11,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 192
+                },
+                "fill": "bar",
+                "text": "Notepad",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 208,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 11,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 12,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 216
+                },
+                "fill": "bar",
+                "text": "Files",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 232,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 12,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 13,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 240
+                },
+                "fill": "bar",
+                "text": "Images",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 256,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 13,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 14,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 264
+                },
+                "fill": "bar",
+                "text": "Browser",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 280,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 14,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 15,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 288
+                },
+                "fill": "bar",
+                "text": "Settings",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 304,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 15,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 16,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 312
+                },
+                "fill": "bar",
+                "text": "Terminal",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 328,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 16,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 17,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 336
+                },
+                "fill": "bar",
+                "text": "Help",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 352,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 17,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 18,
+                "kind": "divider",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 8
+                },
+                "px": {
+                  "x": 0,
+                  "y": 368
+                },
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 384,
+                  "w": 240,
+                  "h": 8
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 18,
+                  "parent": 2,
+                  "kind": 9,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 8,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 19,
+                "kind": "button",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 240,
+                  "h": 24
+                },
+                "px": {
+                  "x": 0,
+                  "y": 0
+                },
+                "fill": "bar",
+                "anchor": [
+                  "B"
+                ],
+                "text": "catos-user",
+                "children": [],
+                "rect": {
+                  "x": 544,
+                  "y": 456,
+                  "w": 240,
+                  "h": 24
+                },
+                "flush_sides": [
+                  "L",
+                  "R",
+                  "B"
+                ],
+                "ce": {
+                  "id": 19,
+                  "parent": 2,
+                  "kind": 12,
+                  "layer": 200,
+                  "req_w": 240,
+                  "req_h": 24,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 536,
+              "y": 8,
+              "w": 256,
+              "h": 480
+            },
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 1,
+              "layer": 4000,
+              "req_w": 256,
+              "req_h": 480,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 600
+        },
+        "flush_sides": [
+          "L",
+          "R",
+          "T",
+          "B"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 800,
+          "req_h": 600,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

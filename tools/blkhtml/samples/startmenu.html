@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Start menu overlay</title>
+<style>
+.menu  { background: panel; border: 1px; padding: 8px;
+         overflow: scroll; }
+.item  { background: bar; width: 240px; height: 24px; }
+.user  { background: bar; width: 240px; height: 24px; }
+</style>
+</head>
+<body>
+  <div style="position:absolute;width:800px;height:600px;padding:0;">
+    <div class="menu" data-blk-layer="overlay" data-blk-anchor="R|T"
+         style="position:absolute;width:256px;height:480px;right:8px;top:8px;overflow:scroll;">
+      <button class="item" style="left:0px;top:0px;">Notepad</button>
+      <button class="item" style="left:0px;top:24px;">Canvas demo</button>
+      <button class="item" style="left:0px;top:48px;">Files</button>
+      <button class="item" style="left:0px;top:72px;">Images</button>
+      <button class="item" style="left:0px;top:96px;">Browser</button>
+      <button class="item" style="left:0px;top:120px;">Settings</button>
+      <button class="item" style="left:0px;top:144px;">Terminal</button>
+      <button class="item" style="left:0px;top:168px;">Launch demo</button>
+      <button class="item" style="left:0px;top:192px;">Notepad</button>
+      <button class="item" style="left:0px;top:216px;">Files</button>
+      <button class="item" style="left:0px;top:240px;">Images</button>
+      <button class="item" style="left:0px;top:264px;">Browser</button>
+      <button class="item" style="left:0px;top:288px;">Settings</button>
+      <button class="item" style="left:0px;top:312px;">Terminal</button>
+      <button class="item" style="left:0px;top:336px;">Help</button>
+      <hr style="width:240px;height:8px;left:0px;top:368px;">
+      <button class="user" data-blk-anchor="B" style="left:0px;top:0px;">catos-user</button>
+    </div>
+  </div>
+</body>
+</html>

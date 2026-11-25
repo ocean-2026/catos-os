@@ -1,0 +1,222 @@
+{
+  "schema_version": "catos.blk/1.0",
+  "single_source_of_truth": {
+    "rule": "本 schema 是 .blk.json 的唯一契约：html2blk 产出、blk2bin 消费、preview 渲染、validate 断言，四者只认这一份字段定义。禁止在脚本里另立字段名或另写一套样式表。",
+    "kernel_refs": [
+      "kernel_v25/include/ce_abi.h :: ce_blk_rec_t（ce 声明式提交记录，9 字段）",
+      "kernel_v25/include/gui/block.h :: blk_spec / block / blk_kind / OVF_* / ANC_* / LAYER_*",
+      "kernel_v25/include/gui/tokens.h :: struct style / gui_role / gui_token",
+      "kernel_v25/src/gui/decl.c :: decl_commit（CE 提交校验与配额）",
+      "kernel_v25/src/gui/layout.c :: layout_free / grid_snap",
+      "kernel_v25/src/gui/paint.c :: calm 圆角掩码 / paint_halo 双层阴影",
+      "kernel_v25/src/font_ascii.inc :: 8x16 ASCII 字形（文本度量与预览唯一字模）"
+    ],
+    "ce_slots": {
+      "72": "blk_commit(const void *recs, int n, const char *strings, int slen)",
+      "73": "blk_event_poll(ce_blk_event_t *ev, int timeout_ms)",
+      "74": "blk_image_load(const char *path)",
+      "75": "blk_image_free(int res)",
+      "76": "blk_text_width(const char *s)"
+    }
+  },
+
+  "ce_blk_rec_t": {
+    "note": "v2.80 @ 89584c4 的线上记录，逐字段镜像；这是唯一能经槽 72 提交进内核的部分。",
+    "byte_layout": "int32 id; int32 parent; uint8 kind; uint8 pad0; uint16 layer; int32 req_w; int32 req_h; int32 text_off; int32 pix_off; int32 pix_w; int32 pix_h; int32 res;  => 40 bytes/rec（无空洞：id@0 parent@4 kind@8 pad0@9 layer@10 req_w@12 req_h@16 text_off@20 pix_off@24 pix_w@28 pix_h@32 res@36）",
+    "wire_stride_note": "内核按 n * sizeof(ce_blk_rec_t) copy_from_user（decl.c:329-330），sizeof=40，所以线上步长必须是 40；曾经写成 36 是错的（漏了 pix_off）。",
+    "fields": {
+      "id": "int32 块 id（>=1，树内唯一）",
+      "parent": "int32 父块 id；根记录 parent=0",
+      "kind": "uint8 blk_kind 枚举值（见 kind_enum）",
+      "pad0": "uint8 对齐填充，必须写 0",
+      "layer": "uint16 LAYER_*；经槽 72 只接受 200 (WORK)",
+      "req_w": "int32 声明宽，-1 = auto",
+      "req_h": "int32 声明高，-1 = auto",
+      "text_off": "int32 文本在 strings 串池中的起始偏移；-1 = 无文本；否则必须 0 <= off < slen",
+      "pix_off": "int32 位图在串池/位图区的偏移；-1 = 无图",
+      "pix_w": "int32 位图宽",
+      "pix_h": "int32 位图高",
+      "res": "int32 槽 74 载入的图像资源句柄；-1 = 无"
+    }
+  },
+
+  "kind_enum": {
+    "root": 0, "column": 1, "row": 2, "stack": 3, "text": 4, "rect": 5,
+    "image": 6, "surface": 7, "spacer": 8, "divider": 9, "canvas": 10,
+    "free": 11, "button": 12, "input": 13, "term": 14
+  },
+
+  "layer_enum": { "bg": 0, "content": 100, "work": 200, "chrome": 3000, "overlay": 4000, "toast": 5000 },
+
+  "anchor_bits": { "L": 1, "R": 2, "T": 4, "B": 8, "HCENTER": 16, "VCENTER": 32 },
+
+  "overflow_enum": { "clip": 0, "visible": 1, "scroll": 2 },
+
+  "align_main_enum": ["start", "center", "end", "space_between"],
+  "align_cross_enum": ["start", "center", "end", "stretch"],
+
+  "token_palette": {
+    "note": "取自 kernel_v25/src/gui/tokens.c，预览必须逐字使用，禁止自拟配色。",
+    "dark":  { "fg": "E8E8EC", "bg": "1E1E26", "panel": "2A2A34", "bar": "3A3A48", "border": "555A66", "line": "555A66", "accent": "4C8DFF" },
+    "light": { "fg": "181820", "bg": "ECECF1", "panel": "DDDDE6", "bar": "C8C8D6", "border": "8A8F9E", "line": "8A8F9E", "accent": "2563D8" },
+    "hc":    { "fg": "FFFFFF", "bg": "000000", "panel": "101010", "bar": "202020", "border": "FFFF00", "line": "FFFF00", "accent": "FFFF00" }
+  },
+
+  "font": {
+    "source": "kernel_v25/src/font_ascii.inc",
+    "cell": "8x16；一个字形 16 字节，每字节一条扫描线，MSB 为最左像素",
+    "advance": "ASCII = 8px；双字节（0x81..0xFE）= 16px；scale=2 时各乘 2",
+    "width_rule": "与 decl_text_width() 完全一致；溢出按 text_overflow 处理"
+  },
+
+  "quotas": {
+    "note": "kernel_v25/include/gui/decl.h",
+    "max_blocks": 256, "max_depth": 16, "max_text_bytes": 4096, "max_pool_bytes": 32768
+  },
+
+  "node": {
+    "id": "int 必填；树内唯一；根节点 id=0，其余 >=1",
+    "parent": "int 可选，由工具按 children 反向填充（禁止手写与 children 冲突的值）",
+    "kind": "enum 必填，取值见 kind_enum",
+    "layer": "enum 可选，默认 work",
+    "rect": "{x,y,w,h} 必填（px），生成器产出的 8pt 量化绝对几何；validate 按此断言包含与贴边",
+    "req": "{w,h} 可选，默认 {-1,-1}；-1 = auto",
+    "layout": "{flow:column|row|stack|free, gap:int, align_main, align_cross} 可选",
+    "padding": "int 或 {t,r,b,l} 可选；取值必须属于 allowed_spacing",
+    "anchor": "字符串列表 可选，仅 FREE 子块；取值 L/R/T/B/HCENTER/VCENTER",
+    "px": "{x,y} 可选，锚点像素偏移",
+    "pct": "{x,y,w,h} 可选，1/1000 父框（0 = 未声明）",
+    "min_max": "{min_w,min_h,max_w,max_h} 可选，0 = 不设，字段直写 min_w 等名",
+    "margin": "int 或 {t,r,b,l} 可选，外边距",
+    "overflow": "enum 可选，默认 clip",
+    "scroll": "{x,y} 可选，仅 overflow=scroll 有意义",
+    "drag": "none|title|full 可选，默认 none",
+    "drag_bounds": "free|parent|screen 可选，默认 free",
+    "resize": "{dir:[L,R,T,B], edge:6, min_w:24, min_h:24, max_w:0, max_h:0, step:0} 可选",
+    "bleed": "bool 可选，默认 false；true = 忽略父 padding 贴父外框",
+    "visible": "bool 可选，默认 true",
+    "focusable": "bool 可选，默认 false",
+    "inert": "bool 可选，默认 false",
+    "z": "int 可选，默认 0",
+    "fill": "角色名（fg/bg/panel/bar/border/line/accent）或 #RRGGBB 可选；默认 bg",
+    "fg": "同上，文本/前景色角色，默认 fg",
+    "accent": "同上，默认 accent",
+    "stroke": "{w:0|1|2, sides:[L,R,T,B], color:角色名} 可选",
+    "radius": "{tl,tr,br,bl} 可选（px，档 0/8/12/16/24），设计态逐角声明",
+    "radius_mode": "per_corner|size_ladder 可选，默认 size_ladder；per_corner 只在 design 预览生效，内核无此能力",
+    "shadow": "{mode:none|contact|dual, sides:[L,R,T,B]} 可选；内核实际按 layer 决定 contact/dual，sides 仅 design 态生效",
+    "text": "string 可选，单行",
+    "font": "{scale:1|2} 可选，默认 1",
+    "text_overflow": "ellipsis|clip 可选，默认 ellipsis（超宽截断加 ...）",
+    "pix": "{path,w,h,res} 可选，图像块",
+    "ce": "ce_blk_rec_t 九字段镜像；html2blk 必须写出，blk2bin 重新计算 text_off 后可写回（显式存在便于 review）",
+    "children": "node[] 可选"
+  },
+
+  "allowed_spacing": {
+    "padding": [0, 2, 4, 8, 12, 16, 24],
+    "gap": [0, 4, 8, 12, 16, 24],
+    "margin": [0, 2, 4, 8, 12, 16, 24],
+    "grid": 8,
+    "note": "坐标/尺寸必须是 8 的倍数；padding/gap 只允许上表（对应 layout.c grid_snap 的 {4,8,12,16,24} 加紧凑档 2）"
+  },
+
+  "html_subset": {
+    "tags": {
+      "div": "容器：display:flex → row/column；position:absolute → free 子块；block 无 flex → column",
+      "span": "text（行内即文本块）",
+      "button": "button",
+      "input": "input（type=text 单行）",
+      "img": "image",
+      "hr": "divider",
+      "br/space": "spacer"
+    },
+    "attributes": {
+      "id/class": "class 只能命中 HTML 内联 <style> 里定义的受限规则；未知 class 报 UNSUPPORTED_CLASS",
+      "style": "仅接受白名单属性（见 css_properties）",
+      "data-blk": "声明层覆盖属性（HTML 里唯一的样式外入口）：data-blk-layer=work|overlay|...；data-blk-anchor=\"R,T\"；data-blk-overflow=clip|visible|scroll；data-blk-drag=none|title|full；data-blk-drag-bounds=free|parent|screen；data-blk-resize=\"R,B\"；data-blk-resize-edge=<px>；data-blk-bleed=true；data-blk-role=<role>；data-blk-z=<int>；data-blk-text-overflow=ellipsis|clip"
+    }
+  },
+
+  "css_properties": {
+    "supported": {
+      "display": "flex|block|none",
+      "flex-direction": "row|column",
+      "justify-content": "flex-start|center|flex-end|space-between",
+      "align-items": "flex-start|center|flex-end|stretch",
+      "gap": "px",
+      "padding/padding-*": "px",
+      "margin/margin-*": "px",
+      "width/height": "px | 100% | auto",
+      "position": "absolute|relative|static",
+      "left/top/right/bottom": "px | % （% → pct_* 千分位）",
+      "background / background-color": "角色名或 #RRGGBB",
+      "color": "角色名或 #RRGGBB",
+      "border / border-width / border-color": "0|1|2 px，sides",
+      "border-radius": "px 或 4 值 → per-corner 半径（贴边归零）",
+      "box-shadow": "none | 关键词 contact/dual",
+      "overflow": "hidden|visible|auto|scroll → clip|visible|scroll",
+      "font-size": "12|16 → scale 1|2（其它值报 UNSUPPORTED_FONT_SIZE）",
+      "opacity": "仅 1 允许；其余 UNSUPPORTED",
+      "line-height": "仅匹配 16（scale1）/ 32（scale2）允许",
+      "z-index": "int → z"
+    },
+    "unsupported": [
+      "float", "position:fixed", "position:sticky", "grid / display:grid", "inline-block 布局流",
+      "transform / rotate / scale / translate", "transition / animation",
+      "opacity < 1", "filter / backdrop-filter", "background-image / url()", "gradient",
+      "border-radius 百分比或非档值", "font-family / font-weight / font-style", "text-align 非 left",
+      "伪元素 ::before/::after", "绝对定位之外的自动换行排版", "rgba()/hsl() 任何带 alpha 的颜色",
+      "混合模式 mix-blend-mode", "clip-path / mask", "writing-mode", "direction:rtl",
+      "表格 / 列表语义 (table, li)", "iframe / canvas / video / svg",
+      "多行文本自动折行（BLK_TEXT 单行不换行）", "任意 CSS 变量 var()", "媒体查询 @media", "@font-face"
+    ],
+    "policy": "命中 unsupported 一律以 `UNSUPPORTED <selector> <property>` 记录到 diagnostics 并以非 0 退出（--allow-lossy 才降级为 warning），禁止静默丢弃。"
+  },
+
+  "flush_rule": {
+    "note": "贴边方角（设计层规则；内核当前无此实现，见 FROZEN.md 的 ABI 现状）",
+    "definition": "同一父块内，把子块 rect 与父块内容矩形（父 rect 去掉 padding 后）按 8pt 量化后逐边比较；某条边坐标完全相等即判该侧贴边（左右比 x/x+w，上下比 y/y+h）。",
+    "effects": [
+      "该侧两个角的 radius 归零",
+      "该侧 stroke 省略（不画父与子的双线）",
+      "该侧 shadow 抑制",
+      "父子共享边只保留 1px 分隔线，颜色 role=line"
+    ]
+  },
+
+  "preview_modes": {
+    "app":  "直角 + 1px 描边 + 无阴影；= 内核 /etc/style=app 的像素口径（paint.c calm_shape_eligible 全 false）",
+    "calm": "按块尺寸阶梯取圆角 8/12/16/24（超椭圆 n≈5）+ paint_halo（WORK 接触层 1px@y+1；OVERLAY/TOAST 双层 +y+3/+y+4）；= 内核 /etc/style=calm 的像素口径",
+    "design": "按 .blk.json 的 radius（逐角）与 shadow.sides 渲染，并执行 flush_rule；这是目标态，不是当前内核态",
+    "default": "app"
+  },
+
+  "ce_projection": {
+    "representable": ["id", "parent", "kind", "layer(仅 work)", "req_w", "req_h", "text", "pix/res"],
+    "not_representable": [
+      "rect 绝对几何", "padding", "gap", "align_main", "align_cross", "anchor/px/pct/min/max/margin",
+      "overflow/scroll", "drag/drag_bounds", "resize", "bleed", "z",
+      "fill/fg/accent/stroke", "radius/radius_mode", "shadow", "font.scale", "visible/focusable/inert"
+    ],
+    "consequence": "槽 72 只能还原「树形 + 种类 + 层 + 声明尺寸 + 文本 + 位图」；几何与样式全部丢失。全保真路径是 blk2bin --emit-c 产出的内核内置页（blk_spec 全字段），不是 CE 应用。"
+  },
+
+  "validation_rules": {
+    "C1": "id 唯一且 >=1（根 id=0），parent 存在，无环，节点数 <= 256，深度 <= 16",
+    "G1": "rect 的 x/y/w/h 均为 8 的倍数",
+    "G2": "padding/gap/margin 取值属于 allowed_spacing",
+    "B1": "overflow=clip 时子块 rect 必须完全落在父内容矩形内；visible/scroll 允许越界但必须显式声明",
+    "B2": "子块 rect 不得超出父块 rect 以外（visible 亦然，越界仅允许内容矩形→父外框之间）",
+    "R1": "贴边侧对应的两个角 radius 必须为 0",
+    "S1": "贴边侧不得声明描边",
+    "S2": "贴边侧不得启用阴影",
+    "D1": "贴边共享边只允许 1px 分隔线；父子不得同时在该侧画 2px 以上",
+    "T1": "文本按 font_ascii 度量必须能在自身内容矩形内放下（或声明 ellipsis 截断）",
+    "L1": "layer 取值合法；走 CE 投影时只允许 work",
+    "O1": "overflow=scroll 时 scroll 偏移必须 <= 内容溢出的实际范围",
+    "P1": "blk2bin 产出：text_off/pix_off 落在 strings 池内 (0 <= off < slen 或 -1)，recs 长度 = 40*n（sizeof(ce_blk_rec_t)，decl.c:329-330），pad0=0，pix_off 恒 -1"
+  },
+
+  "text_overflow_policy": "BLK_TEXT 单行不换行：超宽按 ellipsis 截断到最后一个能放下的字并追加 '...'；不足时直接 clip。"
+}

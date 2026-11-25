@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Browser toolbar flush edges</title>
+<style>
+.toolbar { display: flex; flex-direction: row; align-items: center;
+           gap: 0; background: bar; padding: 0; height: 40px; }
+.tbtn    { width: 48px; height: 40px; background: bar;
+           border: 1px; border-radius: 8px; }
+.addr    { width: 480px; height: 24px; background: bg;
+           border: 1px; }
+.menu    { width: 64px; height: 40px; background: bar;
+           border: 1px; border-radius: 8px; }
+</style>
+</head>
+<body>
+  <div class="toolbar" style="width:800px;">
+    <button class="tbtn">Back</button>
+    <button class="tbtn">Fwd</button>
+    <button class="tbtn">Refresh</button>
+    <button class="tbtn">Stop</button>
+    <input class="addr" type="text" placeholder="addr"></input>
+    <button class="menu">Menu</button>
+  </div>
+</body>
+</html>
