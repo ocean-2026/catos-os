@@ -267,3 +267,14 @@ native syscall 延迟低于 `int 0x80`；**外部表现仍与 v25 一致**；I1/
 ---
 
 *本文件为执行纲领，随每批交付滚动更新。任何与旧 `ROADMAP-通用操作系统.md` 冲突之处，以本文为准。*
+
+---
+
+## 附录：v2.80 交付回填（2026-11-25，仅回填，不改上文正文）
+
+- **交付基线**：main / `feat/gui-blocks` HEAD `70df122`；源码/ISO 基线提交 `502d203`（tree `20e607577b24815b91a018b6e2739705bd197c39`），其后均纯文档。
+- **双 ISO**（各 12,079,104 B）：release `catos-v2.80.iso` `c6ebc9d3656e6adec74862eb551ec0deb391adebdce5338b24f841d1246099fe`；test `catos-v2.80-test.iso` `1cf2f08ecda65032fef19368294e6a18e7dcdd4a07e2486f6c3712b2e5adbdd8`。
+- **门禁**：vprobe 10/10（157.1s）、E3 2/2（80.1s）、F11 9/9（161.8s），`--strict` RC=0；日志 `gate-{vprobe,e3,f11}-full-0930.log`。
+- **ACPI 关机已入 main**：`502d203` 仅 cherry-pick `94f3ba1`（PM1_CNT 偏移 `0x48/0x4C→0x40/0x44`、守卫 `paging_map_top()`、`poweroff` 别名）；纯加法访问器，ring3 修因保留。
+- **`feat/smp` 未整体合并**：merge-base 旧基 `76d0f646`，整体合并会回退 TLS 透传（`77f0ec0`）、browser v0.1、ring3 US 位修因（`8fea31e`）；SMP AP/IOAPIC/多核调度仍按本文 P1 战略重写级推进，未在 v25 树内提前落地。
+- **AHCI D4 实测**：本线仅 `ata.c` IDE/ATAPI PIO；诊断 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，AHCI/多磁盘并入本文 C-P3.4，当前 🔶 deferred。

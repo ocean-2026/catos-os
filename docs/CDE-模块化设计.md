@@ -328,3 +328,14 @@ XFAIL。当年 keyprobe "加 display_mode(3) 就 0/3" 同理——切 gfx 后 TE
 - 离屏 buffer 仍受 CE bss 256 KiB 限制（≤216 KiB 可用），见 §10.2。
 - CE 不能静默切回 TEXT（consent 是强制的），退出类交互需按用户确认流程设计。
 - QEMU 实机务必用独立端口 + 跑前清理残留进程，否则会误判。
+
+---
+
+## 附录：v2.80 交付回填（2026-11-25，仅回填，不改上文正文）
+
+- **交付基线**：main / `feat/gui-blocks` HEAD `70df122`；源码/ISO 基线提交 `502d203`（tree `20e607577b24815b91a018b6e2739705bd197c39`），其后均纯文档。
+- **双 ISO**（各 12,079,104 B）：release `catos-v2.80.iso` `c6ebc9d3656e6adec74862eb551ec0deb391adebdce5338b24f841d1246099fe`；test `catos-v2.80-test.iso` `1cf2f08ecda65032fef19368294e6a18e7dcdd4a07e2486f6c3712b2e5adbdd8`。
+- **门禁**：vprobe 10/10（157.1s）、E3 2/2（80.1s）、F11 9/9（161.8s），`--strict` RC=0；日志 `gate-{vprobe,e3,f11}-full-0930.log`。
+- **ACPI 关机已入 main**：`502d203` 仅 cherry-pick `94f3ba1`（PM1_CNT 偏移 `0x48/0x4C→0x40/0x44`、守卫 `paging_map_top()`、`poweroff` 别名 + 串口打点）；纯加法访问器，`task_page_is_user()` 保留。
+- **`feat/smp` 未整体合并**：merge-base 旧基 `76d0f646`，整体合并会回退 TLS 透传（`77f0ec0`）、browser v0.1、ring3 US 位修因（`8fea31e`）；仅选择性 cherry-pick，未带 `6e99d5e` AHCI 骨架。
+- **AHCI D4 实测**：本线无 `ahci.c`/`ahci.h`，仅 `ata.c` IDE/ATAPI PIO；诊断 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，HBA 未响应，D4 🔶 deferred。

@@ -5,7 +5,7 @@
 > 不写「已并入 / 已验收」。desk 线（`BLK_BUTTON/BLK_INPUT/BLK_TERM`、Settings
 > `gui style` corner、`gui term`）**尚未合入**本分支。
 >
-> 分支：`feat/gui-blocks`；HEAD `4d74ca7`（源码/ISO 基线 `502d203`）。TLS 野站与浏览器 v0.1 的真站结果以
+> 分支：`feat/gui-blocks`；HEAD（源码/ISO 基线 `502d203`）。TLS 野站与浏览器 v0.1 的真站结果以
 > 用户线 / 独立工树实测为基线，本合并树复跑结果见 §4 / §5 的 `PENDING` 标注。
 
 ## 1. 合并提交链（feat/gui-blocks）
@@ -28,6 +28,8 @@
 | `77f0ec0` | fix(tls) | HTTPS 状态码透传（`status_out` 接入 https 分支） | `605ea25` |
 | `502d203` | feat(acpi) | 仅 cherry-pick `94f3ba1`：PM1_CNT 偏移/守卫修复 + `poweroff` 别名；纯加法 `paging_map_top()` 访问器 | `77f0ec0` |
 | `4d74ca7` | docs | 全局待办总表回填（debt 线 `8012c37`，仅搬表文件） | `502d203` |
+| `aef156c` | test(evidence) | v2.80 实测证据归档（wild_result.json / browser-accept.json / bmp.png） | `4d74ca7` |
+| 本轮 docs | docs | 待办表归类 + 六份文档回填 + 交接终态（纯文档，无源码改动） | `aef156c` |
 
 > desk 线 `feat/gui-desk` `c2ad71a` **未合并**；`feat/tls-chacha-wip=732abc6` 为用户线备份，
 > 未单独合并、未 reset。stb PNG/JPEG 接入仍阻塞于 32 位软浮点运行时，未入构建。
@@ -231,7 +233,7 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
   `8ac9d54b6b2f482a7b8753177d8714567c0af2a2e4208bb6d03e4f68abfa08a1`（67,108,864 B），未改动。
 
 ### 7.3 main 合并一致性（ff-only）
-- 当前 main 与 feat/gui-blocks 同值（ff-only，无 merge commit）；`502d203` 之后 `4d74ca7`（待办总表）、`979a181`（REPORT）均为纯文档提交，`kernel_v25/` 源码未再变动。
+- 当前 main 与 feat/gui-blocks 同值（ff-only，无 merge commit）；`502d203` 之后 `4d74ca7`（待办总表）、`70df122`（REPORT）、`aef156c`（实测证据归档）及本轮 docs 回填提交均为纯文档/证据提交，`kernel_v25/` 源码未再变动；双 ISO 对应源码基线 `502d203`。
 - 源码/ISO 基线提交 `502d20343b595ca629a2521e1ffc3ae013969c04`，tree=`20e607577b24815b91a018b6e2739705bd197c39`；双 ISO 对得上该基线源码：
   release `catos-v2.80.iso` `c6ebc9d3…aba9f` / test `catos-v2.80-test.iso` `1cf2f08e…addd8`。
 - 合并方式：`git merge --ff-only feat/gui-blocks`（无 merge commit）；`ls-remote` 确认 main 与 feat/gui-blocks 同值。
@@ -254,6 +256,18 @@ resize 三采样：`bottom=(52,42,42)`、`right=(52,42,42)`、`desk=(38,30,30)`�
 - 本线未编入 AHCI 驱动：`build.sh` 源表只有 `ata.c`，无 `ahci.c`/`ahci.h`；shell 无 `ahci` 命令。存储仍为 IDE/ATAPI，PIO 16-bit `inw` 逐扇区搬运（`ata_read` 已按 count 下发多扇区命令，但未上总线主 DMA / `insl` 32-bit 批量）。
 - 实测（H7 重型盘 IO 基线）：顺序读 14.79 → 15.35 MB/s，xfer 64% PIO `insw` 搬 4 MiB + wait 35%；无 AHCI 端口复位 / IDENTIFY 成功 / DMA 完成中断记录。
 - AHCI 骨架来自 smp `6e99d5e`，本轮未搬；本线无 AHCI 门禁探针，上述为现有 IDE/PIO 路径实测，AHCI 打通留待带金属盘矩阵与 DMA 回归环境的轮次。
+
+### 7.5 实测证据归档（提交 `aef156c`）
+
+入库证据（json 判定 + png 截图）：
+
+| 路径 | 内容 | 判定 |
+|---|---|---|
+| `artifacts/d2-tls/wild_result.json` | TLS 野站逐站判定 + 串口打点行 | example.com 200/577 B **PASS**；baidu 227 B `status=null` **FAIL**；整体 verdict **PASS** |
+| `artifacts/overnight-20261124/browser-accept.json` | 浏览器站点 acceptance + 像素结果 | example 577 B **PASS** / sample 300 B **PASS** / https **SKIP** |
+| `artifacts/overnight-20261124/shots/browser-bmp.png` | BMP 800×600 贴图截图 | 随浏览器 BMP/PPM 探针证据 |
+
+未入库（gitignore：`*.ppm` / `*.log` 全局忽略）：`wild_example_com.ppm`、`wild_www_baidu_com.ppm`、`wild_serial.log`、`browser-bmp.ppm` 为原始帧/串口转储，留本地证据目录，不作为提交对象；`/tmp/catos_qemu_stage_<pid>/` 暂存拷贝不算证据。
 
 ## 8. 未决 / 已知限制 / 实测清单
 

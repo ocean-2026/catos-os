@@ -104,3 +104,14 @@ python tests/qemu_regress.py kernel_v25/catos.iso --qemu 'C:\qemu-portable\qemu-
 ## 许可
 
 仓库内代码与文档仅供学习与研究使用。
+
+---
+
+## 附录：v2.80 交付回填（2026-11-25，仅回填，不改上文正文）
+
+- **交付基线**：main / `feat/gui-blocks` HEAD `70df122`；源码/ISO 基线提交 `502d203`（tree `20e607577b24815b91a018b6e2739705bd197c39`），其后均纯文档，`kernel_v25/` 源码未再变。
+- **双 ISO**（各 12,079,104 B）：release `catos-v2.80.iso` `c6ebc9d3656e6adec74862eb551ec0deb391adebdce5338b24f841d1246099fe`；test `catos-v2.80-test.iso` `1cf2f08ecda65032fef19368294e6a18e7dcdd4a07e2486f6c3712b2e5adbdd8`。
+- **门禁**：vprobe 10/10（157.1s）、E3 2/2（80.1s）、F11 9/9（161.8s），`check_link_layout.py --strict` RC=0；日志 `gate-{vprobe,e3,f11}-full-0930.log`。
+- **ACPI 关机已入 main**：`502d203` 仅 cherry-pick `94f3ba1`——PM1_CNT 端口偏移 `0x48/0x4C → 0x40/0x44`、守卫 `paging_map_top()`、`poweroff` 别名 + 关机串口打点；纯加法 `paging_map_top()` 访问器，本线 `task_page_is_user()` 保留。
+- **`feat/smp` 未整体合并**：其 merge-base 为旧基 `76d0f646`，整体合并会回退已交付的 TLS 状态码透传（`77f0ec0`）、browser v0.1、ring3 镜像 US 位修因（`8fea31e`）；故只做选择性 cherry-pick，未带 `6e99d5e` AHCI 骨架。
+- **AHCI D4 实测**：本线未编入 AHCI 驱动（仅 `ata.c` IDE/ATAPI PIO）；AHCI 诊断 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，HBA 未响应，IDENTIFY/DMA 未打通，D4 保持 🔶 deferred。

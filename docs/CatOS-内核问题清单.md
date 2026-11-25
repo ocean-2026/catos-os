@@ -835,3 +835,14 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 | 210 | 低（窄屏兼容） | 分页提示条 47 字符（`-- More (Enter=1 line, Space=1 page, q=quit) --`）在 40 列窄控制台下会被 `con_cols()` 截断，尾部 `q=quit` 可能被切掉 | 当前 `PAGER_BAR_TEXT` 是单一常量，未按列宽选档 | 双档文案（≥47 列用 full、不足退化 `-- More (Enter/Space/q) --`）已由并行分支实现并归档为 `night/CatOs-h-pager-lazy-park-redundant.patch`；主仓当前 `con_cols()` 固定 80，触发不了，登记为窄屏 deferred | ⏳ deferred（仅窄屏场景） |
 | 211 | 低（显示瑕疵） | 拼音合成串达到 5 字母（如 `zhong`）时，光标格在 framebuffer 上残留上一帧字形（实测显示成 `zhong9_`）；同刻 0xB8000 文本平面读到的是干净的 `zhong`，2 字母（`ni`）不复现 | **未失效 dirty**（已定位，非绘制顺序问题）：`render.c:186-203` 的 `paint()` 在 `painted_valid` 为真且属性全等时直接 `stat_skipped++; return;`；而 `render.c:289-294` 的 `redraw_all()` 对空格子直接标记"已在屏"不写后端；`render.c:682-716` 的 `con_putc_at`/`con_write_at_utf8` 定位写又从不主动清脏缓存 → 擦行/内联合成串/防御空格三者全部可能被跳过。已排除：`py` 缓冲混数字（文本平面与 19/19 断言）、`con_status_bar2` 同行错位（候选区固定 rows-2/rows-1，与输入行不相交） | 本夜只做防御（`keyboard.c:425` 光标格写空格），实测未消除；定案改法见备注，交下版：①把 `render.c:751` 的 `invalidate_row()` 抽成 `con_invalidate_row(int y)` 并在 `rl_redraw()`/`ed_redraw()` 开头整行失效；②或在 `con_putc_at`/`con_write_at_utf8` 写格前清 `painted_valid`（宽字含右半）；③若仍残留再处理 `be_text.c` 表面缓存。交付截图已改用 2 字母 `ni`（画面干净） | ⏳ deferred（显示瑕疵，不影响输入正确性） |
 | 212 | 低（显示瑕疵） | `ls -l <单个文件>` 的表头 `perms      size     name`、`ls` 的 `--- N entries ---` 汇总行、`N hidden invalid entries …` 提示行仍走 `vga_write`，而条目行走 `pager_line` —— 分页块内的"双通道输出"残留：这几行不参与分页行计数，靠近屏底时可能被裁掉或漏过 park 判定 | 与 `e8167f6` 同类缺陷的另一处：`fs.c` 的 `fs_list()` 在 `pager_begin(1)` 之后仍直接用 `vga_write` 打非条目行（`ls_print_one` 已改为整行走 `pager_line`，但表头/汇总/隐藏计数没改） | 交付前代码冻结，未改；下版统一把这几行改成组行后 `pager_line()`（表头拼成一条字符串，汇总与隐藏计数各拼一条），并补 `pager_regress` 一条"`ls -l FILE` 表头与汇总都计行"用例 | ⏳ deferred（显示瑕疵） |
+
+---
+
+## 附录：v2.80 交付回填（2026-11-25，仅回填，不改上文正文）
+
+- **交付基线**：main / `feat/gui-blocks` HEAD `70df122`；源码/ISO 基线提交 `502d203`（tree `20e607577b24815b91a018b6e2739705bd197c39`），其后均纯文档。
+- **双 ISO**（各 12,079,104 B）：release `catos-v2.80.iso` `c6ebc9d3656e6adec74862eb551ec0deb391adebdce5338b24f841d1246099fe`；test `catos-v2.80-test.iso` `1cf2f08ecda65032fef19368294e6a18e7dcdd4a07e2486f6c3712b2e5adbdd8`。
+- **0930 门禁**：vprobe 10/10（157.1s）、E3 2/2（80.1s）、F11 9/9（161.8s），`--strict` RC=0；日志 `gate-{vprobe,e3,f11}-full-0930.log`。
+- **ACPI 关机已入 main**：`502d203` 仅 cherry-pick `94f3ba1`——PM1_CNT 端口偏移 `0x48/0x4C→0x40/0x44`、守卫 `paging_map_top()`、`poweroff` 别名 + 关机串口打点；纯加法 `paging_map_top()` 访问器，`task_page_is_user()`（ring3 US 位修因 `8fea31e`）原样保留。
+- **`feat/smp` 未整体合并**：merge-base 旧基 `76d0f646`，整体合并会回退 TLS 状态码透传（`77f0ec0`）、browser v0.1、ring3 修因；故只选择性 cherry-pick，未带 `6e99d5e` AHCI 骨架。
+- **D4 SATA/AHCI 实测（🔶 deferred）**：本线未编入 AHCI 驱动（无 `ahci.c`/`ahci.h`，仅 `ata.c` IDE/ATAPI PIO）；AHCI 诊断 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，HBA 未响应，IDENTIFY ABRT、DMA 未打通；AHCI 骨架在 smp 线 `6e99d5e`，本轮未搬，多磁盘/驱动框架并入战略 P3.4。
