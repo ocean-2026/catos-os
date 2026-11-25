@@ -229,7 +229,6 @@ int fcache_mmap(task_t *t, int fd, uint32_t len, int prot, uint32_t *out_va) {
     if (len == 0) return FC_ERR_INVAL;
 
     uint32_t span = (len + 0xFFFu) & ~0xFFFu;
-    uint32_t npages = span / 4096u;
     uint32_t base = alloc_va(t, span);
     if (!base) return FC_ERR_NOMEM;
 
@@ -241,17 +240,9 @@ int fcache_mmap(task_t *t, int fd, uint32_t len, int prot, uint32_t *out_va) {
         if (!maps[i].used) { ms = (int)i; break; }
     if (ms < 0) { vma_free(v); return FC_ERR_FULL; }
 
-    uint32_t mapped = 0;
-    for (uint32_t b = 0; b < npages; b++) {
-        uint32_t pa = cache_get(e->cluster, b, e->size, e->path);
-        if (!pa) goto fail;
-        if (task_map_page(&t->space, base + b * 4096u, pa, 0) != 0) {
-            cache_put(e->cluster, b);
-            goto fail;
-        }
-        mapped = b + 1;
-    }
-
+    /* Lazy: register the file-backed VMA + descriptor only.  Pages are pulled
+     * from the read-only cache on first touch via fcache_fault_page() (the
+     * VMA_MMAP branch in vma_map_page_on_fault); no frame is pinned here. */
     fmap_t *m = &maps[ms];
     for (uint32_t k = 0; k < sizeof(*m); k++) ((uint8_t *)m)[k] = 0;
     m->used = 1; m->start = base; m->end = base + span;
@@ -262,14 +253,6 @@ int fcache_mmap(task_t *t, int fd, uint32_t len, int prot, uint32_t *out_va) {
     t->vm = vma_insert(t->vm, v);
     *out_va = base;
     return FC_OK;
-
-fail:
-    for (uint32_t b = 0; b < mapped; b++) {
-        task_scrub_page(&t->space, base + b * 4096u);
-        cache_put(e->cluster, b);
-    }
-    vma_free(v);
-    return FC_ERR_NOMEM;
 }
 
 int fcache_munmap(task_t *t, uint32_t addr, uint32_t len) {

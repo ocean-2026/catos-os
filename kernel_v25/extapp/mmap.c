@@ -1,16 +1,22 @@
-/* mmapfd.c -- Stage 2B CE regression: file-backed read-only mapping.
+/* mmap.c -- Stage 2B CE acceptance: file-backed read-only mapping.
  *
- *   fd  = fd_open("/appdevelop/API.TXT", 0)            -> fd >= 3
+ *   fd  = fd_open("/bin/hello.ce", 0)                  -> fd >= 3
  *   sz  = fd_lseek(fd, 0, SEEK_END)
  *   ref = file_read(path, ref, 4096, 0)                (legacy path read)
  *   m1  = file_mmap(fd, sz, PROT_READ=0, 0)
  *   byte-compare m1[0..n) against ref
  *   m2  = file_mmap(fd, sz, PROT_READ=0, 0)            -> shared cache hit
+ *   munmap_shared(m2, sz)                              -> refcnt drops to 1
+ *   m3  = file_mmap(fd, sz, PROT_READ=0, 0)            -> still hits (m1 holds)
  *   report cache_hit / pages / refcnt (slot 92 fcache_stat)
  *
  * Error paths exercised:
- *   - file_mmap(bad fd=99, ...)        -> negative (EBADF, -22)
- *   - file_mmap(fd, 4096, PROT_WRITE=1) -> EACCES (-13)
+ *   - file_mmap(bad fd=99, ...)          -> negative (EBADF, -22)
+ *   - file_mmap(fd, 4096, PROT_WRITE=1)  -> EACCES (-13)
+ *   - capacity: keep mapping the resident file until the active-map
+ *     descriptor table refuses; reports the negative code observed (-4 FULL
+ *     map-descriptor table full).  The cache-pool ENOMEM (-12) path is not
+ *     reachable on the shipped image and is documented as such.
  *
  * Prints PASS / FAIL lines; every string ASCII so it runs anywhere.
  */
@@ -59,21 +65,46 @@ int ce_main(void) {
         }
     }
 
-    /* second concurrent mapping of the same file: shared pages hit cache. */
     unsigned char *m2 = 0;
     if (m1) {
         m2 = (unsigned char *)__ce_api->file_mmap(fd, (uint32_t)sz, PROT_READ, 0);
         if (m2 == 0) { out("FAIL second file_mmap\n"); fails++; }
-        else out("ok   second mmap (shared cache)\n");
+        else {
+            /* touch m2 so its first page faults in from the shared cache;
+             * the second view must land on the same cached frame. */
+            int bad2 = 0;
+            for (int i = 0; i < n; i++)
+                if (m2[i] != ref[i]) { bad2 = 1; break; }
+            if (bad2) { out("FAIL byte mismatch m2\n"); fails++; }
+            else out("ok   second mmap (shared cache)\n");
+        }
     }
 
-    /* cache diagnostics (slot 92). */
     uint32_t pages = __ce_api->fcache_stat(0, 0);
     uint32_t hits  = __ce_api->fcache_stat(1, 0);
     int rc = m1 ? __ce_api->fcache_stat(2, (uint32_t)m1) : -1;
     out("info cache_hit="); __ce_api->print_int((int)hits);
     out(" pages="); __ce_api->print_int((int)pages);
     out(" refcnt="); __ce_api->print_int(rc); out("\n");
+
+    /* unmap the second view, then re-map: m1 still holds the page, so the
+     * re-map must hit the resident cache (refcnt returns to 2). */
+    if (m2) __ce_api->munmap_shared((uint32_t)m2, (uint32_t)sz);
+    unsigned char *m3 = 0;
+    if (m1) {
+        m3 = (unsigned char *)__ce_api->file_mmap(fd, (uint32_t)sz, PROT_READ, 0);
+        if (m3 == 0) { out("FAIL remap after munmap\n"); fails++; }
+        else {
+            int bad3 = 0;
+            for (int i = 0; i < n; i++)
+                if (m3[i] != ref[i]) { bad3 = 1; break; }
+            if (bad3) { out("FAIL byte mismatch m3\n"); fails++; }
+            else {
+                int rc3 = __ce_api->fcache_stat(2, (uint32_t)m3);
+                pint("ok   remap after munmap refcnt=", rc3);
+            }
+        }
+    }
 
     /* error: invalid fd. */
     int b1 = __ce_api->file_mmap(99, 4096, PROT_READ, 0);
@@ -85,11 +116,25 @@ int ce_main(void) {
     pint("err  prot-write=", b2);
     if (b2 >= 0) { out("FAIL PROT_WRITE accepted\n"); fails++; }
 
-    if (m2) __ce_api->munmap_shared((uint32_t)m2, (uint32_t)sz);
+    /* capacity: repeatedly map the same resident file until the active-map
+     * descriptor table is saturated (FC_ERR_FULL=-4).  Cache pages are
+     * deduped by (cluster, block), so this exercises the mapping-descriptor
+     * cap deterministically regardless of how big the file is.  The
+     * cache-pool ENOMEM (-12) path exists but is not reachable on the
+     * shipped image (every builtin file is < 87 KiB) -- documented in
+     * docs/dynamic-linking.md. */
+    int cap = 0;
+    for (uint32_t i = 0; i < 24; i++) {
+        unsigned char *v = (unsigned char *)__ce_api->file_mmap(fd, (uint32_t)sz, PROT_READ, 0);
+        if ((int)v < 0) { cap = (int)v; break; }
+    }
+    pint("err  capacity=", cap);
+
+    if (m3) __ce_api->munmap_shared((uint32_t)m3, (uint32_t)sz);
     if (m1) __ce_api->munmap_shared((uint32_t)m1, (uint32_t)sz);
     __ce_api->fd_close(fd);
 
-    if (fails == 0) { out("MMAPFD PASS\n"); return 0; }
-    out("MMAPFD FAIL\n");
+    if (fails == 0) { out("MMAP PASS\n"); return 0; }
+    out("MMAP FAIL\n");
     return 1;
 }

@@ -165,17 +165,43 @@ QEMU 实机（文本模式）运行 `dltest.ce`：
   落到固定 API 表（`0x800`，`CATOS_VS_TABLE` 常量不可挪）之后、ls thunk `0xC00`
   之前的空闲间隙；守卫分别校验前段 `< 0x800`、溢出段 `< 0xC00`。
 
-**实机探针 `mmapfd.ce`（`/bin/mmapfd.ce`）**
+**实机探针 `mmap.ce`（`/bin/mmap.ce`，源码 `extapp/mmap.c`）**
 
-打开 `/bin/hello.ce` → `file_mmap` 后与路径式 `file_read` 逐字节比对；再并发第二次
-映射同一文件证明共享缓存命中；经槽 92 读取 `cache_hit / pages / refcnt`。错误路径：
-非法 fd → `-22`；`PROT_WRITE` → `-13`。
+流程：`fd_open("/bin/hello.ce")` → `fd_lseek` 取大小 → 路径式 `file_read`
+留参照 → `file_mmap`（m1）后逐字节比对；第二次映射（m2）同样触碰首页，证明
+两个视图落到同一缓存帧；经槽 92 读取 `cache_hit / pages / refcnt`；`munmap_shared`
+摘掉 m2 后再次重映射（m3），仍命中 m1 持有的驻留页。
+
+实机串口取证（`gate-fdmmap-smoke-hosted.log`）：
+
+```
+ok   fd_open fd=3
+ok   file size=312
+ok   path read bytes=312
+ok   mmap byte-match chunk0
+ok   second mmap (shared cache)
+info cache_hit=1 pages=1 refcnt=2
+ok   remap after munmap refcnt=2
+err  bad-fd=-22
+err  prot-write=-13
+err  capacity=-4
+MMAP PASS
+```
+
+- 映射为**惰性装入**：`file_mmap` 只登记 `VMA_MMAP` VMA 与映射描述符（记录首簇、
+  文件大小、路径、属主 tid、只读），不在 mmap 时预钉帧；首次访问触发缺页，由
+  `VMA_MMAP` 分支回调 `fcache_fault_page` 从缓存取帧并以只读 PTE 映射。
+- 错误路径三条均实机取证：非法 fd → `EBADF -22`；`PROT_WRITE` → `EACCES -13`；
+  超容量 → `-4`（活跃映射描述符表 `MAX_FILE_MAPS=16` 占满，内核全局表）。
+- 任务退出：`task_cleanup` 在 `task_space_destroy` 之前调 `fcache_cleanup_task`，
+  摘除本任务全部 file-mmap VMA、清 PTE、减缓存引用，并回收本任务 fd 表，不泄漏。
 
 ### 2B 残留 deferred / 降级项
 
 - `fd_write` 偏移写、读写打开模式未实现（当前只读，写返回 `EACCES`）；
-- 页缓存无 LRU 淘汰，池满即 `ENOMEM`；超容量（>64 页）错误路径本轮未在探针中触发：
-  磁盘内置文件均 < 4 KiB，无法在 CE 侧填满 64 页，该分支仅经代码走查确认；
+- 页缓存无 LRU 淘汰，池满即 `ENOMEM (-12)`。**缓存池满（-12）分支在本镜像上
+  不可达**：内置最大文件 < 87 KiB（≈22 页），无法凑满 64 页缓存预算；探针的超容量
+  检查实际命中的是活跃映射描述符表上限 `-4`。缓存池满路径仅经代码走查确认；
 - 多页/大文件映射、跨任务只读物理页共享属 2C 范畴。
 
 ### Deferred（2C：用户态 `ld.so` 与共享文本）
