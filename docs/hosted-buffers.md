@@ -96,6 +96,42 @@ threads / preempt / heap 全绿，**回归定位为缓冲结构体迁移本身�
 不符），怀疑是 `task_t` 扩容 / 静态数组平移导致内核静态表或页布局越界。该迁移**撤回**，
 仍列 deferred（§5），复做前需先核对 `task_t` 布局对齐与 `MAX_TASKS` 槽位静态表偏移。
 
+#### 3B-2 二轮 `nm -S` 对照（final2 轮，未改代码结论，迁移仍 deferred）
+
+从 dangling WIP 提交 `bec0d3d`（合并 8f7bae0 + 2bd7e5e，即当时撤回的迁移树）取回
+`task.h` / `task.c`，分别按基线与迁移态单编 `task.o`（内核 CFLAGS 原样：
+`-m32 -ffreestanding -fno-pic -O2 -std=c99`），`nm -S` 对照存
+`probes/scratch/nm-3b/nm_base.txt`、`nm_mig.txt`。
+
+关键符号（task.o 内偏移 / 大小）：
+
+| 符号 | 基线 base | 迁移 mig | 说明 |
+|---|---|---|---|
+| `_tasks` | 0x1130e0 / **0x7500** | 0x99140 / **0x89700** | `task_t[MAX_TASKS]`，MAX_TASKS=16 |
+| `_idle_task_v` | 0x112980 / 0x750 | 0x907c0 / **0x8970** | 静态 idle 任务实例（另一份 `task_t`） |
+| `_e3_fr_buf` | 0xa9940 / 0x40000 | （并入 `tasks`/`idle_task_v`） | 16 KiB × 16 槽 |
+| `_e3_fw_buf` | 0x99940 / 0x10000 | （并入） | 4 KiB × 16 |
+| `_e3_pw_buf` | 0x89940 / 0x10000 | （并入） | 4 KiB × 16 |
+| `_e3_pr_buf` | 0x79940 / 0x10000 | （并入） | 4 KiB × 16 |
+| `_e3_ur_buf` | 0x71940 / 0x8000 | （并入） | 2 KiB × 16 |
+| `_ls_buf` | 0xeb960 / 0x8000 | （并入） | `ls_ent_t`×64 × 16 |
+| `_e3_wr/rl/ur_ip` | 0xea940 / 0xe9940 / 0x717c0 | （并入） | 小缓冲 × 16 |
+
+- **每任务结构体**：基线 `0x7500/16 = 1872 B/task`；迁移 `0x89700/16 = 35184 B/task`
+  （嵌入 fr 16384 + fw/pw/pr 各 4096 + ur 2048 + ls 2048 + wr 257 + rl 256 + ur_ip 24，
+  含对齐填充）。
+- **「净增约 32KB」解释**：静态数组原本只出 `tasks[16]` 一份；迁入结构体后，
+  `tasks[16]` **外加** `idle_task_v` 静态实例各带一套内嵌缓冲，等于多出一份 per-task
+  缓冲集（≈ 33.3 KB），与观测到的 `task.o` bss 净增吻合。这是会计现象，不是越界踩栈。
+- **二轮实测（干净重构，仅缓冲搬迁 + 已交付的堆根 per-process）**：strict RC=0，
+  `_bss_end=0x02120a18`；真机 vprobe **10/10**（fr/cat/fw/pw 全 PASS）、E3 **2/2**、
+  F11 **9/9**。原始 7/3 未能由「结构体搬迁」本身复现——fr/cat/fw 在重构态全绿。
+- **未决**：threads 探针在迁移态与基线态**同样**崩在 `eip=0 cr2=0`（ring3，
+  `int=0e err=5 cs=1b`，worker/主链路尚未出任何输出），属独立的线程/环境卡点，
+  不能归因于缓冲迁移；threads/preempt/heap 三项未在迁移态跑完。迁移**维持 deferred**，
+  复做前提：先把 threads `eip=0` 卡点单独定位（疑似槽 83 thunk 指针或 worker 入口帧
+  为空），再在全绿基线上重跑搬迁 + 全量门禁。
+
 ### 3.1 共享堆分配器 per-process（块3，已交付）
 
 堆 arena（地址空间 / VMA / `heap_end`）在 `thread_create()` 里已按指针共享给同进程
