@@ -131,6 +131,13 @@ static void dmg_coalesce(void) {
 static block *paint_list[GUI_PAINT_MAX];
 static int paint_count;
 
+static void anim_apply_walk(block *b) {
+    if (!b) return;
+    anim_apply(b);
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        anim_apply_walk(c);
+}
+
 static void collect(block *b) {
     if (!b) return;
     if (b->visible && paint_count < GUI_PAINT_MAX)
@@ -157,6 +164,9 @@ static void sort_paint(void) {
 
 extern void ser_write(const char *s);
 extern void ser_putc(char c);
+
+/* anim.c 会话复位（gui_int.h 冻结清单之外的内部入口）。 */
+extern void anim_reset(void);
 
 static void ser_dec_u(uint32_t v) {
     char buf[12]; int n = 0;
@@ -284,7 +294,11 @@ void gui_frame(void) {
         paint_list[i]->snap =
             (paint_list[i]->dirty_layout || paint_list[i]->dirty_paint) ? 1 : 0;
 
+    /* 动画节拍：tick 推进在布局前；布局后、绘制前把当前帧值写回块几何。
+     * 动画期间该块几何以动画帧为准，不参与父级重排纠正。 */
+    anim_tick(16);
     layout_run();
+    anim_apply_walk(gui_root_block());
 
     dmg_reset();
     paint_begin_frame();
@@ -456,6 +470,7 @@ void gui_presence_sweep(void) {
 
 void gui_reset(void) {
     tree_reset();
+    anim_reset();
     dmg_reset();
     s_frames = 0; s_layout_nodes = 0; s_double_commit = 0;
     s_damage_rects = 0; s_damage_area = 0;

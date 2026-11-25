@@ -494,6 +494,19 @@ void decl_post_close(block *b) {
     ser_write("GUI:ev close id="); decl_dec(ev.id); ser_putc('\n');
 }
 
+/* cap2 浮层关闭：向所属应用投递 dismiss（legacy 队列复用 CLOSE 槽位，
+ * 串口标记 dismiss；event2 通道随 cap2/ce 落地后补 ev_kind=6）。 */
+void decl_post_dismiss(block *b) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event_t ev;
+    ev.type = DECL_EV_CLOSE; ev.code = 0; ev.id = block_local_id(b);
+    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
+    enqueue(p, &ev);
+    ser_write("GUI:ev dismiss id="); decl_dec(ev.id); ser_putc('\n');
+}
+
 int decl_pid_blocks(int tid) {
     struct pid_meta *p = ps_get(tid);
     return p ? p->count : 0;

@@ -319,8 +319,16 @@ static int layout_dirty(block *b) {
     return 1;
 }
 
+/* 普通布局之后：锚定浮层按锚点矩形做第二趟 place（measure 自然高 -> 翻转/钳制）。 */
+static void pop_walk(block *b) {
+    if (!b) return;
+    if (b->kind == BLK_POPOVER) pop_layout(b);
+    for (block *c = b->first_child; c; c = c->next_sibling) pop_walk(c);
+}
+
 void layout_run(void) {
     stat_set_layout_nodes(0);
     measure_dirty(gui_root_block());
     layout_dirty(gui_root_block());
+    pop_walk(gui_root_block());
 }
