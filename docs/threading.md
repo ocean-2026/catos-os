@@ -206,6 +206,9 @@ idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧
 
 ## 3B：静态 scratch 改 per-thread（可降级）
 
+> 3C-1 已完成第一轮归属搬迁（UDP/SSH scratch 归入连接 / 会话对象，任务侧 per-tid
+> 数组核对），逐缓冲归属、大小与分配释放点见 [`hosted-buffers.md`](hosted-buffers.md)。
+
 摸底现状：
 
 - `src/dl.c`：暂存帧 `meta`/`st` 已在 `dl_open` 内按需 `kzalloc_frame`、返回前
