@@ -122,3 +122,7 @@ kernel_v25/build/*.exe
 # ---- block GUI evidence: screenshots/PPM never committed; serial logs may ----
 artifacts/gui-blocks/*.png
 artifacts/gui-blocks/*.ppm
+
+# v2.82: release artifacts are shipped outside git (kernel_v25/ 下留档)
+kernel_v25/kernel-v*.bin
+kernel_v25/catos-v*.iso
