@@ -1,0 +1,201 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "alpha-menu",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column"
+        },
+        "req": {
+          "w": 400,
+          "h": 300
+        },
+        "children": [
+          {
+            "id": 2,
+            "kind": "column",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "layout": {
+              "flow": "column"
+            },
+            "padding": {
+              "t": 8,
+              "r": 8,
+              "b": 8,
+              "l": 8
+            },
+            "req": {
+              "w": 240,
+              "h": 180
+            },
+            "fill": "panel",
+            "alpha": 192,
+            "children": [
+              {
+                "id": 3,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 224,
+                  "h": 48
+                },
+                "alpha": 128,
+                "wrap_lines": 2,
+                "ellipsis": 1,
+                "text": "Notification one: the nightly build finished successfully with twelve warnings to review before morning standup.",
+                "children": [],
+                "rect": {
+                  "x": 8,
+                  "y": 8,
+                  "w": 224,
+                  "h": 48
+                },
+                "flush_sides": [
+                  "L",
+                  "R",
+                  "T"
+                ],
+                "ce": {
+                  "id": 3,
+                  "parent": 2,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": 224,
+                  "req_h": 48,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              },
+              {
+                "id": 4,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": 224,
+                  "h": 48
+                },
+                "alpha": 128,
+                "wrap_lines": 2,
+                "ellipsis": 1,
+                "text": "Notification two: disk usage on the data volume has crossed the seventy percent threshold and needs cleanup soon.",
+                "children": [],
+                "rect": {
+                  "x": 8,
+                  "y": 56,
+                  "w": 224,
+                  "h": 48
+                },
+                "flush_sides": [
+                  "L",
+                  "R"
+                ],
+                "ce": {
+                  "id": 4,
+                  "parent": 2,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": 224,
+                  "req_h": 48,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 240,
+              "h": 184
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 1,
+              "layer": 200,
+              "req_w": 240,
+              "req_h": 180,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 400,
+          "h": 304
+        },
+        "flush_sides": [
+          "L",
+          "T"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 400,
+          "req_h": 300,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

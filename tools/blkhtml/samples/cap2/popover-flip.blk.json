@@ -1,0 +1,413 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "popover-flip",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column"
+        },
+        "req": {
+          "w": 400,
+          "h": 300
+        },
+        "children": [
+          {
+            "id": 2,
+            "kind": "button",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 80,
+              "h": 24
+            },
+            "text": "Anchor",
+            "children": [],
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 80,
+              "h": 24
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 12,
+              "layer": 200,
+              "req_w": 80,
+              "req_h": 24,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 3,
+            "kind": "popover",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 110,
+              "h": 48
+            },
+            "pop_prefer": 1,
+            "pop_max_h": 120,
+            "children": [
+              {
+                "id": 4,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "Up menu",
+                "children": [],
+                "rect": {
+                  "x": 0,
+                  "y": 24,
+                  "w": 56,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "T"
+                ],
+                "ce": {
+                  "id": 4,
+                  "parent": 3,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 24,
+              "w": 112,
+              "h": 48
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "anchor_id": 2,
+            "ce": {
+              "id": 3,
+              "parent": 1,
+              "kind": 15,
+              "layer": 200,
+              "req_w": 110,
+              "req_h": 48,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 5,
+            "kind": "popover",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 110,
+              "h": 48
+            },
+            "pop_prefer": 2,
+            "pop_max_h": 120,
+            "children": [
+              {
+                "id": 6,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "Down menu",
+                "children": [],
+                "rect": {
+                  "x": 0,
+                  "y": 72,
+                  "w": 72,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "T"
+                ],
+                "ce": {
+                  "id": 6,
+                  "parent": 5,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 72,
+              "w": 112,
+              "h": 48
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "anchor_id": 2,
+            "ce": {
+              "id": 5,
+              "parent": 1,
+              "kind": 15,
+              "layer": 200,
+              "req_w": 110,
+              "req_h": 48,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 7,
+            "kind": "popover",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 110,
+              "h": 48
+            },
+            "pop_prefer": 4,
+            "pop_max_h": 120,
+            "children": [
+              {
+                "id": 8,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "Left menu",
+                "children": [],
+                "rect": {
+                  "x": 0,
+                  "y": 120,
+                  "w": 72,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "T"
+                ],
+                "ce": {
+                  "id": 8,
+                  "parent": 7,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 120,
+              "w": 112,
+              "h": 48
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "anchor_id": 2,
+            "ce": {
+              "id": 7,
+              "parent": 1,
+              "kind": 15,
+              "layer": 200,
+              "req_w": 110,
+              "req_h": 48,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 9,
+            "kind": "popover",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 110,
+              "h": 48
+            },
+            "pop_prefer": 8,
+            "pop_max_h": 120,
+            "children": [
+              {
+                "id": 10,
+                "kind": "text",
+                "layer": "work",
+                "visible": true,
+                "focusable": false,
+                "inert": false,
+                "req": {
+                  "w": -1,
+                  "h": -1
+                },
+                "text": "Right menu",
+                "children": [],
+                "rect": {
+                  "x": 0,
+                  "y": 168,
+                  "w": 80,
+                  "h": 16
+                },
+                "flush_sides": [
+                  "L",
+                  "T"
+                ],
+                "ce": {
+                  "id": 10,
+                  "parent": 9,
+                  "kind": 4,
+                  "layer": 200,
+                  "req_w": -1,
+                  "req_h": -1,
+                  "text_off": -1,
+                  "pix_off": -1,
+                  "pix_w": 0,
+                  "pix_h": 0,
+                  "res": -1
+                }
+              }
+            ],
+            "rect": {
+              "x": 0,
+              "y": 168,
+              "w": 112,
+              "h": 48
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "anchor_id": 2,
+            "ce": {
+              "id": 9,
+              "parent": 1,
+              "kind": 15,
+              "layer": 200,
+              "req_w": 110,
+              "req_h": 48,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 400,
+          "h": 304
+        },
+        "flush_sides": [
+          "L",
+          "T"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 400,
+          "req_h": 300,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

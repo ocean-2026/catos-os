@@ -1,0 +1,6 @@
+blocks      : 8 (quota 256)
+text bytes  : 26 (quota 4096)
+pool bytes  : 32 (quota 32768)
+recs bytes  : 320 (40 bytes/rec)
+wrote samples/browser-toolbar.recs.bin
+wrote samples/browser-toolbar.strings.bin

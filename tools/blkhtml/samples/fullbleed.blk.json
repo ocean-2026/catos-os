@@ -1,0 +1,237 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "fullbleed",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column"
+        },
+        "padding": {
+          "t": 16,
+          "r": 16,
+          "b": 16,
+          "l": 16
+        },
+        "req": {
+          "w": 800,
+          "h": 96
+        },
+        "fill": "bar",
+        "bleed": true,
+        "children": [
+          {
+            "id": 2,
+            "kind": "text",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "text": "Release Notes",
+            "children": [],
+            "rect": {
+              "x": 16,
+              "y": 16,
+              "w": 104,
+              "h": 16
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 4,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 96
+        },
+        "flush_sides": [
+          "L",
+          "R",
+          "T"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 800,
+          "req_h": 96,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      },
+      {
+        "id": 3,
+        "kind": "column",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "column",
+          "gap": 8
+        },
+        "padding": {
+          "t": 16,
+          "r": 16,
+          "b": 16,
+          "l": 16
+        },
+        "req": {
+          "w": 768,
+          "h": 128
+        },
+        "children": [
+          {
+            "id": 4,
+            "kind": "text",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "text": "Welcome to CatOS.",
+            "children": [],
+            "rect": {
+              "x": 16,
+              "y": 112,
+              "w": 136,
+              "h": 16
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 4,
+              "parent": 3,
+              "kind": 4,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 5,
+            "kind": "text",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "text": "Blocks and tokens.",
+            "children": [],
+            "rect": {
+              "x": 16,
+              "y": 136,
+              "w": 144,
+              "h": 16
+            },
+            "flush_sides": [
+              "L"
+            ],
+            "ce": {
+              "id": 5,
+              "parent": 3,
+              "kind": 4,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 96,
+          "w": 768,
+          "h": 128
+        },
+        "flush_sides": [
+          "L"
+        ],
+        "ce": {
+          "id": 3,
+          "parent": 0,
+          "kind": 1,
+          "layer": 200,
+          "req_w": 768,
+          "req_h": 128,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

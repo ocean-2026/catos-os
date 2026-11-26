@@ -1,0 +1,6 @@
+blocks      : 6 (quota 256)
+text bytes  : 48 (quota 4096)
+pool bytes  : 51 (quota 32768)
+recs bytes  : 240 (40 bytes/rec)
+wrote samples/fullbleed.recs.bin
+wrote samples/fullbleed.strings.bin

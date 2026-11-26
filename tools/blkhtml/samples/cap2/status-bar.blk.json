@@ -1,0 +1,185 @@
+{
+  "schema": "catos.blk/1.0",
+  "title": "status-bar",
+  "theme": "dark",
+  "root": {
+    "id": 0,
+    "kind": "root",
+    "layer": "work",
+    "visible": true,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 600
+    },
+    "children": [
+      {
+        "id": 1,
+        "kind": "row",
+        "layer": "work",
+        "visible": true,
+        "focusable": false,
+        "inert": false,
+        "layout": {
+          "flow": "row"
+        },
+        "req": {
+          "w": 400,
+          "h": 32
+        },
+        "children": [
+          {
+            "id": 2,
+            "kind": "icon",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "icon": 3,
+            "tint_role": 3,
+            "children": [],
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 16,
+              "h": 16
+            },
+            "flush_sides": [
+              "L",
+              "T"
+            ],
+            "ce": {
+              "id": 2,
+              "parent": 1,
+              "kind": 16,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 3,
+            "kind": "icon",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": -1,
+              "h": -1
+            },
+            "icon": 5,
+            "tint_role": 1,
+            "children": [],
+            "rect": {
+              "x": 16,
+              "y": 0,
+              "w": 16,
+              "h": 16
+            },
+            "flush_sides": [
+              "T"
+            ],
+            "ce": {
+              "id": 3,
+              "parent": 1,
+              "kind": 16,
+              "layer": 200,
+              "req_w": -1,
+              "req_h": -1,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          },
+          {
+            "id": 4,
+            "kind": "text",
+            "layer": "work",
+            "visible": true,
+            "focusable": false,
+            "inert": false,
+            "req": {
+              "w": 120,
+              "h": 16
+            },
+            "font_size": 1,
+            "font_tabular": 1,
+            "text": "12:45:08",
+            "children": [],
+            "rect": {
+              "x": 32,
+              "y": 0,
+              "w": 120,
+              "h": 16
+            },
+            "flush_sides": [
+              "T"
+            ],
+            "ce": {
+              "id": 4,
+              "parent": 1,
+              "kind": 4,
+              "layer": 200,
+              "req_w": 120,
+              "req_h": 16,
+              "text_off": -1,
+              "pix_off": -1,
+              "pix_w": 0,
+              "pix_h": 0,
+              "res": -1
+            }
+          }
+        ],
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 400,
+          "h": 32
+        },
+        "flush_sides": [
+          "L",
+          "T"
+        ],
+        "ce": {
+          "id": 1,
+          "parent": 0,
+          "kind": 2,
+          "layer": 200,
+          "req_w": 400,
+          "req_h": 32,
+          "text_off": -1,
+          "pix_off": -1,
+          "pix_w": 0,
+          "pix_h": 0,
+          "res": -1
+        }
+      }
+    ],
+    "ce": {
+      "id": 0,
+      "parent": 0,
+      "kind": 0,
+      "layer": 200,
+      "req_w": -1,
+      "req_h": -1,
+      "text_off": -1,
+      "pix_off": -1,
+      "pix_w": 0,
+      "pix_h": 0,
+      "res": -1
+    }
+  }
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Settings panel</title>
+<style>
+.card     { background: panel; border: 1px; padding: 0; }
+.titlebar { display: flex; flex-direction: row; justify-content: space-between;
+            background: bar; padding: 8px; width: 784px; }
+.body     { display: flex; flex-direction: row; gap: 8; padding: 8px;
+            width: 784px; height: 112px; }
+.cats     { display: flex; flex-direction: column; gap: 0; padding: 8px;
+            background: bar; width: 120px; height: 88px; }
+.cat      { height: 24px; }
+.active   { color: accent; }
+.opts     { display: flex; flex-direction: column; gap: 8; padding: 8px;
+            width: 280px; height: 72px; }
+.ron      { border: 1px; height: 24px; width: 200px; }
+.roff     { border: 1px; height: 24px; width: 200px; }
+.note     { padding: 8px; }
+.close    { width: 64px; height: 24px; background: bar; }
+</style>
+</head>
+<body>
+  <div class="card" style="width:800px;height:600px;">
+    <div class="titlebar">
+      <span>Settings</span>
+      <button class="close">Close</button>
+    </div>
+    <div class="body">
+      <div class="cats">
+        <div class="cat active"><span style="color:accent;">Appearance</span></div>
+        <div class="cat"><span>Display</span></div>
+      </div>
+      <div class="opts">
+        <div class="ron"><span style="color:accent;">Dark theme</span></div>
+        <div class="roff"><span>Light theme</span></div>
+      </div>
+    </div>
+    <div class="note"><span>Changes apply after restart.</span></div>
+  </div>
+</body>
+</html>

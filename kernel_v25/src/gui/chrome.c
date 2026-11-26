@@ -1753,6 +1753,7 @@ void gui_shell_cmd(const char *arg) {
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
+#define APP_BLKGEN 99   /* 追加：blkgen 内置页；不改动既有枚举成员 */
     int app_open = APP_NONE;
     char app_path[160]; app_path[0] = 0;
     const char *rest = 0;
@@ -1781,6 +1782,11 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "files"))    { app_open = APP_FILEMGR; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "images"))    { app_open = APP_IMAGES; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
     else if (!strcmp_probe(word, "browser"))   { app_open = APP_BROWSER; if (rest) xcopy_local(app_path, sizeof(app_path), rest); }
+    else if (!strcmp_probe(word, "shot-blkgen")) { app_open = APP_BLKGEN; }
+
+    /* `gui shot-style-app blkgen` / `gui shot-style-calm blkgen`: 第二词
+     * 选中 blkgen 内置页（全保真路径）。 */
+    if (rest && !strcmp_probe(rest, "blkgen")) app_open = APP_BLKGEN;
 
     /* v2.80 hotfix: 进桌面先清空控制台文本并冻结控制台侧绘制/选中，
      * 否则底下的 shell 内容会在鼠标/时钟等路径上被重绘进帧缓冲。 */
@@ -1794,6 +1800,8 @@ void gui_shell_cmd(const char *arg) {
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
                       free_interact;
+    int blkgen_on = (app_open == APP_BLKGEN);
+    if (blkgen_on) free_sample = 1;   /* 追加：blkgen 页不挂 demo 样本（纯追加，不改既有条件） */
     gui_begin();
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
@@ -1815,6 +1823,7 @@ void gui_shell_cmd(const char *arg) {
         if (app_path[0]) gui_browser_open(app_path);
         else gui_browser_probe_sample();   /* 无网回归：内嵌样本页 */
     }
+    if (app_open == APP_BLKGEN) blkgen_build();
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
 
     gui_idle_loop();

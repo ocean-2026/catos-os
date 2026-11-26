@@ -1,0 +1,40 @@
+PASS C1 root 根 id=0 → CE 投影丢弃，子块 parent=0 挂应用根
+PASS C1 count 8 blocks (quota 256)
+PASS C1 depth max depth 2 (quota 16)
+PASS G1 id=0 
+PASS G1 id=1 
+PASS G1 id=2 
+PASS G1 id=3 
+PASS G1 id=4 
+PASS G1 id=5 
+PASS G1 id=6 
+PASS G1 id=7 
+PASS G2 spacing 
+PASS B2 outer bounds 
+PASS B1 clip bounds 
+PASS R1 flush corners 
+PASS S1 flush stroke 
+PASS S2 flush shadow 
+PASS D1 shared edge 
+PASS T1 id=2 text_w=32 content_w=40 h=40
+PASS T1 id=3 text_w=24 content_w=40 h=40
+PASS T1 id=4 text_w=56 content_w=40 h=40
+PASS T1 id=5 text_w=32 content_w=40 h=40
+PASS T1 id=6 text_w=32 content_w=472 h=24
+PASS T1 id=7 text_w=32 content_w=56 h=40
+PASS L1 id=0 layer=work
+PASS L1 id=1 layer=work
+PASS L1 id=2 layer=work
+FAIL L1 id=2 CE projection rejects kind=button: decl.c validate() allows COLUMN..CANVAS only
+PASS L1 id=3 layer=work
+FAIL L1 id=3 CE projection rejects kind=button: decl.c validate() allows COLUMN..CANVAS only
+PASS L1 id=4 layer=work
+FAIL L1 id=4 CE projection rejects kind=button: decl.c validate() allows COLUMN..CANVAS only
+PASS L1 id=5 layer=work
+FAIL L1 id=5 CE projection rejects kind=button: decl.c validate() allows COLUMN..CANVAS only
+PASS L1 id=6 layer=work
+FAIL L1 id=6 CE projection rejects kind=input: decl.c validate() allows COLUMN..CANVAS only
+PASS L1 id=7 layer=work
+FAIL L1 id=7 CE projection rejects kind=button: decl.c validate() allows COLUMN..CANVAS only
+PASS O1 scroll range 
+FAIL=6
