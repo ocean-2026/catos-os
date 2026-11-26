@@ -15,6 +15,7 @@
 #include "kstring.h"
 #include "keyboard.h"
 #include "fs.h"
+#include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf scheme -> gui token  */
 
 static void geom_walk(block *b);
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly);
@@ -728,6 +729,16 @@ static void clock_refresh(int force) {
 
 void gui_demo_build(void) {
     gui_style_load();   /* 开机 / 进桌面读取 /etc/style 档位，默认 app */
+    /* v2.82 A1.4: mirror the saved shell scheme onto the gui token palette.
+     * Only `light` has a matching TOK_LIGHT token; dark / solarized / mono
+     * fall back to TOK_DARK (no separate gui token exists for the latter). */
+    {
+        const char *sc = cdeconf_scheme();
+        if (sc && *sc && strcmp_probe(sc, "light") == 0)
+            gui_theme_set(TOK_LIGHT);
+        else
+            gui_theme_set(TOK_DARK);
+    }
     block *root = gui_root_block();
     root->w = GFX24_W; root->h = GFX24_H;
     root->pad_l = 64; root->pad_r = 64; root->pad_t = 64; root->pad_b = 64;
