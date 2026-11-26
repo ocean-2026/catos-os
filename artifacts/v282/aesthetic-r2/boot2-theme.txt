@@ -1,0 +1,1 @@
+root@catos:/# theme current theme: light background #F6F6F4 foreground #24292F usage: theme dark|light|solarized|mono [--crash] --crash also rewrites the crash-screen roles one role: hive set HKLM\Software\CatOS\Terminal\Colors\Error "#F85149" root@catos:/# 

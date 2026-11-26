@@ -1,0 +1,1 @@
+root@catos:/# theme light theme: applied 'light' -- colors stored in HKLM\Software\CatOS\Terminal\Colors and saved root@catos:/# 
