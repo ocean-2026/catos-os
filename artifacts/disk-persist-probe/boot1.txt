@@ -1,0 +1,1 @@
+root@catos:/# edit -c /PERSIST.TXT CATOS_PERSIST_V281_7F3A root@catos:/# 
