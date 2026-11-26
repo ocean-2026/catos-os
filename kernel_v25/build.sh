@@ -23,7 +23,11 @@ NM=nm
 # -fleading-underscore: the asm files (cpu.s/boot.s) export/import symbols
 # with a leading '_' (MinGW convention); on GNU/Linux gcc does not add it
 # by default, so we ask gcc to match the asm exactly.
-CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check -fleading-underscore -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-80387 -Wall -O2 -std=c99 -Iinclude -DuECC_WORD_SIZE=4"
+# -U_WIN32/-U_WIN64: 让 uECC 的 platform-specific.inc 不走 Windows CryptoAPI 分支。
+# 运行期 RNG 由 tls.c 的 uECC_set_rng() 注入；若编译进 CryptGenRandom，PE 会多出
+# .idata 导入段，objcopy -O binary 便从 0x400 扁平化而非 .text 的 0x1000000，
+# 结果 kernel.bin 开头不再是 multiboot magic（GRUB 报 no multiboot header）。
+CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check -fleading-underscore -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-80387 -Wall -O2 -std=c99 -Iinclude -DuECC_WORD_SIZE=4 -U_WIN32 -U_WIN64"
 
 # Bench build (BENCH=1): compiles perf.c / bench_*.c as real modules and
 # enables the `bench` shell command.  Production builds compile the same
