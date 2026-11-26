@@ -280,7 +280,7 @@ static const struct { const char *en, *zh; } help_zh[] = {
     {"show the last fatal fault (vector, CR2, PF bits)", "显示最近一次致命错误（向量、CR2、缺页标志位）"},
     {"show the saved panic record (crashlog --full for raw)", "显示保存的崩溃记录（crashlog --full 查看原始内容）"},
     {"audio (SB16 ISA / ES1370-1371 PCI, POSIX options)", "音频（SB16 ISA / ES1370-1371 PCI，POSIX 选项）"},
-    {"CatOS v0.3 (five-pillar kernel) - commands:", "CatOS v0.3（五柱内核）—— 命令列表："},
+    {"CatOS v2.82 (five-pillar kernel) - commands:", "CatOS v2.82（五柱内核）—— 命令列表："},
     {"deletes pinyin letter while IME active", "输入法开启时删除拼音字符"},
     {"digital rain over the whole screen (any key quits)", "全屏数字雨（任意键退出）"},
     {"ASCII steam train rolls across the console (any key quits)", "ASCII 蒸汽火车横穿控制台（任意键退出）"},

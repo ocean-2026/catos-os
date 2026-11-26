@@ -131,7 +131,17 @@ void cdeconf_load(void) {
 }
 
 void cdeconf_save_theme(const char *scheme) {
-    if (!fs_fs_ready() || !scheme || !*scheme) return;
+    if (!scheme || !*scheme) return;
+    /* v2.82 R1 P0-1: keep the in-memory mirror in step with the live scheme.
+     * gui_demo_build() reads cdeconf_scheme() when a session is rebuilt; the
+     * old code wrote the file only, so a re-entered desktop still saw the
+     * boot-time scheme and stayed dark after `theme light`. */
+    {
+        int m = 0;
+        while (scheme[m] && m < (int)sizeof(g_scheme) - 1) { g_scheme[m] = scheme[m]; m++; }
+        g_scheme[m] = 0;
+    }
+    if (!fs_fs_ready()) return;
 
     /* Preserve an existing accent= mirror line; otherwise mirror the live
      * PAL_ACCENT role. */

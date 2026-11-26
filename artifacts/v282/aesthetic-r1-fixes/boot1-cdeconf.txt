@@ -1,0 +1,1 @@
+ text: back to 80x25 text mode (CJK via dynamic font slots) root@catos:/# y catos: unknown command: y catos: did you mean: df? root@catos:/# edit -c /etc/cde.conf # CatOS appearance mirror (v2.82 A1.4); hive stays primary. theme=light accent=#D299DD root@catos:/# 

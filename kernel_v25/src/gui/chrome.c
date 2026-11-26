@@ -755,9 +755,13 @@ void gui_demo_build(void) {
     taskbar_h = probe_tb_high ? 48 : 32;
     blk_spec bar_tb = spec_panel(LAYER_CHROME, GFX24_W, taskbar_h, 0);
     bar_tb.align_cross = XALN_END;
+    bar_tb.pad_l = 8; bar_tb.pad_r = 8;   /* v2.82 R1 P1-1: symmetric side padding */
     taskbar_id = b_row(root_id, &bar_tb);
     block *taskbar = btable_get(taskbar_id);
     taskbar->bleed = 1;
+    /* v2.82 R1 P1-1: distribute the row so Start stays at the left edge and
+     * the clock block is pinned to the right edge (no elastic spacer block). */
+    taskbar->align_main = ALN_SPACE_BETWEEN;
 
     blk_spec start = spec_panel(LAYER_CHROME, 64, 24, 0);
     start.pad_l = 4;
@@ -779,6 +783,19 @@ void gui_demo_build(void) {
     clock_refresh(1);
 
     build_desktop_icons(root_id);
+}
+
+/* v2.82 R1 P0-1: live theme sync from the shell.  Maps the active scheme onto
+ * the GUI token palette and forces the whole tree to repaint, so a desktop
+ * that is already built follows `theme light|dark` immediately instead of
+ * waiting for the next gui_demo_build().  If no tree exists yet this only
+ * caches the token; gui_demo_build() re-derives it from cdeconf_scheme() too. */
+void gui_theme_sync_scheme(const char *scheme) {
+    if (scheme && *scheme && strcmp_probe(scheme, "light") == 0)
+        gui_theme_set(TOK_LIGHT);
+    else
+        gui_theme_set(TOK_DARK);
+    gui_force_next_frame();
 }
 
 /* ---- 开始菜单（LAYER_OVERLAY，模态） ---------------------------------- */

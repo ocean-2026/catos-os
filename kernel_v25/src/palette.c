@@ -189,6 +189,13 @@ static int apply_rgb(int role, uint32_t rgb) { return pal_set_rgb(role, rgb); }
 int pal_apply_scheme(const char *name, int with_crash) {
     if (!name || !*name) return -1;
 
+    /* v2.82 R1 P1-6: snapshot the old role table so the console cells that
+     * snapshotted the old colours can be re-mapped onto the new roles after
+     * the scheme is applied -- otherwise stale bright foregrounds survive on
+     * the new background. */
+    uint32_t old_rgb[PAL_COUNT];
+    for (int i = 0; i < PAL_COUNT; i++) old_rgb[i] = g_rgb[i];
+
     if (!strcmp_ci(name, "mono")) {
         apply_rgb(PAL_BG, 0x000000);
         apply_rgb(PAL_FG, 0xCCCCCC);
@@ -265,6 +272,9 @@ int pal_apply_scheme(const char *name, int with_crash) {
      * this the palette went back to the previous scheme on every reboot
      * while `hive chk` still reported the change as dirty. */
     hive_save();
+    /* v2.82 R1 P1-6: re-map the already-stamped cells onto the new role
+     * colours before the frame is repainted (fg + bg, role by role). */
+    con_restamp_roles(old_rgb, g_rgb, PAL_COUNT);
     /* v2.72: repaint the whole frame with the NEW background.  Without this
      * only the cells that later got written carried the new colour and the
      * untouched area kept the old one -- the "font background is not the
