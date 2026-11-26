@@ -854,10 +854,10 @@ static void paint_halo(block *b) {
     }
 }
 
-void paint_node(block *b) {
+/* 只画本块 body（不递归子块、不改脏位）：供 damage 矩形重合成按层序逐节点
+ * 调用。paint_cur 由调用方 paint_node 维护；body-only 路径不依赖它。 */
+void paint_node_body(block *b) {
     if (!b || !b->visible) return;
-    const block *prev_cur = paint_cur;
-    paint_cur = b;
 
     uint32_t fg = resolve_color(b, 0);
     uint32_t bg = resolve_color(b, 1);
@@ -941,6 +941,14 @@ void paint_node(block *b) {
     block *hov = gui_hover_target();
     if (hov == b && (b->resize_dir || b->drag_mode == DRAG_FULL))
         gui_draw_border(b->x, b->y, b->w, b->h, accent, 1);
+}
+
+void paint_node(block *b) {
+    if (!b || !b->visible) return;
+    const block *prev_cur = paint_cur;
+    paint_cur = b;
+
+    paint_node_body(b);
 
     /* 裁剪口径：OVF_VISIBLE 不压自身框（越界仍绘制）；CLIP/SCROLL 压框。
      * SCROLL 额外压平移栈，内容按 scroll 偏移平移，子块几何不动。 */
@@ -990,6 +998,37 @@ void paint_node_clipped(block *b) {
         paint_clip_pop();
 }
 
+/* 平面遍历入口（只画自身 body）：祖先链裁剪框压栈后调用 paint_node_body，
+ * 不清 dirty/snap；供 damage 矩形重合成按层序逐节点调用。 */
+void paint_node_body_clipped(block *b) {
+    if (!b || !b->visible) return;
+    int depth0 = clip_depth;
+    int tdepth0 = tr_depth;
+    block *chain[CLIP_DEPTH];
+    int n = 0;
+    for (block *p = b->parent; p && p->parent && n < CLIP_DEPTH - 1;
+         p = p->parent)
+        chain[n++] = p;
+    for (int k = n - 1; k >= 0; k--) {
+        block *p = chain[k];
+        if (b->overflow == OVF_VISIBLE || p->overflow == OVF_VISIBLE) continue;
+        if (b->layer > p->layer) continue;         /* 浮层逃逸父框 */
+        paint_clip_push(p->x, p->y, p->w, p->h);
+        if (p->overflow == OVF_SCROLL)
+            paint_trans_push(p->scroll_x, p->scroll_y);
+    }
+    paint_node_body(b);
+    while (tr_depth > tdepth0)
+        paint_trans_pop();
+    while (clip_depth > depth0)
+        paint_clip_pop();
+}
+
 void paint_begin_frame(void) {
     clip_depth = 0;
+    tr_depth = 0;
+}
+
+void paint_clip_push_rect(int x, int y, int w, int h) {
+    paint_clip_push(x, y, w, h);
 }
