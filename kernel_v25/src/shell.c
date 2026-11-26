@@ -1057,7 +1057,7 @@ static void cmd_about(void) {
     vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n", "  输入         : PS/2 键盘（中断驱动）\n"));
     vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n", "  文件系统     : IDE 上的 FAT32（持久化）\n"));
     vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n", "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
-    vga_write("  Version      : CatOS v2.81\n");
+    vga_write("  Version      : CatOS v2.82\n");
     /* v2.78: boot now runs `about`, which clears the screen, so the net
      * adapter line printed during net_init would otherwise be lost -- restate
      * it here so the first screen still answers "what am I running on". */
@@ -2129,8 +2129,25 @@ static void si_pcm_block(int be, int capture) {
     vga_write("Sample rate: "); print_int(snd_info(SND_INFO_RATE));
     vga_write(" Hz, "); vga_write(be == 2 ? "2ch S16LE" : "1ch U8"); vga_write("\n");
     si_num("Buffer size: ", snd_info(SND_INFO_BUFSZ), 0);
-    si_line(" frames (period/avail not exported by driver)");
-    si_line("Underrun count: n/a");
+    if (be == 2) {
+        /* v2.82 D6: real FRAMECNT/SCOUNT-derived period + avail for the PCI
+         * card; underrun stays n/a while the driver does not track xruns. */
+        int period = es1371_info(ES1371_INFO_PERIOD);
+        int avail  = es1371_info(ES1371_INFO_AVAIL);
+        int under  = es1371_info(ES1371_INFO_UNDERRUN);
+        vga_write(" frames; period: ");
+        if (period < 0) si_line("n/a");
+        else { print_int(period); si_line(" frames"); }
+        vga_write("  avail: ");
+        if (avail < 0) si_line("n/a");
+        else { print_int(avail); si_line(" frames"); }
+        vga_write("  underrun: ");
+        if (under < 0) si_line("n/a");
+        else { print_int(under); vga_write("\n"); }
+    } else {
+        si_line(" frames (period/avail not exported by driver)");
+        si_line("Underrun count: n/a");
+    }
     vga_write("\n");
 }
 

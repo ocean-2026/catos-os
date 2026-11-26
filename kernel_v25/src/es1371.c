@@ -460,6 +460,33 @@ int es1371_info(int what) {
         wr(R_MEMPAGE, saved & 0xFu);        /* QEMU: mempage = val & 0xf */
         return (int)fc;
     }
+    case ES1371_INFO_PERIOD: {
+        if (!es_probed) return -1;
+        /* SCOUNT low half = frames-1 for the armed DMA block (arm_dma writes
+         * frames-1); +1 gives the period in 4-byte S16 stereo frames.  The
+         * parked value after init is SCOUNT=0 -> report 0, not a fabricated
+         * full-buffer size. */
+        uint32_t saved = rr(R_MEMPAGE);
+        set_dac1_page();
+        uint32_t sc = rr(R_DAC1_SCOUNT);
+        wr(R_MEMPAGE, saved & 0xFu);
+        uint32_t size = sc & 0xFFFFu;
+        return size ? (int)(size + 1u) : 0;
+    }
+    case ES1371_INFO_AVAIL: {
+        if (!es_probed) return -1;
+        uint32_t saved = rr(R_MEMPAGE);
+        set_dac1_page();
+        uint32_t fc = rr(R_DAC1_FRAMECNT);
+        wr(R_MEMPAGE, saved & 0xFu);
+        uint32_t size = fc & 0xFFFFu, cnt = fc >> 16;
+        if (size == 0) return 0;
+        /* note (3): low half = size, high half = running counter. */
+        return (int)((size - cnt + 1u) <= size ? (size - cnt + 1u) : 0u);
+    }
+    case ES1371_INFO_UNDERRUN:
+        /* No xrun tracking in this driver yet: report n/a (-1), not 0. */
+        return -1;
     default:                   return -8;   /* ENOSYS */
     }
 }

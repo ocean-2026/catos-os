@@ -58,6 +58,12 @@
 #define ES1371_INFO_SERIAL   13  /* raw SERIAL_CONTROL readback            */
 #define ES1371_INFO_SCOUNT   14  /* raw DAC1_SCOUNT (paged) readback       */
 #define ES1371_INFO_SERR     15  /* raw 0x20 SERR/status readback          */
+/* v2.82 D6: PCM diagnostics for sndinfo.  PERIOD/AVAIL are decoded from the
+ * real FRAMECNT/SCOUNT readbacks; UNDERRUN stays -1 while the driver does not
+ * track xruns (callers report n/a instead of inventing a zero counter). */
+#define ES1371_INFO_PERIOD    16  /* frames in one DMA block, -1 if absent  */
+#define ES1371_INFO_AVAIL     17  /* frames left in current block, -1 n/a   */
+#define ES1371_INFO_UNDERRUN  18  /* xrun counter, -1 = not exported        */
 
 /* ---- hardware geometry ---- */
 #define ES1371_DMA_PHYS      0x550000u  /* 64 KiB aligned, identity-mapped  */
