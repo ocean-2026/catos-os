@@ -1,0 +1,438 @@
+
+===== 01-desktop-autostart-dark (gui frame) =====
+
+
+===== 02-console-gfx24 =====
+net: no usable NIC (no 1022:2000); PCI bus 0: vend=8086 dev=1237 vend=8086 dev=7
+000 vend=8086 dev=7010 vend=8086 dev=7113 vend=1234 dev=1111
+net: QEMU -> -netdev user,id=n0 -device pcnet,netdev=n0
+
+[display] frame 640x400, 80x25 cells @8x16)
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 03-about-banner =====
+   ###  #   #   #    ###  ####
+    A tiny Unix-like OS on GRUB Multiboot
+    Architecture : i386 (32-bit x86)
+    Bootloader   : GRUB 2 (ISO9660 / El Torito)
+    Kernel       : interrupts + paging + tasks
+                   ring3 CE apps via int 0x80, uid perms
+    Display      : front-end + text/gfx back-ends ('display')
+    Input        : PS/2 keyboard (IRQ-driven)
+    Filesystem   : FAT32 on IDE (persistent)
+    Runs on      : QEMU / VMware / Bochs / real PC
+    Version      : CatOS v2.82
+    Network      : not initialised
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 04-help =====
+  format                    erase the FAT32 volume (y/n confirm)
+  fsck                      check FAT mirror + scan dir tree; --purge wipes bad
+entries
+  mount                     list the mount table
+  mount <1..4|hd0pN> DIR    bind a FAT32 partition to an empty dir
+  umount DIR                detach the partition bound to DIR
+  df                        per-mountpoint volume usage
+  faultinfo                 show the last fatal fault (vector, CR2, PF bits)
+  crashlog                  show the saved panic record (crashlog --full for raw
+)
+  edit FILE                 nano-style full-screen editor; -c/-c N/-c -N prints
+   (arrows move, ^O save, ^X exit, ^K del line, ^U clear)
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 05-ls-root =====
+  home
+  lib
+  mnt
+  pkg
+  proc
+  root
+  sbin
+  sys
+  tmp
+  usr
+  var
+  --- 17 entries
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 06-ls-bin =====
+  node.ce
+  ocntools.ce
+  ocntools.cfg
+  perms.ce
+  punctest.ce
+  sndtest.ce
+  spinner.ce
+  sysinfo.ce
+  test.js
+  vprobe.ce
+  zhdemo.ce
+  --- 32 entries
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 07-ls-long =====
+  -rw-r--r--    29.0K node.ce
+  -rw-r--r--    84.4K ocntools.ce
+  -rw-r--r--      712 ocntools.cfg
+  -rw-r--r--      720 perms.ce
+  -rw-r--r--      288 punctest.ce
+  -rw-r--r--      860 sndtest.ce
+  -rw-r--r--      344 spinner.ce
+  -rw-r--r--      912 sysinfo.ce
+  -rw-r--r--      949 test.js
+  -rw-r--r--     1.8K vprobe.ce
+  -rw-r--r--     1.1K zhdemo.ce
+  --- 32 entries
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 08-colors-sample =====
+root@catos:/# echo -c green Green sample: ok / success text
+echo: invalid option -- 'c'
+Try 'echo --help' for more information.
+root@catos:/# echo -c blue Blue sample: link / accent text
+echo: invalid option -- 'c'
+Try 'echo --help' for more information.
+root@catos:/# echo -c yellow Yellow sample: caution text
+echo: invalid option -- 'c'
+Try 'echo --help' for more information.
+root@catos:/# echo -c cyan Cyan sample: neutral highlight
+echo: invalid option -- 'c'
+Try 'echo --help' for more information.
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 09-text-mode-cjk =====
+root@catos:/# lang zh
+  ? ? ? ? ?
+  note: ?  gfx ? ? ? ? ? ? ?  (switch to gfx mode to display CJK)
+  zh
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 10-text-mode-ls =====
+  node.ce
+  ocntools.ce
+  ocntools.cfg
+  perms.ce
+  punctest.ce
+  sndtest.ce
+  spinner.ce
+  sysinfo.ce
+  test.js
+  vprobe.ce
+  zhdemo.ce
+  --- 32 entries
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 11-gfx-console =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 12-desktop-dark (gui frame) =====
+
+
+===== 13-theme-before-light =====
+root@catos:/# theme
+  current theme: dark
+  background #0A0E14  foreground #DCDCDC
+  usage: theme dark|light|solarized|mono [--crash]
+         --crash also rewrites the crash-screen roles
+         one role: hive set HKLM\Software\CatOS\Terminal\Colors\Error "#F85149"
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 13-shell-light =====
+  usage: theme dark|light|solarized|mono [--crash]
+         --crash also rewrites the crash-screen roles
+         one role: hive set HKLM\Software\CatOS\Terminal\Colors\Error "#F85149"
+root@catos:/# theme light
+  theme: applied 'light' -- colors stored in HKLM\Software\CatOS\Terminal\Colors
+ and saved
+root@catos:/# theme
+  current theme: light
+  background #F6F6F4  foreground #24292F
+  usage: theme dark|light|solarized|mono [--crash]
+         --crash also rewrites the crash-screen roles
+         one role: hive set HKLM\Software\CatOS\Terminal\Colors\Error "#F85149"
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 16-after-reboot-shell =====
+root@catos:/# theme
+  current theme: light
+  background #F6F6F4  foreground #24292F
+  usage: theme dark|light|solarized|mono [--crash]
+         --crash also rewrites the crash-screen roles
+         one role: hive set HKLM\Software\CatOS\Terminal\Colors\Error "#F85149"
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 17-blank-volume-warning =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 18-help-header =====
+  format                    erase the FAT32 volume (y/n confirm)
+  fsck                      check FAT mirror + scan dir tree; --purge wipes bad
+entries
+  mount                     list the mount table
+  mount <1..4|hd0pN> DIR    bind a FAT32 partition to an empty dir
+  umount DIR                detach the partition bound to DIR
+  df                        per-mountpoint volume usage
+  faultinfo                 show the last fatal fault (vector, CR2, PF bits)
+  crashlog                  show the saved panic record (crashlog --full for raw
+)
+  edit FILE                 nano-style full-screen editor; -c/-c N/-c -N prints
+   (arrows move, ^O save, ^X exit, ^K del line, ^U clear)
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== 18-help-header =====
+  mount <1..4|hd0pN> DIR    bind a FAT32 partition to an empty dir
+  umount DIR                detach the partition bound to DIR
+  df                        per-mountpoint volume usage
+  faultinfo                 show the last fatal fault (vector, CR2, PF bits)
+  crashlog                  show the saved panic record (crashlog --full for raw
+)
+  edit FILE                 nano-style full-screen editor; -c/-c N/-c -N prints
+   (arrows move, ^O save, ^X exit, ^K del line, ^U clear)
+root@catos:/# head -12 /tmp/h.txt
+  catos: ? ? ? ? ? ? ? ? ? ? ? ? ? :
+  note: ?  gfx ? ? ? ? ? ? ?  (switch to gfx mode to display CJK)
+  edit -c N
+root@catos:/#
+
+
+
+
+
+
+
+
+
+
+
+

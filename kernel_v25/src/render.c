@@ -726,6 +726,30 @@ void con_repaint_frame(void) {
     repaint_all();
 }
 
+/* v2.82 R1 P1-6: cells snapshot their fg/bg RGB when written, so after a
+ * scheme switch the old rows keep the old role colours (bright green on the
+ * new light background).  Walk the grid and re-map any colour that matches an
+ * old role onto the corresponding new role; unknown colours (panels, inverse
+ * video, selection) are left alone. */
+void con_restamp_roles(const uint32_t *old_rgb, const uint32_t *new_rgb, int n) {
+    if (!old_rgb || !new_rgb || n <= 0) return;
+    for (int y = 0; y < CON_MAX_ROWS; y++) {
+        for (int x = 0; x < CON_MAX_COLS; x++) {
+            con_cell_t *c = &cells[y][x];
+            for (int i = 0; i < n; i++) {
+                if (c->fg == old_rgb[i]) {
+                    c->fg = new_rgb[i];
+                    c->fg_idx = render_quantize(c->fg);
+                }
+                if (c->bg == old_rgb[i]) {
+                    c->bg = new_rgb[i];
+                    c->bg_idx = render_quantize(c->bg);
+                }
+            }
+        }
+    }
+}
+
 void con_clear(void) {
     for (int y = 0; y < CON_MAX_ROWS; y++)
         for (int x = 0; x < CON_MAX_COLS; x++) cell_blank(&cells[y][x]);

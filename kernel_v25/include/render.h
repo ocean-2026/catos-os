@@ -194,6 +194,11 @@ const char *con_mode_name(int mode);
 int         con_request_mode(int mode, int origin);
 /* v2.72: full-frame repaint with the live palette background, text kept. */
 void        con_repaint_frame(void);
+/* v2.82 R1 P1-6: restamp cells that still snapshot an old role colour onto
+ * the matching new role colour (fg and bg), so a scheme switch does not leave
+ * stale bright foregrounds on the new background.  Cells whose colour matches
+ * no old role are left untouched (panels / inverse video). */
+void        con_restamp_roles(const uint32_t *old_rgb, const uint32_t *new_rgb, int n);
 int         con_force_text(void);   /* kernel-only emergency, no syscall */
 void        con_diag(void);
 

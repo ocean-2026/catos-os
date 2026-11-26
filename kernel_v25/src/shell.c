@@ -31,6 +31,12 @@
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
 #include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf appearance mirror       */
+
+/* v2.82 R1 P1-4: single version source for user-visible strings (about /
+ * help heading / uname).  Bump this one constant instead of editing copies. */
+#ifndef CATOS_VERSION
+#define CATOS_VERSION "2.82"
+#endif
 #ifdef CATOS_BENCH
 #include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
 #endif
@@ -272,6 +278,12 @@ static int has_cjk(const char *s) {
     return 0;
 }
 
+/* help two-column geometry: command field 24 cols, description starts at col
+ * 26, terminal width 80 (v2.82 R1 P1-3 wrap bounds). */
+#define HELP_CMD_W     24
+#define HELP_DESC_COL  26
+#define HELP_COLS      80
+
 static void help_row(const char *cmd, const char *desc) {
     if (pager_quit()) return;
     desc = trhelp_cmd(cmd, desc);         /* v2.62: localise description; v2.82 P1-5 cmd hint for loose match */
@@ -288,20 +300,45 @@ static void help_row(const char *cmd, const char *desc) {
         pager_line(l2);
         return;
     }
-    char line[160];
-    line[0] = 0;
-    /* command field is 24 chars wide, description starts in column 26 */
-    int n = 0;
-    for (const char *p = cmd; *p; p++) { if (n < (int)sizeof(line)-1) line[n++] = *p; }
-    while (n < 24 && n < (int)sizeof(line)-1) line[n++] = ' ';
-    if (n < (int)sizeof(line)-2) { line[n++] = ' '; line[n++] = ' '; }
-    for (const char *p = desc; *p && n < (int)sizeof(line)-1; p++) {
-        /* Chinese descriptions are UTF-8 and 2 cells wide per glyph, but
-         * pager_line prints raw bytes; keep the byte-fit guard. */
-        line[n++] = *p;
+    /* v2.82 R1 P1-3: wrap the description at the 80-column right edge instead
+     * of hard-truncating it; continuation lines indent to the description
+     * column (26) so the two columns stay aligned. */
+    char prefix[HELP_DESC_COL + 1];
+    int pl = 0;
+    for (const char *p = cmd; *p && pl < HELP_CMD_W; p++) prefix[pl++] = *p;
+    while (pl < HELP_CMD_W) prefix[pl++] = ' ';
+    prefix[pl++] = ' '; prefix[pl++] = ' ';      /* pl == HELP_DESC_COL */
+
+    const char *p = desc;
+    int first = 1;
+    while (*p) {
+        if (pager_quit()) return;
+        int avail = HELP_COLS - HELP_DESC_COL;
+        int k = 0; const char *sp = 0;
+        const char *q = p;
+        while (*q && k < avail) {
+            if (*q == ' ' && k > 0) sp = q;
+            q++; k++;
+        }
+        int take;
+        if (!*q)               take = (int)(q - p);      /* rest fits        */
+        else if (sp && sp > p) take = (int)(sp - p);     /* break at a space */
+        else                   take = avail;             /* long token: cut  */
+        char seg[64]; int s = 0;
+        for (int i = 0; i < take && s < (int)sizeof(seg) - 1; i++) seg[s++] = p[i];
+        seg[s] = 0;
+        p += take;
+        while (*p == ' ') p++;
+
+        char line[160]; int n = 0;
+        if (first) { for (int i = 0; i < pl; i++) line[n++] = prefix[i]; }
+        else       { for (int i = 0; i < HELP_DESC_COL; i++) line[n++] = ' '; }
+        for (int i = 0; seg[i] && n < (int)sizeof(line) - 1; i++) line[n++] = seg[i];
+        line[n] = 0;
+        pager_line(line);
+        first = 0;
     }
-    line[n] = 0;
-    pager_line(line);
+    if (!*desc) pager_line(prefix);
 }
 static void help_head(const char *s) {
     if (pager_quit()) return;
@@ -319,7 +356,7 @@ static void help_note(const char *s)  { if (pager_quit()) return; s = trhelp(s);
 static void cmd_help(void) {
     con_suppress_cursor(1);                       /* v2.60: batch paint, no flicker */
     pager_begin(1);
-    pager_line(trhelp("CatOS v0.3 (five-pillar kernel) - commands:"));  /* v2.75: 经翻译表 */
+    pager_line(trhelp("CatOS v" CATOS_VERSION " (five-pillar kernel) - commands:"));  /* v2.75: 经翻译表; v2.82 R1 P1-4: 单一版本来源 */
     help_row("help",        "show this message");
     help_row("keys|shortcuts", "list all bound key bindings by group");
     help_row("clear",       "clear the screen");
@@ -757,6 +794,7 @@ static void cmd_theme(const char *arg) {
         return;
     }
     cdeconf_save_theme(name);   /* v2.82 A1.4: mirror the scheme to /etc/cde.conf */
+    gui_theme_sync_scheme(name); /* v2.82 R1 P0-1: push the scheme onto the live gui token palette */
     con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     /* v2.72: con_set_style_rgb() re-stamps the cells' snapshot background;
      * the frame itself must be cleared with the new colour in the same
@@ -1057,7 +1095,7 @@ static void cmd_about(void) {
     vga_write(trs("  Input        : PS/2 keyboard (IRQ-driven)\n", "  输入         : PS/2 键盘（中断驱动）\n"));
     vga_write(trs("  Filesystem   : FAT32 on IDE (persistent)\n", "  文件系统     : IDE 上的 FAT32（持久化）\n"));
     vga_write(trs("  Runs on      : QEMU / VMware / Bochs / real PC\n", "  运行平台     : QEMU / VMware / Bochs / 真实 PC\n"));
-    vga_write("  Version      : CatOS v2.82\n");
+    vga_write("  Version      : CatOS v" CATOS_VERSION "\n");
     /* v2.78: boot now runs `about`, which clears the screen, so the net
      * adapter line printed during net_init would otherwise be lost -- restate
      * it here so the first screen still answers "what am I running on". */
@@ -1192,7 +1230,7 @@ static void cmd_sndregs(void) {
 }
 
 static void cmd_uname(void) {
-    vga_write(trs("CatOS i386 0.3 (grub-multiboot, 5-pillar kernel)\n", "CatOS i386 0.3（GRUB Multiboot，五大支柱内核）\n"));
+    vga_write(trs("CatOS i386 v" CATOS_VERSION " (grub-multiboot, 5-pillar kernel)\n", "CatOS i386 v" CATOS_VERSION "（GRUB Multiboot，五大支柱内核）\n"));
 }
 
 static void cmd_date(void) {

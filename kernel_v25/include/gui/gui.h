@@ -20,6 +20,7 @@
 void      gui_begin(void);                 /* 进入图形块桌面（保存文本侧状态由渲染层负责） */
 void      gui_end(void);                   /* 干净退回文本控制台 */
 void      gui_reset(void);                 /* 清空块表重建（含根），孤儿数 0 */
+void      gui_theme_sync_scheme(const char *scheme);  /* v2.82 R1 P0-1: shell scheme -> gui token, live repaint */
 
 /* ---- 声明式建块 API ---- */
 block_id  b_column (block_id parent, const blk_spec *s);
