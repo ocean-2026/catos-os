@@ -101,6 +101,8 @@ static void apply_spec(block *b, const blk_spec *s) {
     if (b->st.role_accent) b->st.accent = 0;
     b->st.scale = s->scale ? s->scale : 1;
     b->st.border_w = s->border_w;
+    b->stroke = s->stroke;
+    if (!b->st.border_w) b->st.border_w = b->stroke;
 
     b->text = s->text;
     b->pix = s->pix;

@@ -75,6 +75,11 @@ void ib_reset_if_owner(int tid) {
 
 int ib_is_active(void) { return ib_active; }
 
+void ib_get_state(int *len, int *pos) {
+    if (len) *len = ib_len;
+    if (pos) *pos = ib_pos;
+}
+
 /* ---- 自绘：文本 + 光标竖线（底色 / 边框由 paint 默认路径处理） ------------- */
 
 void ib_render(block_id id) {

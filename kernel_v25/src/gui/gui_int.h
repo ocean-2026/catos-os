@@ -42,7 +42,10 @@ void      gui_force_next_frame(void);
 /* paint.c */
 void      paint_begin_frame(void);
 void      paint_node(block *b);
+void      paint_node_body(block *b);
 void      paint_node_clipped(block *b);
+void      paint_node_body_clipped(block *b);
+void      paint_clip_push_rect(int x, int y, int w, int h);
 void      gui_fill_rect(int x, int y, int w, int h, uint32_t rgb);
 void      gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale);
 void      gui_blit24(const uint8_t *src, int x, int y, int w, int h);
@@ -124,12 +127,17 @@ int       blkgen_build(void);
 void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
+void      gui_inject_hover(int x, int y);
+void      gui_inject_press_block(block_id id);
+void      gui_inject_hover_block(block_id id);
+void      gui_inject_key(int code);
 block_id  gui_hit_test(int x, int y);
 int       gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir);
 #define GUI_IT_NONE   0
 #define GUI_IT_MOVE   1
 #define GUI_IT_RESIZE 2
 block    *gui_hover_target(void);
+block    *gui_press_target(void);
 void      gui_focus_raise(block_id id);
 void      gui_modal_inert(block_id overlay_id);
 
@@ -148,13 +156,18 @@ void      ib_activate(block_id id);
 void      ib_reset(void);
 void      ib_reset_if_owner(int tid);
 int       ib_is_active(void);
+void      ib_get_state(int *len, int *pos);
 int       ib_key(int code, void *ud);
 void      ib_render(block_id id);
+
+/* paint.c 边框绘制（settings.c / shadows.c 复用；此前仅 shadows.c 本地 extern） */
+void      gui_draw_border(int x, int y, int w, int h, uint32_t color, uint8_t bw);
 
 /* settings.c 外观设置组件 + 风格档位（app / calm） */
 void      gui_settings_open(void);
 void      gui_settings_close(void);
 int       gui_settings_active(void);
+void      st_layout_rects(int i, int *x, int *y, int *w, int *h);
 int       gui_style_calm(void);
 void      gui_style_set(int calm);
 void      gui_style_load(void);

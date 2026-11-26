@@ -817,6 +817,7 @@ static void br_build_ui(void) {
     br_root = b_column(root_id, &root);
     block *pr = btable_get(br_root);
     pr->x = 112; pr->y = 48; pr->moved = 1;
+    pr->st.corner_radius = 16;   /* §16.1 外框 r16 */
 
     /* 工具栏：Back / Fwd / Refresh / Stop + 地址栏。 */
     blk_spec bar = br_panel(LAYER_WORK, BR_VP_W, 22, 0);

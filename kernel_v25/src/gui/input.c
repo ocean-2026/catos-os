@@ -12,6 +12,16 @@
 #include "keyboard.h"
 #include "gfx24.h"
 
+extern void ser_write(const char *s);
+extern void ser_putc(char c);
+
+static void ser_dec_u(uint32_t v) {
+    char buf[12]; int n = 0;
+    if (v == 0) { ser_write("0"); return; }
+    while (v) { buf[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) ser_putc(buf[--n]);
+}
+
 #define DRAG_NONE   0
 #define DRAG_MOVE   1
 #define DRAG_RESIZE 2
@@ -27,8 +37,21 @@ static int       drag_mode;
 static uint8_t   drag_resize_dir;
 static int       drag_off_x, drag_off_y;
 static block    *hover_block;
+static block    *pressed_block;     /* E 轮新增：左键按住期间命中的按钮（三态按下反馈） */
+
+/* 运行时调试开关（默认关，release 惰性）：故障注入时对硬禁拖块临时放行，
+ * 仅用于核验“被拖块出现在本不该出现的位置时，兜底重合成仍不烙残影”。
+ * 唯一绕过点：drag_denied / drag_band_hit；不写任何像素。 */
+int g_dbg_dragfull = 0;
+
+void gui_dbg_set_dragfull(int on) {
+    g_dbg_dragfull = on ? 1 : 0;
+    ser_write("GUI:warn fault=dragfull ");
+    ser_write(g_dbg_dragfull ? "on\n" : "off\n");
+}
 
 block *gui_hover_target(void) { return hover_block; }
+block *gui_press_target(void) { return pressed_block; }
 
 /* 组件键盘钩子：返回 1 表示消费该键，默认 Esc 退出路径不再触发。 */
 static int       (*key_hook)(int code, void *ud);
@@ -122,10 +145,24 @@ static int in_resize_band(block *b, int x, int y) {
 }
 
 static int drag_band_hit(block *cur, int y) {
-    /* drag_mode=0 回落标题带拖拽（v1 兼容默认；v2 可显式声明整块/不可拖）。 */
-    uint8_t dm = cur->drag_mode ? cur->drag_mode : DRAG_TITLE;
-    if (dm == DRAG_FULL) return 1;
-    if (dm == DRAG_TITLE && y < cur->y + TITLE_H) return 1;
+    /* 故障注入开关：临时把禁拖块视为整块可拖（仅此一处）。 */
+    if (g_dbg_dragfull) return 1;
+    /* 默认 DRAG_NONE 不可拖；仅显式声明 TITLE/FULL 的块参与拖拽带判定，
+     * 不再把 0 回落成标题带可拖。 */
+    if (cur->drag_mode == DRAG_FULL) return 1;
+    if (cur->drag_mode == DRAG_TITLE && y < cur->y + TITLE_H) return 1;
+    return 0;
+}
+
+/* 硬禁拖：背景层 / 内容层 / 根块 / 全出血块一律不可拖，即使显式声明
+ * DRAG_FULL 也忽略。这类块是桌面底、容器或任务栏，拖拽只会误移动底色。 */
+static int drag_denied(block *b) {
+    if (!b) return 1;
+    /* 故障注入开关：临时放行硬禁拖块（仅此一处绕过，默认关）。 */
+    if (g_dbg_dragfull) return 0;
+    if (b->layer == LAYER_BG || b->layer == LAYER_CONTENT) return 1;
+    if (b->kind == BLK_ROOT) return 1;
+    if (b->bleed) return 1;
     return 0;
 }
 
@@ -142,8 +179,17 @@ static block *resolve_interaction(block *b, int x, int y,
     block *target = b;
     while (target->parent && target->parent->kind != BLK_ROOT &&
            !target->focusable && !target->resize_dir &&
-           target->drag_mode == 0)
+           target->drag_mode == DRAG_NONE)
         target = target->parent;
+
+    /* 硬禁拖：背景层 / 内容层 / 根块 / 全出血块一律不可拖，即使声明
+     * DRAG_FULL 也忽略；记串口告警供探针核验。 */
+    if (drag_denied(target)) {
+        ser_write("GUI:warn dragdeny id="); ser_dec_u(target->id);
+        ser_write(" layer="); ser_dec_u(target->layer); ser_write("\n");
+        *mode = DRAG_NONE;
+        return target;
+    }
 
     /* 1) resize 边缘带（优先于拖拽带）。 */
     if (in_resize_band(target, x, y)) {
@@ -219,11 +265,16 @@ static void on_press(int x, int y) {
         return;
     }
 
-    /* 菜单模态：点下层空白只关闭菜单，不下发命中。 */
-    if (gui_menu_is_open() && b->layer < LAYER_OVERLAY) {
+    /* 菜单模态：点菜单外部（含下层全部被 inert 后命中为空）只关闭菜单，不下发命中。 */
+    if (gui_menu_is_open() && (!b || b->layer < LAYER_OVERLAY)) {
         gui_menu_close();
         return;
     }
+    if (!b) return;
+
+    /* E 轮三态：左键按住期间记录命中块（优先上溯到按钮），供按下反馈；松开清空。 */
+    { block *p = b; while (p && p->kind != BLK_BUTTON) p = p->parent;
+      pressed_block = p ? p : b; }
 
     /* 点击冒泡：命中的通常是最里层的标签/文本块，而 on_click 声明在
      * 行/面板上。向上找最近一个带 on_click 的祖先（含自身），否则
@@ -234,10 +285,11 @@ static void on_press(int x, int y) {
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
 
-    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。命中块本身是输入
-     * 框时按 b 接管（CE 声明块不带 legacy on_click，act 上溯会落空）。 */
-    block *ib_target = (b->kind == BLK_INPUT) ? b : act;
-    if (ib_target && ib_target->kind == BLK_INPUT) {
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。
+     * act 上溯到无 on_click 的祖先可能为 null，故按命中块 b 回退判 BLK_INPUT。 */
+    block *ib_target = (act && act->kind == BLK_INPUT) ? act
+                     : (b->kind == BLK_INPUT) ? b : 0;
+    if (ib_target) {
         gui_set_key_hook(ib_key, (void *)ib_target->id);
         ib_activate(ib_target->id);
     }
@@ -333,6 +385,7 @@ static void on_drag_move(int x, int y) {
 }
 
 static void on_release(void) {
+    pressed_block = 0;
     if (drag_block && drag_block->on_drag)
         drag_block->on_drag(drag_block->id, 0, 0, 2); /* phase 2 = end */
     drag_block = 0;
@@ -350,6 +403,7 @@ void gui_pump_input(void) {
         }
         if (e.down && (e.changed & MOUSE_BTN_LEFT)) on_press(e.x, e.y);
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
+            pressed_block = 0;
             if (drag_mode != DRAG_NONE || sb_drag_target()) on_release();
             else hover_block = hit_test(e.x, e.y);
             pop_bridge_note(e.x, e.y);
@@ -394,6 +448,7 @@ void gui_input_reset(void) {
     focus_n = 0;
     for (int i = 0; i < 4; i++) focus_stack[i] = 0;
     hover_block = 0;
+    pressed_block = 0;
     key_hook = 0;
     key_ud = 0;
     sb_state_reset();
@@ -404,6 +459,10 @@ void gui_inject_press(int x, int y)  { on_press(x, y); }
 void gui_inject_move(int x, int y)   { on_drag_move(x, y); }
 void gui_inject_release(void)        { on_release(); }
 void gui_inject_wheel(int x, int y, int dz) { on_wheel(x, y, dz); }
+void gui_inject_hover(int x, int y) { hover_block = hit_test(x, y); }
+void gui_inject_press_block(block_id id) { pressed_block = btable_get(id); }
+void gui_inject_hover_block(block_id id) { hover_block = btable_get(id); }
+void gui_inject_key(int code) { if (key_hook) key_hook(code, key_ud); }
 block_id gui_hit_test(int x, int y) {
     block *b = hit_test(x, y);
     return b ? b->id : 0;

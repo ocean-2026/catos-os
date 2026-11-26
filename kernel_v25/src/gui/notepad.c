@@ -219,16 +219,17 @@ void gui_notepad_open(const char *path) {
     np_root = b_column(root_id, &root);
     block *pr = btable_get(np_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
+    pr->st.corner_radius = 16;   /* §16.1 外框 r16 */
     pr->z = layer_max_z(LAYER_WORK) + 1;   /* 同层取最大 z+1，不与既有面板同序 */
 
-    /* 标题条：标签 + 关闭块。 */
+    /* 标题条：固定串标签 + 关闭块，两端分列不叠（E4-⑦）。路径已在状态行显示。 */
     blk_spec title = np_panel(LAYER_WORK, NP_BODY_W, NP_TITLE_H, 0);
     title.role_bg = ROLE_BAR;
     title.bg = INHERIT_COLOR;
     title.align_cross = XALN_CENTER;
+    title.align_main = ALN_SPACE_BETWEEN;
     block_id bar = b_row(np_root, &title);
-    xcopy(np_title, sizeof(np_title), "Notepad: ");
-    xcat(np_title, sizeof(np_title), np_path);
+    xcopy(np_title, sizeof(np_title), "Notepad");
     b_text(bar, 0, np_title);
     blk_spec close = np_panel(LAYER_WORK, 56, NP_TITLE_H - 4, 1);
     close.on_click = np_close_click;
