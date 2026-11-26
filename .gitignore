@@ -20,6 +20,7 @@ kernel_v25/build/*.bin
 kernel_v25/extapp/build/*
 !kernel_v25/extapp/build/mkce.py
 !kernel_v25/extapp/build/mkso.py
+!kernel_v25/extapp/build/mkrel8.py
 
 # ---- bootable artifacts / disk images (hundreds of MB) ----
 *.iso
