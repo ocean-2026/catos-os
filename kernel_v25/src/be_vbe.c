@@ -463,6 +463,80 @@ static void vbe_set_palette(uint8_t idx, uint32_t rgb) {
     (void)idx; (void)rgb;      /* truecolour: no CLUT in hardware */
 }
 
+/* ---- D7 pixel self-check (diagnostic only; changes no paint path) -------
+ * Runs from vbe_diag(): 32bpp write -> readback consistency (WC/UC alike),
+ * and -- when HW panning is active -- scanline mapping after a one-line
+ * scroll.  Only off-screen rows are touched; the viewport is restored at
+ * the end.  This is a verifier: it must not alter the painting primitives. */
+static void vbe_selftest(void) {
+    if (!lfb) { con_write("vbe-px: no LFB\n"); return; }
+
+    int avail = pan_rows ? pan_rows : (VBE_H / 16);
+    if (avail < 2) { con_write("vbe-px: n/a (short buffer)\n"); return; }
+
+    int fail = 0;
+
+    /* Write four known dwords to the last off-screen row, drain WC, read
+     * back and compare the XRGB byte mask (high byte is unused by XRGB). */
+    static const uint32_t pats[4] = {
+        0x00FF0000u, 0x0000FF00u, 0x000000FFu, 0x00FFFFFFu
+    };
+    uint32_t row = (uint32_t)(avail - 1);
+    for (int i = 0; i < 4; i++)
+        lfb[row * pitch_px + i] = pats[i];
+    __asm__ volatile("sfence" : : );
+    __asm__ volatile("wbinvd");
+    int mism = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t v = lfb[row * pitch_px + i] & 0x00FFFFFFu;
+        if (v != (pats[i] & 0x00FFFFFFu)) mism++;
+    }
+    if (mism) fail = 1;
+    con_write(mism == 0 ? "vbe-px: readback 4/4 OK ("
+                        : "vbe-px: readback MISMATCH ");
+    con_write(wc_enabled ? "WC)\n" : "UC fallback)\n");
+
+    /* Pan mapping: mark logical row 0, scroll one line; the same pixels
+     * must follow the viewport to physical row pan_off. */
+    int pan_tested = 0;
+    if (!pan_rows) {
+        con_write("vbe-px: pan n/a (re-render backend)\n");
+    } else {
+        int old_off = pan_off;
+        if (old_off + 1 + VBE_ROWS > pan_rows) {
+            con_write("vbe-px: pan n/a (near wrap)\n");
+        } else {
+            const uint32_t marker = 0x00112233u;
+            lfb[(uint32_t)old_off * 16u * pitch_px + 4] = marker;
+            __asm__ volatile("sfence" : : );
+            int sc = vbe_scroll(1, 0x00000000u);
+            if (sc != 0) {
+                con_write("vbe-px: pan n/a (scroll wrap)\n");
+            } else {
+                pan_tested = 1;
+                __asm__ volatile("sfence" : : );
+                uint32_t got = lfb[(uint32_t)pan_off * 16u * pitch_px + 4]
+                               & 0x00FFFFFFu;
+                if (got != (marker & 0x00FFFFFFu)) {
+                    fail = 1;
+                    con_write("vbe-px: pan scanline MISMATCH\n");
+                } else {
+                    con_write("vbe-px: pan scanline OK\n");
+                }
+            }
+        }
+    }
+
+    /* Restore the viewport, then leave a verdict swatch in row 1 (the
+     * shell prompt lives on row 0) for the pixel probe to sample:
+     * green = readback OK and (pan OK or pan not tested);
+     * yellow = readback OK, pan n/a; red = any mismatch. */
+    vbe_clear(0x00000000u);
+    uint32_t swatch = fail ? 0x00FF0000u
+                           : (pan_tested ? 0x0000FF00u : 0x00FFFF00u);
+    fill_abs(0, 16, 16, 16, swatch);
+}
+
 static void vbe_diag(void) {
     con_write(svga_backend
         ? "vbe backend: VMware SVGA II 800x600x32 XRGB, FIFO UPDATE @25Hz\n"
@@ -501,6 +575,7 @@ static void vbe_diag(void) {
     con_write(wc_enabled ? " mtrr=WC" : " mtrr=UC(fallback)");
     con_write(pan_rows ? " scroll=HW-pan" : " scroll=re-render");
     con_write("\n");
+    vbe_selftest();
 }
 
 render_be_t be_vbe = {
