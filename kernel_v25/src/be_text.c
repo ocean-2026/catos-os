@@ -99,6 +99,19 @@ static void vga_reload_font(void) {
 /* Cached so a full redraw does not rewrite the same glyphs 3700 times. */
 static uint32_t loaded_cp[CON_TEXT_HZ_SLOTS];
 
+/* B7 (#117): the VGA text font slots cannot hold the full CJK set reliably,
+ * so text mode degrades every non-ASCII codepoint to a single '?' instead of
+ * painting a blank cell (the old printable-ASCII-only filter dropped Chinese
+ * wholesale).  The first non-ASCII cell on a text session emits one hint line;
+ * gfx/VBE back-ends are untouched. */
+static int text_cjk_hint_shown;
+
+static void text_note_cjk(void) {
+    if (text_cjk_hint_shown) return;
+    text_cjk_hint_shown = 1;
+    con_write("\nnote: 切 gfx 模式可显示中文 (switch to gfx mode to display CJK)\n");
+}
+
 static void text_load_hz(uint32_t cp, uint8_t slot) {
     if (slot >= CON_TEXT_HZ_SLOTS || loaded_cp[slot] == cp) return;
     const uint8_t *g = render_font_hz(cp);
@@ -144,26 +157,29 @@ static void text_draw_cell(int gx, int gy, const con_cell_t *c) {
     uint8_t a = attr_byte(c->fg, c->bg, c->attrs);
     uint16_t word;
     if (c->flags == CELL_F_WIDE_L) {
-        uint8_t s = c->gslot;
-        if (s >= CON_TEXT_HZ_SLOTS) {         /* no slot -> fallback */
-            word = (uint16_t)'?' | ((uint16_t)a << 8);
-            vram[gy * 80 + gx] = word;
-            if (gx + 1 < 80) vram[gy * 80 + gx + 1] = word;
-            return;
-        }
-        text_load_hz(c->cp, s);
-        vram[gy * 80 + gx] =
-            (uint16_t)(0x80 + 2 * (int)s) | ((uint16_t)a << 8);
+        /* B7 (#117): degrade the CJK cell to one '?'.  The partner right cell
+         * is left blank, NOT a second '?' -- a wide character counts as one
+         * character, matching the 2-cell advance in the width table. */
+        text_note_cjk();
+        word = (uint16_t)'?' | ((uint16_t)a << 8);
+        vram[gy * 80 + gx] = word;
         if (gx + 1 < 80)
-            vram[gy * 80 + gx + 1] =
-                (uint16_t)(0x81 + 2 * (int)s) | ((uint16_t)a << 8);
+            vram[gy * 80 + gx + 1] = (uint16_t)' ' | ((uint16_t)a << 8);
         return;
     }
-    /* printable ASCII only; anything else (blanked cells from '\b',
-     * control codepoints, >0xFF) paints as a space -- cp==0 used to
-     * paint '?' and every backspace left ghost marks (#103). */
-    unsigned char ch = (c->cp >= 0x20 && c->cp <= 0x7F)
-                     ? (unsigned char)c->cp : ' ';
+    unsigned char ch;
+    if (c->cp == 0 || c->cp < 0x20) {
+        /* blanked cells from '\b' / control codepoints paint a space -- cp==0
+         * must not paint '?' (every backspace would leave ghost marks, #103). */
+        ch = ' ';
+    } else if (c->cp <= 0x7F) {
+        ch = (unsigned char)c->cp;
+    } else {
+        /* non-ASCII (CJK or other): one '?', never a blank; do not drop the
+         * line.  The hint line is emitted once per text session. */
+        text_note_cjk();
+        ch = '?';
+    }
     word = (uint16_t)ch | ((uint16_t)a << 8);
     vram[gy * 80 + gx] = word;
 }
@@ -259,6 +275,7 @@ static int text_enter(void) {
     vga_reload_font();
     text_dac_reset();
     for (int i = 0; i < CON_TEXT_HZ_SLOTS; i++) loaded_cp[i] = 0;
+    text_cjk_hint_shown = 0;
     {   /* Wipe planes 0/1/3: Mode 13h chain4 splatters all four planes,
          * and stale chain4 bytes there render as diagonal RGB stripes
          * over the restored text screen (QEMU std-VGA surface cache).
