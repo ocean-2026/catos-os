@@ -274,7 +274,7 @@ static int has_cjk(const char *s) {
 
 static void help_row(const char *cmd, const char *desc) {
     if (pager_quit()) return;
-    desc = trhelp(desc);                  /* v2.62: localise description */
+    desc = trhelp_cmd(cmd, desc);         /* v2.62: localise description; v2.82 P1-5 cmd hint for loose match */
     if (has_cjk(desc)) {
         char l1[96], l2[192];
         int a = 0, b = 0;

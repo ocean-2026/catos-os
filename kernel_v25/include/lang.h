@@ -60,6 +60,9 @@ const char *tr(int id);
  * incrementally without breaking anything.  Command spellings are NEVER
  * translated -- only the human-readable description/heading text. */
 const char *trhelp(const char *en);
+/* v2.82 P1-5: trhelp variant carrying the command name as a loose-match
+ * disambiguation hint; exact match behaviour is unchanged. */
+const char *trhelp_cmd(const char *cmd, const char *en);
 /* v2.68: inline en/zh pair picker for command output and error messages. */
 const char *trs(const char *en, const char *zh);
 

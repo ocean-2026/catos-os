@@ -1,0 +1,1 @@
+ FAT32 umount DIR DIR df faultinfo CR2 crashlog crashlog --full edit FILE nano -c/-c N/-c -N ^O ^X ^K ^U root@catos:/# 
