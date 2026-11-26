@@ -30,6 +30,7 @@
 #include "crypto.h"   /* v2.76: SHA-256 for the .catpkg digest */      /* v2.59 generic console pager                    */
 #include "hive.h"       /* v2.67 binary tree registry (/etc/hive)          */
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
+#include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf appearance mirror       */
 #ifdef CATOS_BENCH
 #include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
 #endif
@@ -273,7 +274,7 @@ static int has_cjk(const char *s) {
 
 static void help_row(const char *cmd, const char *desc) {
     if (pager_quit()) return;
-    desc = trhelp(desc);                  /* v2.62: localise description */
+    desc = trhelp_cmd(cmd, desc);         /* v2.62: localise description; v2.82 P1-5 cmd hint for loose match */
     if (has_cjk(desc)) {
         char l1[96], l2[192];
         int a = 0, b = 0;
@@ -755,6 +756,7 @@ static void cmd_theme(const char *arg) {
         vga_write("' (dark|light|solarized|mono)\n");
         return;
     }
+    cdeconf_save_theme(name);   /* v2.82 A1.4: mirror the scheme to /etc/cde.conf */
     con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
     /* v2.72: con_set_style_rgb() re-stamps the cells' snapshot background;
      * the frame itself must be cleared with the new colour in the same
@@ -6993,6 +6995,7 @@ void shell_run(void) {
     hive_set_user(g_uid);     /* v2.67: HKCU -> HKU\<uid>                      */
     hive_init();              /* v2.67: binary hive; migrates /etc/reg + files */
     pal_init();               /* v2.67: colour roles from the hive             */
+    cdeconf_load();           /* v2.82 A1.4: adopt /etc/cde.conf fallback mirror */
     lang_init();              /* v2.21 T50: load lang via reg, default en */
     btime_mark("S2 lang_init");
     env_init();               /* v2.23: load /etc/env, default PATH=/bin */

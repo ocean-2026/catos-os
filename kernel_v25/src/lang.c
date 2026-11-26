@@ -293,13 +293,97 @@ static int help_zh_cmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
-const char *trhelp(const char *en) {
+/* ---- v2.82 P1-5: tolerant help lookup ----------------------------------
+ * Exact match keeps first priority and unchanged behaviour.  On a miss we
+ * retry: (2) normalised comparison -- case-fold, trim, collapse whitespace
+ * runs, drop trailing punctuation; (3) loose first-English-word match, with
+ * the command name as a best-effort disambiguation hint.  The table stores
+ * descriptions only, so the command name can prefer but not force a row. */
+
+static int h_is_ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+static int h_is_punct(char c) {
+    return c == '.' || c == ',' || c == ';' || c == ':' || c == '!' ||
+           c == '?' || c == ')' || c == ']';
+}
+static char h_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+static int h_eq(const char *a, const char *b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+/* Case-fold, trim leading/trailing whitespace + trailing punctuation,
+ * collapse internal whitespace runs to one space.  Internal punctuation
+ * is preserved so distinct entries do not collapse together. */
+static void h_norm(const char *in, char *out, int cap) {
+    int o = 0, want_space = 0;
+    const char *p = in;
+    while (p && *p && (h_is_ws(*p) || h_is_punct(*p))) p++;
+    for (; p && *p; p++) {
+        char c = h_lower(*p);
+        if (h_is_ws(c)) { want_space = 1; continue; }
+        if (want_space && o < cap - 1) { out[o++] = ' '; want_space = 0; }
+        if (o < cap - 1) out[o++] = c;
+    }
+    while (o > 0 && (out[o - 1] == ' ' || h_is_punct(out[o - 1]))) o--;
+    out[o] = 0;
+}
+
+static void h_first_word(const char *in, char *out, int cap) {
+    int o = 0;
+    const char *p = in;
+    while (p && *p && (h_is_ws(*p) || h_is_punct(*p))) p++;
+    while (p && *p && !h_is_ws(*p) && !h_is_punct(*p) && o < cap - 1) {
+        out[o++] = h_lower(*p); p++;
+    }
+    out[o] = 0;
+}
+
+static int h_contains_ci(const char *hay, const char *needle) {
+    if (!hay || !needle || !*needle) return 0;
+    for (const char *a = hay; *a; a++) {
+        const char *x = a, *y = needle;
+        while (*y && h_lower(*x) == h_lower(*y)) { x++; y++; }
+        if (!*y) return 1;
+    }
+    return 0;
+}
+
+const char *trhelp_cmd(const char *cmd, const char *en) {
     if (g_lang != LANG_ZH) return en;
+    if (!en) return en;
+    /* 1) exact match (unchanged table behaviour) */
     for (int i = 0; i < HELP_ZH_COUNT; i++)
-        if (help_zh[i].en && en && 0 == help_zh_cmp(help_zh[i].en, en))
+        if (help_zh[i].en && 0 == help_zh_cmp(help_zh[i].en, en))
             return help_zh[i].zh;
+    /* 2) normalised match: extra spaces, trailing punctuation, case noise */
+    char ne[160];
+    h_norm(en, ne, (int)sizeof(ne));
+    for (int i = 0; i < HELP_ZH_COUNT; i++) {
+        char nt[160];
+        h_norm(help_zh[i].en, nt, (int)sizeof(nt));
+        if (h_eq(ne, nt)) return help_zh[i].zh;
+    }
+    /* 3) loose fallback: first English word; command name prefers the row
+     * whose description mentions that token. */
+    char fw[32];
+    h_first_word(en, fw, (int)sizeof(fw));
+    if (*fw) {
+        const char *loose = 0;
+        for (int i = 0; i < HELP_ZH_COUNT; i++) {
+            char tw[32];
+            h_first_word(help_zh[i].en, tw, (int)sizeof(tw));
+            if (!h_eq(fw, tw)) continue;
+            if (cmd && *cmd && h_contains_ci(help_zh[i].en, cmd))
+                return help_zh[i].zh;
+            if (!loose) loose = help_zh[i].zh;
+        }
+        if (loose) return loose;
+    }
     return en;
 }
+
+const char *trhelp(const char *en) { return trhelp_cmd(0, en); }
 
 const char *trs(const char *en, const char *zh) {
     return (g_lang == LANG_ZH && zh) ? zh : en;
