@@ -1,0 +1,6 @@
+== pkg list ==
+root@catos:/# pkg list Package repository (/pkg/): bc [1.0 ] available - tiny integer calculator (A op B) stats [1.0 ] available - lines/words/bytes text statistics rps [1.0 ] available - rock-paper-scissors one round vs cpu desktop [1.0 ] available - detachable graphical desktop environment root@catos:/# 
+== pkg info desktop ==
+root@catos:/# pkg list Package repository (/pkg/): bc [1.0 ] available - tiny integer calculator (A op B) stats [1.0 ] available - lines/words/bytes text statistics rps [1.0 ] available - rock-paper-scissors one round vs cpu desktop [1.0 ] available - detachable graphical desktop environment root@catos:/# pkg info desktop name: desktop version: 1.0 desc: detachable graphical desktop environment file: desktop.catpkg status: available root@catos:/# 
+== ls /pkg ==
+ name: desktop version: 1.0 desc: detachable graphical desktop environment file: desktop.catpkg status: available root@catos:/# ls /pkg bc.cat desktop.cat pkgs.txt rps.cat stats.cat --- 5 entries root@catos:/# 

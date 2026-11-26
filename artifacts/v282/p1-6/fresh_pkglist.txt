@@ -1,0 +1,1 @@
+root@catos:/# pkg list Package repository (/pkg/): bc [1.0 ] available - tiny integer calculator (A op B) stats [1.0 ] available - lines/words/bytes text statistics rps [1.0 ] available - rock-paper-scissors one round vs cpu root@catos:/# 

@@ -1,0 +1,1 @@
+root@catos:/# ps TID UID RING STATE NAME 0 0 0 RUN shell --- 1 task(s), uptime 117s --- root@catos:/# 

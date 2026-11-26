@@ -1,0 +1,1 @@
+root@catos:/# pkg remove desktop pkg: removed desktop root@catos:/# 
