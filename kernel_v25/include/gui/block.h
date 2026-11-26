@@ -170,6 +170,9 @@ typedef struct {
      * 整块四角形态统一，不允许逐角混用（规则 R-7.5-03）。 */
     uint8_t  corner_shape;          /* 0=ARC（默认）1=SQUIRCLE */
     uint8_t  corner_n;              /* 0=默认 n=5.0；仅 SQUIRCLE 有效；其它值钳到 50 + WARN_RADIUS_N_RANGE */
+
+    /* ---- E 轮描边规格（append-only；gui-fix 合入，0=未设） ---- */
+    uint8_t  stroke;                /* 描边线宽；desc.c 镜像到 block.stroke，0 时回退 border_w */
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -232,6 +235,7 @@ typedef struct block {
     /* POPOVER 运行时：最近一次锚点矩形 + 内容自然高（供翻转/滚动范围） */
     int32_t  pop_ax, pop_ay, pop_aw, pop_ah;
     int32_t  pop_content_h;
+    uint8_t  stroke;                    /* E 轮描边线宽镜像（append-only） */
 
     const char   *text;
     const uint8_t *pix;
