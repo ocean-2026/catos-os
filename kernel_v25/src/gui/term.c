@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>   /* memset(): GCC 14+ treats implicit declaration as an error */
 
 /* shell.c 远程命令执行入口：复用同一套内置分发，输出经 tee 捕获到缓冲。 */
 extern int shell_ssh_exec_line(const char *line, char *out, int outmax,

@@ -1814,7 +1814,8 @@ void gui_shell_cmd(const char *arg) {
     int free_sample = free_dash || free_side || free_float || free_overflow ||
                       free_interact || deskev;
     int blkgen_on = (app_open == APP_BLKGEN);
-    if (blkgen_on) free_sample = 1;   /* blkgen 页不挂 demo 样本（纯追加，不改既有条件） */    gui_begin();
+    if (blkgen_on) free_sample = 1;   /* blkgen 页不挂 demo 样本（纯追加，不改既有条件） */
+    gui_begin();
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
