@@ -36,7 +36,9 @@
 #define IMG_MAX         4
 #define IMG_W           64
 #define IMG_H           64
-#define SCRATCH_PAGES   11          /* 记录 + 字符串池的帧页数 */
+/* 记录区 5 页（20 KiB，容纳 256 条 76B rec2）+ 字符串池 8 页（32 KiB）。 */
+#define SCRATCH_PAGES   13
+#define SCRATCH_POOL_OFF 5
 
 struct pid_meta {
     uint8_t  used;
@@ -46,13 +48,15 @@ struct pid_meta {
     uint32_t hash;
     int      last_reject;
     int      evh, evt;
-    ce_blk_event_t evq[DECL_EVQ];
+    ce_blk_event2_t evq[DECL_EVQ];  /* 同一队列：旧 poll 只取前 sizeof(ev1) 字节 */
+    uint32_t seq;                   /* cap2：事件序号（每 pid 单调递增） */
     uint8_t *mem;                   /* 帧分配：gmap/lmap/arena */
     /* per-pid 统计（#33）。 */
     int      stat_events;           /* 已入队事件数 */
     int      stat_damage;           /* 落地置脏布局标记数 */
     int      stat_frames;            /* 成功落地提交批次数 */
     int      toast_hints;           /* 系统侧非法声明提示次数 */
+    uint32_t dropped;               /* 事件队列满队累计丢弃条数（#B 可观测） */
 };
 
 /* 当前焦点所属声明式应用；-1 = 焦点归还内核。跨应用焦点链 #33。 */
@@ -129,7 +133,7 @@ static int scratch_alloc(void) {
         scratch_phys[p] = pa;
     }
     rec_scratch = (ce_blk_rec_t *)scratch_phys[0];
-    pool_scratch = (char *)scratch_phys[4];
+    pool_scratch = (char *)scratch_phys[SCRATCH_POOL_OFF];
     scratch_ready = 1;
     return 1;
 }
@@ -216,6 +220,100 @@ static int validate(const ce_blk_rec_t *r, int n, const char *pool, int slen,
             if (d->res < 0 || !img_find(d->res, tid)) return E_DECL_RES;
         } else {
             if (d->res != -1) return E_DECL_RES;
+        }
+    }
+    return 0;
+}
+
+/* rec2 允许的 kind：旧白名单（COLUMN..CANVAS）+ cap2 扩权五类。
+ * FREE/SURFACE 等维持旧口径，CE 仍不可写像素。 */
+static int kind_allowed_rec2(uint8_t k) {
+    if (k >= BLK_COLUMN && k <= BLK_CANVAS) return 1;
+    if (k == BLK_BUTTON || k == BLK_INPUT || k == BLK_TERM ||
+        k == BLK_POPOVER || k == BLK_ICON) return 1;
+    return 0;
+}
+
+/* cap2 rec2 整批校验（不触碰块树）。与旧口径一致：任一非法整批拒绝。 */
+static int validate2(const ce_blk_rec2_t *r, int n, const char *pool, int slen,
+                     int tid) {
+    int pos[DECL_MAX_BLOCKS];
+    int lid[DECL_MAX_BLOCKS];
+    for (int i = 0; i < n; i++) pos[i] = -1;
+
+    for (int i = 0; i < n; i++) {
+        const ce_blk_rec2_t *d = &r[i];
+        const ce_blk_rec_t *b = &d->base;
+
+        if (b->id < 1) return E_DECL_BADID;
+        for (int k = 0; k < i; k++) if (lid[k] == b->id) return E_DECL_BADID;
+        lid[i] = b->id;
+
+        if (d->cap_ver != CE_BLK_REC2_VER) return E_DECL_BADREC;
+        if (!kind_allowed_rec2(b->kind)) return E_DECL_BADREC;
+
+        /* elevation 值域 0..5（阴影/SH_PAD/SH_OX 均为 6 元表）：越界明确
+         * 拒绝，不做静默钳制；整批不落树，旧子树不受影响。 */
+        if (d->elevation > 5) {
+            ser_write("GUI:decl bad elevation el="); decl_dec(d->elevation);
+            ser_write(" pid="); decl_dec(tid); ser_putc('\n');
+            return E_DECL_BADREC;
+        }
+
+        /* 越层：只允许 WORK。 */
+        if (b->layer != LAYER_WORK) return E_DECL_LAYER;
+
+        /* 内联像素：指针 / 宽 / 高一律拒绝，且不 deref。 */
+        if (b->pix_off != -1 || b->pix_w != 0 || b->pix_h != 0)
+            return E_PIX_FIELD;
+
+        /* 文本偏移与长度。 */
+        int tlen = 0;
+        if (b->text_off != -1) {
+            if (b->text_off < 0 || b->text_off >= slen) return E_DECL_BADREC;
+            const char *s = pool + b->text_off;
+            const char *e = pool + slen;
+            while (s < e && *s) { s++; tlen++; }
+            if (tlen > DECL_MAX_TEXT) return E_DECL_QUOTA;
+        }
+
+        /* 父链：0 = 本应用根；否则必须是本批已出现的 id。 */
+        int pidx = -1;
+        if (b->parent != 0) {
+            for (int k = 0; k < i; k++) if (lid[k] == b->parent) { pidx = k; break; }
+            if (pidx < 0) return E_DECL_BADID;
+        }
+
+        /* 深度：沿父链累加。 */
+        int depth = 1;
+        int cur = pidx;
+        while (cur >= 0) {
+            depth++;
+            if (depth > DECL_MAX_DEPTH) return E_DECL_QUOTA;
+            cur = pos[cur];
+        }
+        pos[i] = pidx;
+
+        /* 资源句柄归属校验（新五类一律不挂资源句柄）。 */
+        if (b->kind == BLK_CANVAS) {
+            if (b->res < 0 || !cvchan_owner(b->res, tid)) return E_DECL_RES;
+        } else if (b->kind == BLK_IMAGE) {
+            if (b->res < 0 || !img_find(b->res, tid)) return E_DECL_RES;
+        } else {
+            if (b->res != -1) return E_DECL_RES;
+        }
+
+        /* POPOVER 锚点：必须解析到同批已提交块，或本 pid 既有子树内的块；
+         * 跨 pid 锚定 / 悬空 id 一律 E_DECL_BADID。 */
+        if (b->kind == BLK_POPOVER && d->anchor_id != 0) {
+            int found = 0;
+            for (int k = 0; k < i; k++)
+                if (lid[k] == (int)d->anchor_id) { found = 1; break; }
+            if (!found) {
+                block *ab = btable_get((block_id)d->anchor_id);
+                if (ab && ab->owner == (uint8_t)tid) found = 1;
+            }
+            if (!found) return E_DECL_BADID;
         }
     }
     return 0;
@@ -314,6 +412,118 @@ static int decl_apply(struct pid_meta *p, const ce_blk_rec_t *r, int n,
     return 0;
 }
 
+/* cap2 rec2 落地：与旧 apply 同构，额外把 rec2 扩展段镜像到块上。
+ * corner_n 不下发（CE 恒默认 n=5.0），块字段保持 0。 */
+static int decl_apply2(struct pid_meta *p, const ce_blk_rec2_t *r, int n,
+                       const char *pool, int slen) {
+    (void)slen;
+    if (p->root) tree_free_subtree(btable_get(p->root));
+    p->count = 0;
+    p->hash = 2166136261u;
+    decl_ensure_root(p);
+    if (!p->root) return E_DECL_QUOTA;
+
+    uint16_t *gm = pgmap(p);
+    int16_t  *lm = plmap(p);
+
+    for (int i = 0; i < n; i++) {
+        const ce_blk_rec2_t *d = &r[i];
+        const ce_blk_rec_t *b = &d->base;
+        block *par = btable_get(p->root);
+        for (int k = 0; k < i; k++) {
+            if (lm[k] == b->parent) { par = btable_get(gm[k]); break; }
+        }
+        block *blk = btable_alloc(b->kind);
+        if (!blk) return E_DECL_QUOTA;
+
+        blk->req_w = b->req_w;
+        blk->req_h = b->req_h;
+        blk->layer = LAYER_WORK;
+        blk->visible = 1;
+        blk->focusable = 0;
+        blk->owner = (uint8_t)p->tid;
+        blk->dirty_layout = 1;
+
+        const char *text = 0;
+        if (b->text_off != -1) {
+            const char *s = pool + b->text_off;
+            int len = 0;
+            while (len < DECL_MAX_TEXT && s[len]) len++;
+            text = decl_copy_text(p, s, len);
+            if (!text) return E_DECL_QUOTA;
+        }
+        blk->text = text;
+
+        if (b->kind == BLK_IMAGE) {
+            struct img_meta *ir = img_find(b->res, p->tid);
+            if (ir) {
+                blk->pix = ir->pix;
+                blk->pix_w = ir->w;
+                blk->pix_h = ir->h;
+            }
+        }
+
+        /* ---- cap2 扩展段镜像（0 = 未声明 ≡ 旧行为） ---- */
+        blk->alpha        = d->alpha;
+        blk->alpha_mode   = d->alpha_mode;
+        blk->elevation    = d->elevation;
+        blk->corner_tl    = d->corner_tl;
+        blk->corner_tr    = d->corner_tr;
+        blk->corner_br    = d->corner_br;
+        blk->corner_bl    = d->corner_bl;
+        blk->wrap_lines   = d->wrap_lines;
+        blk->ellipsis     = d->ellipsis;
+        blk->font_size    = d->font_size;
+        blk->font_bold    = d->font_bold;
+        blk->font_tabular = d->font_tabular;
+        blk->line_h       = d->line_h;
+        blk->anim_ms      = d->anim_ms;
+        blk->anim_ease    = d->anim_ease;
+        blk->anim_mask    = d->anim_mask;
+        blk->scrollbar    = d->scrollbar;
+        blk->scroll_axis  = d->scroll_axis;
+        blk->border_sides = d->border_sides;
+        blk->icon         = d->icon;
+        blk->tint_role    = d->tint_role;
+        blk->pop_prefer   = d->pop_prefer;
+        blk->pop_max_h    = d->pop_max_h;
+        blk->corner_shape = d->corner_shape;
+
+        /* 生产路径建档点：声明了动画（anim_ms>0 且 anim_mask!=0）即按声明值
+         * kick。anim_kick 内部对 ease==0 / reduced_motion 自洽空转；已在途的
+         * 同 id 槽按可中断接管语义续跑（起点=当前帧值）。这里只在建档/整批
+         * 重建时触发一次，帧循环（compose.c）不重复 kick。 */
+        if (blk->anim_ms > 0 && blk->anim_mask != 0) anim_kick(blk);
+
+        /* 锚点：同批 local id 解析为全局块 id；既有子树锚点保留全局 id。 */
+        uint32_t anchor = d->anchor_id;
+        if (anchor != 0) {
+            int local = -1;
+            for (int k = 0; k < p->count; k++)
+                if (lm[k] == (int16_t)anchor) { local = k; break; }
+            if (local >= 0) anchor = gm[local];
+            else {
+                block *ab = btable_get((block_id)anchor);
+                if (!ab || ab->owner != (uint8_t)p->tid) anchor = 0;
+            }
+        }
+        blk->anchor_id = anchor;
+
+        tree_attach(par ? par : gui_root_block(), blk);
+        gm[p->count] = (uint16_t)blk->id;
+        lm[p->count] = (int16_t)b->id;
+        p->count++;
+        p->stat_damage++;
+
+        p->hash = fnv(p->hash, b->id);
+        p->hash = fnv(p->hash, b->parent);
+        p->hash = fnv(p->hash, b->req_w);
+        p->hash = fnv(p->hash, b->req_h);
+        p->hash = fnv(p->hash, b->res);
+    }
+    return 0;
+}
+
 int decl_commit(struct task *t, const void *recs, int n,
                 const char *strings, int slen) {
     int tid = t ? t->tid : -1;
@@ -360,14 +570,182 @@ int decl_commit(struct task *t, const void *recs, int n,
     return 0;
 }
 
+/* 校验通过后的落地收尾（节流 / 帧分配 / apply / 统计打点）。 */
+static int commit_finish(struct pid_meta *p, int tid, int n, uint32_t rec_size) {
+    if (commit_frame_cnt >= DECL_COMMIT_FRAME_MAX) {
+        ser_write("GUI:decl throttle pid="); decl_dec(tid); ser_putc('\n');
+        decl_reject(E_DECL_QUOTA, tid);
+        return E_DECL_QUOTA;
+    }
+    commit_frame_cnt++;
+
+    if (!pid_mem_alloc(p)) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+
+    int rc;
+    if (rec_size == (uint32_t)sizeof(ce_blk_rec2_t))
+        rc = decl_apply2(p, (const ce_blk_rec2_t *)rec_scratch, n,
+                         pool_scratch, 0);
+    else
+        rc = decl_apply(p, rec_scratch, n, pool_scratch, 0);
+    if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
+
+    p->used = 1;
+    p->stat_frames++;
+    ser_write("GUI:decl commit n="); decl_dec(n);
+    ser_write(" ok=1 pid="); decl_dec(tid); ser_putc('\n');
+    return 0;
+}
+
+/* ---- cap2：能力探测 / rec2 提交 / 事件2 轮询（append-only） -------------- */
+
+uint32_t decl_caps(void) { return DECL_CAP2_ALL; }
+
+int decl_commit2(struct task *t, const void *recs, int n,
+                 const char *strings, int slen, uint32_t rec_size) {
+    int tid = t ? t->tid : -1;
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return E_EPERM;
+    p->tid = tid;
+
+    /* rec_size==40：完全委托旧 decl_commit()，逐字节等价，不吃任何 rec2 逻辑。 */
+    if (rec_size == 40) return decl_commit(t, recs, n, strings, slen);
+    if (rec_size != (uint32_t)sizeof(ce_blk_rec2_t)) {
+        decl_reject(E_DECL_BADREC, tid); return E_DECL_BADREC;
+    }
+
+    if (n < 0 || n > DECL_MAX_BLOCKS) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+    if (slen < 0 || slen > DECL_MAX_POOL) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+    if (!scratch_alloc()) { decl_reject(E_DECL_QUOTA, tid); return E_DECL_QUOTA; }
+
+    if (n > 0) {
+        if (!recs || copy_from_user(t, rec_scratch, recs,
+                                    (uint32_t)n * rec_size) != 0) {
+            decl_reject(E_DECL_BADREC, tid); return E_DECL_BADREC;
+        }
+    }
+    if (slen > 0) {
+        if (!strings || copy_from_user(t, pool_scratch, strings,
+                                       (uint32_t)slen) != 0) {
+            decl_reject(E_DECL_BADREC, tid); return E_DECL_BADREC;
+        }
+    }
+
+    int rc = validate2((const ce_blk_rec2_t *)rec_scratch, n,
+                       pool_scratch, slen, tid);
+    if (rc != 0) { p->last_reject = rc; decl_reject(rc, tid); return rc; }
+    return commit_finish(p, tid, n, rec_size);
+}
+
+/* ---- 探针专用入口（内核内自检使用；不走 copy_from_user） ---------------- */
+
+int decl_ce_probe_commit(int tid, const void *recs, int n,
+                         const char *strings, int slen, uint32_t rec_size) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p) return E_EPERM;
+    p->tid = tid;
+    if (n < 0 || n > DECL_MAX_BLOCKS) return E_DECL_QUOTA;
+    if (slen < 0 || slen > DECL_MAX_POOL) return E_DECL_QUOTA;
+    if (rec_size != 40 && rec_size != (uint32_t)sizeof(ce_blk_rec2_t))
+        return E_DECL_BADREC;
+    if (!scratch_alloc()) return E_DECL_QUOTA;
+    if (n > 0) memcpy(rec_scratch, recs, (uint32_t)n * rec_size);
+    if (slen > 0) memcpy(pool_scratch, strings, (uint32_t)slen);
+
+    int rc;
+    if (rec_size == 40)
+        rc = validate(rec_scratch, n, pool_scratch, slen, tid);
+    else
+        rc = validate2((const ce_blk_rec2_t *)rec_scratch, n,
+                       pool_scratch, slen, tid);
+    if (rc != 0) { p->last_reject = rc; return rc; }
+    /* 探针为同步自检步骤，不受每帧提交节流预算约束。 */
+    commit_frame_cnt = 0;
+    return commit_finish(p, tid, n, rec_size);
+}
+
+int decl_ce_probe_poll2(int tid, ce_blk_event2_t *ev) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p || !ev) return E_EPERM;
+    if (!p->used || p->evh == p->evt) return 0;
+    *ev = p->evq[p->evh];
+    p->evh = (p->evh + 1) % DECL_EVQ;
+    return 1;
+}
+
+block_id decl_ce_probe_local_to_global(int tid, int lid) {
+    struct pid_meta *p = ps_get(tid);
+    if (!p || !p->mem) return 0;
+    uint16_t *gm = pgmap(p);
+    int16_t  *lm = plmap(p);
+    for (int i = 0; i < p->count; i++)
+        if (lm[i] == (int16_t)lid) return gm[i];
+    return 0;
+}
+
+int decl_ce_probe_count(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    return p ? p->count : 0;
+}
+
+/* 探针/诊断可读：本 pid 事件队列累计丢弃条数（满队丢最旧策略，见 enqueue2）。 */
+int decl_ce_probe_dropped(int tid) {
+    struct pid_meta *p = ps_get(tid);
+    return p ? (int)p->dropped : -1;
+}
+
 /* ---- 事件轮询 ------------------------------------------------------------ */
 
-static void enqueue(struct pid_meta *p, const ce_blk_event_t *e) {
+/* 旧 type → cap2 ev_kind 映射（未映射的旧类型 ev_kind 留 0）。 */
+static uint8_t ev_kind_from_type(int16_t type) {
+    switch (type) {
+    case DECL_EV_CLICK:    return 0;
+    case DECL_EV_FOCUS_IN: return 1;
+    case DECL_EV_FOCUS_OUT:return 2;
+    case DECL_EV_KEY:      return 5;
+    case DECL_EV_CLOSE:    return 6;
+    default:               return 0;
+    }
+}
+
+/* 满队策略：丢最旧腾位（overwrite head），新事件优先入队；被淘汰的队头
+ * 最旧事件不再回传。丢弃累计到 p->dropped 并串口打点，绝不静默丢失。
+ * （备选“保留丢新”语义等价于计数后直接 return，本包选定丢最旧：新事件
+ * 不被背积压的旧事件堵在门外。） */
+static void enqueue2(struct pid_meta *p, ce_blk_event2_t *e) {
     int next = (p->evt + 1) % DECL_EVQ;
-    if (next == p->evh) return;
+    if (next == p->evh) {
+        p->evh = (p->evh + 1) % DECL_EVQ;   /* 淘汰队头最旧事件 */
+        p->dropped++;
+        ser_write("GUI:ev overflow pid="); decl_dec(p->tid);
+        ser_write(" dropped="); decl_dec(p->dropped); ser_putc('\n');
+    }
+    e->seq = ++p->seq;
     p->evq[p->evt] = *e;
     p->evt = next;
     p->stat_events++;
+}
+
+/* 旧事件入队包装：前 sizeof(ev1) 字段逐字节保留，扩展段清零。 */
+static void enqueue(struct pid_meta *p, const ce_blk_event_t *e) {
+    ce_blk_event2_t e2;
+    memset(&e2, 0, sizeof(e2));
+    memcpy(&e2, e, sizeof(ce_blk_event_t));
+    e2.ev_kind = ev_kind_from_type(e->type);
+    enqueue2(p, &e2);
+}
+
+/* UTF-8 安全截断：按整字符装入 cap-1 字节，末尾 NUL；不切断多字节字符。 */
+static void utf8_clip(uint8_t *dst, int cap, const char *src) {
+    int i = 0;
+    if (!src) { dst[0] = 0; return; }
+    while (i < cap - 1 && src[i]) {
+        uint8_t c = (uint8_t)src[i];
+        int len = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+        if (i + len > cap - 1) break;
+        for (int k = 0; k < len; k++) dst[i + k] = (uint8_t)src[i + k];
+        i += len;
+    }
+    dst[i] = 0;
 }
 
 static int block_local_id(block *b) {
@@ -397,10 +775,12 @@ void decl_post_click(block *b, int lx, int ly) {
     if (!p->used) return;
 
     int lid = block_local_id(b);
-    ce_blk_event_t ev;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
     ev.type = DECL_EV_CLICK; ev.code = 0; ev.id = lid;
     ev.x = lx; ev.y = ly; ev.w = 0; ev.h = 0;
-    enqueue(p, &ev);
+    ev.target_id = b->id; ev.ev_kind = 0;
+    enqueue2(p, &ev);
 
     ser_write("GUI:ev click id="); decl_dec(lid);
     ser_write(" x="); decl_dec(lx);
@@ -449,10 +829,11 @@ void decl_post_key(int code, int mods) {
     }
     if (target < 0) return;
     struct pid_meta *p = ps_get(target);
-    ce_blk_event_t ev;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
     ev.type = DECL_EV_KEY; ev.code = (int16_t)code; ev.id = 0;
-    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
-    enqueue(p, &ev);
+    ev.ev_kind = 5; ev.mods = (uint8_t)mods;
+    enqueue2(p, &ev);
     ser_write("GUI:ev key code="); decl_dec(code);
     ser_write(" mods="); decl_dec(mods);
     ser_write(" pid="); decl_dec(target); ser_putc('\n');
@@ -462,11 +843,13 @@ void decl_post_focus(block *b, int in) {
     if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
     struct pid_meta *p = &ps[b->owner];
     if (!p->used) return;
-    ce_blk_event_t ev;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
     ev.type = in ? DECL_EV_FOCUS_IN : DECL_EV_FOCUS_OUT;
     ev.code = 0; ev.id = block_local_id(b);
-    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
-    enqueue(p, &ev);
+    ev.target_id = b->id;
+    ev.ev_kind = in ? 1 : 2;
+    enqueue2(p, &ev);
     ser_write(in ? "GUI:ev focus_in id=" : "GUI:ev focus_out id=");
     decl_dec(ev.id); ser_putc('\n');
 }
@@ -475,10 +858,12 @@ void decl_post_resize(block *b, int w, int h) {
     if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
     struct pid_meta *p = &ps[b->owner];
     if (!p->used) return;
-    ce_blk_event_t ev;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
     ev.type = DECL_EV_RESIZE; ev.code = 0; ev.id = block_local_id(b);
-    ev.x = 0; ev.y = 0; ev.w = w; ev.h = h;
-    enqueue(p, &ev);
+    ev.w = w; ev.h = h;
+    ev.target_id = b->id;
+    enqueue2(p, &ev);
     ser_write("GUI:ev resize id="); decl_dec(ev.id);
     ser_write(" w="); decl_dec(w); ser_write(" h="); decl_dec(h); ser_putc('\n');
 }
@@ -487,11 +872,58 @@ void decl_post_close(block *b) {
     if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
     struct pid_meta *p = &ps[b->owner];
     if (!p->used) return;
-    ce_blk_event_t ev;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
     ev.type = DECL_EV_CLOSE; ev.code = 0; ev.id = block_local_id(b);
-    ev.x = 0; ev.y = 0; ev.w = 0; ev.h = 0;
-    enqueue(p, &ev);
+    ev.target_id = b->id; ev.ev_kind = 6;
+    enqueue2(p, &ev);
     ser_write("GUI:ev close id="); decl_dec(ev.id); ser_putc('\n');
+}
+
+/* ---- cap2 新事件入口：滚轮 / 输入提交 / 浮层关闭 -------------------------- */
+
+void decl_post_wheel(block *b, int dx, int dy) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = DECL_EV_KEY; ev.code = 0; ev.id = block_local_id(b);
+    ev.target_id = b->id; ev.ev_kind = 4;
+    ev.wheel_dx = (int16_t)dx; ev.wheel_dy = (int16_t)dy;
+    enqueue2(p, &ev);
+    ser_write("GUI:ev wheel id="); decl_dec(ev.id);
+    ser_write(" dx="); decl_dec(dx);
+    ser_write(" dy="); decl_dec(dy); ser_putc('\n');
+}
+
+void decl_post_input(block *b, const char *utf8) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = DECL_EV_KEY; ev.code = 0; ev.id = block_local_id(b);
+    ev.target_id = b->id; ev.ev_kind = 3;
+    utf8_clip(ev.utext, sizeof(ev.utext), utf8);
+    enqueue2(p, &ev);
+    int ulen = 0;
+    while (ev.utext[ulen]) ulen++;
+    ser_write("GUI:ev input id="); decl_dec(ev.id);
+    ser_write(" len="); decl_dec(ulen);
+    ser_putc('\n');
+}
+
+void decl_post_dismiss(block *b) {
+    if (!b || b->owner == 0 || b->owner >= MAX_TASKS) return;
+    struct pid_meta *p = &ps[b->owner];
+    if (!p->used) return;
+    ce_blk_event2_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = DECL_EV_CLOSE; ev.code = 0; ev.id = block_local_id(b);
+    ev.target_id = b->id; ev.ev_kind = 6;
+    enqueue2(p, &ev);
+    ser_write("GUI:ev dismiss id="); decl_dec(ev.id); ser_putc('\n');
 }
 
 int decl_pid_blocks(int tid) {
@@ -509,10 +941,41 @@ void decl_dump_pid(int tid) {
     ser_write(" events="); decl_dec(p->stat_events);
     ser_write(" damage="); decl_dec(p->stat_damage);
     ser_write(" toast="); decl_dec(p->toast_hints);
+    ser_write(" dropped="); decl_dec(p->dropped);
     ser_write(" last_reject="); decl_dec(p->last_reject); ser_putc('\n');
 }
 
+/* deskev 门禁用：转储所有 CE（owner != 0）块的实时几何，供驱动定位
+ * 按钮/输入框矩形。只读，不改任何状态。 */
+void decl_dump_ce_rects(void) {
+    uint32_t cap = btable_capacity();
+    for (uint32_t id = 1; id <= cap; id++) {
+        block *b = btable_get((block_id)id);
+        if (!b || b->id == 0 || b->owner == 0) continue;
+        ser_write("GUI:deskev pid="); decl_dec((int)b->owner);
+        ser_write(" id="); decl_dec((int)b->id);
+        ser_write(" kind="); decl_dec((int)b->kind);
+        ser_write(" x="); decl_dec(b->x);
+        ser_write(" y="); decl_dec(b->y);
+        ser_write(" w="); decl_dec(b->w);
+        ser_write(" h="); decl_dec(b->h);
+        ser_putc('\n');
+    }
+}
+
 int decl_event_poll(struct task *t, ce_blk_event_t *ev, int timeout_ms) {
+    (void)timeout_ms;
+    int tid = t ? t->tid : -1;
+    struct pid_meta *p = ps_get(tid);
+    if (!p || !ev) return E_EPERM;
+    if (!p->used || p->evh == p->evt) return 0;
+    /* 同一队列：旧入口只取前 sizeof(ce_blk_event_t) 字节，字段语义不变。 */
+    memcpy(ev, &p->evq[p->evh], sizeof(ce_blk_event_t));
+    p->evh = (p->evh + 1) % DECL_EVQ;
+    return 1;
+}
+
+int decl_event_poll2(struct task *t, ce_blk_event2_t *ev, int timeout_ms) {
     (void)timeout_ms;
     int tid = t ? t->tid : -1;
     struct pid_meta *p = ps_get(tid);
@@ -646,6 +1109,7 @@ int decl_text_width(const char *s) {
 static void decl_cleanup_tid(int tid) {
     struct pid_meta *p = ps_get(tid);
     if (!p) return;
+    ib_reset_if_owner(tid);
     if (p->root) {
         tree_free_subtree(btable_get(p->root));
         block *b = btable_get(p->root);
@@ -661,6 +1125,9 @@ static void decl_cleanup_tid(int tid) {
 void decl_task_cleanup(struct task *t) {
     if (t) decl_cleanup_tid(t->tid);
 }
+
+/* 探针专用：按 tid 回收子树（内核自检使用）。 */
+void decl_ce_probe_cleanup(int tid) { decl_cleanup_tid(tid); }
 
 /* ---- 探针自检 ------------------------------------------------------------ */
 
@@ -745,7 +1212,8 @@ int decl_self_test(void) {
         memset(&click, 0, sizeof(click));
         int have_click = 0;
         while (p->evh != p->evt && n < 4) {
-            ce_blk_event_t e = p->evq[p->evh];
+            ce_blk_event_t e;
+            memcpy(&e, &p->evq[p->evh], sizeof(e));
             if (e.type == DECL_EV_CLICK && !have_click) { click = e; have_click = 1; }
             types[n++] = e.type;
             p->evh = (p->evh + 1) % DECL_EVQ;
@@ -795,12 +1263,14 @@ int decl_self_test(void) {
 
         int k1 = 0, k2 = 0, fi = 0, fo = 0;
         while (p->evh != p->evt) {
-            ce_blk_event_t e = p->evq[p->evh];
+            ce_blk_event_t e;
+            memcpy(&e, &p->evq[p->evh], sizeof(e));
             if (e.type == DECL_EV_KEY) k1 = 1;
             p->evh = (p->evh + 1) % DECL_EVQ;
         }
         while (p2->evh != p2->evt) {
-            ce_blk_event_t e = p2->evq[p2->evh];
+            ce_blk_event_t e;
+            memcpy(&e, &p2->evq[p2->evh], sizeof(e));
             if (e.type == DECL_EV_KEY) k2 = 1;
             if (e.type == DECL_EV_FOCUS_IN) fi = 1;
             if (e.type == DECL_EV_FOCUS_OUT) fo = 1;

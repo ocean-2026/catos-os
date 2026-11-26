@@ -1737,10 +1737,21 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
         if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
+        /* cap2 能力扩展探针族：`gui cap2-<case>`（cap2probe.c 分派三包） */
+        {
+            int n = 0;
+            while (arg[n] && n < 5) n++;
+            if (n == 5 && arg[0]=='c' && arg[1]=='a' && arg[2]=='p' &&
+                arg[3]=='2' && arg[4]=='-') {
+                cap2_probe_cmd(arg + 5);
+                return;
+            }
+        }
         {
             char w2[24]; const char *r2 = 0;
             split_word(arg, w2, sizeof(w2), &r2);
             if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
+            if (!strcmp_probe(w2, "perf"))  { gui_perf_set(r2 ? r2 : ""); return; }
         }
     }
 
@@ -1750,6 +1761,7 @@ void gui_shell_cmd(const char *arg) {
     int shot_menu = 0, shot_reset = 0, shot_crop = 0, shot_drag = 0;
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
+    int deskev = 0;
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER };
@@ -1770,6 +1782,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-float")) free_float = 1;
     else if (!strcmp_probe(word, "shot-free-overflow")) free_overflow = 1;
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
+    else if (!strcmp_probe(word, "deskev")) deskev = 1;
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; }
@@ -1799,10 +1812,9 @@ void gui_shell_cmd(const char *arg) {
         return;
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
-                      free_interact;
+                      free_interact || deskev;
     int blkgen_on = (app_open == APP_BLKGEN);
-    if (blkgen_on) free_sample = 1;   /* 追加：blkgen 页不挂 demo 样本（纯追加，不改既有条件） */
-    gui_begin();
+    if (blkgen_on) free_sample = 1;   /* blkgen 页不挂 demo 样本（纯追加，不改既有条件） */    gui_begin();
     if (!free_sample) gui_demo_build();
     if (shot_reset) { gui_reset(); if (!free_sample) gui_demo_build(); }
     if (shot_tok != TOK_DARK) gui_theme_set(shot_tok);
@@ -1825,6 +1837,7 @@ void gui_shell_cmd(const char *arg) {
     }
     if (app_open == APP_BLKGEN) blkgen_build();
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
+    if (deskev) { layout_run(); gui_frame(); decl_dump_ce_rects(); }
 
     gui_idle_loop();
 

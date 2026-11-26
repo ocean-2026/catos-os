@@ -63,6 +63,12 @@ void mouse_get_state(int *x, int *y, uint8_t *buttons);
 /* Clamp the maintained position to the active pixel surface.  Called by
  * the console glue when the display mode / cell metrics change. */
 void mouse_clamp(int px_w, int px_h);
+
+/* Reset driver-side session state between desktop lifetimes: drains the
+ * queued event ring, clears the live button bitmap and any partial packet,
+ * but keeps the maintained absolute position.  It does NOT time-release a
+ * button held down during a legitimate long drag. */
+void mouse_state_reset(void);
 void mouse_dev_info(int *id, int *wheel, int *pkt);   /* v2.73 diagnostics */
 
 /* v2.62: wheel notches buffered by the IRQ12 top half.  The console drains

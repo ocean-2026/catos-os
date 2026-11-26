@@ -323,6 +323,7 @@ static void cmd_help(void) {
     help_row("clear",       "clear the screen");
     help_row("desktop",     "enter the block desktop (Esc returns to console)");
     help_row("gui",         "alias of desktop (kept for scripts)");
+    help_row("perf [on|off|reset]", "GUI frame timing / damage perf stats");
     help_row("lang [en|zh]","show/set UI language (default en, /etc/lang)");
     help_note("Up/Down history | Left/Right/Home/End edit the line");
     help_note("Ctrl+Up/Down   scroll back console output (any key returns)");
@@ -819,6 +820,12 @@ static void cmd_rgb(const char *arg) {
  * `gui idem` / `gui leak` 跑内核内自检探针，结果走串口 GUI: 行。 */
 static void cmd_gui(char *arg) {
     gui_shell_cmd(arg);
+}
+
+/* 第 2a 轮：帧性能观测。`perf` 无参 dump 最近 N 帧；`perf on|off|reset`。
+ * 环形缓冲是 GUI 静态状态，退出桌面后仍可读。 */
+static void cmd_perf(char *arg) {
+    gui_perf_set(arg ? arg : "");
 }
 
 /* v2.60: unified display-mode switcher + graphics diagnostics.
@@ -7346,6 +7353,7 @@ static void shell_exec(char *cmd, char *arg) {
                  !strcmp_(cmd, "cls"))      vga_clear();   /* NIGHT-P3: cls alias */
         else if (!strcmp_(cmd, "gfx"))        cmd_gfx(arg);
         else if (!strcmp_(cmd, "desktop") || !strcmp_(cmd, "gui")) cmd_gui(arg);
+        else if (!strcmp_(cmd, "perf"))       cmd_perf(arg);
         else if (!strcmp_(cmd, "text"))       cmd_text();
         else if (!strcmp_(cmd, "style"))      cmd_style(arg);
         else if (!strcmp_(cmd, "rgb"))        cmd_rgb(arg);

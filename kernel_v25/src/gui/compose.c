@@ -2,7 +2,7 @@
  * compose.c -- 帧调度、damage 合并、统计打点（规格 §4 / §5 / §9）。
  *
  * 节拍：PIT 100Hz，同一 tick 内重复 gui_frame() 只算一次提交
- * （stat_double_commit）。damage 矩形上限 8 个，超出退化为包围盒；
+ * （stat_double_commit）。damage 矩形上限 16 个，超出退化为包围盒；
  * 只合成脏区，禁止整帧重绘。
  */
 #include "gui/gui.h"
@@ -18,10 +18,18 @@ extern volatile uint32_t timer_ticks;
 extern uint64_t perf_now(void);
 extern uint32_t perf_mhz(void);
 
-#define DMG_MAX 8
+#define DMG_MAX 16
 static struct { int x, y, w, h; } dmg[DMG_MAX];
 static int dmg_n;
 static int dmg_full;
+
+/* cap2 阴影外扩保守量：6 档最大 pad=10，右下光源偏移 ox/oy 最大 6。
+ * 贴边/成组紧贴的块本就不投影（paint.c flush_edges），这里按最大外扩留边，
+ * 宁多纳一条窄边，不把阴影像素留在损伤区外。 */
+#define HALO_PAD_L 10
+#define HALO_PAD_T 10
+#define HALO_PAD_R 16
+#define HALO_PAD_B 16
 
 static uint32_t s_frames, s_layout_nodes, s_double_commit;
 static uint32_t s_damage_rects, s_damage_area;
@@ -71,11 +79,64 @@ static void dmg_add(int x, int y, int w, int h) {
     dmg_full = 1;
 }
 
+/* 带阴影外扩地纳入损伤，并裁到屏内。 */
+static void dmg_add_pad(int x, int y, int w, int h) {
+    int x0 = x - HALO_PAD_L, y0 = y - HALO_PAD_T;
+    int x1 = x + w + HALO_PAD_R, y1 = y + h + HALO_PAD_B;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > GFX24_W) x1 = GFX24_W;
+    if (y1 > GFX24_H) y1 = GFX24_H;
+    dmg_add(x0, y0, x1 - x0, y1 - y0);
+}
+
+/* 两矩形是否重叠或 1px 邻接（可并成一条带）。 */
+static int dmg_touch(int i, int j) {
+    int ax = dmg[i].x, ay = dmg[i].y, aw = dmg[i].w, ah = dmg[i].h;
+    int bx = dmg[j].x, by = dmg[j].y, bw = dmg[j].w, bh = dmg[j].h;
+    int xov = ax < bx + bw + 1 && bx < ax + aw + 1;
+    int yov = ay < by + bh + 1 && by < ay + ah + 1;
+    return xov && yov;
+}
+
+static void dmg_merge_into(int i, int j) {
+    int x0 = dmg[i].x < dmg[j].x ? dmg[i].x : dmg[j].x;
+    int y0 = dmg[i].y < dmg[j].y ? dmg[i].y : dmg[j].y;
+    int x1 = dmg[i].x + dmg[i].w > dmg[j].x + dmg[j].w
+             ? dmg[i].x + dmg[i].w : dmg[j].x + dmg[j].w;
+    int y1 = dmg[i].y + dmg[i].h > dmg[j].y + dmg[j].h
+             ? dmg[i].y + dmg[i].h : dmg[j].y + dmg[j].h;
+    dmg[i].x = x0; dmg[i].y = y0; dmg[i].w = x1 - x0; dmg[i].h = y1 - y0;
+    dmg[j] = dmg[dmg_n - 1];
+    dmg_n--;
+}
+
+/* 区域合并：先两两 union 收敛，再做水平扫描带（同带内 y 交叠的相邻
+ * 条带并成一条），减少上报给 perf 的小矩形数。 */
+static void dmg_coalesce(void) {
+    int changed = 1;
+    while (changed && dmg_n > 1) {
+        changed = 0;
+        for (int i = 0; i < dmg_n && !changed; i++) {
+            for (int j = i + 1; j < dmg_n; j++) {
+                if (dmg_touch(i, j)) { dmg_merge_into(i, j); changed = 1; break; }
+            }
+        }
+    }
+}
+
 /* ---- 绘制顺序收集：layer 升序 → z 升序 → 树先序（稳定） --------------- */
 
 #define GUI_PAINT_MAX 256
 static block *paint_list[GUI_PAINT_MAX];
 static int paint_count;
+
+static void anim_apply_walk(block *b) {
+    if (!b) return;
+    anim_apply(b);
+    for (block *c = b->first_child; c; c = c->next_sibling)
+        anim_apply_walk(c);
+}
 
 static void collect(block *b) {
     if (!b) return;
@@ -103,6 +164,9 @@ static void sort_paint(void) {
 
 extern void ser_write(const char *s);
 extern void ser_putc(char c);
+
+/* anim.c 会话复位（gui_int.h 冻结清单之外的内部入口）。 */
+extern void anim_reset(void);
 
 static void ser_dec_u(uint32_t v) {
     char buf[12]; int n = 0;
@@ -140,6 +204,76 @@ uint32_t stat_damage_area(void)      { return s_damage_area; }
 uint64_t stat_frame_cycles(void)    { return s_frame_cycles; }
 uint32_t stat_last_frame_us(void)   { return s_last_us; }
 
+/* ---- 第 2a 轮：帧性能观测环形缓冲（只测量，不做优化） ------------------ */
+
+#define PERF_RING 32
+static uint32_t perf_on = 1;
+static uint32_t perf_us[PERF_RING];
+static uint32_t perf_area[PERF_RING];   /* 本帧 damage 合并区域覆盖像素数（触碰写像素估计） */
+static uint32_t perf_rects[PERF_RING];  /* 本帧 damage 合并后区域数 */
+static uint32_t perf_n, perf_head;
+
+static void perf_record(uint32_t us, uint32_t area, uint32_t rects) {
+    if (!perf_on) return;
+    perf_us[perf_head] = us;
+    perf_area[perf_head] = area;
+    perf_rects[perf_head] = rects;
+    perf_head = (perf_head + 1) % PERF_RING;
+    if (perf_n < PERF_RING) perf_n++;
+}
+
+static uint32_t perf_sorted_us[PERF_RING];
+
+static uint32_t perf_sort_us(void) {
+    for (uint32_t i = 0; i < perf_n; i++) perf_sorted_us[i] = perf_us[i];
+    for (uint32_t i = 1; i < perf_n; i++) {
+        uint32_t key = perf_sorted_us[i];
+        int j = (int)i - 1;
+        while (j >= 0 && perf_sorted_us[j] > key) {
+            perf_sorted_us[j + 1] = perf_sorted_us[j];
+            j--;
+        }
+        perf_sorted_us[j + 1] = key;
+    }
+    return perf_n;
+}
+
+static int perf_eq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+void gui_perf_set(const char *op) {
+    if (!op || !*op) { gui_perf_dump(); return; }
+    if (perf_eq(op, "on"))    { perf_on = 1; return; }
+    if (perf_eq(op, "off"))   { perf_on = 0; return; }
+    if (perf_eq(op, "reset")) { perf_n = 0; perf_head = 0; perf_on = 1; return; }
+}
+
+void gui_perf_dump(void) {
+    if (perf_n == 0) {
+        ser_write("GUI:perf n=0\n");
+        return;
+    }
+    uint32_t sum_us = 0, sum_area = 0, sum_rect = 0;
+    for (uint32_t i = 0; i < perf_n; i++) {
+        sum_us += perf_us[i]; sum_area += perf_area[i]; sum_rect += perf_rects[i];
+    }
+    uint32_t n = perf_sort_us();
+    uint32_t avg_us = (uint32_t)(sum_us / n);
+    uint32_t med_us = perf_sorted_us[n / 2];
+    uint32_t p95_us = perf_sorted_us[(n * 95) / 100];
+    uint32_t avg_area = (uint32_t)(sum_area / n);
+    uint32_t avg_rect = (uint32_t)(sum_rect / n);
+    ser_write("GUI:perf n="); ser_dec_u(n);
+    ser_write(" us_avg="); ser_dec_u(avg_us);
+    ser_write(" us_median="); ser_dec_u(med_us);
+    ser_write(" us_p95="); ser_dec_u(p95_us);
+    ser_write(" px_avg="); ser_dec_u(avg_area);
+    ser_write(" rects_avg="); ser_dec_u(avg_rect);
+    ser_write("\n");
+}
+
 /* ---- 帧 ----------------------------------------------------------------- */
 
 void gui_frame(void) {
@@ -160,22 +294,32 @@ void gui_frame(void) {
         paint_list[i]->snap =
             (paint_list[i]->dirty_layout || paint_list[i]->dirty_paint) ? 1 : 0;
 
+    /* 动画节拍：tick 推进在布局前；布局后、绘制前把当前帧值写回块几何。
+     * 动画期间该块几何以动画帧为准，不参与父级重排纠正。 */
+    anim_tick(16);
     layout_run();
+    anim_apply_walk(gui_root_block());
 
     dmg_reset();
     paint_begin_frame();
 
-    /* 第一遍：收集脏块矩形（v1 记当前矩形），合并成 damage 链表。
-     * OVF_VISIBLE 子块的脏区并入父块脏区：移出父框后旧位置由父底色补齐，
-     * 防止残影；再按裁剪栈只在屏内裁。 */
+    /* 第一遍：收集脏块矩形，合并成 damage 链表。
+     * 窗口移动损伤 = 旧矩形 ∪ 新矩形（均含阴影外扩边）；旧位置的背景补齐
+     * 只发生在这条并集条带内，不整节点重填。OVF_VISIBLE 子块脏区并入父块，
+     * 移出父框后旧位置由父底色补齐防残影。 */
     for (int i = 0; i < paint_count; i++) {
         block *b = paint_list[i];
         if (!b->snap) continue;
-        dmg_add(b->x, b->y, b->w, b->h);
+        if (b->has_old) {
+            dmg_add_pad(b->old_x, b->old_y, b->old_w, b->old_h);
+            b->has_old = 0;
+        }
+        dmg_add_pad(b->x, b->y, b->w, b->h);
         if (b->overflow == OVF_VISIBLE && b->parent)
-            dmg_add(b->parent->x, b->parent->y,
-                    b->parent->w, b->parent->h);
+            dmg_add_pad(b->parent->x, b->parent->y,
+                        b->parent->w, b->parent->h);
     }
+    dmg_coalesce();
 
     /* 第二遍：只重绘本帧脏节点。干净节点即使与 damage 相交也不整节点
      * 重绘——背景/容器的命中重绘会把尚未重绘的干净前景整片擦掉（§4
@@ -197,6 +341,7 @@ void gui_frame(void) {
     uint32_t area = 0;
     for (int i = 0; i < dmg_n; i++) area += (uint32_t)(dmg[i].w * dmg[i].h);
     stat_note_frame(t1 - t0, (uint32_t)dmg_n, area);
+    perf_record(s_last_us, stat_damage_area(), stat_damage_rects());
 
     uint32_t seq = s_frames;
     if (seq == 0) {
@@ -323,14 +468,21 @@ void gui_presence_sweep(void) {
     }
 }
 
-void gui_reset(void) {
-    tree_reset();
+static void gui_reset_common(int keep_ce) {
+    if (keep_ce) tree_reset_keep_ce();
+    else         tree_reset();
+    anim_reset();
     dmg_reset();
     s_frames = 0; s_layout_nodes = 0; s_double_commit = 0;
     s_damage_rects = 0; s_damage_area = 0;
     s_frame_cycles = 0; s_last_us = 0;
     s_last_tick = 0;
 }
+
+void gui_reset(void) { gui_reset_common(0); }
+
+/* gui_begin 会话重建专用：保留控制台阶段已提交的 CE 声明子树（见 tree.c）。 */
+void gui_reset_keep_ce(void) { gui_reset_common(1); }
 
 void gui_begin(void) {
     /* v2.80 hotfix: 组件/画布先收摊（画布页池按块持有，不关会跨会话泄漏，
@@ -344,8 +496,11 @@ void gui_begin(void) {
     gui_term_reset();
     ib_reset();
     gui_input_reset();
+    /* 跨会话清残留按键 / 半包 / 积压滚轮：与 GUI 输入态在同一处一起复位，
+     * 避免上一轮的 sticky 按键或拖拽捕获带进新一轮桌面。保留绝对落点。 */
+    mouse_state_reset();
     gui_chrome_reset();
-    gui_reset();
+    gui_reset_keep_ce();
     gfx24_clear(gui_active_style()->bg);
     block *root = gui_root_block();
     root->x = 0; root->y = 0;
@@ -354,5 +509,9 @@ void gui_begin(void) {
 }
 
 void gui_end(void) {
+    /* 退出桌面边界：先清 GUI 拖拽/捕获/焦点/退出请求态，再清鼠标驱动会话态
+     * （残留按键 / 半包 / 滚轮），两边一起清，避免半清把 sticky 态留给下一轮。 */
+    gui_input_reset();
+    mouse_state_reset();
     gui_reset();
 }

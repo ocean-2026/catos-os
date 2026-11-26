@@ -34,6 +34,13 @@ block *gui_hover_target(void) { return hover_block; }
 static int       (*key_hook)(int code, void *ud);
 static void     *key_ud;
 
+/* popover.c 内部入口（gui_int.h 冻结清单之外）。 */
+extern void pop_bridge_note(int x, int y);
+
+/* sb.c 拖动态访问器（gui_int.h 冻结清单之外的本地接线）。 */
+extern block *sb_drag_target(void);
+extern void   sb_state_reset(void);
+
 void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
     key_hook = fn;
     key_ud = ud;
@@ -171,9 +178,47 @@ static void focus_set(block *b) {
     }
 }
 
-static void on_press(int x, int y) {
+/* 沿父链找最近的可滚动块（OVF_SCROLL 且滚动条可见）；没有则返回 0。 */
+static block *scroll_ancestor(block *b) {
+    for (; b; b = b->parent)
+        if (b->overflow == OVF_SCROLL && sb_visible(b)) return b;
+    return 0;
+}
+
+/* 滚轮分发：命中可滚动块则内核滚动一格（3 行），并把 ev_kind=4 回投该块
+ * 所属应用；命中块整条父链都没有滚动条时，回投最近带 owner 的祖先，免得
+ * 应用收不到滚轮。 */
+static void on_wheel(int x, int y, int dz) {
     block *b = hit_test(x, y);
     if (!b) return;
+    block *sc = scroll_ancestor(b);
+    if (sc) {
+        sb_wheel(sc, dz);
+        decl_post_wheel(sc, 0, dz * 3);
+        sc->dirty_layout = 1; sc->dirty_paint = 1;
+        gui_mark_dirty(sc->id);
+        return;
+    }
+    block *own = b;
+    while (own && !own->owner) own = own->parent;
+    if (own) decl_post_wheel(own, 0, dz * 3);
+}
+
+static void on_press(int x, int y) {
+    /* 点在最上层浮层矩形外：先关闭浮层并回投 dismiss，本帧不再向下下发点击。 */
+    if (pop_dismiss_at(x, y)) return;
+    block *b = hit_test(x, y);
+    if (!b) return;
+
+    /* 滚动条 thumb 按下：进入拖动态，抢占窗口拖拽 / 点击回投（点在 track
+     * 空白处不算抓到，落回下面的常规路径）。 */
+    block *sc = scroll_ancestor(b);
+    if (sc) sb_mouse(sc, x, y, 0);
+    if (sc && sb_drag_target()) {
+        sc->dirty_layout = 1; sc->dirty_paint = 1;
+        return;
+    }
+
     /* 菜单模态：点下层空白只关闭菜单，不下发命中。 */
     if (gui_menu_is_open() && b->layer < LAYER_OVERLAY) {
         gui_menu_close();
@@ -189,8 +234,13 @@ static void on_press(int x, int y) {
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
 
-    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。 */
-    if (act && act->kind == BLK_INPUT) gui_set_key_hook(ib_key, (void *)act->id);
+    /* 输入框聚焦：接管键盘；点到别处则释放输入框钩子。命中块本身是输入
+     * 框时按 b 接管（CE 声明块不带 legacy on_click，act 上溯会落空）。 */
+    block *ib_target = (b->kind == BLK_INPUT) ? b : act;
+    if (ib_target && ib_target->kind == BLK_INPUT) {
+        gui_set_key_hook(ib_key, (void *)ib_target->id);
+        ib_activate(ib_target->id);
+    }
     else if (ib_is_active())           gui_set_key_hook(0, 0);
 
     /* 拖拽/缩放：解析到可聚焦面板（resize 边缘带 > 标题/整块拖拽带）。 */
@@ -209,9 +259,19 @@ static void on_press(int x, int y) {
 }
 
 static void on_drag_move(int x, int y) {
+    block *sb = sb_drag_target();
+    if (sb) {
+        sb_mouse(sb, x, y, 1);
+        sb->dirty_layout = 1; sb->dirty_paint = 1; sb->moved = 1;
+        gui_mark_dirty(gui_root_block()->id);
+        return;
+    }
     if (!drag_block) return;
     block *b = drag_block;
     if (drag_mode == DRAG_MOVE) {
+        /* 脏矩形：改几何前缓存旧矩形，供合成层算「旧 ∪ 新」损伤条带。 */
+        b->old_x = b->x; b->old_y = b->y;
+        b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
         int nx = x - drag_off_x, ny = y - drag_off_y;
         /* drag_bounds：0 不限 / 1 父框 / 2 屏幕。 */
         if (b->drag_bounds == BOUND_SCREEN) {
@@ -238,6 +298,8 @@ static void on_drag_move(int x, int y) {
         if (b->overflow == OVF_VISIBLE && b->parent)
             b->parent->dirty_paint = 1;
     } else if (drag_mode == DRAG_RESIZE) {
+        b->old_x = b->x; b->old_y = b->y;
+        b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
         uint8_t d = drag_resize_dir;
         int nl = b->x, nt = b->y, nr = b->x + b->w, nb = b->y + b->h;
         if (d & RESIZE_L) nl = x;
@@ -263,7 +325,10 @@ static void on_drag_move(int x, int y) {
     b->dirty_layout = 1;
     b->dirty_paint = 1;
     b->moved = 1;
-    /* 旧位置必须由背景/兄弟整树补齐：只标拖动块会在拖出轨迹上留残影。 */
+    /* 整树标脏（当前定论）：旧位置的背景补齐依赖同帧重绘的背景/兄弟节点，
+     * 条带级背景补齐（只在损伤条带内擦旧位）尚未实现，收窄脏位会在拖出
+     * 轨迹上留残影。实测拖动帧时/损伤无全屏回退、无残影，权衡与口径见
+     * evidence-fix/09-perf/dirty-rect-summary.md；条带化补齐留后续轮次。 */
     gui_mark_dirty(gui_root_block()->id);
 }
 
@@ -272,16 +337,25 @@ static void on_release(void) {
         drag_block->on_drag(drag_block->id, 0, 0, 2); /* phase 2 = end */
     drag_block = 0;
     drag_mode = DRAG_NONE;
+    block *sb = sb_drag_target();
+    if (sb) sb_mouse(sb, 0, 0, 2);
 }
 
 void gui_pump_input(void) {
     mouse_event_t e;
     while (mouse_poll_event(&e)) {
+        if (e.dz) {
+            on_wheel(e.x, e.y, e.dz);
+            continue;
+        }
         if (e.down && (e.changed & MOUSE_BTN_LEFT)) on_press(e.x, e.y);
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
-            if (drag_mode != DRAG_NONE) on_release();
+            if (drag_mode != DRAG_NONE || sb_drag_target()) on_release();
             else hover_block = hit_test(e.x, e.y);
+            pop_bridge_note(e.x, e.y);
         } else if (drag_block) {
+            on_drag_move(e.x, e.y);
+        } else if (sb_drag_target()) {
             on_drag_move(e.x, e.y);
         }
     }
@@ -291,6 +365,7 @@ void gui_pump_input(void) {
     }
     if (k == 27) {
         if (gui_sak_esc()) return;             /* SAK 面板优先消费 Esc */
+        if (pop_esc()) return;                  /* Esc 先关最上层浮层 */
         if (gui_menu_is_open()) gui_menu_close();  /* Esc 先关菜单 */
         else exit_requested = 1;                   /* Esc 退回文本控制台 */
     }
@@ -321,12 +396,14 @@ void gui_input_reset(void) {
     hover_block = 0;
     key_hook = 0;
     key_ud = 0;
+    sb_state_reset();
 }
 
 /* ---- 探针注入钩子：复用真实命中 / 拖拽路径，不另起一套模拟。 ---- */
 void gui_inject_press(int x, int y)  { on_press(x, y); }
 void gui_inject_move(int x, int y)   { on_drag_move(x, y); }
 void gui_inject_release(void)        { on_release(); }
+void gui_inject_wheel(int x, int y, int dz) { on_wheel(x, y, dz); }
 block_id gui_hit_test(int x, int y) {
     block *b = hit_test(x, y);
     return b ? b->id : 0;
