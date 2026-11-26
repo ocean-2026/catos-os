@@ -1,0 +1,1 @@
+root@catos:/# heaptest HEAPTEST start alloc(4097) = 0x02100008 rw over 4097 bytes: ok alloc(12288) = 0x02101018 rw over 12288 bytes: ok alloc(65536) = 0x02104020 rw over 65536 bytes: ok four 9000-byte blocks: ok HEAPTEST PASS [task 1 'heaptest' exit(0)] root@catos:/# 

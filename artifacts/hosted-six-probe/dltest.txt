@@ -1,0 +1,1 @@
+root@catos:/# dltest dltest: CSO2 dynamic-link demo dltest: loaded libmath.so, handle=1 libmath 2.0 (CSO2 shared object) [libmath] hello from a shared object 7+5=12 7-5=2 7*5=35 gcd(84,36)=12 seed=7 combo(5)=12 dispatch(0,7,5)=12 dispatch(1,7,5)=2 dispatch(2,7,5)=35 dltest: dlclose -> 0 (0=ok) dltest: PASS [task 1 'dltest' exit(0)] root@catos:/# 

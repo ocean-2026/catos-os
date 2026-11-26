@@ -1,0 +1,1 @@
+ 499500 sum= 499500 join ret=1 join ret=2 join ret=3 join ret=4 sum=10 threads: tid=2 i=1000 errno=8 own=7 sum=499500 threads: fault worker exit(1) fault join ret=1 THREAD PASS [task 1 'threads' exit(0)] root@catos:/# 

@@ -74,6 +74,16 @@ CFLAGS="-m32 -ffreestanding -fno-pic -fno-stack-protector -fno-stack-check \
 # v2.49 shared app layer: single __ce_api slot definition -- see ce_app.c
 "$GCC" $CFLAGS -I"$CEBASE" -I"$ROOT/include" -c "$CEBASE/ce_app.c" \
     -o "$CEBASE/build/ce_app.o"
+# FIX: an app that defines its own strong __ce_api (most legacy probes do)
+# must NOT also link ce_app.o's weak copy: mingw ld keeps TWO .ce_api cells
+# and the api_off can point at the wrong one, so the kernel injects the table
+# pointer into a cell the app never reads -> NULL deref at entry.
+if "$NM" "$CEBASE/build/$NAME.o" 2>/dev/null | grep -qE '[BD] _*__ce_api$|[BD] ___ce_api$'; then
+    LINK_CE_APP=""
+    echo "  [build_ce] $NAME self-defines __ce_api; skipping ce_app.o (avoids duplicate .ce_api cell)"
+else
+    LINK_CE_APP="$CEBASE/build/ce_app.o"
+fi
 
 # v2.67 build fix: modern GCC emits a .comment section.  With ce.ld that
 # section lands BELOW the 0x2000000 image base ("ld: .comment: section
@@ -97,7 +107,7 @@ fi
 # cc.c's static buffers, far over CE_MAX_IMAGE).  The CE loader relocates
 # nothing, so the section is pure weight.
 "$LD" -m i386pe --disable-reloc-section -T "$CEBASE/ce.ld" -e "$ENTRY_SYM" \
-    "$CEBASE/build/$NAME.o" "$CEBASE/build/ce_stub.o" "$CEBASE/build/ce_app.o" \
+    "$CEBASE/build/$NAME.o" "$CEBASE/build/ce_stub.o" $LINK_CE_APP \
     -o "$CEBASE/build/$NAME.exe"
 
 MAIN=$("$NM" "$CEBASE/build/$NAME.exe" | awk '/[TD] _*ce_main$/{print $1; exit}')

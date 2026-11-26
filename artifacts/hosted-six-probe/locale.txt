@@ -1,0 +1,1 @@
+root@catos:/# locale LOCALE PASS [task 1 'locale' exit(0)] root@catos:/# 

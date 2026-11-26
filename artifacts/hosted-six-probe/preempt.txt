@@ -1,0 +1,1 @@
+root@catos:/# preempt preempt: worker=0preempt: worker= switches=11 switches=1 preempt: d0=1 d1=1 main_wake=2 PREEMPT PASS [task 1 'preempt' exit(0)] root@catos:/# 

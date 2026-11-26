@@ -1,0 +1,1 @@
+root@catos:/# mmaptest ok mmap 8k ok rw pattern page0 ok rw pattern page1 ok munmap ok re-mmap reuses hole ok munmap rejects bogus MMAPTEST PASS [task 1 'mmaptest' exit(0)] root@catos:/# 
