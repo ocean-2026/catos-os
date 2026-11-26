@@ -846,3 +846,20 @@ vbe24 命令后无法输入，gfx 模式中 光标应该是[当前所在格无�
 - **ACPI 关机已入 main**：`502d203` 仅 cherry-pick `94f3ba1`——PM1_CNT 端口偏移 `0x48/0x4C→0x40/0x44`、守卫 `paging_map_top()`、`poweroff` 别名 + 关机串口打点；纯加法 `paging_map_top()` 访问器，`task_page_is_user()`（ring3 US 位修因 `8fea31e`）原样保留。
 - **`feat/smp` 未整体合并**：merge-base 旧基 `76d0f646`，整体合并会回退 TLS 状态码透传（`77f0ec0`）、browser v0.1、ring3 修因；故只选择性 cherry-pick，未带 `6e99d5e` AHCI 骨架。
 - **D4 SATA/AHCI 实测（🔶 deferred）**：本线未编入 AHCI 驱动（无 `ahci.c`/`ahci.h`，仅 `ata.c` IDE/ATAPI PIO）；AHCI 诊断 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，HBA 未响应，IDENTIFY ABRT、DMA 未打通；AHCI 骨架在 smp 线 `6e99d5e`，本轮未搬，多磁盘/驱动框架并入战略 P3.4。
+
+---
+
+## 附录：v2.82 交付回填（2026-11-27，仅追加，不改上文正文）
+
+| # | 严重度 | 问题 | 根因 | 规避 / 修复 | 状态 |
+|---|---|---|---|---|---|
+| 213 | 低（测试基建） | 在云主机上直接跑 `tests/*.py` 报 `qemu-system-i386 not found`、RC=2，门禁看似"不存在" | 门禁脚本用 `shutil.which("qemu-system-i386")` 找 QEMU，而云主机的 wrapper 只装在 `/home/user/bin`，不在默认 PATH | 跑任何门禁前 `export PATH=/home/user/bin:$PATH`；wrapper 自带宽 `-L` BIOS 路径，不需要额外参数 | ✅ 已知规避（未改测试代码） |
+| 214 | 低（镜像一致性） | shipped `catos_disk.img` 的 `/pkg/pkgs.txt` 与仓库 `build/pkg.list` 不同步：镜像里残留已退役的 `desktop [1.0]` 与 `ls /pkg` 的 `desktop.cat`，而仓库只打包 bc/stats/rps | 盘镜像是一次性生成的产物，`build/pkg.list` 变动后没有重建镜像；`build.sh disk` 只在显式调用时刷盘 | 判断包状态以全新格式化卷的 `pkg list` 为准（本轮 `tests/detach_probe.py` 用新卷验证只剩 bc/stats/rps）；旧镜像的 desktop 条目不影响纯 shell，也不影响内核 | ⏳ 待镜像重建（不影响 v2.82 验收） |
+| 215 | 低（测试误报） | 崩溃关键字探针在正常输出上误报：`faultinfo`、`panic record` 这类正常文本会被当成崩溃标记 | 真实崩溃横幅只有 `!!! PANIC !!!`（`bsod.c:298`），早期探针用了过宽的 `fault`/`panic` 子串 | 探针匹配改为 `!!! PANIC !!!` 与 `system halted` 精确串；`tests/detach_probe.py` 已按此口径 | ✅ 已修（测试侧） |
+| 216 | 低（shell 语义） | `ls /bin/<file>` 不能用来判断文件是否存在——单个文件参数被当目录读，输出不报错也不列文件 | `ls` 的单文件分支沿用目录语义 | 判文件存在改用 `cat`/`stat`，装包状态改用 `pkg list` 的 installed/available 列 | ✅ 已验证（测试侧改口径） |
+| 217 | 低（交互粘连） | 退出遗留 CE 应用后，最后按键可能与下一条命令粘连（实测 `q` + `clear` → `qclear`），导致抓屏断言错位 | CE 任务退出时键盘 FIFO 里残留退出键，shell 读 prompt 前不清 | 自动化脚本在每次应用退出后先发一次回车排空再输入下一条命令；`tests/*_probe.py` 已遵循 | ✅ 已规避（测试侧） |
+| 218 | 低（后端取舍） | `vbe_selftest()` 的 pan 扫描线断言在 QEMU 上永远记 n/a | QEMU `-vga std` 走 Bochs dispi 路径，`pan_rows=0`（re-render 后端），dispi 拒绝超出 600px 虚拟高度 | 断言代码保留，色块按"回读 OK + pan n/a"显示黄色；只有支持虚拟高度的后端/真机才会转绿 | ⏳ deferred（需真机或带 pan 的后端） |
+
+- **交付基线**：main HEAD `459f582`（P1 六项 + D7 + F5 合入），其后 D6 与版本串 `cbcf041`。
+- **双 ISO**（各 12,267,520 B）：release `catos-v2.82.iso` `10d360a87d104ee5…`；test（`GUI_AUTOSTART=1`）`catos-v2.82-test.iso` `d5ccddd1d9de4e71…`；`kernel-v2.82.bin` 1,541,556 B。
+- **v2.82 门禁**：`--strict` RC=0、E3 2/2、vprobe 10/10、P1 六项探针 2/2·7/7·6/6·7/7·8/8·15/15、D6 三档、D7 1/1。
