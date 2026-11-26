@@ -581,12 +581,19 @@ void net_dhcp_ensure(void);                            /* forward decl (defined 
 void net_arp_flush(void);                              /* forward decl (defined below) */
 void net_dns_server_set(const uint8_t ip[4]);          /* forward decl (defined below) */
 
-static uint16_t udp_local_port = 0xC000;          /* ephemeral source port */
-static uint8_t  udp_rx_data[2048];
-static uint32_t udp_rx_len  = 0;
-static uint16_t udp_rx_sport = 0;
-static uint16_t udp_rx_dport = 0;
-static uint8_t  udp_rx_src[4];
+/* UDP one-shot context: the single UDP client / resolver instance.  The RX
+ * datagram, its metadata and the UDP checksum pseudo-header scratch belong
+ * to this context rather than independent globals.  Concurrent UDP sockets
+ * are a 3B item; this slot is reused one datagram at a time. */
+static struct {
+    uint16_t local_port;
+    uint8_t  rx_data[2048];
+    uint32_t rx_len;
+    uint16_t rx_sport;
+    uint16_t rx_dport;
+    uint8_t  rx_src[4];
+    uint8_t  pseudo[12 + 8 + 2048];   /* UDP checksum scratch (pseudo hdr + datagram) */
+} udp = { 0xC000, {0}, 0, 0, 0, {0}, {0} };
 
 static void udp_send_pkt(const uint8_t dst[4], uint16_t dport, uint16_t sport,
                          const uint8_t *payload, uint32_t plen) {
@@ -620,7 +627,7 @@ static void udp_handle(const uint8_t *iph, const uint8_t *seg, uint32_t seglen) 
     /* verify the UDP checksum when the sender computed one (0 = none):
      * pseudo header (src, dst, 0, 17, udp length) + the datagram itself */
     if (rd16(seg + 6) != 0) {
-        static uint8_t pseudo[12 + 8 + 2048];   /* kernel is non-preemptive: shared scratch is safe */
+        uint8_t *pseudo = udp.pseudo;   /* checksum scratch owned by the UDP context */
         uint32_t o = 0;
         for (int i = 0; i < 4; i++) pseudo[o++] = iph[12 + i];
         for (int i = 0; i < 4; i++) pseudo[o++] = iph[16 + i];
@@ -632,12 +639,12 @@ static void udp_handle(const uint8_t *iph, const uint8_t *seg, uint32_t seglen) 
         if (ip_checksum(pseudo, o) != 0) return;   /* corrupt: drop */
     }
     uint32_t plen = ulen - 8;
-    if (plen > sizeof(udp_rx_data)) plen = sizeof(udp_rx_data);
-    for (int i = 0; i < 4; i++) udp_rx_src[i] = iph[12+i];
-    udp_rx_sport = rd16(seg + 0);
-    udp_rx_dport = rd16(seg + 2);
-    udp_rx_len = plen;
-    for (uint32_t i = 0; i < plen; i++) udp_rx_data[i] = seg[8+i];
+    if (plen > sizeof(udp.rx_data)) plen = sizeof(udp.rx_data);
+    for (int i = 0; i < 4; i++) udp.rx_src[i] = iph[12+i];
+    udp.rx_sport = rd16(seg + 0);
+    udp.rx_dport = rd16(seg + 2);
+    udp.rx_len = plen;
+    for (uint32_t i = 0; i < plen; i++) udp.rx_data[i] = seg[8+i];
 }
 
 /* public (CE API): send a UDP datagram to "ip:port" (ip may be a hostname) */
@@ -648,7 +655,7 @@ int net_udp_send(const char *ip, uint16_t port, const uint8_t *data, uint32_t le
     if (ip_parse(ip, dst) != 0) {
         if (net_dns_lookup(ip, dst) != 0) return -1;
     }
-    udp_send_pkt(dst, port, udp_local_port, data, len);
+    udp_send_pkt(dst, port, udp.local_port, data, len);
     return 0;
 }
 
@@ -657,14 +664,14 @@ int net_udp_send(const char *ip, uint16_t port, const uint8_t *data, uint32_t le
  * -1 on bad args. */
 int net_udp_recv(char *ip_out, int *port_out, uint8_t *buf, int max) {
     if (!net_ready || !buf || max <= 0) return -1;
-    if (udp_rx_len == 0) return 0;
-    uint32_t n = udp_rx_len;
+    if (udp.rx_len == 0) return 0;
+    uint32_t n = udp.rx_len;
     if (n > (uint32_t)max) n = (uint32_t)max;
-    for (uint32_t i = 0; i < n; i++) buf[i] = udp_rx_data[i];
+    for (uint32_t i = 0; i < n; i++) buf[i] = udp.rx_data[i];
     if (ip_out) {
         char *o = ip_out;
         for (int i = 0; i < 4; i++) {
-            int d = udp_rx_src[i];
+            int d = udp.rx_src[i];
             char t[4]; int ti = 0;
             if (d == 0) t[ti++] = '0';
             while (d > 0) { t[ti++] = (char)('0' + d % 10); d /= 10; }
@@ -673,8 +680,8 @@ int net_udp_recv(char *ip_out, int *port_out, uint8_t *buf, int max) {
         }
         *o = 0;
     }
-    if (port_out) *port_out = (int)udp_rx_sport;
-    udp_rx_len = 0;
+    if (port_out) *port_out = (int)udp.rx_sport;
+    udp.rx_len = 0;
     return (int)n;
 }
 
@@ -744,29 +751,29 @@ static uint32_t dhcp_frame(uint8_t *f, uint32_t xid, uint8_t msg_type,
  * (2=OFFER, 5=ACK, 6=NAK) or 0 when nothing usable arrived. */
 static int dhcp_poll_reply(uint32_t xid, uint8_t yi[4], uint8_t srv[4],
                            uint8_t gw[4], uint8_t dns[4]) {
-    if (udp_rx_len == 0) return 0;
-    if (udp_rx_dport != 68) { udp_rx_len = 0; return 0; }
-    const uint8_t *d = udp_rx_data;
-    if (udp_rx_len < 240 || rd32(d + 4) != xid ||
+    if (udp.rx_len == 0) return 0;
+    if (udp.rx_dport != 68) { udp.rx_len = 0; return 0; }
+    const uint8_t *d = udp.rx_data;
+    if (udp.rx_len < 240 || rd32(d + 4) != xid ||
         d[236] != 0x63 || d[237] != 0x82 || d[238] != 0x53 || d[239] != 0x63) {
-        udp_rx_len = 0; return 0;
+        udp.rx_len = 0; return 0;
     }
     int type = 0;
     for (int i = 0; i < 4; i++) { yi[i] = d[16+i]; srv[i] = gw[i] = dns[i] = 0; }
     uint32_t o = 240;
-    while (o + 2 <= udp_rx_len) {
+    while (o + 2 <= udp.rx_len) {
         uint8_t opt = d[o];
         if (opt == 0) { o++; continue; }              /* pad */
         if (opt == 255) break;                        /* end */
         uint8_t l = d[o + 1];
-        if (o + 2 + (uint32_t)l > udp_rx_len) break;
+        if (o + 2 + (uint32_t)l > udp.rx_len) break;
         if      (opt == 53 && l >= 1) type = d[o+2];
         else if (opt == 54 && l >= 4) for (int i = 0; i < 4; i++) srv[i] = d[o+2+i];
         else if (opt == 3  && l >= 4) for (int i = 0; i < 4; i++) gw[i]  = d[o+2+i];
         else if (opt == 6  && l >= 4) for (int i = 0; i < 4; i++) dns[i] = d[o+2+i];
         o += 2 + l;
     }
-    udp_rx_len = 0;
+    udp.rx_len = 0;
     return type;
 }
 
@@ -890,41 +897,41 @@ int net_dns_lookup(const char *host, uint8_t ip[4]) {
     const uint8_t *dns_ip = dns_server_v;
 
     for (int try = 0; try < 3; try++) {
-        udp_local_port++;
-        udp_send_pkt(dns_ip, 53, udp_local_port, q, qlen);
+        udp.local_port++;
+        udp_send_pkt(dns_ip, 53, udp.local_port, q, qlen);
         for (long i = 0; i < 1500000L; i++) {
             net_poll();
-            if (udp_rx_len == 0) continue;
-            if (udp_rx_dport != udp_local_port) { udp_rx_len = 0; continue; }
-            const uint8_t *r = udp_rx_data;
-            if (udp_rx_len < 12 || rd16(r + 0) != id) { udp_rx_len = 0; continue; }
+            if (udp.rx_len == 0) continue;
+            if (udp.rx_dport != udp.local_port) { udp.rx_len = 0; continue; }
+            const uint8_t *r = udp.rx_data;
+            if (udp.rx_len < 12 || rd16(r + 0) != id) { udp.rx_len = 0; continue; }
             uint16_t ancount = rd16(r + 6);
-            if (ancount == 0) { udp_rx_len = 0; return -1; }   /* NXDOMAIN */
+            if (ancount == 0) { udp.rx_len = 0; return -1; }   /* NXDOMAIN */
             uint32_t off = 12;
             int q_was_ptr = 0;
             /* skip question: qname (possibly compressed) + qtype/qclass.
              * after a compression pointer there is NO root label, so the
              * skip is 4 (type+class), not 5 - the old +5 mis-parsed every
              * response whose question name was compressed */
-            while (off < udp_rx_len && r[off] != 0) {
+            while (off < udp.rx_len && r[off] != 0) {
                 if ((r[off] & 0xC0) == 0xC0) { off += 2; q_was_ptr = 1; break; }
                 off += 1 + r[off];
             }
             off += q_was_ptr ? 4 : 5;        /* [+root label] + qtype + qclass */
-            for (uint16_t a = 0; a < ancount && off + 12 <= udp_rx_len; a++) {
+            for (uint16_t a = 0; a < ancount && off + 12 <= udp.rx_len; a++) {
                 /* answer name: compression pointer or plain name */
-                if (off + 2 <= udp_rx_len && (r[off] & 0xC0) == 0xC0) off += 2;
+                if (off + 2 <= udp.rx_len && (r[off] & 0xC0) == 0xC0) off += 2;
                 else {
-                    while (off < udp_rx_len && r[off]) {
+                    while (off < udp.rx_len && r[off]) {
                         if ((r[off] & 0xC0) == 0xC0) { off += 2; break; }
                         off += 1 + r[off];
                     }
-                    if (off < udp_rx_len) off++;
+                    if (off < udp.rx_len) off++;
                 }
-                if (off + 10 > udp_rx_len) break;
+                if (off + 10 > udp.rx_len) break;
                 uint16_t type  = rd16(r + off + 0);
                 uint16_t rdlen = rd16(r + off + 8);
-                if (type == 1 && rdlen == 4 && off + 14 <= udp_rx_len) {
+                if (type == 1 && rdlen == 4 && off + 14 <= udp.rx_len) {
                     ip[0] = r[off+10]; ip[1] = r[off+11];
                     ip[2] = r[off+12]; ip[3] = r[off+13];
                     int ci = 0;
@@ -932,12 +939,12 @@ int net_dns_lookup(const char *host, uint8_t ip[4]) {
                     dns_cache_name[ci] = 0;
                     for (int k = 0; k < 4; k++) dns_cache_ip[k] = ip[k];
                     dns_cache_valid = 1;
-                    udp_rx_len = 0;
+                    udp.rx_len = 0;
                     return 0;
                 }
                 off += 10 + rdlen;
             }
-            udp_rx_len = 0;
+            udp.rx_len = 0;
             return -1;
         }
     }

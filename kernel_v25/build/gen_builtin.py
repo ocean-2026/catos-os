@@ -57,9 +57,12 @@ FILES = [("/bin/%s.ce" % name,
           os.path.join(ROOT, "extapp", "bin", name + ".ce"))
          for name in app_names()]
 
-# Files NOT produced from apps.list: a prebuilt ELF and developer docs.
+# Files NOT produced from apps.list: a prebuilt ELF, developer docs and
+# the Stage 2A CSO1 shared object.
 FILES += [
     ("/bin/hello.elf",           os.path.join(ROOT, "extapp", "bin", "hello.elf")),
+    ("/bin/libmath.so",          os.path.join(ROOT, "extapp", "bin", "libmath.so")),
+    ("/bin/rel8.so",             os.path.join(ROOT, "extapp", "bin", "rel8.so")),
     ("/appdevelop/API.TXT",      os.path.join(ROOT, "extapp", "docs", "API.txt")),
     ("/appdevelop/CEFORMAT.TXT", os.path.join(ROOT, "extapp", "docs", "CEFORMAT.txt")),
 ]

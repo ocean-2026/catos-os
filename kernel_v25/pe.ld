@@ -35,7 +35,7 @@ SECTIONS
          * can never push them into the remapped user arena [0x2000000,0x2800000).
          * Symbols are defined here; C/asm only declare them extern. */
         . = ALIGN(8);
-        _gdt = .;  . = _gdt + 48;            /* uint64_t gdt[6]  */
+        _gdt = .;  . = _gdt + 56;            /* uint64_t gdt[7]  */
         _idt = .;  . = _idt + 2048;          /* idt_entry_t idt[256] */
         _tss = .;  . = _tss + 104;           /* tss_t            */
         *(.keytabs)

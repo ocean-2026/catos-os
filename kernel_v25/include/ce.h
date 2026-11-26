@@ -308,6 +308,34 @@ typedef struct catos_api {
     int      (*blk_commit2)(const void *recs, int n, const char *strings,
                             int slen, uint32_t rec_size);
     int      (*blk_event_poll2)(ce_blk_event2_t *ev, int timeout_ms);
+    /* ---- Stage 2B: file-backed mapping (append-only; mirror 80-82) ------ */
+    /* Reserved: the file-backed path needs an fd handle table the CE layer
+     * does not expose yet; dispatch returns -8 ENOSYS.  Old binaries NULL. */
+    uint32_t (*file_mmap)(int fd, uint32_t len, int prot, int flags); /* 80 */
+    int      (*mprotect)(uint32_t addr, uint32_t len, int prot);      /* 81 */
+    int      (*munmap_shared)(uint32_t addr, uint32_t len);           /* 82 */
+
+    /* ---- Stage 2A: CSO1 shared object (append-only; mirror 83-85) ------ */
+    int      (*dlopen)(const char *path);            /* 83 */
+    void *   (*dlsym)(int handle, const char *name); /* 84 */
+    int      (*dlclose)(int handle);                 /* 85 */
+
+    /* ---- Stage 3A: user threads (append-only; mirror 86-89) ---------- */
+    int      (*thread_create)(void *entry, void *arg); /* 86 */
+    void     (*thread_exit)(void *retval);             /* 87 */
+    void *   (*thread_join)(int tid);                  /* 88 */
+    int      (*thread_detach)(int tid);                /* 89 */
+
+    /* ---- Stage 2B: CE fd handle table (append-only; mirror 90-94) ---- */
+    int      (*fd_open)(const char *path, int flags);  /* 90 */
+    int      (*fd_close)(int fd);                       /* 91 */
+    int      (*fd_read)(int fd, void *buf, int len);    /* 92 */
+    int      (*fd_write)(int fd, const void *buf, int len);/* 93 */
+    int      (*fd_lseek)(int fd, int off, int whence); /* 94 */
+    uint32_t (*fcache_stat)(int what, uint32_t arg);        /* 95 */
+    uint32_t (*thread_switches)(void);                       /* 96 */
+    int      (*setlocale)(int category, const char *name);   /* 97 */
+    int      (*locale_query)(int category, int what, char *buf, int len); /* 98 */
 } catos_api_t;
 
 /* install the API (called once at boot) */

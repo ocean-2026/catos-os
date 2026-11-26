@@ -190,6 +190,22 @@ typedef struct {
 typedef void (*ce_ls_cb)(int is_dir, const char *name, uint32_t size, void *ud);
 
 /* system-call table: 61 slots, v2.11 */
+/* Stage 3 block 4: locale categories (mirror kernel locale.h). LC_COLLATE is
+ * explicitly unsupported. */
+#define LC_CTYPE_CAT     0
+#define LC_NUMERIC_CAT   1
+#define LC_TIME_CAT      2
+#define LC_MONETARY_CAT  3
+#define LC_COLLATE_CAT   4
+#define LC_ALL_CAT       5
+/* locale_query() selectors */
+#define LQ_NAME_Q        0
+#define LQ_DECIMAL_Q     1
+#define LQ_THOUSANDS_Q   2
+#define LQ_CURRENCY_Q    3
+#define LQ_MONTH_Q       100   /* + month 1..12 */
+#define LQ_WDAY_Q        200   /* + wday 0..6 */
+
 typedef struct catos_api {
     /* ---- console ---- */
     void   (*write)(const char *s);                 /* 0  */
@@ -375,7 +391,51 @@ typedef struct catos_api {
     int     (*blk_commit2)(const void *recs, int n, const char *strings,
                            int slen, uint32_t rec_size);                          /*78*/
     int     (*blk_event_poll2)(ce_blk_event2_t *ev, int timeout_ms);              /*79*/
-} catos_api_t;
+    /* Stage 2B: file-backed mapping slots, append-only (80..82).
+     * Reserved in the ABI this stage; the file-backed path needs an fd
+     * handle table the CE layer does not expose yet, so the kernel dispatch
+     * returns -8 ENOSYS for now.  80 file_mmap / 81 mprotect / 82 munmap_shared. */
+    uint32_t (*file_mmap)(int fd, uint32_t len, int prot, int flags);             /*80*/
+    int      (*mprotect)(uint32_t addr, uint32_t len, int prot);                  /*81*/
+    int      (*munmap_shared)(uint32_t addr, uint32_t len);                       /*82*/
+    /* Stage 2A: CSO1 fixed-base shared object, append-only (83..85).
+     * dlopen(path) -> handle (>0) or negative errno; dlsym(handle, name)
+     * -> function pointer, NULL on unknown symbol / bad handle; dlclose
+     * (handle) -> 0 ok or negative errno. */
+    int      (*dlopen)(const char *path);                                         /*83*/
+    void *   (*dlsym)(int handle, const char *name);                              /*84*/
+    int      (*dlclose)(int handle);                                              /*85*/
+    /* Stage 3A: user threads (append-only, slots 86..89).  A worker thread
+     * shares the caller's address space (VMA/page table) but has its own
+     * kernel slot, user stack and join state.  thread_create(entry, arg) ->
+     * tid > 0 / negative errno; thread_exit(retval) terminates the caller;
+     * thread_join(tid) blocks until the thread exits and returns its retval;
+     * thread_detach(tid) makes exit auto-reap.  NOTE: this stage reserves
+     * the ABI surface only; the live shared-space thread path is deferred
+     * (see docs/threading.md), dispatch returns ENOSYS. */
+    int      (*thread_create)(void *entry, void *arg);                            /*86*/
+    void     (*thread_exit)(void *retval);                                        /*87*/
+    void *   (*thread_join)(int tid);                                             /*88*/
+    int      (*thread_detach)(int tid);                                          /*89*/
+    /* Stage 2B: CE fd handle table (append-only, slots 90..94).  fd 0/1/2
+     * are reserved stdin/stdout/stderr; user fds start at 3.  The legacy
+     * path-based file_read/file_write/file_delete slots are unchanged. */
+    int      (*fd_open)(const char *path, int flags);                            /*90*/
+    int      (*fd_close)(int fd);                                                  /*91*/
+    int      (*fd_read)(int fd, void *buf, int len);                               /*92*/
+    int      (*fd_write)(int fd, const void *buf, int len);                       /*93*/
+    int      (*fd_lseek)(int fd, int off, int whence);                            /*94*/
+    /* Stage 2B diagnostics: what=0 resident cached pages, what=1 cumulative
+     * cache hits, what=2 refcnt of the cached page covering arg (a user VA;
+     * -1 if none).  Returns the requested value as an unsigned word. */
+    uint32_t (*fcache_stat)(int what, uint32_t arg);                              /*95*/
+    /* Stage 3 block 3: scheduler switch count for the calling task (no args). */
+    uint32_t (*thread_switches)(void);                                              /*96*/
+    /* Stage 3 block 4: minimal locale. setlocale(category, name) -> 0/negative;
+     * locale_query(category, what, buf, len) copies a NUL-terminated locale
+     * string into buf. LC_COLLATE is unsupported (setlocale returns -22). */
+    int      (*setlocale)(int category, const char *name);                          /*97*/
+    int      (*locale_query)(int category, int what, char *buf, int len);            /*98*/} catos_api_t;
 
 /* snd_info() selectors.  Kept in the user-visible header so CE apps do
  * not have to include the kernel-only snd.h.  Values are mirrored there. */

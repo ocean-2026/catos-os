@@ -1,0 +1,337 @@
+# 用户态多线程（Stage 3，feat/hosted）
+
+## 3A-3 / 3A-4：per-thread TLS + 四线程隔离（已落地，实机实测）
+
+槽 83–86 从 `ENOSYS` 改为真分发，工作线程**共享父进程地址空间**跑通 create /
+exit / join / detach。实现见 `src/task.c` 线程子系统块（`thread_create` /
+`thread_exit_current` / `thread_join` / `thread_detach` / `thread_reap` /
+`tls_apply`），探针 `extapp/t1.c`、`extapp/threads.c`。
+
+### 资源归属（`thread_create`）
+
+先把父进程共享字段拷过来（顺序关键：必须先建活目录，后续 anon mmap / 用户拷贝
+才能经父目录映射）：`space`（`dir/pt/pt2` 结构拷贝）、`vm` 链表指针、`heap_end`、
+`heap_free_root[slot]`、`uid/gid/caps`、`out_pipe/in_pipe/out_append/bg_mode`。
+随后线程私有资源：
+
+| 资源 | 大小 | 来源 |
+|---|---|---|
+| 内核栈 | 8 KiB | kvheap extent（`kvmalloc`），零页 |
+| 用户栈 | 16 KiB | 扩展 arena 匿名 VMA（guard 在前） |
+| TLS 用户页 | 4 KiB | 扩展 arena 匿名 VMA，**用户可写映射**（supervisor-only 的 KV 堆窗口不能当 TLS） |
+
+TLS 页布局（32 位字）：`[0]=tid`、`[4]=errno（创建置 0）`、`[8]=0xC0FFEE` canary、
+`[12]=本页自基址 VA`（ring3 无 rdmsr，靠它反推 errno 槽地址）。
+
+### TLS 走 GDT ring3 数据描述符（索引 6，`SEL_TLS=0x33`）
+
+- 实测：legacy 32 位保护模式下 `%gs` 寻址从 **GDT 描述符基址**解析段基址，
+  不采用 FS/GS_BASE MSR（wrmsr 方案在真机 #PF 被否定，保留教训勿回退）。
+- GDT 由 6 项扩到 7 项；索引 6 为 ring3 可写数据描述符（access `0xF2`，gran
+  `0xC0`，limit 0xFFF=4 KiB）。`gdt_tls_set_base(base)` 改写该描述符高低基址半字。
+- `tls_apply(t)` 在**三条切换路径**上都被调用：协作式 `schedule_to`、tick 抢占
+  返回 `sched_timer_tick`、syscall 退出抢占 `preempt_at_syscall_exit`；无 TLS 的
+  任务（main/idle）写基址 0。线程帧 `gs=SEL_TLS`，其余 `ds/es/fs/ss=SEL_UDATA`。
+- 早期踩坑：两条直接 `cur_task=pick` 的抢占路径漏调 `tls_apply`，导致首个工作
+  线程的描述符基址仍为 0，ring3 读 `%gs:12` 落 `cr2=0xc` #PF；已补齐两处。
+
+### ring3 帧构造
+
+cdecl 用户栈：`[esp]=VS_EXIT_STUB` 返回地址、`[esp+4]=arg`。内核栈顶手搭
+`int_frame_t`：`eip=entry`、`cs=SEL_UCODE`、`eflags=0x202`（IF=1）、`esp=用户栈顶`、
+`ss=SEL_UDATA`、`ds/es/fs=SEL_UDATA`、`gs=SEL_TLS`；状态 `T_READY`、`resume_frame=1`、
+`is_thread=1`、`proc=parent->proc`、`parent=parent`。
+
+### 退出 / 回收状态机
+
+- `thread_exit_current(retval)`：写 `thread_ret`；只 `vma_munmap` 自身用户栈与 TLS
+  页，**绝不** `task_space_destroy` 拆共享 space。非 detached 置 ZOMBIE 并唤醒
+  `waiter`；detached 置 ZOMBIE，由下一次 `thread_create` 上下文的
+  `thread_sweep_zombies()` 扫回并 `thread_reap`（见 3C-2）。
+- `thread_join(tid)`：找不到 / 非线程返回 `-22` EINVAL；非 zombie 则 `waiter=caller`、
+  caller 阻塞 `T_WAIT_CHILD` 后 `reschedule()`；唤醒后取 `thread_ret`，调
+  `thread_reap` 释放 kvheap 内核栈并置 `T_UNUSED`。
+- `thread_detach(tid)`：置 `detached`；已 zombie 立即 reap。
+- `thread_reap`：`kvmfree(kstack_va)`，清 `kstack_top/ksp/resume_frame/
+  thr_stack_va/tls_va/waiter`，置 `T_UNUSED`；必须在非被回收线程上下文跑
+  （要释放其内核栈）。
+
+### 实机证据（本轮 mt2 构建）
+
+- `t1.ce`：单 worker 打印 `T1` 后 `thread_exit(0)`，main join 得 0，`T1 PASS`。
+- `threads.ce`：4 worker 各跑 1000 项私有栈数组并 `exit(id+1)`，main join 求和
+  `sum=10`；detach 一个 worker 不 join；fault worker `exit(1)`，join 得 retval 1
+  （非零退出不连坐进程空间）；终态 `THREAD PASS`。
+- 三门禁回归（不回归基线）：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a40`；无新增大 `.bss` 数组。
+
+## 3C-2：线程欠账收口（已落地，实机实测）
+
+- **CE `__tls_errno()` 访问器**：`extapp/ce_app.h` 内联 `int *__tls_errno(void)`，
+  `movl %%gs:12` 取本线程 TLS 自基址，返回 `base+4`（errno 槽）。CE 侧 errno
+  写/读均走此访问器；`threads.c` worker 写真 errno=`id+1` 再读回，打印
+  `errno=<readback>`，各线程互不串。主进程线程无 TLS 页，禁止在 `ce_main` 调用。
+- **detached 内核栈回收**：新增 `thread_sweep_zombies()`，只扫
+  `is_thread && detached && T_ZOMBIE && kstack_va` 的槽，在 `thread_create` 开头从
+  另一任务上下文 `thread_reap` 归还 kvheap 内核栈 extent；原先 deferred 泄漏至此
+  收口（回收时机仍为下一次建线程，不在退出自身栈上释放）。
+- **TLS 承载方式切换**：由被实测否定的 GS_BASE MSR 方案改为 GDT 索引 6 ring3
+  描述符（详见上文「TLS 走 GDT ring3 数据描述符」）。
+
+### 实机证据（3C-2 构建）
+
+- `threads.ce`：4 worker join retval 1/2/3/4，`sum=10`；detached worker
+  `own=7` 读回 `errno=8`（=7+1，未串到其他 worker 值）；fault worker join 得 1；
+  终态 `THREAD PASS`，RC=0。
+- 三门禁回归：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a00`（较 3A 净减 64 B；GDT 描述符多占
+  的 8 B 在 `_gdt` 预留区内部，不计净 bss 增长）。
+
+## 第三块：真抢占最小版（已落地，实机实测）
+
+- **抢占嵌套计数**：`task.c` 新增 `preempt_depth_v` 与 `preempt_disable()` /
+  `preempt_enable()` / `preempt_depth()`（单核，普通 int 即可，无需原子）。tick 抢占
+  与 syscall 退出抢占两条路径在 `preempt_depth_v > 0` 时把切换推迟（置
+  `need_resched`，不立即切走），计数归零后再消费。
+- **调度切换计数**：`task_t` 新增 `switches` 字段，每次被调度器选中自增；新增 ABI
+  槽 **93** `thread_switches(void)`（nargs 0）返回当前任务的切换次数。
+- **关键段包裹（本轮只接 dl.c）**：`dl_close` / `dl_close_all` / `dl_open` 的句柄表
+  提交段用 `preempt_disable/enable` 包住 `dl_mods` 记录读写；dl.c 无阻塞等待，
+  计数可在函数内平衡。
+- **探针 `preempt.ce`**：两个纯计算 worker 忙循环，各自读自身 `switches` 前后差值；
+  两个 worker 差值均 >0 才 `PREEMPT PASS`，证明忙线程在 tick 边界被切走并切回，不崩。
+
+### 实机证据（第三块构建）
+
+- `preempt.ce`：`d0=1 d1=1`，两 worker 各被调度切回 ≥1 次，`PREEMPT PASS`，RC=0。
+- 回归 `threads.ce`：`THREAD PASS`，RC=0。
+- 三门禁回归：vprobe 10/10、E3 2/2、F11 9/9，均 RC=0。
+- strict 布局门禁 RC=0，`_bss_end=0x02117a00`（与 3C-2 持平；`switches` 字段计入
+  既有 `tasks[]` 槽位，无新增大 `.bss` 数组）。
+
+### 已知边界（本轮 deferred）
+
+- **ring0 仍非异步抢占**：本轮只把 tick/syscall 退出的切换纳入抢占计数门控，ring0
+  代码依旧协作式让出；`preempt_disable/enable` 是为将来真正的内核可抢占预埋的计数，
+  此刻不产生异步内核切换。
+- **netstack.c / ssh.c 关键段未包计数**：这两个模块的 syscall 入口含阻塞 recv 等待
+  循环（`net_tcp_recv` / `net_tcp_srecv_all` / SSH 收发等待），持 `preempt_depth`
+  跨 reschedule 会导致计数永不回落；包计数必须等阻塞点拆成「短临界段 + 显式让出」
+  后再做。其 NIC IRQ 处理路径（`arp_handle`/`tcp_handle`/`udp_handle`）本身在中断
+  上下文，不参与计数。连接/会话记录在 3C-1 已归属到连接/会话对象。
+- **共享堆分配器未 per-process**：`heap_free_root` 仍按 slot 拷自父进程；线程内
+  `malloc/free` 路径的归属/加锁列入 3B。
+- 按 tid 索引的静态缓冲（`ls_buf`、`e3_*_buf` 等）已在 3C-1 核对为按 tid 槽位，
+  迁入 `task_t` 属 3B；其余多线程串扰见 `docs/hosted-buffers.md`。
+- `kvheap inuse` 打点无对应 syscall 槽；detached 栈回收仍依赖下一次建线程触发，
+  无线程创建时不主动回收。
+
+### 抢占保护矩阵（块2）
+
+口径：**阻塞等待点本身就是抢占点**（显式 `reschedule`/让出，不持 `preempt_depth`）；
+**IRQ 处理**只在极短临界区关计数，且必须在 EOI 前恢复，任何可能睡眠/重入的调用不得
+包在里面；`preempt_disable/enable` 仅用于不阻塞的短提交段。ring0 仍是协作式，计数只是
+预埋（见上「已知边界」）。
+
+| 模块 / 函数 | 类型 | 理由 | 恢复点 / 让出方式 |
+|---|---|---|---|
+| task.c `schedule_to(next)` | 调度点（显式让出） | 保存当前上下文切到 `next`；协作式切换 | 被调度回时从保存的 eip/栈/TLS 继续 |
+| task.c `reschedule()` | 抢占点 | `pick_ready` 选下一个；无可运行则进 idle | 同上，下一次被选中继续 |
+| task.c `thread_join(caller,tid)` | 阻塞等待点 | caller 置 `T_WAIT_CHILD` 后 `reschedule()` 让出；子线程退出路径回收并唤醒 waiter | 唤醒后继续取 `thread_ret` 返回 |
+| task.c `sched_timer_tick`（PIT ISR） | IRQ 抢占点（仅 ring3） | ISR 内不切 ring0；ring3 且 `preempt_depth==0` 才置 `need_resched` | ISR 返回后由 tick 返回 / syscall 退出路径消费 |
+| task.c `preempt_at_syscall_exit` | 抢占点 | syscall 返回用户态前检查 `need_resched` 与计数 | 切回后继续用户态取 syscall 结果 |
+| task.c `preempt_disable/enable/depth` | 临界区计数 | `depth>0` 推迟切换，归零后消费 | `preempt_enable` 归零后 |
+| dl.c `dl_close` / `dl_close_all` / `dl_open` 句柄表提交段 | 临界区 | 读写 `dl_mods` 记录需一致；dl 路径无阻塞等待，计数可函数内平衡 | `preempt_enable` 后函数内继续 |
+| netstack.c `net_tcp_recv(buf,max,ticks)` 等待循环 | 阻塞等待点（抢占点） | 每轮 `net_poll()` + `task_maybe_yield()` 显式让出；**不持** `preempt_depth`（持计数跨让出永不回落） | 收到数据 / 超时 / 连接关闭后继续拷贝 |
+| netstack.c `net_tcp_srecv` / `net_tcp_srecv_all` | 阻塞等待点 | 循环经 recv 让出 | 收满 `n` 字节或出错后继续 |
+| netstack.c `arp_handle` / `tcp_handle` / `udp_handle`（NIC IRQ） | IRQ 短临界区 | 中断上下文，只做报文解析 / 入队；不睡眠、不重入；EOI 前退出 | IRQ 返回 |
+| netstack.c 校验和 / 地址解析辅助 | 不可抢占 | 纯计算，无共享写 | — |
+| ssh.c `ssh_recv_packet` / 握手收发循环 | 阻塞等待点 | 经 `net_tcp_srecv_all` 让出；会话缓冲归属会话对象（3C-1） | 收齐报文后继续状态机 |
+| ssh.c 会话状态机字段处理 | 不可抢占（单会话内） | 无跨会话共享写 | — |
+
+> 注：netstack/ssh 的阻塞段**未**包 `preempt_depth`——它们含阻塞 recv 等待循环，持计数跨
+> reschedule 会导致计数永不回落；要包计数必须先把阻塞点拆成「短临界段 + 显式让出」。
+> 联机 recv/SSH 阻塞路径本机 QEMU 无 PCnet/e1000，未真机取证（见文末未取证项）。
+
+## 3A-2：`task_t` proc/thread 拆分脚手架（行为零变化）
+
+本轮只做结构边界落地，**不接新槽、不迁字段**：
+
+- `task.h` 前向声明 `struct proc`（进程描述符，持地址空间 / VMA / 堆根 / fd 表 /
+  管道/控制台/日志归属）；`task_t` 作为线程描述符，新增进程回指 `proc` 与线程侧
+  占位字段：`is_thread / detached / tls_va / thr_stack_va / thread_ret / waiter /
+  kstack_va`。
+- 既有进程（shell、spawn 出来的 CE 任务）按"单线程进程"映射：`proc=0` 表示隐式
+  自持进程，`is_thread=0`。槽位复用与 `tasks_init` 都复位这些字段。
+- 进程共享字段（`space/vm/heap_end/out_pipe/.../log_buf`）本轮**仍留在 `task_t`**；
+  待 3A-3 工作线程真正共享地址空间时再迁入 `proc`，避免在无活线程路径时搬迁 150+
+  处引用。
+- 回归：strict RC=0（`_bss_end=0x02116a40`）；`dltest` PASS、`mmapfd` MMAP PASS。
+
+## 3A-1：页后备虚拟连续堆（kvheap，已落地）
+
+在拆 proc/thread 之前先打好通用内核堆地基。实现见 `src/kvheap.c` /
+`include/kvheap.h`，映射原语 `paging_kmap/paging_kunmap` 在 `src/paging.c`。
+
+### 虚拟窗口
+
+```
+0x18000000 .. 0x1a000000   kvheap 窗口，32 MiB（8192 帧），supervisor-only 写回
+```
+
+选窗依据：低于 4 GiB 物理上限；在 256 MiB 身份映射 RAM 顶（实测 `top=0xffe0000`）
+之上，不被 PSE 身份映射覆盖；避开 CE 映像 `0x02000000` 与用户区
+`0x2000000..0x2800000`。窗口 PDE 在 `kdir` 内建 4 KiB 页表，任务目录在建空间时
+从 `kdir` 拷贝这些 supervisor-only PDE，所以在调用者 CR3 上内核仍可达窗口。
+
+### 分配模型
+
+- 接口：`void *kvmalloc(size, align)` / `void kvmfree(va)`；载荷 16 字节对齐，
+  `align` 参数暂留。分配器只发虚拟地址，物理帧可碎。
+- slab：`<=4096` 按 size class（32/64/128/256/512/1024/2048/4096）从共享帧切分；
+  每类一条空闲链。
+- extent：`>4096` 取窗口内一段连续 VA，逐帧映射零散物理帧；头部记帧数。
+- 元数据：每类空闲链头 + extent 空闲链为固定小静态表，**未新增大 `.bss` 数组**。
+
+### 启动自检
+
+`kvheap_selftest()`：分配 8 KiB / 32 KiB 各一次，写满后读回比对；释放后重分配同尺寸
+须拿回同一虚拟地址；再做一次 1 KiB slab 往返同址校验。串口：
+
+```
+kvheap selftest: PASS total=13 free=0 bytes=0
+```
+
+### 已知边界（本轮 deferred）
+
+- extent 空闲跑在释放时**保留帧与映射**挂回空闲链（高水位缓存），帧池回收与 VA 跑
+  紧凑化 deferred；进程/线程退出时的 extent 归还在 3A-3 接线程栈时再补。
+- extent 单次最多 8 帧（32 KiB 量级）；超过需扩 `pa_tmp[]` 容量。
+- 未做对齐大于 16、未做 OOM 回退到 slab 外的大块拆分。
+
+## 结论
+
+Stage 3 目标是在**单核、不碰 SMP** 的前提下给 CatOS 加用户态线程。3A 已落地：
+kvheap 页后备堆、`task_t` proc/thread 拆分脚手架、槽 83–86 真线程分发（共享地址空间 +
+per-thread MSR TLS）、四线程隔离探针，三门禁回归不回归基线。3B per-thread scratch 迁移、
+3C 内核态可抢占仍**如实 deferred**，原因与下一步见文末。既有进程路径（spawn / wait /
+pipe / console / heap / FPU）行为字节级未改。
+
+红线延续：不动 v2.80 交付 ISO 与版本串；CE ABI append-only；不给应用可写像素出口；
+33 fps 不动；不新增大 `.bss` 数组；`check_link_layout.py --strict` RC=0。
+
+## 槽位（append-only，不可重排）
+
+| 槽位 | 成员 | 签名 / 语义 | 状态 |
+|---|---|---|---|
+| 83 | `thread_create(entry, arg)` | `entry` 为 ring3 函数指针 `void *fn(void *arg)`；`arg` 经新线程用户栈传入。返回 tid>0 / 负 errno | 已实现（3A-3） |
+| 84 | `thread_exit(retval)` | 终止调用线程；`retval` 作为 join 返回值 | 已实现（3A-3） |
+| 85 | `thread_join(tid)` | 阻塞直到目标线程退出，回收其槽位，返回 `retval` | 已实现（3A-3） |
+| 86 | `thread_detach(tid)` | 标记线程分离；退出时自动回收，无需 join | 已实现（3A-3） |
+
+两处镜像（`include/ce_abi.h`、`include/ce.h`）成员顺序与 `SYS_*` 枚举序、`nargs[]`
+表、vsyscall 表指针序一致：83 两参、84 一参、85 一参、86 一参。
+
+## 现状内核模型（摸底结论，决定改造面）
+
+当前 `task_t` 把**进程与线程融合为一体**，每个 slot 自持：
+
+- `space`（`dir/pt/pt2` 页目录与两张用户页表）、`vm`（VMA 单链表）；
+- `kstack_top/ksp` 内核栈；`heap_end` + 静态 `heap_free_root[slot]`；
+- 退出码、`parent`、`pgid`、FPU 保存区、ls 快照、管道/日志重定向字段。
+
+调度：`tasks[16]` 静态表，`pick_ready()` 轮询 `T_READY`；`schedule_to()` 切换时
+` tss_set_kstack(next->kstack_top)` + `cpu_cr3_write(next->space.dir)`，FPU 懒切换。
+
+内核栈：`static uint8_t task_kstacks[MAX_TASKS-1][8192]`（既有静态池，红线内保留）；
+idle 用独立 `idle_stack[4096]`。**帧池 `frame_alloc()` 只给单 4 KiB 帧，没有
+>4 KiB 连续分配器，也没有通用内核堆**——这是每线程内核栈方案的硬约束。
+
+## 目标设计（早期设计草图；实际落地口径以首节为准）
+
+### 进程 / 线程所有权拆分
+
+- 引入进程持有者概念：主线程（main thread）持 `space`、`vm`、堆根、管道/控制台/
+  日志归属；工作线程挂到所属进程，**共享** `space.dir/pt/pt2` 与 `vm` 链表，自带：
+  - 独立 slot（复用既有静态内核栈池 `task_kstacks[slot-1]`，不新增静态栈数组）；
+  - 独立用户栈（在扩展 arena 匿名区按 VMA 分配，带 guard 页，懒装入）；
+  - 独立 join 状态（`detached` / `thread_ret` / 等待者）。
+- 退出拆分：
+  - **工作线程退出**：只回收自身用户栈 VMA、TLS 帧、FPU 归属；**不**销毁共享
+    `space`、不释放共享 VMA 节点、不动共享堆/管道/控制台；分离线程自动回收，
+    否则留 zombie 等 join 回收。
+  - **主线程退出**：现有 `task_cleanup` 全量销毁 `space`/VMA/堆/管道/控制台，并
+    先回收其余工作线程。
+- 堆：线程共享进程堆；`heap_free_root` 需从 per-slot 改为 per-process（本轮探针
+  不在线程内 `alloc`，共享堆分配器改造列入后续）。
+
+### 用户区布局（不抬基址）
+
+```
+0x2000000 .. 0x2400000  PDE 8：镜像 / vsyscall / heap / 主线程栈（既有）
+0x2400000 .. 0x2700000  PDE 9 扩展 arena：匿名 mmap + 工作线程栈（懒装入，guard 页）
+0x2700000 .. 0x2780000  Stage 2A 库区（既有，未动）
+0x2780000 .. 0x2800000  保留余量
+```
+
+线程栈上限（待实测标定）：扩展 arena 匿名区扣除既有 mmap/库后，建议单线程栈
+32 KiB、并发工作线程 ≤4（与 16 slot 上限、既有 shell/进程槽位一起核算）。
+
+### TLS / errno / canary
+
+- **已落地（3A-3）**：per-thread TLS 走 `IA32_GS_BASE` MSR，TLS 为独立用户映射页
+  （非 GDT TLS 段 / LDT）。内核与 CE 均 `-fno-stack-protector`，canary 暂不参与；
+  TLS `[8]=0xC0FFEE` 仅作占位校验。
+- **剩余缺口**：CE 用户态尚无 `__tls_errno` 取址 / `mov %gs:off` 直读访问器，探针
+  `errno=0` 为占位；errno 词的用户态读写 deferred 到 3B。
+
+## 3B：静态 scratch 改 per-thread（可降级）
+
+> 3C-1 已完成第一轮归属搬迁（UDP/SSH scratch 归入连接 / 会话对象，任务侧 per-tid
+> 数组核对），逐缓冲归属、大小与分配释放点见 [`hosted-buffers.md`](hosted-buffers.md)。
+
+摸底现状：
+
+- `src/dl.c`：暂存帧 `meta`/`st` 已在 `dl_open` 内按需 `kzalloc_frame`、返回前
+  `frame_free`（Stage 2A 重构），**无大静态暂存缓冲**；静态表仅 `dl_mods[16]`
+  描述符与 `dl_next_handle`，句柄按 tid 索引。多线程下库句柄表的归属/加锁是后续项。
+- `src/netstack.c:623`：`static uint8_t pseudo[12+8+2048]` 静态暂存，注释明确
+  依赖"内核非抢占所以共享 scratch 安全"。
+- `src/ssh.c`：会话/收发静态缓冲（待逐函数清点）。
+- 未发现名为 `g_in_syscall` 的全局嵌套计数；syscall 嵌套/重入保护目前隐含在
+  单核非抢占模型里。
+
+**deferred**：netstack/ssh 静态 scratch 与未来 syscall 嵌套计数改 per-thread；
+`dl_mods` 表的多线程归属与互斥。
+
+## 3C：内核态可抢占（最可能 deferred）
+
+**当前内核态仍非抢占**：PIT ISR 只抢占 ring3 用户态任务；ring0 内核代码在阻塞点
+（键盘/网络/磁盘）协作式让出，没有定时器抢占点，也没有关抢占区计数。
+
+依赖"内核非抢占"这一前提、3C 落地前不得假设可重入的模块：
+
+- `src/netstack.c`（静态 `pseudo` 暂存、协议栈收发状态）；
+- `src/ssh.c`（会话状态机与收发缓冲）；
+- `src/dl.c`（库描述符表、暂存帧生命周期）；
+- 任务/管道/控制台/日志/ls 快照等 per-slot 静态缓冲（`task.c` 内 `ls_buf`、
+  `e3_*_buf` 等按 tid 索引的静态区）。
+
+**deferred**：定时器抢占点、`preempt_disable/enable` 关抢占区、抢占计数与栈深度
+安全审计。
+
+## 验收探针（3A 已实机跑通；共享 text 证据属 2C 遗留）
+
+- 4 线程探针（`extapp/threads.c`，已 PASS）：各自栈数组互不干扰；join 返回值正确
+  （求和 10）；detach 后退出不崩；杀一线程非零退出不连坐进程空间。
+- 共享证据：第二个程序加载同一库/代码段时 text 物理页不重复装入（打印物理页 /
+  shared 计数）。Stage 2A 当前形态是每任务私有帧副本，text 尚未跨任务共享（2C 遗留）。
+
+## 下一步
+
+1. **3A-3 / 3A-4（已落地，见首节）**：槽 83–86 真分发、共享 space、MSR TLS、
+   四线程探针 `THREAD PASS`；三门禁 vprobe 10/10、E3 2/2、F11 9/9。
+2. **3B**：netstack/ssh 静态 scratch 与 dl 句柄表归属迁移 per-thread；共享堆分配器
+   per-process；detached 内核栈回收；TLS errno CE 访问器；按 tid 索引静态缓冲串扰。
+3. **3C**：内核态抢占点 + 关抢占区，先解除 netstack/ssh/dl 的非抢占假设。
+4. 全绿后版本号才走 v2.81；不动 v2.80 ISO/版本串。

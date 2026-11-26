@@ -15,6 +15,7 @@
 #include "vma.h"
 #include "task.h"
 #include "vga.h"
+#include "fcache.h"
 
 /* ---- VMA list ops ---------------------------------------------------- */
 
@@ -110,7 +111,15 @@ static int vma_map_page_on_fault(task_t *t, uint32_t vaddr) {
     /* Already mapped by a user PTE?  A supervisor-only #D11 mirror PTE does
      * not count: ring3 still cannot reach it, so remap to a user frame. */
     if (task_page_is_user(&t->space, vaddr)) return 0;
-    uint32_t pa = (uint32_t)kzalloc_frame();
+    uint32_t pa;
+    if (v->kind == VMA_MMAP) {
+        /* Stage 2B: file-backed mapping -- serve the cached read-only page. */
+        pa = fcache_fault_page(t, vaddr);
+        if (!pa) return -1;
+        if (task_map_page(&t->space, vaddr, pa, 0) != 0) return -1;
+        return 0;
+    }
+    pa = (uint32_t)kzalloc_frame();
     if (!pa) return -1;
     if (task_map_page(&t->space, vaddr, pa, v->writable ? 1 : 0) != 0) {
         frame_free(pa);
@@ -213,15 +222,17 @@ int copy_from_user(task_t *t, void *dst, const void *src, uint32_t len) {
 uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
     if (!t || len == 0) return 0;
     /* first-fit gap scan over the (start-sorted) VMA list, restricted
-     * to the extension arena; the returned base needs room for the
-     * guard pages plus len, page-aligned */
+     * to the anonymous part of the extension arena; the CSO1 library
+     * zone (USER_LIB_BASE..USER_LIB_END) sits above and is excluded.
+     * The returned base needs room for the guard pages plus len,
+     * page-aligned */
     uint32_t want = VMA_GUARD_SZ + ((len + 0xFFFu) & ~0xFFFu);
     uint32_t cur = USER_EXT_BASE;
     while (1) {
-        uint32_t next = USER_EXT_END;
+        uint32_t next = USER_LIB_BASE;
         for (vma_t *x = t->vm; x; x = x->next)
             if (x->start >= cur && x->start < next) next = x->start;
-        if (next - cur >= want && cur + want <= USER_EXT_END) {
+        if (next - cur >= want && cur + want <= USER_LIB_BASE) {
             uint32_t base = cur;
             vma_t *nv = vma_new(base, base + want, VMA_ANON, writable ? 1 : 0);
             if (!nv) return 0;
@@ -230,19 +241,19 @@ uint32_t vma_mmap_anon(task_t *t, uint32_t len, int writable) {
             t->vm = vma_insert(t->vm, nv);
             return base + VMA_GUARD_SZ;
         }
-        if (next >= USER_EXT_END) return 0;     /* arena exhausted */
+        if (next >= USER_LIB_BASE) return 0;     /* anon arena exhausted */
         cur = next;
         /* skip past the whole VMA that starts at cur */
         for (vma_t *x = t->vm; x; x = x->next)
             if (x->start == cur && x->end > cur) { cur = x->end; break; }
-        if (cur >= USER_EXT_END) return 0;
+        if (cur >= USER_LIB_BASE) return 0;
     }
 }
 
 int vma_munmap(task_t *t, uint32_t addr, uint32_t len) {
     if (!t || len == 0) return -22;
-    if (addr < USER_EXT_BASE || addr + ((len + 0xFFFu) & ~0xFFFu) > USER_EXT_END)
-        return -22;                             /* only ext-arena mappings */
+    if (addr < USER_EXT_BASE || addr + ((len + 0xFFFu) & ~0xFFFu) > USER_LIB_BASE)
+        return -22;                             /* only ext-arena anon mappings */
     uint32_t start = addr & ~0xFFFu;
     uint32_t end   = addr + ((len + 0xFFFu) & ~0xFFFu);
     /* the whole range must lie inside ONE mapping we created */

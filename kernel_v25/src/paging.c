@@ -316,6 +316,19 @@ int task_unmap_page(task_space_t *s, uint32_t vaddr) {
     return 0;
 }
 
+/* Stage 2B: drop the user PTE for vaddr WITHOUT freeing the frame.  Used
+ * for shared read-only file-cache pages: the frame stays resident in the
+ * global page cache and is released only when its cache refcount hits zero.
+ * No-op if the page is not present. */
+void task_scrub_page(task_space_t *s, uint32_t vaddr) {
+    uint32_t *t = pt_for(s, vaddr);
+    if (!t) return;
+    uint32_t pte = (vaddr >> 12) & 0x3FF;
+    if (!(t[pte] & 1)) return;
+    t[pte] = 0;
+    cpu_invlpg(vaddr);
+}
+
 uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr) {
     uint32_t *t = pt_for(s, vaddr);
     if (!t) return 0;
@@ -418,6 +431,37 @@ void paging_static_slot_guard_selftest(void) {
     ser_write(" intact="); guard_dec((uint32_t)intact);
     ser_write(" result="); guard_dec((uint32_t)ok);
     ser_write("\n");
+}
+
+/* ---- supervisor-only kernel window map (kvheap backing) -----------------
+ * Stage 3A-1: map a physical frame into a high virtual window that is NOT
+ * covered by the identity PSE RAM map.  The kernel directory installs a 4 KiB
+ * PT per touched PDE; task directories copy those supervisor-only PDEs at
+ * task_space_create(), so the window stays reachable on a caller's CR3.
+ * No US bit: ring3 cannot reach it. */
+void paging_kmap(uint32_t va, uint32_t pa, int uc) {
+    uint32_t pde = va >> 22;
+    if (!(kdir[pde] & 1u)) {
+        uint32_t pt = frame_alloc();
+        if (!pt) return;
+        uint32_t *t = (uint32_t *)pt;
+        for (int i = 0; i < 1024; i++) t[i] = 0;
+        kdir[pde] = pt | 0x003u;                 /* P | RW, supervisor-only */
+    }
+    uint32_t *t = (uint32_t *)(kdir[pde] & ~0xFFFu);
+    t[(va >> 12) & 0x3FFu] = (pa & ~0xFFFu) | (uc ? 0x013u : 0x003u);
+    cpu_invlpg(va);
+}
+
+uint32_t paging_kunmap(uint32_t va) {
+    uint32_t pde = va >> 22;
+    if (!(kdir[pde] & 1u)) return 0;
+    uint32_t *t = (uint32_t *)(kdir[pde] & ~0xFFFu);
+    uint32_t pte = (va >> 12) & 0x3FFu;
+    uint32_t old = t[pte] & ~0xFFFu;
+    t[pte] = 0;
+    cpu_invlpg(va);
+    return old;
 }
 
 /* ---- helpers exposed to the task layer --------------------------------- */

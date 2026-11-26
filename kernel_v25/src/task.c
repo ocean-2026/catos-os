@@ -12,7 +12,9 @@
  */
 
 #include "task.h"
+#include "locale.h"
 #include <stddef.h>
+#include "fpu.h"
 #include "usb.h"
 #include "io.h"
 #include "vga.h"
@@ -27,6 +29,9 @@
 #include "hw.h"
 #include "paging.h"
 #include "vma.h"     /* for vma_t */
+#include "dl.h"      /* Stage 2A: CSO1 fixed-base shared object */
+#include "fcache.h"  /* Stage 2B: fd table + read-only file page cache */
+#include "kvheap.h"  /* Stage 3A-1: page-backed kernel heap (per-thread stacks) */
 #include "snd.h"     /* v2.11 SB16 PCM audio syscalls */
 #include "gfx24.h"   /* v2.12 24bpp truecolour drawing */
 #include "mouse.h"   /* P1 (v2.69): mouse_get_state() for CE desktop slots 66-68 */
@@ -125,6 +130,14 @@ static uint8_t idle_stack[4096] __attribute__((aligned(16)));
 static int     tasks_on;
 static uint32_t idle_ticks_v;      /* ticks burned in the idle loop */
 static volatile int need_resched;
+/* preempt nesting depth: >0 inside a kernel critical section; the tick and
+ * syscall-exit paths defer rescheduling until it drops back to 0.  Single core,
+ * so a plain int suffices (no atomic). */
+static volatile int preempt_depth_v;
+
+void preempt_disable(void) { preempt_depth_v++; }
+void preempt_enable(void)  { if (preempt_depth_v > 0) preempt_depth_v--; }
+int  preempt_depth(void)   { return preempt_depth_v; }
 
 /* one 8 KiB kernel stack per ring3 slot, in .bss */
 static uint8_t task_kstacks[MAX_TASKS - 1][8192] __attribute__((aligned(16)));
@@ -229,6 +242,9 @@ void tasks_init(void) {
     tasks[0].ring0 = 1;
     tasks[0].resume_frame = 0;
     tasks[0].parent = 0;
+    tasks[0].proc = 0; tasks[0].is_thread = 0; tasks[0].detached = 0;
+    tasks[0].tls_va = 0; tasks[0].thr_stack_va = 0; tasks[0].thread_ret = 0;
+    tasks[0].waiter = 0; tasks[0].kstack_va = 0;
     tasks[0].space.pt = 0;
     tasks[0].space.dir = 0;
     tasks[0].vm = 0;                           /* ring0: no user VMA list */
@@ -272,6 +288,12 @@ static task_t *pick_ready(void) {
     return 0;
 }
 
+static void tls_apply(task_t *t);
+static int  thread_create(task_t *parent, uint32_t entry, uint32_t arg);
+static void thread_exit_current(int retval) __attribute__((noreturn));
+static int  thread_join(task_t *caller, int tid);
+static int  thread_detach(int tid);
+
 /* enter `next` from ring0 context; never call from an ISR.
  * NOTE: this is intentionally NOT noreturn - the cpu_switch_to path
  * returns when this task is rescheduled later, and GCC must keep the
@@ -285,6 +307,9 @@ static void schedule_to(task_t *next) {
         g_sp_resume_tsc[next->tid] = perf_now();
 #endif
     next->state = T_RUNNING;
+    next->switches++;
+    tls_apply(next);              /* Stage 3A-3: point GS_BASE at its TLS block */
+    fpu_on_switch();              /* Stage 1: lazy FPU, incoming task traps #NM */
 #if CATOS_SPAWN_TRACE
     {
         ser_write("[SCHED] tid="); ser_hex("", next->tid);
@@ -446,8 +471,10 @@ uint32_t sched_timer_tick(int_frame_t *f) {
     task_tick_wake();
     if (!tasks_on) return (uint32_t)f;
     task_t *c = cur_task;
-    /* preempt only when the timer interrupted ring3 user code directly */
-    if (!c || c->ring0 || c == &idle_task_v || (f->cs & 3) != 3) {
+    /* preempt only when the timer interrupted ring3 user code directly and no
+     * kernel critical section is holding off preemption. */
+    if (!c || c->ring0 || c == &idle_task_v || (f->cs & 3) != 3 ||
+        preempt_depth_v > 0) {
         need_resched = 1;
         return (uint32_t)f;
     }
@@ -464,6 +491,8 @@ uint32_t sched_timer_tick(int_frame_t *f) {
     c->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    pick->switches++;
+    tls_apply(pick);
     cpu_cr3_write(pick->space.dir);
     tss_set_kstack(pick->kstack_top);
     return pick->ksp;                     /* stub swaps esp -> resumes pick */
@@ -491,6 +520,14 @@ static void task_cleanup(task_t *t) {
 #ifdef CATOS_BENCH
     uint64_t _cb = perf_now(); g_sp.cr3 += _cb - _ca;
 #endif
+    /* Stage 2B: drop this task's file-cache refs and scrub its shared file
+     * PTEs BEFORE task_space_destroy walks the PT, so a cached shared frame
+     * is not freed out from under the cache. */
+    fcache_cleanup_task(t);
+    /* Stage 2C-3: detach shared-library mappings BEFORE task_space_destroy
+     * walks the PT, so a pooled read-only RO frame is scrubbed (PTE dropped)
+     * rather than freed out from under the shared pool. */
+    dl_close_all(t);
     if (t->space.pt) task_space_destroy(&t->space);
     t->space.pt = 0;
     t->space.dir = 0;
@@ -504,6 +541,7 @@ static void task_cleanup(task_t *t) {
     uint64_t _cd = perf_now(); g_sp.vma += _cd - _cc;
 #endif
     pipe_task_cleanup(t);                 /* v2.5: release pipe ends */
+    fpu_task_cleanup(t);                  /* Stage 1: drop FPU ownership */
     cvchan_task_cleanup(t);               /* v2.81: force-reclaim canvas channel */
     decl_task_cleanup(t);                 /* P3: reclaim declarative subtree */
 #ifdef CATOS_BENCH
@@ -787,6 +825,11 @@ void console_wake_release(int tid) {
 #define VS_EXIT_STUB    (VSYSCALL_BASE + 0xF00)
 #define VS_LS_THUNK     (VSYSCALL_BASE + 0xC00)
 #define VS_TABLE        (VSYSCALL_BASE + 0x800)
+/* Segment A generic thunks occupy 0x000..0x7FF.  Once that fills, the
+ * remaining thunks are laid in the gap right after the API table, before the
+ * ls thunk at 0xC00.  VS_TABLE offset 0x800 is a fixed ABI constant
+ * (CATOS_VS_TABLE) and must NOT move; only the trailing thunks relocate. */
+#define VS_THUNK_A_END  0x800u
 #define VS_LS_H         (VSYSCALL_BASE + 0xD00)
 #define VS_LS_NAME      (VSYSCALL_BASE + 0xD20)
 #define VS_LS_SIZE      (VSYSCALL_BASE + 0xD40)
@@ -851,7 +894,23 @@ enum {
     SYS_DECL_IMAGE_LOAD, SYS_DECL_IMAGE_FREE, SYS_DECL_TEXT_WIDTH,
     /* cap2: decl channel v2（append-only，槽 77..79；旧号不动） */
     SYS_DECL_CAPS, SYS_DECL_COMMIT2, SYS_DECL_EVENT_POLL2,
-    SYS_COUNT
+    /* Stage 2B: file-backed mapping (append-only, slots 80..82).
+     * Reserved; dispatch returns -8 ENOSYS pending the fd handle table. */
+    SYS_FILE_MMAP, SYS_MPROTECT, SYS_MUNMAP_SHARED,
+    /* Stage 2A: CSO1 fixed-base shared object (append-only, slots 83..85). */
+    SYS_DLOPEN, SYS_DLSYM, SYS_DLCLOSE,
+    /* Stage 3A: user threads (append-only, slots 86..89).  The ABI surface
+     * is reserved this stage; the shared-address-space thread path still
+     * needs the process/thread ownership split (see docs/threading.md), so
+     * the dispatch returns -8 ENOSYS for now. */
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_DETACH,
+    /* Stage 2B: CE fd handle table (append-only, slots 90..94). */
+    SYS_FD_OPEN, SYS_FD_CLOSE, SYS_FD_READ, SYS_FD_WRITE, SYS_FD_LSEEK,
+    SYS_FCACHE_STAT,
+    /* Stage 3 block 3: per-task scheduler switch counter (slot 96, no args). */
+    SYS_THREAD_SWITCHES,
+    /* Stage 3 block 4: minimal locale (slots 97..98). */
+    SYS_SETLOCALE, SYS_LOCALE_QUERY,    SYS_COUNT
 };
 #define SYS_LS_NEXT 1000
 
@@ -934,18 +993,30 @@ static void build_vsyscall_page(uint8_t *page) {
         /*69*/3, /*70*/1, /*71*/1,               /* canvas create/present/destroy */
         /*72*/4, /*73*/2, /*74*/1, /*75*/1, /*76*/1, /* decl commit/poll/load/free/textw */
         /*77*/0, /*78*/5, /*79*/2,                 /* cap2 caps/commit2/poll2 */
-    };
+        /*80*/4, /*81*/3, /*82*/2,                 /* file_mmap / mprotect / munmap_shared */
+        /*83*/1, /*84*/2, /*85*/1,                 /* dlopen / dlsym / dlclose */
+        /*86*/2, /*87*/1, /*88*/1, /*89*/1,       /* thread_create/exit/join/detach */
+        /*90*/2, /*91*/1, /*92*/3, /*93*/3, /*94*/3, /* open/close/read/write/lseek */
+        /*95*/2,                                    /* fcache_stat(what,arg) */
+        /*96*/0,                                    /* thread_switches() */
+        /*97*/2, /*98*/4,                          /* setlocale / locale_query */    };
     uint32_t taddr[SYS_COUNT];
+    /* Overflow segment: thunks that do not fit segment A go into the gap
+     * right after the API table (16-byte aligned), before the ls thunk. */
+    uint32_t overflow_base = VS_THUNK_A_END +
+            (((uint32_t)SYS_COUNT * 4u + 0xFu) & ~0xFu);
+    uint32_t segA_end = 0;
     e.p = page;
     for (uint32_t i = 0; i < SYS_COUNT; i++) {
+        if (i == (uint32_t)SYS_FD_OPEN) e.p = page + overflow_base;
         taddr[i] = VSYSCALL_BASE + (uint32_t)(e.p - page);
         generic_thunk(&e, i, nargs[i]);
+        if (i + 1 == (uint32_t)SYS_FD_OPEN) segA_end = (uint32_t)(e.p - page);
     }
-    /* Guard the hand-packed page layout: the generic thunks must never
-     * reach the API pointer table at +0x800.  Without this check a future
-     * syscall would silently corrupt the table and every api->fn() call
-     * from a CE program would jump into thunk code. */
-    if ((uint32_t)(e.p - page) > 0x800u) {
+    /* Guard: segment A must stay clear of the fixed table at 0x800; the
+     * overflow segment must stay clear of the ls thunk at 0xC00. */
+    if (segA_end > VS_THUNK_A_END ||
+        (uint32_t)(e.p - page) > 0xC00u) {
         con_write("vsyscall: thunk overflow - system halted\n");
         for (;;) __asm__ volatile("hlt");
     }
@@ -1133,9 +1204,19 @@ static int heap_ensure(task_t *t, uint32_t vaddr) {
     return heap_ensure_range(t, vaddr & ~0xFFFu, 1);
 }
 
-/* freelist head kept in the kernel (task_t has no spare field: use a
- * static table indexed by tid) */
+/* freelist head kept in the kernel, shared by all threads of one process.
+ * Worker threads reference the main thread's slot: the heap arena (space /
+ * vm / heap_end) is already shared by pointer in thread_create(), so the
+ * free-list head must be process-shared too -- a block freed by one worker
+ * has to be reachable from the other worker's allocation scan. */
 static uint32_t heap_free_root[MAX_TASKS];
+
+/* Walk the parent chain back to the main thread; its slot is the process
+ * root index.  Legacy single-thread tasks are their own owner. */
+static task_t *heap_owner(task_t *t) {
+    while (t->is_thread && t->parent) t = t->parent;
+    return t;
+}
 
 /* called once on the first SYS_ALLOC to carve out the heap VMA.
  *
@@ -1169,9 +1250,9 @@ static void *sys_alloc(task_t *t, uint32_t size) {
         base->size = USER_HEAP_MAX - (t->heap_end - USER_HEAP_BASE)
                      - sizeof(heap_hdr_t);
         base->next = 0;
-        heap_free_root[t->tid] = t->heap_end;
+        heap_free_root[heap_owner(t)->tid] = t->heap_end;
     }
-    uint32_t *pp = &heap_free_root[t->tid];
+    uint32_t *pp = &heap_free_root[heap_owner(t)->tid];
     while (*pp) {
         heap_hdr_t *h = (heap_hdr_t *)*pp;
         if (h->size >= size) {
@@ -1230,8 +1311,8 @@ static void sys_free(task_t *t, void *p) {
      * (offset 4 of heap_hdr_t), written via the physical alias. */
     if (validate_uaddr(t, h, sizeof(heap_hdr_t)) != 0) return;
     heap_hdr_put32(t, h, (uint32_t)offsetof(heap_hdr_t, next),
-                   heap_free_root[t->tid]);
-    heap_free_root[t->tid] = h;
+                   heap_free_root[heap_owner(t)->tid]);
+    heap_free_root[heap_owner(t)->tid] = h;
 }
 
 /* ---- ls snapshot ---------------------------------------------------------- */
@@ -1471,6 +1552,7 @@ static void preempt_at_syscall_exit(int_frame_t *f) {
     /* the frame on this kernel stack doubles as the saved context; the
      * task resumes via cpu_frame_resume into ring3 later, with the
      * syscall return value already stored in frame->eax */
+    if (preempt_depth_v > 0) return;          /* still inside a critical section */
     task_t *pick = 0;
     for (int k = 1; k <= MAX_TASKS && !pick; k++) {
         task_t *tt = &tasks[(cur_task->tid + k) % MAX_TASKS];
@@ -1484,6 +1566,8 @@ static void preempt_at_syscall_exit(int_frame_t *f) {
     me->state = T_READY;
     cur_task = pick;
     pick->state = T_RUNNING;
+    pick->switches++;
+    tls_apply(pick);
     cpu_frame_resume(pick->ksp, pick->space.dir, pick->kstack_top);
 }
 
@@ -2420,7 +2504,102 @@ void isr_syscall(int_frame_t *f) {
         ret = (uint32_t)rc;
         break;
     }
-    default: ret = (uint32_t)-8; break;
+    /* ---- Stage 2B: file-backed mapping via the fd table + page cache -- */
+    case SYS_FILE_MMAP: {
+        uint32_t va = 0;
+        int r = fcache_mmap(t, (int)a1, a2, (int)a3, &va);
+        ret = r == 0 ? va : (uint32_t)r;
+        break;
+    }
+    case SYS_MPROTECT:
+        ret = (uint32_t)fcache_mprotect(t, a1, a2, (int)a3);
+        break;
+    case SYS_MUNMAP_SHARED:
+        ret = (uint32_t)fcache_munmap(t, a1, a2);
+        break;
+    /* ---- Stage 2A: CSO1 fixed-base shared object --------------------- */
+    case SYS_DLOPEN: {
+        char path[FS_NAME_MAX];
+        if (a1 == 0 || copy_from_user(t, path, (const void *)a1,
+                                       FS_NAME_MAX - 1) != 0) {
+            ret = (uint32_t)-14; break;
+        }
+        path[FS_NAME_MAX - 1] = 0;
+        ret = (uint32_t)dl_open(t, path);
+        break;
+    }
+    case SYS_DLSYM: {
+        char nm[128];
+        if (a2 == 0 || copy_from_user(t, nm, (const void *)a2,
+                                      sizeof(nm) - 1) != 0) {
+            ret = 0; break;
+        }
+        nm[sizeof(nm) - 1] = 0;
+        ret = (uint32_t)dl_sym(t, (int)a1, nm);
+        break;
+    }
+    case SYS_DLCLOSE:
+        ret = (uint32_t)dl_close(t, (int)a1);
+        break;
+    /* ---- Stage 3A-3: user threads (shared address space) -------------- */
+    case SYS_THREAD_CREATE:
+        ret = (uint32_t)thread_create(t, a1, a2);
+        break;
+    case SYS_THREAD_EXIT:
+        thread_exit_current((int)a1);          /* noreturn */
+        ret = 0;
+        break;
+    case SYS_THREAD_JOIN:
+        ret = (uint32_t)thread_join(t, (int)a1);
+        break;
+    case SYS_THREAD_DETACH:
+        ret = (uint32_t)thread_detach((int)a1);
+        break;
+    /* ---- Stage 2B: CE fd handle table -------------------------------- */
+    case SYS_FD_OPEN: {
+        char p[FS_PATH_MAX];
+        if (a1 == 0 || copy_from_user(t, p, (const void *)a1,
+                                       FS_PATH_MAX - 1) != 0) {
+            ret = (uint32_t)-14; break;
+        }
+        p[FS_PATH_MAX - 1] = 0;
+        ret = (uint32_t)fd_open(t, p, (int)a2);
+        break;
+    }
+    case SYS_FD_CLOSE:
+        ret = (uint32_t)fd_close(t, (int)a1);
+        break;
+    case SYS_FD_READ:
+        ret = (uint32_t)fd_read(t, (int)a1, (void *)a2, (int)a3);
+        break;
+    case SYS_FD_WRITE:
+        ret = (uint32_t)fd_write(t, (int)a1, (const void *)a2, (int)a3);
+        break;
+    case SYS_FD_LSEEK:
+        ret = (uint32_t)fd_lseek(t, (int)a1, (int)a2, (int)a3);
+        break;
+    case SYS_FCACHE_STAT:
+        if (a1 == 0) ret = fcache_stat_pages();
+        else if (a1 == 1) ret = fcache_stat_hits();
+        else ret = (uint32_t)fcache_refcnt_at(a2);
+        break;
+    case SYS_THREAD_SWITCHES:
+        ret = t->switches;
+        break;
+    case SYS_SETLOCALE: {
+        char nm[24];
+        if (u2k_str(nm, (const char *)a2, sizeof(nm)) != 0) { ret = (uint32_t)-3; break; }
+        ret = (uint32_t)locale_set((int)a1, nm);
+        break;
+    }
+    case SYS_LOCALE_QUERY: {
+        char tmp[32];
+        int rc = locale_query((int)a1, (int)a2, tmp, sizeof(tmp));
+        if (rc != 0) { ret = (uint32_t)rc; break; }
+        if (copy_to_user(t, (char *)a3, tmp, sizeof(tmp)) != 0)
+            { ret = (uint32_t)-3; break; }
+        ret = 0; break;
+    }    default: ret = (uint32_t)-8; break;
     }
 #ifdef CATOS_BENCH
     if (!t->ring0 && nr < 64) g_sp.sys[nr] += perf_now() - _s0;
@@ -2527,6 +2706,20 @@ typedef struct {
     uint32_t p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align;
 } elf32_phdr_t;
 
+typedef struct {
+    uint32_t sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
+             sh_link, sh_info, sh_addralign, sh_entsize;
+} elf32_shdr_t;
+
+typedef struct {
+    uint32_t st_name, st_value, st_size;
+    uint8_t  st_info, st_other;
+    uint16_t st_shndx;
+} elf32_sym_t;
+
+#define ELF_SHT_REL    9u
+#define ELF_SHT_DYNSYM 11u
+
 #define ELF_PT_LOAD 1u
 #define ELF_ET_EXEC 2u
 #define ELF_ET_DYN  3u
@@ -2556,6 +2749,75 @@ static int fat_pread(uint32_t clus0, uint32_t fsize, uint32_t off, uint32_t len,
         uint32_t nx = fat_get(c);
         if (done < len && (nx < 2 || nx >= 0x0FFFFFF0)) return -1;
         c = nx;
+    }
+    return 0;
+}
+
+/* Apply ELF dynamic relocations (.rel.dyn / .rel.plt) through the shared
+ * relocation engine (block ①).  Images without a dynamic section (the current
+ * prelinked CE/ELF samples) take the early no-op return.  Unsupported reloc
+ * types are rejected by dl_reloc_apply rather than skipped. */
+static int elf_apply_relocs(task_t *t, uint32_t clus0, uint32_t fsize,
+                            uint32_t base, const elf32_ehdr_t *eh,
+                            const elf32_phdr_t *ph, int nph) {
+    if (!eh->e_shoff || eh->e_shnum == 0 || eh->e_shnum > 32) return 0;
+    uint32_t shb = (uint32_t)eh->e_shnum * sizeof(elf32_shdr_t);
+    if ((uint64_t)eh->e_shoff + shb > fsize) return 0;   /* no usable sections */
+
+    elf32_shdr_t sh[32];
+    if (fat_pread(clus0, fsize, eh->e_shoff, shb, (uint8_t *)sh) != 0) return -4;
+
+    uint32_t bound = 0;
+    for (int i = 0; i < nph; i++)
+        if (ph[i].p_type == ELF_PT_LOAD) {
+            uint32_t e = base + ph[i].p_vaddr + ph[i].p_memsz;
+            if (e > bound) bound = e;
+        }
+    bound -= base;
+
+    int dynsym = -1;
+    for (int i = 0; i < eh->e_shnum; i++)
+        if (sh[i].sh_type == ELF_SHT_DYNSYM) { dynsym = i; break; }
+
+    static elf32_sym_t dynsym_buf[128];
+    const elf32_sym_t *syms = 0;
+    uint32_t sym_cnt = 0;
+    if (dynsym >= 0) {
+        if (sh[dynsym].sh_size > sizeof(dynsym_buf)) return -5;
+        sym_cnt = sh[dynsym].sh_size / sizeof(elf32_sym_t);
+        if (fat_pread(clus0, fsize, sh[dynsym].sh_offset,
+                      sh[dynsym].sh_size, (uint8_t *)dynsym_buf) != 0) return -4;
+        syms = dynsym_buf;
+    }
+
+    static uint32_t relbuf[256];                 /* up to 128 REL entries */
+    for (int i = 0; i < eh->e_shnum; i++) {
+        if (sh[i].sh_type != ELF_SHT_REL) continue;
+        uint32_t entsz = sh[i].sh_entsize ? sh[i].sh_entsize : 8;
+        if (entsz != 8) continue;
+        uint32_t n = sh[i].sh_size / 8;
+        if (n == 0 || n > 128) return -5;
+        if (sh[i].sh_offset + n * 8 > fsize) return -5;
+        if (fat_pread(clus0, fsize, sh[i].sh_offset, n * 8,
+                      (uint8_t *)relbuf) != 0) return -4;
+        for (uint32_t k = 0; k < n; k++) {
+            uint32_t r_off  = relbuf[2 * k];
+            uint32_t r_info = relbuf[2 * k + 1];
+            uint32_t type = r_info & 0xFFu;
+            uint32_t sym  = r_info >> 8;
+            uint32_t symval = 0;
+            if (sym && syms && sym < sym_cnt)
+                symval = base + syms[sym].st_value;
+            int32_t addend = 0;
+            if (type == 1 /* R_386_32: REL addend lives in the slot */) {
+                uint32_t pa = task_virt_to_phys(&t->space, base + r_off);
+                if (!pa) return -5;
+                addend = (int32_t) * (uint32_t *)pa;
+            }
+            if (dl_reloc_apply(&t->space, base, bound, r_off, type,
+                               symval, addend) != DL_OK)
+                return -8;
+        }
     }
     return 0;
 }
@@ -2640,6 +2902,10 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
             va += n; off += n; remaining -= n;
         }
     }
+
+    /* Apply any dynamic relocations through the shared engine (block ①). */
+    int rel = elf_apply_relocs(t, clus0, fsize, base, &eh, ph, eh.e_phnum);
+    if (rel != 0) return rel;
 
     uint32_t entry = base + eh.e_entry;
     int ok = 0;
@@ -3035,7 +3301,8 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
     t->resume_frame = 0;
     t->space.pt = 0;
     t->space.dir = 0;
-    t->vm = 0;
+    t->vm = 0;                           /* ring0: no user VMA list */
+    t->fpu_used = 0;
     t->wake_tick = 0;
     t->exit_code = 0;
     t->parent = cur_task;
@@ -3052,6 +3319,225 @@ int task_spawn_r0(void (*entry)(void), const char *name, int daemon) {
         t->name[i] = 0;
     }
     return slot;
+}
+
+/* ---- Stage 3A-3: user threads (shared address space) ---------------------
+ *
+ * A worker thread reuses an existing task slot but SHARES the parent's
+ * address space (dir/pt/pt2 + VMA list); it gets its own kernel stack
+ * (kvheap), its own 16 KiB user stack (anonymous, guard page ahead) and its
+ * own TLS user page.  The thread exit path NEVER calls task_space_destroy:
+ * the shared space belongs to the process and outlives every worker.
+ *
+ * TLS is exposed to ring3 through a dedicated ring3 data descriptor at GDT
+ * index 6 (SEL_TLS).  Legacy 32-bit %gs addressing resolves the segment base
+ * from the GDT descriptor, not the FS/GS_BASE MSR, so the descriptor base is
+ * rewritten here on every context switch; a task without a TLS gets base 0.
+ */
+#define THREAD_KSTACK_SZ         8192u
+#define THREAD_STACK_SZ          16384u
+#define THREAD_TLS_SZ            4096u
+
+/* Repoint the TLS descriptor at the incoming task's TLS block (0 when none).
+ * Called from the scheduler on every switch. */
+static void tls_apply(task_t *t) {
+    gdt_tls_set_base(t ? t->tls_va : 0);
+}
+
+/* Reap a thread's thread-only kernel resources and release the slot.  The
+ * shared process space / VMA list are left untouched.  Must run in a
+ * context other than the thread being reaped (its kvheap kernel stack is
+ * freed here). */
+static void thread_reap(task_t *t) {
+    if (t->kstack_va) {
+        kvmfree((void *)t->kstack_va);
+        t->kstack_va = 0;
+    }
+    t->kstack_top = 0;
+    t->ksp = 0;
+    t->resume_frame = 0;
+    t->thr_stack_va = 0;
+    t->tls_va = 0;
+    t->waiter = 0;
+    t->state = T_UNUSED;
+}
+
+/* Reap leftover detached zombies: a detached thread has no joiner, so its
+ * kvheap kernel stack cannot be freed on its own running stack.  Swept from
+ * another task's context (thread_create) once a new thread slots in; only
+ * detached zombies are touched -- a joined zombie still belongs to its caller's
+ * reap path. */
+static void thread_sweep_zombies(void) {
+    for (int i = 1; i < MAX_TASKS; i++) {
+        task_t *z = &tasks[i];
+        if (z->is_thread && z->detached && z->state == T_ZOMBIE && z->kstack_va)
+            thread_reap(z);
+    }
+}
+
+static int thread_create(task_t *parent, uint32_t entry, uint32_t arg) {
+    if (!parent || parent->ring0) return -12;     /* no ring0 thread spawn yet */
+    if (!entry) return -22;
+
+    thread_sweep_zombies();
+
+    int slot = -1;
+    for (int i = 1; i < MAX_TASKS; i++)
+        if (tasks[i].state == T_UNUSED) { slot = i; break; }
+    if (slot < 0) return -12;
+
+    task_t *t = &tasks[slot];
+
+    /* Share the parent's address space and process-shared state FIRST, so
+     * the anon mmap / user copy below map pages through the live parent
+     * directory instead of this slot's stale zeroed space. */
+    t->space = parent->space;
+    t->vm = parent->vm;
+    t->heap_end = parent->heap_end;
+    /* heap free-list head is process-shared: resolved through heap_owner(),
+     * the worker's own slot entry is unused. */
+    t->uid = parent->uid;
+    t->gid = parent->gid;
+    t->caps = parent->caps;
+    t->out_pipe = parent->out_pipe;
+    t->in_pipe = parent->in_pipe;
+    t->out_file[0] = 0;
+    t->out_append = parent->out_append;
+    t->bg_mode = parent->bg_mode;
+
+    /* kernel stack from the kvheap (8 KiB, zeroed) */
+    uint8_t *ksk = kvmalloc(THREAD_KSTACK_SZ, 16);
+    if (!ksk) { ser_write("thr: kstack OOM\n"); return -12; }
+    for (uint32_t i = 0; i < THREAD_KSTACK_SZ; i++) ksk[i] = 0;
+    t->kstack_va = (uint32_t)ksk;
+    t->kstack_top = (uint32_t)ksk + THREAD_KSTACK_SZ;
+
+    /* private user stack, anonymous in the extension arena (guard ahead) */
+    uint32_t stk = vma_mmap_anon(t, THREAD_STACK_SZ, 1);
+    if (!stk) { ser_write("thr: stack mmap OOM\n"); goto fail_kstack; }
+    t->thr_stack_va = stk;
+
+    /* private TLS user page: [0]=tid [4]=errno [8]=canary [12]=self base VA.
+     * The self base lets ring3 take the errno slot address without an MSR read
+     * (rdmsr is ring0 only): read %gs:12, add 4. */
+    uint32_t tls = vma_mmap_anon(t, THREAD_TLS_SZ, 1);
+    if (!tls) { ser_write("thr: tls mmap OOM\n"); goto fail_stack; }
+    t->tls_va = tls;
+    {
+        uint32_t tl[4] = { (uint32_t)slot, 0u, 0xC0FFEEu, tls };
+        if (copy_to_user(t, (void *)tls, tl, sizeof(tl)) != 0) {
+            ser_write("thr: tls copy EFAULT\n"); goto fail_tls;
+        }
+    }
+
+    /* cdecl frame: [esp]=return stub, [esp+4]=arg */
+    uint32_t usp = stk + THREAD_STACK_SZ;
+    usp -= 8;
+    uint32_t stub = VS_EXIT_STUB;
+    k2u_copy(&t->space, usp, &stub, 4);
+    k2u_copy(&t->space, usp + 4, &arg, 4);
+
+    int_frame_t *fr = (int_frame_t *)(t->kstack_top - sizeof(int_frame_t) - 16);
+    uint8_t *fb = (uint8_t *)fr;
+    for (uint32_t i = 0; i < sizeof(int_frame_t); i++) fb[i] = 0;
+    fr->eip = entry;
+    fr->cs = SEL_UCODE;
+    fr->eflags = 0x202;                    /* IF set */
+    fr->esp = usp;
+    fr->ss = SEL_UDATA;
+    fr->ds = fr->es = fr->fs = SEL_UDATA;
+    fr->gs = SEL_TLS;                    /* %gs -> this thread's TLS descriptor */
+
+    t->tid = slot;
+    t->ring0 = 0;
+    t->state = T_READY;
+    t->ksp = (uint32_t)fr;
+    t->resume_frame = 1;
+    t->parent = parent;
+    t->proc = parent->proc;
+    t->is_thread = 1;
+    t->detached = 0;
+    t->thread_ret = 0;
+    t->waiter = 0;
+    t->exit_code = 0;
+    t->wake_tick = 0;
+    t->fpu_used = 0;
+    t->pgid = parent->pgid;
+    t->ls_count = 0;
+    t->ls_step = 0;
+    t->cpu_ticks = 0;
+    {
+        t->name[0] = 't'; t->name[1] = 'h'; t->name[2] = 'r';
+        t->name[3] = (char)('0' + (slot % 10)); t->name[4] = 0;
+    }
+    ser_write("thr: create ok tid="); ser_hex("", (uint32_t)slot);
+    ser_hex(" stk=", stk); ser_hex(" tls=", tls); ser_write("\n");
+    return slot;
+
+fail_tls:
+    vma_munmap(t, tls, THREAD_TLS_SZ);
+fail_stack:
+    vma_munmap(t, stk, THREAD_STACK_SZ);
+fail_kstack:
+    kvmfree((void *)ksk);
+    t->kstack_va = 0;
+    return -12;
+}
+
+/* Worker thread exit.  Unmaps only this thread's user stack + TLS page; the
+ * shared space stays intact.  The kvheap kernel stack is freed at reap
+ * (join / detach), never while running on it. */
+static void thread_exit_current(int retval) {
+    task_t *t = cur_task;
+    t->thread_ret = retval;
+    t->exit_code = retval;
+
+    if (t->thr_stack_va) {
+        vma_munmap(t, t->thr_stack_va, THREAD_STACK_SZ);
+        t->thr_stack_va = 0;
+    }
+    if (t->tls_va) {
+        vma_munmap(t, t->tls_va, THREAD_TLS_SZ);
+        t->tls_va = 0;
+    }
+
+    if (t->detached) {
+        /* No joiner: the kernel stack cannot be freed on its own running
+         * stack.  Mark zombie; thread_sweep_zombies() reaps it from the next
+         * thread_create context. */
+        t->state = T_ZOMBIE;
+    } else {
+        t->state = T_ZOMBIE;
+        if (t->waiter) {
+            t->waiter->state = T_READY;
+            t->waiter = 0;
+        }
+    }
+    reschedule();
+    __builtin_unreachable();
+}
+
+static int thread_join(task_t *caller, int tid) {
+    task_t *th = task_by_tid(tid);
+    if (!th || !th->is_thread) return -22;          /* EINVAL: no such thread */
+
+    if (th->state != T_ZOMBIE) {
+        th->waiter = caller;
+        caller->state = T_WAIT_CHILD;
+        reschedule();
+        /* resumed: `th` has exited and is a zombie */
+    }
+    int rv = th->thread_ret;
+    thread_reap(th);
+    return rv;
+}
+
+static int thread_detach(int tid) {
+    task_t *th = task_by_tid(tid);
+    if (!th || !th->is_thread) return -22;
+    th->detached = 1;
+    if (th->state == T_ZOMBIE) thread_reap(th);
+    return 0;
 }
 
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
@@ -3168,6 +3654,10 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->bg_mode = 0;
     t->daemon = 0;              /* v2.54: detached-service flag */
     t->pending_sig = 0;          /* v2.52: clear stale pending signal */
+    /* 3A-2: reset thread-side scaffolding on slot reuse (single-thread proc). */
+    t->proc = 0; t->is_thread = 0; t->detached = 0;
+    t->tls_va = 0; t->thr_stack_va = 0; t->thread_ret = 0;
+    t->waiter = 0; t->kstack_va = 0;
     t->log_head = 0;
     t->log_tail = 0;
     t->log_lost = 0;
@@ -3379,6 +3869,7 @@ int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
     t->parent = cur_task;
     t->pgid = slot;              /* v2.52: standalone job owns its group */
     t->heap_end = USER_HEAP_BASE;
+    t->fpu_used = 0;
     heap_free_root[slot] = 0;
     t->ls_count = 0;
     t->ls_step = 0;

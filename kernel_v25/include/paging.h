@@ -35,6 +35,8 @@ typedef struct task_space {
 int      task_space_create(task_space_t *s);
 int      task_map_page(task_space_t *s, uint32_t vaddr, uint32_t pa, int user_writable);
 int      task_unmap_page(task_space_t *s, uint32_t vaddr);   /* frees the frame */
+/* Stage 2B: clear the user PTE without freeing the frame (shared file cache). */
+void     task_scrub_page(task_space_t *s, uint32_t vaddr);
 uint32_t task_virt_to_phys(task_space_t *s, uint32_t vaddr);
 int      task_page_is_user(task_space_t *s, uint32_t vaddr);
 void     task_space_destroy(task_space_t *s);
@@ -42,12 +44,17 @@ void     task_space_destroy(task_space_t *s);
  * mirror of a kernel static frame. Prints a [guard] result line to COM1. */
 void     paging_static_slot_guard_selftest(void);
 
+/* Stage 3A-1: supervisor-only high-window map/unmap (kvheap backing). */
+void     paging_kmap(uint32_t va, uint32_t pa, int uc);
+uint32_t paging_kunmap(uint32_t va);   /* returns old frame PA, 0 if absent */
+
 /* ---- VMA type and management ----------------------------------------- */
 /* vma_kind values for vma_new(). */
 #define VMA_IMAGE  0        /* program code/data (read-write or read-only) */
 #define VMA_VSYSCALL 1      /* per-task syscall thunk page (read-only) */
 #define VMA_ANON   2        /* anonymous: heap, stack, mmap'd pages */
 #define VMA_MMAP   3        /* file-backed mmap (future ELF loader) */
+#define VMA_LIB    4        /* CSO1 fixed-base shared object (Stage 2A) */
 
 typedef struct vma {
     uint32_t  start;     /* inclusive */
@@ -105,6 +112,25 @@ int    vma_contains(const vma_t *list, uint32_t addr);
 #define USER_EXT_END    0x2800000u
 #define USER_EXT_SIZE   (USER_EXT_END - USER_EXT_BASE)
 #define PDE_USER_EXT    9u
+
+/* ---- CSO1 shared-object zone (Stage 2A) -------------------------------
+ * Reserved at the TOP of PDE 9 so the anonymous mmap / PIE first-fit scan
+ * never reaches it.  The base addresses are fixed at build time (CSO1 has
+ * no relocation pass); the kernel must NOT raise USER_IMAGE_BASE /
+ * CE_LOAD_BASE to make room.
+ *
+ *   0x2400000 .. 0x2700000  anonymous mmap + PIE images (3 MiB)
+ *   0x2700000 .. 0x2780000  CSO1 fixed-base libraries (512 KiB)
+ *   0x2780000 .. 0x2800000  reserved headroom (untouched)
+ *
+ * Per-module span is image(64 KiB) + bss(64 KiB) rounded to pages, so the
+ * 512 KiB zone holds at most MAX_DL_MODULES=4 concurrent libraries; total
+ * shared .text is capped by the same 512 KiB.  Cross-task text sharing and
+ * reference counting are Stage 2C work (deferred); Stage 2A maps each
+ * module into the opening task's own frames. */
+#define USER_LIB_BASE   0x2700000u
+#define USER_LIB_END    0x2780000u
+#define USER_LIB_SIZE   (USER_LIB_END - USER_LIB_BASE)
 
 /* ---- VBE linear framebuffer -------------------------------------------
  * Map a PCI MMIO framebuffer into the KERNEL page directory (identity,

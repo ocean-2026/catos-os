@@ -11,28 +11,48 @@
  * a usable /bin) and once at boot as a fallback.  Skips files that are
  * already present, so it never overwrites user changes.
  */
+/* v2.81 fix: create a missing parent directory before writing a built-in.
+ * fs_write_raw() fails with [F4] when the parent is absent; the old loop
+ * bailed on the first failure, so a stale volume without /appdevelop left
+ * node.ce / TEST.JS uninstalled after API.TXT failed. */
+static int builtin_ensure_parent(const char *path) {
+    char parent[128];
+    int plen = 0;
+    for (const char *q = path; *q; q++) if (*q == '/') plen = (int)(q - path);
+    if (plen <= 1) return 0;                /* root-level file */
+    if (plen >= (int)sizeof(parent)) return -1;
+    for (int i = 0; i < plen; i++) parent[i] = path[i];
+    parent[plen] = 0;
+    int rc = fs_mkdir(parent);
+    return (rc == FS_OK || rc == FS_ERR_EXIST) ? 0 : rc;
+}
+
 void ce_install_builtins(void) {
     if (!fs_fs_ready()) return;
     btime_mark("B0 builtins resolve+seed");
     int n = (int)(sizeof(builtin_files) / sizeof(builtin_files[0]));
-    int installed = 0;
+    int installed = 0, failed = 0;
     for (int i = 0; i < n; i++) {
         uint32_t c = 0, s = 0;
         if (fs_resolve_file(builtin_files[i].path, &c, &s) == 0)
             continue;                       /* already installed */
-        if (fs_write_raw(builtin_files[i].path,
+        if (builtin_ensure_parent(builtin_files[i].path) != 0 ||
+            fs_write_raw(builtin_files[i].path,
                          (const char *)builtin_files[i].data,
                          builtin_files[i].len) != 0) {
             vga_write("builtin: install FAILED for ");
             vga_write(builtin_files[i].path);
             vga_write(" (disk full?)\n");
-            return;
+            failed++;                       /* keep going: one bad file must not
+                                             * strand the rest */
+            continue;
         }
         installed++;
     }
     /* Quiet on the common path: boot must not claim it installed anything
      * when /bin came from the disk.  Only report real work. */
     if (installed) vga_write("Installed missing built-in app(s)/doc(s) from kernel image.\n");
+    if (failed) vga_write("builtin: some install(s) FAILED; see lines above\n");
     btime_mark("B1 builtins done");
 }
 

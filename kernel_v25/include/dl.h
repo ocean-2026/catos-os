@@ -34,12 +34,25 @@
 
 #include <stdint.h>
 #include "paging.h"
+#include "fs.h"
 
 #define CSO_MAGIC0 'C'
 #define CSO_MAGIC1 'S'
 #define CSO_MAGIC2 'O'
 #define CSO_MAGIC3 '1'
+#define CSO2_MAGIC3 '2'
 #define CSO_VERSION  1u
+#define CSO2_VERSION 2u
+
+/* R_386 relocation types (mirror ELF32 i386 codes).  2C-2 implements
+ * 1/2/6/7/8; every other code is rejected explicitly by the loader.
+ * Type 8 R_386_RELATIVE is a base-relative fixup (`*slot = base + old`),
+ * which a PIC -shared library always emits; approved for support. */
+#define R_386_32        1u
+#define R_386_PC32      2u
+#define R_386_GLOB_DAT  6u
+#define R_386_JMP_SLOT  7u
+#define R_386_RELATIVE  8u
 
 #define CSO_NO_API   0xFFFFFFFFu
 
@@ -50,6 +63,7 @@
 #define CSO_MAX_NAMES    2048u
 #define CSO_MAX_FILE     (0x10000u + 0x10000u + 0x4000u)
 #define MAX_DL_MODULES   16
+#define DL_MAX_RO_PAGES  16          /* image <= 64 KiB => <= 16 RO frames */
 
 typedef struct {
     uint8_t  magic[4];
@@ -60,22 +74,72 @@ typedef struct {
     uint32_t api_offset;
     uint32_t export_off;
     uint32_t export_cnt;
-} cso_header_t;                     /* 32 bytes */
+    /* CSO2 v2 fields (zero / absent for CSO1 v1 files). */
+    uint32_t rela_off;        /* file offset of rela table, 0 = none */
+    uint32_t rela_cnt;
+    uint32_t text_end;        /* RO span end offset from base (text+rodata) */
+    uint32_t data_end;        /* RW .data end offset from base; bss follows */
+    uint32_t init_array_off;  /* offset from base; 0 = none */
+    uint32_t init_array_cnt;
+    uint32_t fini_array_off;
+    uint32_t fini_array_cnt;
+} cso_header_t;                     /* 64 bytes v2; first 32 shared with v1 */
+
+/* CSO2 rela entry (12 bytes, LE). */
+typedef struct {
+    uint32_t r_offset;       /* offset from base where the reloc applies */
+    uint32_t r_info;         /* type: low16, sym_idx: high16 */
+    int32_t  r_addend;
+} cso_rela_t;
 
 typedef struct {
     uint32_t name_off;              /* offset into the name blob */
-    uint32_t func_off;              /* offset from the library base VA */
+    uint32_t sym_off;               /* offset from the library base VA (function or data symbol) */
 } cso_export_t;                     /* 8 bytes */
+
+typedef struct dl_shared dl_shared_t;
+
+/* Global shared state for one loaded library (2C-3 block ③).  Keyed by the
+ * source file's first cluster (NOT by task/pid): the same library mapped into
+ * several tasks shares one set of read-only physical frames and one metadata
+ * frame.  The [0,text_end) RO span is mapped read-only into every opener;
+ * the [text_end,data_end) .data span and .bss stay private per task. */
+struct dl_shared {
+    int      used;
+    uint32_t cluster;
+    uint32_t base;
+    uint32_t image_size;
+    uint32_t bss_size;
+    uint32_t span;                  /* image+bss, page-rounded */
+    uint32_t text_end;              /* RO span offset from base */
+    uint32_t data_end;              /* RW .data end offset from base */
+    uint32_t api_offset;
+    uint32_t rela_off;
+    uint32_t rela_cnt;
+    uint32_t export_cnt;
+    uint32_t init_off;
+    uint32_t init_cnt;
+    uint32_t fini_off;
+    uint32_t fini_cnt;
+    uint32_t fsize;
+    uint32_t image_off;
+    char     path[FS_NAME_MAX];
+    int      refcnt;                /* tasks currently holding this library */
+    int      ro_cnt;
+    uint32_t ro_pa[DL_MAX_RO_PAGES]; /* shared RO physical frames */
+    uint8_t *meta;                  /* shared exports + names kernel frame */
+    uint32_t meta_bytes;
+    uint8_t *rela;                  /* shared rela kernel frame (0 = none) */
+};
 
 typedef struct {
     int      used;
     int      handle;                /* small positive integer, 1..N */
     int      owner_tid;
     uint32_t base;
-    uint32_t span;                  /* image+bss, page-rounded */
+    uint32_t span;
     uint32_t export_cnt;
-    uint8_t *meta;                  /* one kernel frame: exports + names */
-    uint32_t meta_bytes;
+    dl_shared_t *sh;                /* back-pointer to the global shared state */
 } dl_module_t;
 
 /* Return codes (negative errno, matching the rest of the syscall ABI). */
@@ -85,6 +149,17 @@ typedef struct {
 #define DL_ERR_FULL     -4
 #define DL_ERR_NOMEM   -12
 #define DL_ERR_BADH    -22          /* bad handle / unknown symbol */
+#define DL_ERR_RELOC    -8          /* unsupported / rejected relocation */
+
+/* Shared relocation engine (2C-1 block ①).  Applies one resolved relocation
+ * to the mapped task space.  base is the load VA; loc_off is the offset from
+ * base of the slot; sym_val is the resolved symbol VA (0 if the reloc has no
+ * symbol); addend is the ELF/CSO2 addend.  Returns 0 on success,
+ * DL_ERR_RELOC on an unsupported type or out-of-range slot.  Used by both
+ * the CSO2 dlopen path and the ELF executable loader. */
+int dl_reloc_apply(struct task_space *sp, uint32_t base, uint32_t img_size,
+                   uint32_t loc_off, uint32_t type, uint32_t sym_val,
+                   int32_t addend);
 
 struct task;
 

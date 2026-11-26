@@ -159,6 +159,21 @@ static struct {
     /* line assembly for the shell channel */
     uint8_t  line[256];
     int      line_len;
+    /* per-session scratch buffers: owned by this session, reused across its
+     * packet / kex / exec / shell phases.  Concurrent sessions are a 3B item;
+     * the single session slot is reused one connection at a time. */
+    uint8_t  s_out[SSH_OUT_MAX + 64];
+    uint8_t  s_body[SSH_IN_MAX];
+    uint8_t  s_macmsg[4 + SSH_IN_MAX];
+    uint8_t  s_kdf[64 + 40 + 1 + 32];
+    uint8_t  s_msg[8200];
+    char     s_exec_line[512];
+    char     s_exec_out[8192];
+    uint8_t  s_shell_payload[SSH_IN_MAX];
+    char     s_shell_out[8192];
+    uint8_t  s_loop_payload[SSH_IN_MAX];
+    uint8_t  s_hb[8192];
+    uint8_t  s_reply[512];
 } S;
 
 /* ------------------------------------------------------------------ */
@@ -171,7 +186,7 @@ static int ssh_send_raw(const uint8_t *buf, int n) {
 
 /* build, optionally encrypt, and send one binary packet */
 static int ssh_send_packet(const uint8_t *payload, int plen) {
-    static uint8_t out[SSH_OUT_MAX + 64];
+    uint8_t *out = S.s_out;
     /* RFC 4253 6: total (4+packlen) must be a multiple of the cipher
      * block size or 8, whichever is LARGER -> 16 for aes128-ctr.
      * OpenSSH enforces this ("padding error: ... mod N") and paramiko
@@ -233,14 +248,14 @@ static int ssh_recv_packet(uint8_t *payload) {
     crypto_aes128_ctr_crypt(&S.dec_st, lenb, 4);
     uint32_t n = rd32be(lenb);
     if (n < 2 || n > SSH_IN_MAX) return -1;
-    static uint8_t body[SSH_IN_MAX];
+    uint8_t *body = S.s_body;
     if (ssh_readn(body, (int)n) != 0) return -1;
     crypto_aes128_ctr_crypt(&S.dec_st, body, n);
     if (ssh_readn(mac, 32) != 0) return -1;
     /* verify MAC: seq || plaintext length field || plaintext body */
     {
         uint8_t expect[32], seqb[4];
-        static uint8_t macmsg[4 + SSH_IN_MAX];
+        uint8_t *macmsg = S.s_macmsg;
         wr32be(seqb, S.in_seq);
         ssh_memcpy(macmsg, lenb, 4);
         ssh_memcpy(macmsg + 4, body, (int)n);
@@ -264,7 +279,7 @@ static void ssh_derive(uint8_t *out, int count, const char letter) {
     int plen = 0;
     while (got < count) {
         /* hash input: Kmp || H || letter || H || prev */
-        static uint8_t buf[64 + 40 + 1 + 32];
+        uint8_t *buf = S.s_kdf;
         int o = 0;
         ssh_memcpy(buf + o, S.Kmp, S.Kmp_len); o += S.Kmp_len;
         ssh_memcpy(buf + o, S.H, 32);          o += 32;
@@ -335,7 +350,7 @@ extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
 /* ------------------------------------------------------------------ */
 
 static int ssh_chan_data(const uint8_t *data, int len) {
-    static uint8_t msg[8200];
+    uint8_t *msg = S.s_msg;
     int chunk = len;
     if (chunk > 8000) chunk = 8000;
     msg[0] = MSG_CHANNEL_DATA;
@@ -392,16 +407,16 @@ static int ssh_send_banner(void) {
 
 /* exec "command": run it, stream output, send exit-status, close */
 static int ssh_do_exec(const uint8_t *cmd, int cmdlen, uint32_t peer) {
-    static char line[512];
-    static char out[8192];
+    char *line = S.s_exec_line;
+    char *out = S.s_exec_out;
     int rc = 0;
     int n = cmdlen;
-    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
+    if (n > (int)sizeof(S.s_exec_line) - 1) n = (int)sizeof(S.s_exec_line) - 1;
     ssh_memcpy((uint8_t *)line, cmd, n);
     line[n] = 0;
 
     out[0] = 0;
-    shell_ssh_exec_line(line, out, (int)sizeof(out), &rc);
+    shell_ssh_exec_line(line, out, (int)sizeof(S.s_exec_out), &rc);
 
     /* stream captured output (send at least one data packet) */
     {
@@ -437,7 +452,7 @@ static int ssh_do_shell(uint32_t peer) {
     ssh_chan_send_all("> ");
     S.line_len = 0;
     for (;;) {
-        static uint8_t payload[SSH_IN_MAX];
+        uint8_t *payload = S.s_shell_payload;
         int plen = ssh_recv_packet(payload);
         if (plen < 0) return -1;
         if (plen == 0) continue;
@@ -457,11 +472,11 @@ static int ssh_do_shell(uint32_t peer) {
                 ssh_chan_data((const uint8_t *)"\r\n", 2);
                 S.line[S.line_len] = 0;
                 if (S.line_len > 0) {
-                    static char out[8192];
+                    char *out = S.s_shell_out;
                     int rc = 0;
                     out[0] = 0;
                     shell_ssh_exec_line((const char *)S.line, out,
-                                        (int)sizeof(out), &rc);
+                                        (int)sizeof(S.s_shell_out), &rc);
                     ssh_chan_send_all(out);
                     S.line_len = 0;
                 } else {
@@ -530,7 +545,7 @@ void sshd_daemon_main(void) {
 }
 
 int ssh_serve_session(void) {
-    static uint8_t payload[SSH_IN_MAX];
+    uint8_t *payload = S.s_loop_payload;
     S.encrypted = 0;
     S.in_seq = S.out_seq = 0;
     S.line_len = 0;
@@ -572,7 +587,7 @@ int ssh_serve_session(void) {
 
     /* exchange hash H (see header comment rule 1) */
     {
-        static uint8_t hb[8192];
+        uint8_t *hb = S.s_hb;
         int o = 0;
         o += ssh_put_str(hb + o, (const uint8_t *)S.v_c, ssh_strlen(S.v_c));
         o += ssh_put_str(hb + o, (const uint8_t *)SSH_VERSION,
@@ -594,7 +609,7 @@ int ssh_serve_session(void) {
 
     /* KEX_ECDH_REPLY: s(K_S) || s(q_s) || s(sigblob) */
     {
-        static uint8_t reply[512];
+        uint8_t *reply = S.s_reply;
         uint8_t sig[64];
         uint8_t sigblob[96];     /* s("ssh-ed25519")+s(sig64) = 83 bytes! */
         crypto_ed25519_sign(sig, S.H, 32, S.host_priv);

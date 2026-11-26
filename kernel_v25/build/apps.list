@@ -19,6 +19,7 @@ hw
 gfxdemo
 zhdemo
 mmaptest
+mmap
 allocprobe
 heaptest
 go
@@ -36,3 +37,14 @@ punctest
 memlog
 benchrt
 blkgen
+fpu
+dltest
+share_a
+share_b
+share_parent
+rel8test
+t1
+threads
+preempt
+locale
+heap

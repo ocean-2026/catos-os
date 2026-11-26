@@ -53,6 +53,13 @@ typedef enum {
 #define UID_ROOT   0
 #define UID_USER   100
 
+/* 3A-2: process descriptor.  Owns the address space and all process-shared
+ * resources (page space, VMA list, heap root, fd table, pipe/console/log
+ * ownership).  The main thread embeds one; worker threads reference it.
+ * Full field migration from task_t lands with the 3A-3 thread path; this
+ * forward declaration only lets task_t hold the back-pointer. */
+struct proc;
+
 typedef struct task {
     int         tid;
     int         state;
@@ -74,10 +81,31 @@ typedef struct task {
     int         pending_sig;    /* v2.52: last delivered signal, 0 = none   */
     uint32_t    heap_end;       /* user heap break                     */
     vma_t      *vm;             /* VMA list for this task (NULL if ring0)*/
+
+    /* ---- 3A-2 proc/thread split scaffolding --------------------------
+     * Existing single-thread tasks map onto the new model as: main thread ==
+     * sole thread, owning an implicit process.  The process-shared fields
+     * (space/vm/heap/fd/pipe/console/log) still live in task_t this step;
+     * they move under `proc` when worker threads (3A-3) share an address
+     * space.  The thread-side fields below are placeholders wired up in 3A-3. */
+    struct proc *proc;          /* owning process; NULL = implicit self proc */
+    int         is_thread;      /* 0 = main thread/process, 1 = worker thread */
+    int         detached;       /* 1 = join not required, auto-reap on exit */
+    uint32_t    tls_va;         /* per-thread TLS block VA (3A-3)          */
+    uint32_t    thr_stack_va;   /* worker user-stack VMA base (3A-3)       */
+    int         thread_ret;      /* join retval                              */
+    struct task *waiter;        /* task blocked in thread_join on this one  */
+    uint32_t    kstack_va;      /* kvheap kernel stack VA (3A-3); 0 = legacy static */
+    /* Stage 1 FPU: 512-byte coprocessor save area, 16-byte aligned for
+     * fxsave.  fpu_used=1 means fpu_save holds live state that may need
+     * restoring; owned lazily (see fpu.h). */
+    uint8_t     fpu_save[512] __attribute__((aligned(16)));
+    int         fpu_used;
     /* ls syscall snapshot (one listing at a time per task) */
     int         ls_count;       /* entries in the snapshot  */
     int         ls_step;        /* next index for LS_NEXT   */
     uint32_t    cpu_ticks;      /* timer ticks charged to this task */
+    uint32_t    switches;       /* times this task was picked up by the scheduler */
     /* v2.5: output / input redirection targets (minimal fd abstraction).
      * out_pipe>=0: SYS_WRITE goes to the pipe; else out_file[0] set:
      * SYS_WRITE appends/truncates that file; else vga.
@@ -101,6 +129,15 @@ typedef struct task {
 
 /* ---- lifecycle ------------------------------------------------------- */
 void     tasks_init(void);
+
+/* Minimal preempt-nesting count (single core).  Critical sections that touch
+ * shared kernel state wrap their body in preempt_disable()/preempt_enable();
+ * the timer tick and syscall-exit reschedule only fire when the depth is 0.
+ * This kernel remains cooperatively scheduled in ring0 -- the count defers a
+ * pending reschedule until the section drops, it does not make ring0 preemptive. */
+void     preempt_disable(void);
+void     preempt_enable(void);
+int      preempt_depth(void);
 task_t  *task_current(void);
 int      tasks_ready(void);
 int      task_spawn_ce(const char *path, int argc, char **argv, int uid);

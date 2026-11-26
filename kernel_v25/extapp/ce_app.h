@@ -23,6 +23,20 @@
 /* Defined once in ce_app.c; the kernel fills the pointer before entry. */
 extern catos_api_t *__ce_api;
 
+/* ---- per-thread TLS errno --------------------------------------------
+ * The kernel loads the ring3 %gs data descriptor (GDT index 6) to the thread's
+ * private TLS user page on every switch.  TLS words:
+ *   [0] = tid   [4] = errno   [8] = canary 0xC0FFEE   [12] = self base VA
+ * Ring3 cannot read the GS_BASE MSR (rdmsr is ring0 only), so the TLS page
+ * carries its own base at offset 12; read it and return the errno slot.
+ * Valid only on threads that own a TLS page (worker threads); the main
+ * process thread currently runs without one -- do not deref in ce_main. */
+static inline int *__tls_errno(void) {
+    uint32_t base;
+    __asm__ __volatile__("movl %%gs:12, %0" : "=r"(base));
+    return (int *)(base + 4);
+}
+
 /* Current API table shorthand (kept for apps that still write api->...). */
 static inline catos_api_t *ce_api(void) { return __ce_api; }
 
