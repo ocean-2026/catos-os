@@ -2927,8 +2927,12 @@ static int spawn_load_elf(task_t *t, uint32_t clus0, uint32_t fsize,
  *   - not a DLL (IMAGE_FILE_DLL bit clear), non-high ImageBase
  *     (< 0x80000000); the whole image fits
  *     [USER_IMAGE_BASE, USER_EXT_END)
- *   - sections mapped at ImageBase+RVA; raw data copied in, the
+ *   - sections mapped at load_base+RVA; raw data copied in, the
  *     VirtualSize tails stay zeroed (kzalloc_frame)
+ *   - Base Relocation directory (DataDirectory[5]) is parsed: HIGHLOW(3)
+ *     and DIR64(10) slots are adjusted by (load_base - ImageBase).  A
+ *     preferred base outside the arena slides to the legacy image slot
+ *     below the heap; malformed reloc blocks/entries return -5.
  *
  * Error codes mirror spawn_load_elf: -5 bad/unsupported image,
  * -4 disk read error, -12 out of memory, -3 file too large.
@@ -2974,6 +2978,74 @@ typedef struct {
 #define PE_CHAR_WRITE     0x80000000u
 #define PE_HIGH_BASE      0x80000000u
 
+/* Base relocation types (Base Relocation directory, DataDirectory[5]).
+ * ABSOLUTE(0) is a padding entry and must be skipped; HIGHLOW(3) fixes a
+ * 32-bit absolute address; DIR64(10) fixes a 64-bit one (accepted for
+ * completeness on PE32 images; the high word must stay zero). */
+#define PE_REL_BASED_ABSOLUTE 0u
+#define PE_REL_BASED_HIGHLOW  3u
+#define PE_REL_BASED_DIR64    10u
+#define PE_MAX_RELOC_ENTRIES  4096u
+#define PE_OPT_DIR_RELOC      5u
+
+static uint32_t pe_rd32(const uint8_t *p);
+
+/* Walk the .reloc blocks already copied into the mapped image and adjust
+ * every absolute slot by `delta = load_base - preferred ImageBase`.
+ * Malformed blocks/entries (size overrun, entry count overrun, RVA outside
+ * the image, unsupported type) return -5 instead of touching ring3 memory
+ * blindly.  Mirrors the ELF engine's reject-don't-skip policy. */
+static int pe_apply_relocs(task_t *t, uint32_t load_base, uint32_t size_image,
+                           uint32_t rel_rva, uint32_t rel_size, int32_t delta) {
+    if (rel_rva == 0 && rel_size == 0) return 0;
+    if (rel_size < 8 || rel_rva >= size_image) return -5;
+    if ((uint64_t)rel_rva + rel_size > size_image) return -5;
+
+    uint32_t cur = rel_rva;
+    uint32_t end = rel_rva + rel_size;
+    while (cur < end) {
+        if (cur + 8 > end) return -5;
+        uint32_t pa = task_virt_to_phys(&t->space, load_base + cur);
+        if (!pa) return -5;
+        const uint8_t *blk = (const uint8_t *)pa;
+        uint32_t blk_rva  = pe_rd32(blk);
+        uint32_t blk_size = pe_rd32(blk + 4);
+        if (blk_size < 8 || (blk_size & 1u)) return -5;
+        if ((uint64_t)cur + blk_size > end) return -5;
+        if (blk_rva >= size_image) return -5;
+        uint32_t n = (blk_size - 8) / 2;
+        if (n > PE_MAX_RELOC_ENTRIES) return -5;
+        for (uint32_t k = 0; k < n; k++) {
+            uint16_t ent = (uint16_t)blk[8 + 2 * k] |
+                           ((uint16_t)blk[9 + 2 * k] << 8);
+            uint32_t type = ent >> 12;
+            uint32_t off  = ent & 0xFFFu;
+            uint32_t tgt  = blk_rva + off;
+            if (tgt >= size_image) return -5;
+            uint32_t tpa = task_virt_to_phys(&t->space, load_base + tgt);
+            if (!tpa) return -5;
+            uint8_t *slot = (uint8_t *)tpa;
+            if (type == PE_REL_BASED_ABSOLUTE) continue;
+            if (type == PE_REL_BASED_HIGHLOW) {
+                uint32_t val = pe_rd32(slot);
+                *(uint32_t *)slot = (uint32_t)((int32_t)val + delta);
+            } else if (type == PE_REL_BASED_DIR64) {
+                if (tgt + 8 > size_image) return -5;
+                uint64_t val = (uint64_t)pe_rd32(slot) |
+                               ((uint64_t)pe_rd32(slot + 4) << 32);
+                val += (int64_t)delta;
+                *(uint32_t *)slot = (uint32_t)val;
+                *(uint32_t *)(slot + 4) = (uint32_t)(val >> 32);
+            } else {
+                return -5;    /* unsupported reloc type: reject, do not skip */
+            }
+        }
+        cur += blk_size;
+    }
+    return 0;
+}
+
+
 static uint32_t pe_rd32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -3011,12 +3083,37 @@ static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
     if (opt_magic != PE_OPT_MAGIC_32) return -5;         /* PE32+ / other */
 
     uint32_t entry_rva  = pe_rd32(opt + 16);
-    uint32_t image_base = pe_rd32(opt + 28);
+    uint32_t pref_base  = pe_rd32(opt + 28);
     uint32_t size_image = pe_rd32(opt + 56);
-    if (image_base >= PE_HIGH_BASE) return -5;           /* high address */
+    if (pref_base >= PE_HIGH_BASE) return -5;            /* high address */
     if (size_image == 0 || size_image > USER_EXT_SIZE) return -5;
-    if (image_base < USER_IMAGE_BASE) return -5;
-    if (image_base > USER_EXT_END - size_image) return -5;
+
+    /* Base selection: keep the preferred ImageBase when it lands inside the
+     * user arena; otherwise slide the image to the fixed legacy image slot
+     * below the heap.  The relocation pass below fixes every absolute slot
+     * by the resulting load delta (load_base - pref_base). */
+    uint32_t load_base;
+    if (pref_base >= USER_IMAGE_BASE &&
+        pref_base <= USER_EXT_END - size_image) {
+        load_base = pref_base;
+    } else {
+        load_base = USER_IMAGE_BASE;
+        if (load_base + size_image > USER_HEAP_BASE) return -5;
+    }
+    int32_t delta = (int32_t)(load_base - pref_base);
+
+    /* DataDirectory[5]: Base Relocation Table (PE32 directory starts at
+     * optional-header offset 96; each entry is RVA(4) + size(4)). */
+    uint32_t rel_rva = 0, rel_size = 0;
+    uint32_t n_dirs = pe_rd32(opt + 92);
+    if (n_dirs > PE_OPT_DIR_RELOC) {
+        uint32_t dir_off = opt_off + 96 + PE_OPT_DIR_RELOC * 8;
+        if (dir_off + 8 > fsize) return -5;
+        uint8_t dir[8];
+        if (fat_pread(clus0, fsize, dir_off, 8, dir) != 0) return -4;
+        rel_rva  = pe_rd32(dir);
+        rel_size = pe_rd32(dir + 4);
+    }
 
     uint32_t sect_off = opt_off + coff.SizeOfOptionalHeader;
     if ((uint64_t)sect_off + (uint64_t)coff.NumberOfSections * sizeof(pe_section_t)
@@ -3031,7 +3128,7 @@ static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
     struct { uint32_t start, end; int w; } rg[PE_MAX_SECTIONS];
     int nrg = 0;
     for (int i = 0; i < coff.NumberOfSections; i++) {
-        uint32_t va  = image_base + sec[i].VirtualAddress;
+        uint32_t va  = load_base + sec[i].VirtualAddress;
         uint32_t mem = sec[i].VirtualSize;
         if (mem < sec[i].SizeOfRawData) mem = sec[i].SizeOfRawData;
         if (mem == 0) continue;
@@ -3077,7 +3174,7 @@ static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
         static uint8_t fb2[FAT_CLUSTER_SZ_MAX];
         uint32_t remaining = sec[i].SizeOfRawData;
         uint32_t off = sec[i].PointerToRawData;
-        uint32_t va = image_base + sec[i].VirtualAddress;
+        uint32_t va = load_base + sec[i].VirtualAddress;
         while (remaining) {
             uint32_t n = remaining > sizeof(fb2) ? sizeof(fb2) : remaining;
             if (fat_pread(clus0, fsize, off, n, fb2) != 0) return -4;
@@ -3086,7 +3183,12 @@ static int spawn_load_pe(task_t *t, uint32_t clus0, uint32_t fsize,
         }
     }
 
-    uint32_t entry = image_base + entry_rva;
+    /* Apply base relocations: fix every absolute slot by the load delta. */
+    int rel = pe_apply_relocs(t, load_base, size_image, rel_rva, rel_size,
+                              delta);
+    if (rel != 0) return rel;
+
+    uint32_t entry = load_base + entry_rva;
     int ok = 0;
     for (int i = 0; i < nrg; i++)
         if (entry >= rg[i].start && entry < rg[i].end) ok = 1;
