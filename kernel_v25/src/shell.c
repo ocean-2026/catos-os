@@ -2400,6 +2400,66 @@ static int run_from_path(const char *cmd, char **argv, int argc, int bg, int uid
     return -1;
 }
 
+/* H10: resolve a pipeline right-hand command the same way a bare external
+ * command is found -- absolute path as-is, otherwise cwd first then $PATH,
+ * appending ".ce" when the name carries no extension.  Fills `out` with the
+ * resolved path on a hit (0), returns -1 when absent, -2 when refused by the
+ * exec capability gate. */
+static int resolve_pipe_target(const char *name, char *out, int outlen, int uid) {
+    if (!name || !*name) return -1;
+    if (!fs_fs_ready()) return -1;
+    uint32_t c = 0, s = 0;
+    const char *ext = cmd_has_ext(name) ? "" : ".ce";
+
+    if (name[0] == '/') {
+        out[0] = 0;
+        if (strcat_b(out, outlen, name) != 0) return -1;
+        if (strcat_b(out, outlen, ext) != 0) return -1;
+        if (fs_resolve_file(out, &c, &s) != 0) return -1;
+        char why[56];
+        return sec_exec_check(out, uid, why, sizeof(why)) == 0 ? 0 : -2;
+    }
+
+    char pwd[FS_PATH_MAX];
+    fs_pwd(pwd, sizeof(pwd));
+    out[0] = 0;
+    if (!(pwd[0] == '/' && pwd[1] == 0)) {
+        if (strcat_b(out, outlen, pwd) != 0) return -1;
+        if (strcat_b(out, outlen, "/") != 0) return -1;
+    } else {
+        strcat_b(out, outlen, "/");
+    }
+    if (strcat_b(out, outlen, name) != 0) return -1;
+    if (strcat_b(out, outlen, ext) != 0) return -1;
+    if (fs_resolve_file(out, &c, &s) == 0) {
+        char why[56];
+        return sec_exec_check(out, uid, why, sizeof(why)) == 0 ? 0 : -2;
+    }
+
+    const char *pathv = env_get_("PATH");
+    if (!pathv || !*pathv) pathv = "/bin";
+    const char *seg = pathv;
+    while (*seg) {
+        char dir[64];
+        int di = 0;
+        while (*seg && *seg != ':' && di < (int)sizeof(dir) - 1)
+            dir[di++] = *seg++;
+        dir[di] = 0;
+        if (*seg == ':') seg++;
+        if (!di) continue;
+        out[0] = 0;
+        if (strcat_b(out, outlen, dir) != 0) continue;
+        if (dir[di - 1] != '/' && strcat_b(out, outlen, "/") != 0) continue;
+        if (strcat_b(out, outlen, name) != 0) continue;
+        if (strcat_b(out, outlen, ext) != 0) continue;
+        if (fs_resolve_file(out, &c, &s) == 0) {
+            char why[56];
+            return sec_exec_check(out, uid, why, sizeof(why)) == 0 ? 0 : -2;
+        }
+    }
+    return -1;
+}
+
 /* spawn a .ce as a ring3 task; foreground runs wait for it to exit,
  * background ('&') returns to the shell immediately */
 void spawn_and_maybe_wait(const char *path, int argc, char **argv, int bg, int uid) {
@@ -2523,7 +2583,9 @@ static void spawn_ce_redirect(const char *path, int argc, char **argv,
 }
 
 static void vga_clear_disabled(void) { }
-static void cmd_run(char *arg, int uid) {
+static void cmd_run(char *arg, int uid,
+                    const char *pre_redir, int pre_append,
+                    const char *pre_pipe) {
     while (*arg == ' ') arg++;
     if (!*arg) {
         vga_write(trs("usage: run FILE.ce [args...] [&] [> F] [>> F] [| CMD]\n", "用法：run FILE.ce [args...] [&] [> F] [>> F] [| CMD]\n"));
@@ -2531,8 +2593,15 @@ static void cmd_run(char *arg, int uid) {
     }
     if (!fs_fs_ready()) { vga_write(trs("run: no FAT32 volume.\n", "run: 没有 FAT32 卷.\n")); return; }
 
-    char *out_redir = 0, *pipe_to = 0; int append = 0;
-    parse_redir(arg, &out_redir, &append, &pipe_to);
+    /* H10: shell_exec already parsed the redirect/pipe marker once up front
+     * (shell_line_noninteractive) and truncated arg at the operator; re-parsing
+     * that truncated string here would lose the right-hand command and the
+     * pipeline would never wire.  Reuse the parsed pointers, falling back to a
+     * local parse only when the caller did not supply them. */
+    char *out_redir = (char *)pre_redir, *pipe_to = (char *)pre_pipe;
+    int append = pre_append;
+    if (!out_redir && !pipe_to)
+        parse_redir(arg, &out_redir, &append, &pipe_to);
 
     /* split FILE.ce from its arguments */
     char *file = arg;
@@ -2617,11 +2686,20 @@ static void cmd_run(char *arg, int uid) {
         int argc2 = 1;
         argv2[0] = file2;
         argc2 += split_words(sp, argv2 + 1, 15);
+        /* H10: resolve the consumer through cwd/PATH as well as an absolute
+         * path; a bare name no longer fails to load with err -2. */
+        char p2[FS_PATH_MAX];
+        int r2 = resolve_pipe_target(file2, p2, sizeof(p2), uid);
+        if (r2 != 0) {
+            vga_write(trs("run: cannot load '", "run: 无法加载 '"));
+            vga_write(file2); vga_write("'\n");
+            return;
+        }
         int h = kpipe_create();
         if (h < 0) { vga_write(trs("run: no pipe slots\n", "run: 没有空闲管道\n")); return; }
         vga_clear();
         spawn_ce_redirect(file, argc, argv, 0, uid, 0, 0, h, -1);
-        spawn_ce_redirect(file2, argc2, argv2, 1, uid, 0, 0, -1, h);
+        spawn_ce_redirect(p2, argc2, argv2, 1, uid, 0, 0, -1, h);
         return;
     }
     vga_clear_disabled();
@@ -7474,7 +7552,7 @@ static void shell_exec(char *cmd, char *arg) {
             else vga_write(trs("format: permission denied (need CAP_FSADMIN or CAP_FORMAT)\n", "format: 权限不足 (need CAP_FSADMIN or CAP_FORMAT)\n"));
         }
         else if (!strcmp_(cmd, "edit"))      cmd_edit(arg);
-        else if (!strcmp_(cmd, "run"))        cmd_run(arg, g_uid);
+        else if (!strcmp_(cmd, "run"))        cmd_run(arg, g_uid, out_redir, append, pipe_to);
         else if (!strcmp_(cmd, "sudo")) {
             /* sudo CMD ...: run as root; requires CAP_USERADM (or root) */
             if (!session_is_admin()) {
@@ -7486,7 +7564,7 @@ static void shell_exec(char *cmd, char *arg) {
             while (*sarg && *sarg != ' ') sarg++;
             if (*sarg) { *sarg = 0; sarg++; while (*sarg == ' ') sarg++; }
             if (!*scmd) { vga_write(trs("usage: sudo COMMAND [args...]\n", "用法：sudo COMMAND [args...]\n")); }
-            else if (!strcmp_(scmd, "run"))   cmd_run(sarg, UID_ROOT);
+            else if (!strcmp_(scmd, "run"))   cmd_run(sarg, UID_ROOT, out_redir, append, pipe_to);
             else if (!strcmp_(scmd, "sudo")) {
                 vga_write(trs("sudo: no nested sudo\n", "sudo: 不支持嵌套 sudo\n"));
             } else {
@@ -7595,9 +7673,10 @@ static void shell_exec(char *cmd, char *arg) {
             /* not a builtin: current-dir program, then /bin (PATH), else
              * report an unknown command.  Runs as uid USER (use 'sudo'
              * for root).  A trailing '&' backgrounds the task.  v2.5:
-             * `cmd [> F | >> F | | CMD]` redirection is supported. */
-            char *out_redir = 0, *pipe_to = 0; int append = 0;
-            parse_redir(arg, &out_redir, &append, &pipe_to);
+             * `cmd [> F | >> F | | CMD]` redirection is supported.
+             * H10: out_redir/append/pipe_to are the values parsed once up
+             * front in shell_exec; arg was already truncated at the operator,
+             * so re-parsing here would drop the right-hand command. */
             char *argv[16];
             int argc = 1;
             argv[0] = cmd;
@@ -7641,12 +7720,24 @@ static void shell_exec(char *cmd, char *arg) {
                     int argc2 = 1;
                     argv2[0] = file2;
                     argc2 += split_words(sp, argv2 + 1, 15);
-                    int h = kpipe_create();
-                    if (h < 0) { vga_write(trs("run: no pipe slots\n", "run: 没有空闲管道\n")); }
-                    else {
-                        vga_clear();
-                        spawn_ce_redirect(p, argc, argv, 0, g_uid, 0, 0, h, -1);
-                        spawn_ce_redirect(file2, argc2, argv2, 1, g_uid, 0, 0, -1, h);
+                    /* H10: resolve the consumer through cwd/PATH like the
+                     * producer; a bare `sink_ce.ce` must not fail with err -2. */
+                    char p2[FS_PATH_MAX];
+                    int r2 = resolve_pipe_target(file2, p2, sizeof(p2), g_uid);
+                    if (r2 != 0) {
+                        con_set_fg_rgb(pal_rgb(PAL_ERROR));
+                        vga_write(trs("catos: unknown command: ", "catos: 未知 命令: "));
+                        vga_write(file2); vga_write("\n");
+                        con_set_fg_rgb(pal_rgb(PAL_FG));
+                        g_last_rc = 127;
+                    } else {
+                        int h = kpipe_create();
+                        if (h < 0) { vga_write(trs("run: no pipe slots\n", "run: 没有空闲管道\n")); }
+                        else {
+                            vga_clear();
+                            spawn_ce_redirect(p, argc, argv, 0, g_uid, 0, 0, h, -1);
+                            spawn_ce_redirect(p2, argc2, argv2, 1, g_uid, 0, 0, -1, h);
+                        }
                     }
                 } else {
                     vga_clear();
