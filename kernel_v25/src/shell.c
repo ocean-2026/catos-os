@@ -619,7 +619,7 @@ static void cmd_sndtest(const char *arg) {
      * perfectly played tone.  SB16 keeps the strict IRQ check. */
     int completed = (snd_info(SND_INFO_BACKEND) == 2) ? 1 : (after > before);
     if (completed && !snd_info(SND_INFO_PLAYING))
-        vga_write("SNDTEST PASS\n");
+        vga_write(trs("SNDTEST PASS\n", "SNDTEST 通过\n"));
     else
         vga_write(trs("SNDTEST FAIL (no DMA completion IRQ)\n", "SNDTEST 失败（没有 DMA 完成中断）\n"));
 }
@@ -653,7 +653,7 @@ static void cmd_style(const char *arg) {
         uint32_t rgb;
         if (con_parse_color(p + 3, &rgb) == 0) {
             con_set_fg_rgb(rgb);
-            vga_write("fg set to 0x"); print_hex(rgb); vga_write("\n");
+            vga_write(trs("fg set to 0x", "前景色设为 0x")); print_hex(rgb); vga_write("\n");
         } else {
             vga_write(trs("style: bad colour spec (see 'help')\n", "style: 颜色规格错误（见 help）\n"));
         }
@@ -663,7 +663,7 @@ static void cmd_style(const char *arg) {
         uint32_t rgb;
         if (con_parse_color(p + 3, &rgb) == 0) {
             con_set_bg_rgb(rgb);
-            vga_write("bg set to 0x"); print_hex(rgb); vga_write("\n");
+            vga_write(trs("bg set to 0x", "背景色设为 0x")); print_hex(rgb); vga_write("\n");
         } else {
             vga_write(trs("style: bad colour spec (see 'help')\n", "style: 颜色规格错误（见 help）\n"));
         }
@@ -810,9 +810,10 @@ static void cmd_theme(const char *arg) {
     con_repaint_frame();
     /* v2.67: the i18n entry is a TEMPLATE ("theme set to %s"); printing
      * it raw leaked the %s into the terminal. */
-    vga_write("theme: applied '"); vga_write(name);
-    vga_write("' -- colors stored in HKLM\\Software\\CatOS\\Terminal\\Colors");
-    vga_write(hive_dirty() ? " (run `hive save` to persist)\n" : " and saved\n");
+    vga_write(trs("theme: applied '", "theme: 已应用 '")); vga_write(name);
+    vga_write(trs("' -- colors stored in HKLM\\Software\\CatOS\\Terminal\\Colors",
+                  "' —— 颜色已存入 HKLM\\Software\\CatOS\\Terminal\\Colors"));
+    vga_write(hive_dirty() ? " (run `hive save` to persist)\n" : trs(" and saved\n", "，已保存\n"));
 }
 
 /* v2.67: `hive` (alias `reg`) -- binary tree registry front-end.
@@ -1694,7 +1695,7 @@ static void cmd_clip(char *arg) {
     while (*p == ' ') p++;
     if (!strcmp_(p, "-c") || !strcmp_(p, "clear")) {
         clip_clear();
-        vga_write("clip: cleared\n");
+        vga_write(trs("clip: cleared\n", "clip: 剪贴板已清空\n"));
         return;
     }
     if (*p) { vga_write(trs("clip: unknown argument\n", "clip: 未知参数\n")); return; }
@@ -2800,7 +2801,7 @@ static void cmd_netcfg(char *arg) {
         vga_write("netcfg: DHCP discover ...\n");
         net_dhcp_retry();
         if (net_dhcp_ok()) {
-            vga_write("netcfg: dhcp ok  ip ");
+            vga_write(trs("netcfg: dhcp ok  ip ", "netcfg: DHCP 获取成功  ip "));
             for (int i = 0; i < 4; i++) { print_int(net_our_ip[i]); if (i < 3) vga_write("."); }
             vga_write("  gw ");
             for (int i = 0; i < 4; i++) { print_int(net_gw_ip[i]); if (i < 3) vga_write("."); }
@@ -2842,7 +2843,7 @@ static void cmd_netcfg(char *arg) {
     if (n >= 3 && ip4_parse_(w[2], dns)) net_dns_server_set(dns);
     net_arp_flush();
     net_cfg_user_set();                    /* v2.66: static wins over DHCP */
-    vga_write("netcfg: ip/gw/dns updated, ARP cache cleared\n");
+    vga_write(trs("netcfg: ip/gw/dns updated, ARP cache cleared\n", "netcfg: ip/网关/DNS 已更新，ARP 缓存已清空\n"));
 }
 
 /* ---------- hwinfo: full hardware-properties dump ---------- */
@@ -3887,16 +3888,16 @@ static void cmd_edit(const char *arg) {
             con_set_style_rgb(pal_rgb(PAL_FG), pal_rgb(PAL_BG), 0);
             ime_off();
             vga_clear();
-            vga_write("edit: saved ");
+            vga_write(trs("edit: saved ", "edit: 已保存 "));
             print_int(fs_file_size(f));
-            vga_write(" bytes.\n");
+            vga_write(trs(" bytes.\n", " 字节。\n"));
             return;
         }
         if (k == 0x0F || k == 0x13) {       /* ^O / ^S save */
             if (ed_save(f) != 0)
                 ed_status_msg("SAVE FAILED: exceeds editor buffer limit");
             else
-                ed_status_msg("Saved.");
+                ed_status_msg(trs("Saved.", "已保存。"));
             continue;
         }
         if (k == 0x07) {                    /* ^G help */
@@ -4048,7 +4049,7 @@ static void cmd_crashlog(char *arg) {
     }
     int full = !strcmp_(arg, "--full") || !strcmp_(arg, "-f");
 
-    vga_write("crashlog: saved panic record\n");
+    vga_write(trs("crashlog: saved panic record\n", "crashlog: 崩溃记录已保存\n"));
     vga_write("version: "); vga_write(r->version); vga_write("\n");
     vga_write("tick=");
     { static const char *h = "0123456789abcdef";
@@ -4312,7 +4313,7 @@ static void cmd_groupadd(char *arg) {
         return;
     }
     if (group_save() != 0) { vga_write(trs("groupadd: WARNING: could not persist\n", "groupadd: 警告： could not persist\n")); return; }
-    vga_write("group '"); vga_write(argv[0]); vga_write("' gid ");
+    vga_write(trs("group '", "组 '")); vga_write(argv[0]); vga_write("' gid ");
     print_int(gid); vga_write("\n");
 }
 
@@ -4401,7 +4402,7 @@ static void cmd_useradd(char *arg) {
             kb_readline(ans, sizeof(ans));
             if (ans[0] == 'y' || ans[0] == 'Y') {
                 caps |= W[i].bit;
-                vga_write("     -> granted\n");
+                vga_write(trs("     -> granted\n", "     -> 已授予\n"));
             } else {
                 vga_write(trs("     -> denied\n", "     -> 已拒绝\n"));
             }
@@ -4424,7 +4425,7 @@ static void cmd_useradd(char *arg) {
     if (r == -5) { vga_write(trs("useradd: name or uid already exists\n", "useradd: 用户名或 uid 已存在\n")); return; }
     if (r != 0)  { vga_write(trs("useradd: failed (table full?)\n", "useradd: 失败 (table full?)\n")); return; }
     if (user_save() != 0) vga_write(trs("useradd: WARNING: could not persist /etc/passwd\n", "useradd: 警告： could not persist /etc/passwd\n"));
-    else vga_write("user added (persisted to /etc/passwd)\n");
+    else vga_write(trs("user added (persisted to /etc/passwd)\n", "用户已添加（已写入 /etc/passwd）\n"));
 }
 
 static void cmd_userdel(char *arg) {
@@ -4438,7 +4439,7 @@ static void cmd_userdel(char *arg) {
     int r = user_del(argv[0]);
     if (r == -1) { vga_write(trs("userdel: no such user\n", "userdel: 找不到用户\n")); return; }
     if (user_save() != 0) vga_write(trs("userdel: WARNING: could not persist\n", "userdel: 警告： could not persist\n"));
-    else vga_write("user deleted\n");
+    else vga_write(trs("user deleted\n", "用户已删除\n"));
 }
 
 static void cmd_passwd(char *arg) {
@@ -4468,7 +4469,7 @@ static void cmd_passwd(char *arg) {
     }
     user_set_pw(name, pw);
     if (user_save() != 0) vga_write(trs("passwd: WARNING: could not persist\n", "passwd: 警告： could not persist\n"));
-    else vga_write("password set\n");
+    else vga_write(trs("password set\n", "口令已设置\n"));
 }
 
 static void cmd_chcaps(char *arg) {
@@ -4488,7 +4489,7 @@ static void cmd_chcaps(char *arg) {
         return;
     }
     if (user_save() != 0) vga_write(trs("chcaps: WARNING: could not persist\n", "chcaps: 警告： could not persist\n"));
-    else vga_write("capabilities updated\n");
+    else vga_write(trs("capabilities updated\n", "权限位已更新\n"));
     user_rec_t *tu = user_by_name(argv[1]);
     if (tu && g_uid == tu->uid) session_apply();
 }
@@ -4517,7 +4518,7 @@ static void cmd_chmod(char *arg) {
         return;
     }
     if (acl_save() != 0) vga_write(trs("chmod: WARNING: could not persist\n", "chmod: 警告： could not persist\n"));
-    else vga_write("mode updated\n");
+    else vga_write(trs("mode updated\n", "权限模式已更新\n"));
 }
 
 /* chown UID[:GID] PATH   (root or CAP_FSADMIN) */
@@ -4545,7 +4546,7 @@ static void cmd_chown(char *arg) {
     if (gid < 0) gid = fgid;
     if (acl_set(path, uid, gid, fmode) != 0) { vga_write("chown: acl table full\n"); return; }
     if (acl_save() != 0) vga_write(trs("chown: WARNING: could not persist\n", "chown: 警告： could not persist\n"));
-    else vga_write("owner updated\n");
+    else vga_write(trs("owner updated\n", "所有者已更新\n"));
 }
 
 /* ---------- file utilities: cat / rm / cp / mv (v2.14) ------------------
@@ -5259,7 +5260,8 @@ static void cmd_pkg_update(void) {
     if (fs_write_text(PKG_INDEX, pkg_idx_buf, (uint32_t)rd) != 0) {
         vga_write(trs("pkg: failed to write local index\n", "pkg：写入本地索引失败\n")); return;
     }
-    vga_write("pkg: index updated ("); print_int(rd); vga_write(" bytes)\n");
+    vga_write(trs("pkg: index updated (", "pkg: 索引已更新（")); print_int(rd);
+    vga_write(trs(" bytes)\n", " 字节）\n"));
 }
 
 /* ---- v2.78 (D10): install straight from a file -------------------------
@@ -5385,7 +5387,7 @@ static void pkg_install_file(const char *path) {
         vga_write(trs("pkg: install failed (disk full?)\n", "pkg: install 失败 (disk full?)\n")); return;
     }
     acl_set(dst, g_uid, g_gid, 0755);
-    vga_write("pkg: installed "); vga_write(cmd);
+    vga_write(trs("pkg: installed ", "pkg: 已安装 ")); vga_write(cmd);
     vga_write(" -> "); vga_write(dst); vga_write("\n");
 }
 
@@ -5488,7 +5490,7 @@ static void cmd_pkg_remove(const char *name) {
     }
     if (fs_delete(dst) != 0) { vga_write(trs("pkg: remove failed\n", "pkg: remove 失败\n")); return; }
     acl_unset(dst);
-    vga_write("pkg: removed "); vga_write(recs[i].name); vga_write("\n");
+    vga_write(trs("pkg: removed ", "pkg: 已移除 ")); vga_write(recs[i].name); vga_write("\n");
 }
 
 static void cmd_pkg(char *arg) {
@@ -6173,7 +6175,7 @@ static void cmd_fsck(char *arg) {
 
     int r = fat_verify_mirror();
     if (r < 0)      vga_write(trs("fsck: ATA error while comparing FAT mirrors\n", "fsck: ATA 错误 while comparing FAT mirrors\n"));
-    else if (r == 0) vga_write("fsck: FAT mirror OK\n");
+    else if (r == 0) vga_write(trs("fsck: FAT mirror OK\n", "fsck: FAT 镜像正常\n"));
     else {
         vga_write("fsck: repaired "); print_int(r);
         vga_write(" FAT sector(s) from mirror #1\n");
@@ -6182,7 +6184,7 @@ static void cmd_fsck(char *arg) {
     struct fsck_ud u = { 0, 0, purge };
     int n = fat_fsck_scan(fat_root(), fsck_report_cb, &u, purge);
     if (n == 0) {
-        vga_write("fsck: directory tree OK\n");
+        vga_write(trs("fsck: directory tree OK\n", "fsck: 目录树正常\n"));
     } else {
         vga_write("fsck: "); print_int(u.bad);
         vga_write(trs(" bad entries, ", " 错误的 entries, ")); print_int(u.repairable);
@@ -6913,7 +6915,7 @@ static void cmd_mount(char *arg) {
     int rc = fs_mount(argv[0], argv[1]);
     switch (rc) {
     case FS_OK:
-        vga_write("mount: "); vga_write(argv[1]); vga_write(" mounted\n");
+        vga_write("mount: "); vga_write(argv[1]); vga_write(trs(" mounted\n", " 已挂载\n"));
         break;
     case FS_ERR_NOENT:  vga_write(trs("mount: target directory not found\n", "挂载: target 目录 未找到\n")); break;
     case FS_ERR_NOTDIR: vga_write(trs("mount: target is not a directory\n", "挂载: target is 不是目录\n")); break;
@@ -6936,7 +6938,7 @@ static void cmd_umount(char *arg) {
     if (argc < 1) { vga_write(trs("usage: umount <directory>\n", "用法：umount <目录>\n")); return; }
     int rc = fs_umount(argv[0]);
     switch (rc) {
-    case FS_OK:         vga_write("umount: detached\n"); break;
+    case FS_OK:         vga_write(trs("umount: detached\n", "umount: 已卸载\n")); break;
     case FS_ERR_NOENT:  vga_write(trs("umount: not a mount point\n", "umount: 不是挂载点\n")); break;
     case FS_ERR_INVAL:  vga_write(trs("umount: bad argument\n", "umount: 错误的 参数\n")); break;
     case -14:           vga_write("umount: busy (current directory is inside)\n"); break;
@@ -8024,7 +8026,7 @@ static void cmd_autostart(const char *arg) {
         while (*w && n < 62) body[n++] = *w++;
         body[n++] = '\n';
         fs_write_raw_mode("/etc/autostart", body, (uint32_t)n, 0);
-        vga_write("autostart: wrote /etc/autostart (");
+        vga_write(trs("autostart: wrote /etc/autostart (", "autostart: 已写入 /etc/autostart ("));
         vga_write(what);
         vga_write(")\n");
         return;
