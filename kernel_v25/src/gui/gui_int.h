@@ -51,6 +51,10 @@ void      gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scal
 void      gui_blit24(const uint8_t *src, int x, int y, int w, int h);
 void      gui_blit24_stride(const uint8_t *src, int x, int y, int w, int h,
                             int stride);
+/* v2.83 A7.3 最近邻缩放铺满 + 指针逆映射（fit 档位见 block.h FIT_*）。 */
+void      gui_blit24_scaled(int dx, int dy, int dw, int dh, const uint8_t *src,
+                            int sw, int sh, int mode);
+void      gui_fit_inv_map(block *b, int lx, int ly, int *sx, int *sy);
 int       cv_dirty_rect(block *b, int *rx, int *ry, int *rw, int *rh);
 void      cv_dirty_clear(block *b);
 

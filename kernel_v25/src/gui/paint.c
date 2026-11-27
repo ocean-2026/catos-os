@@ -118,6 +118,64 @@ void gui_blit24(const uint8_t *src, int x, int y, int w, int h) {
     gui_blit24_stride(src, x, y, w, h, w);
 }
 
+/* v2.83 A7.3 整数最近邻缩放：列/行源索引表在进入像素循环前预计算一次，整行
+ * 复用，禁止每像素做除法。mode=FIT_FILL 拉伸铺满 dst 矩形；FIT_NONE 回退 1:1。
+ * 源/目标均 RGB24 紧凑排列。 */
+void gui_blit24_scaled(int dx, int dy, int dw, int dh, const uint8_t *src,
+                       int sw, int sh, int mode) {
+    if (!src || dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+    if (mode == FIT_NONE) { gui_blit24(src, dx, dy, dw, dh); return; }
+
+    dx -= trans_x(); dy -= trans_y();
+    int ox = dx, oy = dy, ow = dw, oh = dh;
+    if (!clip_rect(&dx, &dy, &dw, &dh)) return;
+
+    static int col[GFX24_W], row[GFX24_H];
+    for (int i = 0; i < ow && i < GFX24_W; i++) col[i] = (i * sw) / ow;
+    for (int j = 0; j < oh && j < GFX24_H; j++) row[j] = (j * sh) / oh;
+
+    int blend = paint_cur && (paint_cur->alpha || cap2_shape_declared(paint_cur));
+    int xoff = dx - ox, yoff = dy - oy;   /* 裁剪后相对原始目标矩形的偏移 */
+    volatile uint8_t *lfb = gfx24_lfb_ptr();
+    int pitch = gfx24_pitch();
+    uint8_t stride = gfx24_stride();
+    int packed4 = (stride == 4u) && lfb;
+    for (int j = 0; j < dh; j++) {
+        int sy = row[yoff + j];
+        const uint8_t *srow = src + (uint32_t)sy * (uint32_t)sw * 3u;
+        int X = dx, Y = dy + j;
+        volatile uint8_t *drow = packed4 ? lfb + (uint32_t)Y * (uint32_t)pitch : 0;
+        for (int i = 0; i < dw; i++) {
+            int sx = col[xoff + i];
+            const uint8_t *p = srow + (uint32_t)sx * 3u;
+            uint32_t sc = ((uint32_t)p[0] << 16) |
+                          ((uint32_t)p[1] <<  8) | (uint32_t)p[2];
+            if (blend) {
+                int cov = blk_cov((block *)paint_cur, X + i, Y);
+                blend_px(X + i, Y, sc, cov);
+            } else if (packed4) {
+                volatile uint32_t *dp = (volatile uint32_t *)(drow + (uint32_t)(X + i) * 4u);
+                *dp = sc | (0xFFu << 24);
+            } else {
+                clip_putpx(X + i, Y, sc);
+            }
+        }
+    }
+}
+
+/* v2.83 A7.3 指针逆映射：块内局部坐标 -> 源图像坐标（最近邻同口径）。
+ * fit=NONE 或源/目标尺寸缺失时恒等映射；结果按源尺寸钳制不越界。 */
+void gui_fit_inv_map(block *b, int lx, int ly, int *sx, int *sy) {
+    if (!b || !sx || !sy) return;
+    if (b->fit == FIT_NONE || b->pix_w <= 0 || b->pix_h <= 0 ||
+        b->w <= 0 || b->h <= 0) { *sx = lx; *sy = ly; return; }
+    int mx = (lx * b->pix_w) / b->w;
+    int my = (ly * b->pix_h) / b->h;
+    if (mx < 0) mx = 0; if (mx >= b->pix_w) mx = b->pix_w - 1;
+    if (my < 0) my = 0; if (my >= b->pix_h) my = b->pix_h - 1;
+    *sx = mx; *sy = my;
+}
+
 void gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale) {
     if (!txt) return;
     x -= trans_x(); y -= trans_y();
@@ -897,9 +955,19 @@ void paint_node_body(block *b) {
     }
     case BLK_IMAGE:
     case BLK_SURFACE:
-        gui_blit24(b->pix, b->x, b->y, b->pix_w, b->pix_h);
+        if (b->fit == FIT_FILL)
+            gui_blit24_scaled(b->x, b->y, b->w, b->h, b->pix,
+                              b->pix_w, b->pix_h, FIT_FILL);
+        else
+            gui_blit24(b->pix, b->x, b->y, b->pix_w, b->pix_h);
         break;
     case BLK_CANVAS: {
+        if (b->fit == FIT_FILL) {
+            gui_blit24_scaled(b->x, b->y, b->w, b->h, b->buf,
+                              b->pix_w, b->pix_h, FIT_FILL);
+            cv_dirty_clear(b);
+            break;
+        }
         int rx, ry, rw, rh;
         if (cv_dirty_rect(b, &rx, &ry, &rw, &rh)) {
             const uint8_t *s = b->buf +

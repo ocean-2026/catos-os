@@ -102,6 +102,11 @@ enum {
     LAYER_TOAST   = 5000
 };
 
+/* v2.83 A7.3 位图/画布缩放档位（block.fit）。 */
+#define FIT_NONE     0    /* 1:1 贴左上（旧行为，默认） */
+#define FIT_CONTAIN  1    /* 等比缩放到完整可见，居中留边（留档） */
+#define FIT_FILL     2    /* 拉伸铺满块框（最近邻） */
+
 /* 声明属性集合（规格 §2 blk_spec）。fg/bg 为 0xFFFFFFFF 表示继承父块。 */
 typedef struct {
     int32_t  req_w, req_h;              /* -1 = auto */
@@ -237,6 +242,10 @@ typedef struct block {
     int32_t  pop_ax, pop_ay, pop_aw, pop_ah;
     int32_t  pop_content_h;
     uint8_t  stroke;                    /* E 轮描边线宽镜像（append-only） */
+
+    /* v2.83 A7.3 位图/画布缩放档位：0=none（1:1 左上，旧行为）；1=contain；2=fill。
+     * 内部字段，不入 blk_spec / CE ABI。 */
+    uint8_t  fit;
 
     const char   *text;
     const uint8_t *pix;

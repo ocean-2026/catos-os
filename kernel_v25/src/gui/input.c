@@ -345,8 +345,12 @@ static void on_press(int x, int y) {
         act_dbl->on_dblclick(act_dbl->id, x - act_dbl->x, y - act_dbl->y);
     else if (!armed && act && act->on_click)
         act->on_click(act->id, x - act->x, y - act->y);
-    /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
-    if (b->owner) decl_post_click(b, x - b->x, y - b->y);
+    /* 声明式应用块：命中事件回投到所属应用队列；fit 缩放块按逆映射换算到源坐标。 */
+    if (b->owner) {
+        int isx = x - b->x, isy = y - b->y;
+        gui_fit_inv_map(b, isx, isy, &isx, &isy);
+        decl_post_click(b, isx, isy);
+    }
 }
 
 static void on_drag_move(int x, int y) {

@@ -1923,6 +1923,60 @@ void gui_probe_menuclick(void) {
     gui_end();
 }
 
+/* A7.3 最近邻缩放 + 逆映射探针：320×240 源铺满 640×480 块，四角采样 = 源四角；
+ * 四角/中心逆映射误差 0；回打合成帧耗时（µs）。 */
+static void gui_probe_scaled(void) {
+    gui_begin();
+    con_request_mode(CON_MODE_VBE24, 0);
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    blk_spec cs = spec_panel(LAYER_WORK, 640, 480, 0);
+    block_id cid = b_canvas(0, &cs, 320, 240);
+    block *cb = btable_get(cid);
+    if (cb) { cb->req_w = 640; cb->req_h = 480; cb->fit = FIT_FILL; }
+
+    /* 源四角 + 中心，互不相同的纯色。 */
+    cv_pixel(cid,   0,   0, 0xFF0000u);   /* TL 红 */
+    cv_pixel(cid, 319,   0, 0x00FF00u);   /* TR 绿 */
+    cv_pixel(cid,   0, 239, 0x0000FFu);   /* BL 蓝 */
+    cv_pixel(cid, 319, 239, 0xFFFF00u);   /* BR 黄 */
+    cv_pixel(cid, 160, 120, 0xFFFFFFu);   /* 中心 白 */
+
+    layout_run();
+    gui_mark_dirty(cid);
+    gui_frame();
+    uint32_t us = stat_last_frame_us();
+
+    int bx = cb ? cb->x : 0, by = cb ? cb->y : 0;
+    int bw = cb ? cb->w : 0, bh = cb ? cb->h : 0;
+    int fitv = cb ? cb->fit : -1;
+    int tl = gfx24_getpx(bx, by) == 0xFF0000u;
+    int tr = gfx24_getpx(bx + bw - 1, by) == 0x00FF00u;
+    int bl = gfx24_getpx(bx, by + bh - 1) == 0x0000FFu;
+    int br = gfx24_getpx(bx + bw - 1, by + bh - 1) == 0xFFFF00u;
+
+    int sx, sy;
+    int inv = 1;
+    gui_fit_inv_map(cb, 0, 0, &sx, &sy); inv &= (sx == 0   && sy == 0);
+    gui_fit_inv_map(cb, bw - 1, bh - 1, &sx, &sy); inv &= (sx == 319 && sy == 239);
+    gui_fit_inv_map(cb, bw / 2, bh / 2, &sx, &sy); inv &= (sx == 160 && sy == 120);
+
+    int ok = tl && tr && bl && br && inv && us <= 8000u;
+    ser_write("GUI:scaled x="); ser_dec(bx);
+    ser_write(" y="); ser_dec(by);
+    ser_write(" w="); ser_dec(bw);
+    ser_write(" h="); ser_dec(bh);
+    ser_write(" fit="); ser_dec(fitv);
+    ser_write(" tl="); ser_dec(tl);
+    ser_write(" tr="); ser_dec(tr);
+    ser_write(" bl="); ser_dec(bl);
+    ser_write(" br="); ser_dec(br);
+    ser_write(" inv="); ser_dec(inv);
+    ser_write(" frame_us="); ser_dec(us);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
 /* A7.2 松开命中触发探针：正常点按（press+release 同点）必须触发；按下后移出
  * 再在块外松手不得触发。 */
 static void gui_probe_clickup(void) {
@@ -2899,6 +2953,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }
         if (!strcmp_probe(arg, "menu-accel")) { gui_probe_menu_accel(); return; }
         if (!strcmp_probe(arg, "clickup"))    { gui_probe_clickup(); return; }
+        if (!strcmp_probe(arg, "scaled"))    { gui_probe_scaled(); return; }
         {
             char aw[16]; const char *ar = 0;
             split_word(arg, aw, sizeof(aw), &ar);
