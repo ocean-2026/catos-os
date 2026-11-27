@@ -177,3 +177,9 @@ CatOS[易错点] 每跑一次 QEMU 套件都会在 `/tmp` 留一份 `catos_qemu_
 CatOS[易错点] Windows 侧压缩大于 1GB 的目录不要用 `C:\Windows\System32\tar.exe -czf`：本机实测 1.23 GB 的 trash 目录产出 tar.gz 只写完 262 MB 就报 `Truncated input file`，解压时在第 200 项中断（中文/长路径混合下更明显）。改用 `Compress-Archive` 出 zip（1128 条目可正常读取，1.23 GB→313 MB），压缩率差一点但可靠。另外仓库内受控文件 `nul`、以及带 `&&`/`:` 的垃圾目录，`Remove-Item` 会静默失败，必须用 `\\?\` 前缀的扩展路径才删得掉。
 
 CatOS[交付记录·v2.80 2026-11-25] main/`feat/gui-blocks` HEAD `70df122`，源码/ISO 基线 `502d203`（tree `20e60757…97c39`），其后纯文档。双 ISO 各 12,079,104 B：release `c6ebc9d3…aba9f`、test `1cf2f08e…addd8`；门禁 vprobe 10/10 157.1s、E3 2/2 80.1s、F11 9/9 161.8s、`--strict` RC=0（`gate-*-0930.log`）。ACPI 关机仅 cherry-pick `94f3ba1`（PM1_CNT 偏移/守卫/`poweroff` 别名）；`feat/smp` 未整体合并——merge-base 旧基 `76d0f646` 会回退 TLS 透传 `77f0ec0`/browser v0.1/ring3 US 位修因 `8fea31e`，AHCI 骨架 `6e99d5e` 未带。AHCI D4 实测 `PxTFD=0x130 / PxSIG=0x101 / DMA 全零`，HBA 未响应，🔶 deferred。
+
+CatOS[易错点] 合成顺序：父容器 z 大于子块 z 时，子块被父 panel 底色覆盖（桌面只剩第一项）。修法是父子同 z，靠先序「父底先、子内容后」；排查先用串口打几何确认布局，再看 compose.c/paint.c。
+CatOS[易错点] ser_dec 是各模块各自一份 static 副本，跨模块引用会 undefined reference；串口打点统一用 serial_log.h 的 ser_hex(tag, v)。
+CatOS[易错点] BLK_ICON 在 layout.c 的 leaf_natural_w/h() 里原本返回 0，新建图标块必须补分支，否则尺寸为 0 不显示。
+CatOS[易错点] QEMU 测试脚本靠 shutil.which 找可执行文件，必须 export PATH=/home/user/bin:$PATH，否则 qemu-system-i386 not found；杀进程用 pkill -9 -x qemu-system-i386，别用 pkill -f qemu（会误杀自己）。
+CatOS[易错点] gfx24 默认后端下 read_screen 读的是 VGA 文本内存，开机后必须先 force_text(s, settle=10) 再 wait_for_prompt，否则命令全被丢弃。
