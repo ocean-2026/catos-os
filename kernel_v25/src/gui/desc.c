@@ -123,6 +123,7 @@ static block *create_block(blk_kind kind, block_id parent_id,
     block *b = btable_alloc(kind);
     if (!b) return 0;
     b->click_on_up = (kind == BLK_BUTTON) ? 1 : 0;   /* 按钮默认松开命中触发 */
+    b->icon_fit = 0;                                /* 默认整格 2× 居中；桌面条目显式置 1 */
     block *p = btable_get(parent_id);
     apply_spec(b, s);
     tree_attach(p ? p : gui_root_block(), b);

@@ -906,7 +906,7 @@ static void build_desktop_icons(block_id root_id) {
             int sx = 0, sy = 0, saved = desk_save_lookup(desk_names[i], &sx, &sy);
 
             blk_spec item = spec_panel(LAYER_WORK, DESK_ITEM_W, DESK_ITEM_H, 0);
-            item.gap = 4;
+            item.gap = 1;
             item.role_bg = ROLE_NONE;
             item.bg = INHERIT_COLOR;
             item.align_cross = XALN_CENTER;
@@ -932,10 +932,14 @@ static void build_desktop_icons(block_id root_id) {
             ic.align_cross = XALN_CENTER;
             ic.tint_role = 3;                  /* accent：跟主题令牌走 */
             ic.z = i;                          /* 与容器同 z：合成按 layer→z 升序，父先序在前，底色才不会盖掉子块 */
-            b_icon(it, &ic, desk_item_icon(is_dir));
+            block_id ic_id = b_icon(it, &ic, desk_item_icon(is_dir));
+            block *ic_b = btable_get(ic_id);
+            if (ic_b) ic_b->icon_fit = 1;      /* P0-2：桌面图标墨迹撑满块框 */
 
             desk_label(shown, desk_labels[i], sizeof(desk_labels[i]));
             blk_spec lb = spec_panel(LAYER_WORK, 0, 16, 0);   /* 自然宽 + 居中，文件名才像 Windows 图标下标签 */
+            lb.role_bg = ROLE_NONE;            /* P0-1r：标签去面板底色条，继承桌面背景 */
+            lb.bg = INHERIT_COLOR;
             lb.align_cross = XALN_CENTER;
             lb.wrap_lines = 1; lb.ellipsis = 1;
             lb.z = i;

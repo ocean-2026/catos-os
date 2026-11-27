@@ -260,6 +260,10 @@ typedef struct block {
     /* v2.83: 1 = 松开且仍命中同块才回调 on_click（按钮/菜单行/开始菜单行）；
      * 0 = 保持旧的按下即触发（画布/可拖面板等，本轮不推广）。 */
     uint8_t  click_on_up;
+    /* v2.84 P0-2: 1 = 图标先扫源 16×16 墨迹 bbox，再最近邻撑满块框（桌面条目）；
+     * 0 = 保持旧整格 2× 居中（标题栏/菜单/对话框图标复用同绘制，像素不变）。
+     * 内部字段，不入 blk_spec / CE ABI。 */
+    uint8_t  icon_fit;
     void (*render)(block_id id);
     void  *usr;
     uint8_t *buf;                       /* BLK_CANVAS 运行时缓冲（24bpp） */

@@ -70,11 +70,49 @@ void icon_draw(block *b, uint32_t fg, uint32_t accent) {
 
     uint8_t ic = b->icon;
     if (ic >= 8) ic = 0;
+    const uint16_t *glyph = ICON_GLYPH[ic];
+
+    if (b->icon_fit) {
+        /* P0-2：先扫源 16×16 墨迹 bbox，再按块 w/h 最近邻非整数映射撑满块框。
+         * 仅桌面条目置位；旧整格 2× 居中路径保留在下方 else，供标题栏/菜单/对话框复用。 */
+        int min_r = 16, max_r = -1, min_c = 16, max_c = -1;
+        for (int row = 0; row < 16; row++) {
+            uint16_t bits = glyph[row];
+            if (!bits) continue;
+            for (int col = 0; col < 16; col++) {
+                if (bits & (1u << (15 - col))) {
+                    if (row < min_r) min_r = row;
+                    if (row > max_r) max_r = row;
+                    if (col < min_c) min_c = col;
+                    if (col > max_c) max_c = col;
+                }
+            }
+        }
+        if (max_r < 0 || max_c < 0) return;            /* 空图标：不画 */
+        int iw = max_c - min_c + 1;
+        int ih = max_r - min_r + 1;
+        int dw = b->w, dh = b->h;
+        for (int dy = 0; dy < dh; dy++) {
+            int sr = min_r + (int)((uint32_t)dy * (uint32_t)ih / (uint32_t)dh);
+            if (sr < 0) sr = 0; if (sr > 15) sr = 15;
+            uint16_t bits = glyph[sr];
+            for (int dx = 0; dx < dw; dx++) {
+                int sc = min_c + (int)((uint32_t)dx * (uint32_t)iw / (uint32_t)dw);
+                if (sc < 0) sc = 0; if (sc > 15) sc = 15;
+                if (!(bits & (1u << (15 - sc)))) continue;
+                int px = b->x + dx, py = b->y + dy;
+                int cov = blk_cov(b, px, py);
+                blk_px_blend(px, py, color, cov);
+            }
+        }
+        (void)accent;
+        return;
+    }
+
     int scale = (b->w >= 24 && b->h >= 24) ? 2 : 1;
     int gw = 16 * scale, gh = 16 * scale;
     int ox = b->x + (b->w - gw) / 2;
     int oy = b->y + (b->h - gh) / 2;
-    const uint16_t *glyph = ICON_GLYPH[ic];
 
     for (int row = 0; row < 16; row++) {
         uint16_t bits = glyph[row];
