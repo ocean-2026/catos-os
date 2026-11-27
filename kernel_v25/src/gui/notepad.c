@@ -211,7 +211,8 @@ void gui_notepad_open(const char *path) {
 
     block_id root_id = gui_root_block()->id;
     blk_spec root = np_panel(LAYER_WORK, NP_BODY_W + NP_PAD * 2,
-                             NP_TITLE_H + NP_BODY_H + NP_STAT_H, 1);
+                             NP_TITLE_H + NP_BODY_H + NP_STAT_H
+                             + NP_PAD * 4, 1);
     root.pad_l = NP_PAD; root.pad_r = NP_PAD;
     root.pad_t = NP_PAD; root.pad_b = NP_PAD;
     root.gap = NP_PAD;

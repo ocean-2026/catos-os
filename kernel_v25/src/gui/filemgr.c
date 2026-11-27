@@ -269,7 +269,10 @@ void gui_filemgr_open(const char *path) {
     if (xlen(fm_cwd) == 0) xcopy(fm_cwd, sizeof(fm_cwd), "/");
 
     block_id root_id = gui_root_block()->id;
-    blk_spec root = cv_panel_local(LAYER_WORK, FM_BODY_W + 16, FM_BODY_H + 64, 1);
+    /* 高度 = pad_t/b + 标题 + 路径条 + 工具行 + 列表 + 状态行 + 4×gap；
+     * 此前漏算 padding/gap，状态行被 clamp_child 压成 h=0。 */
+    blk_spec root = cv_panel_local(LAYER_WORK, FM_BODY_W + 16,
+        16 + 16 + 20 + FM_BODY_H + 16 + 8 * 2 + 4 * 4, 1);
     root.pad_l = 8; root.pad_r = 8; root.pad_t = 8; root.pad_b = 8;
     root.gap = 4;
     root.focusable = 1;

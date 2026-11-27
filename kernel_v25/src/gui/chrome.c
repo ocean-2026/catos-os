@@ -1485,6 +1485,86 @@ void gui_probe_bounds(void) {
     gui_end();
 }
 
+/* ---- R4 裁剪审计（只读探针） -------------------------------------------- */
+/* 遍历块表：列出 visible 但 w/h<=0 的塌陷块，以及未声明允许溢出（非
+ * OVF_VISIBLE / moved / bleed / 高层浮层）却越出父内容框的子块。
+ * 规则口径与 layout.c clamp_child 完全一致；探针只读数，不改几何。 */
+static int audit_zero_n, audit_over_n;
+static void audit_walk(block *b) {
+    for (block *c = b->first_child; c; c = c->next_sibling) {
+        if (c->visible && (c->w <= 0 || c->h <= 0)) {
+            audit_zero_n++;
+            ser_write("GUI:audit-zero id="); ser_dec(c->id);
+            ser_write(" parent="); ser_dec(b->id);
+            ser_write(" kind="); ser_dec((uint32_t)c->kind);
+            ser_write(" w="); ser_dec((int32_t)c->w);
+            ser_write(" h="); ser_dec((int32_t)c->h);
+            ser_write(" txt="); ser_write(c->text ? c->text : "(null)");
+            ser_write("\n");
+        }
+        int declared = (c->overflow == OVF_VISIBLE || c->moved || c->bleed ||
+                        c->layer > b->layer);
+        if (!declared) {
+            int px = b->x, py = b->y, pw = b->w, ph = b->h;
+            if (!c->bleed) {
+                px += b->pad_l; py += b->pad_t;
+                pw -= b->pad_l + b->pad_r;
+                ph -= b->pad_t + b->pad_b;
+            }
+            int inside = c->x >= px && c->y >= py &&
+                         c->x + c->w <= px + pw && c->y + c->h <= py + ph;
+            if (!inside) {
+                audit_over_n++;
+                ser_write("GUI:audit-over id="); ser_dec(c->id);
+                ser_write(" parent="); ser_dec(b->id);
+                ser_write(" child=("); ser_dec((int32_t)c->x);
+                ser_write(","); ser_dec((int32_t)c->y);
+                ser_write(","); ser_dec((int32_t)c->w);
+                ser_write(","); ser_dec((int32_t)c->h);
+                ser_write(") parent=("); ser_dec(px); ser_write(","); ser_dec(py);
+                ser_write(","); ser_dec(pw); ser_write(","); ser_dec(ph);
+                ser_write(")\n");
+            }
+        }
+        audit_walk(c);
+    }
+}
+
+static void gui_probe_audit(const char *comp) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:audit comp=none zero=0 overflow=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    if (!strcmp_probe(comp, "notepad")) gui_notepad_open(0);
+    else if (!strcmp_probe(comp, "canvas")) gui_canvas_demo();
+    else if (!strcmp_probe(comp, "files")) gui_filemgr_open(0);
+    else if (!strcmp_probe(comp, "images")) gui_images_open(0);
+    else if (!strcmp_probe(comp, "browser")) gui_browser_probe_sample();
+    else if (!strcmp_probe(comp, "settings")) gui_settings_open();
+    else if (!strcmp_probe(comp, "term")) gui_term_open();
+
+    layout_run();
+    gui_frame();
+    audit_zero_n = 0; audit_over_n = 0;
+    audit_walk(gui_root_block());
+    ser_write("GUI:audit comp="); ser_write(comp ? comp : "none");
+    ser_write(" zero="); ser_dec((uint32_t)audit_zero_n);
+    ser_write(" overflow="); ser_dec((uint32_t)audit_over_n);
+    ser_write("\n");
+    gui_end();
+    con_set_gui_mode(0);
+    con_force_text();
+    con_clear();
+}
+
 void gui_probe_home(void) {
     gui_begin();
     gui_demo_build();
@@ -2391,6 +2471,11 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
         if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
+        {
+            char aw[16]; const char *ar = 0;
+            split_word(arg, aw, sizeof(aw), &ar);
+            if (!strcmp_probe(aw, "audit")) { gui_probe_audit(ar ? ar : "none"); return; }
+        }
         /* cap2 能力扩展探针族：`gui cap2-<case>`（cap2probe.c 分派三包） */
         {
             int n = 0;
@@ -2404,8 +2489,7 @@ void gui_shell_cmd(const char *arg) {
         {
             char w2[24]; const char *r2 = 0;
             split_word(arg, w2, sizeof(w2), &r2);
-            if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }
-            if (!strcmp_probe(w2, "perf"))  { gui_perf_set(r2 ? r2 : ""); return; }
+            if (!strcmp_probe(w2, "style")) { gui_probe_style(r2 ? r2 : "app"); return; }            if (!strcmp_probe(w2, "perf"))  { gui_perf_set(r2 ? r2 : ""); return; }
             if (!strcmp_probe(w2, "debug")) {
                 char w3[16]; const char *r3 = 0;
                 split_word(r2 ? r2 : "", w3, sizeof(w3), &r3);
