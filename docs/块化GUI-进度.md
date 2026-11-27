@@ -158,3 +158,7 @@ R19 记的"每条一个图标块"实际只是行容器、纯文字。本日补�
 原 `t_render()` 固定"29 行输出 + 底行输入"，输入行永远贴在窗口最下面，空会话时提示符悬在底部、中间一片空。改为按已产出内容动态计行：`used = min(ring_n, T_ROWS-1)`，输出从第 0 行开始画 `used` 行，输入行落在 `row = used`；内容满屏后取最后 `T_ROWS-1` 行，输入行自然停在底行，等价于整体上滚。体块高度仍为 `T_ROWS*16+T_PAD*2`，无需改尺寸。
 
 实测（`f3ac74d` + 本改动，800×600）：空会话 `CatOS block terminal (builtins: ...)` 下一行即 `> `；`ls` 后 `> ` 紧接 `--- 8 entries` 下一行；`help` 满屏时输入行稳在框内底行。截图 `artifacts/parent-verify/pv-open.png` / `pv-ls.png` / `pv-help.png`；`check_link_layout.py --strict` RC=0。
+
+### H14 复评记录（2026-11-28）
+
+H14 24bpp MTRR-WC：H11 后拖动不再整屏标脏、damage 已收敛，顺序拷贝未成为瓶颈 → 已复评，仍不做（理由：LFB 写读混用未验证、收益未测）。未打开 MTRR-WC，未改实现。
