@@ -186,3 +186,35 @@ H14 24bpp MTRR-WC：H11 后拖动不再整屏标脏、damage 已收敛，顺序�
 | ⑥ | VMware 路径 `text` 往返回字模 | **未走查（环境）**：本机 QEMU 无 VMware 宿主，`vmware/` 下仅 vmdk/vmx/scoreboard，无可执行 VMware 通道。文本后端动态字模槽路径在 `be_text.c`，`text` 命令回退 80×25 文本模式（CJK 走动态字模槽）；VMware 下往返回字模是否丢字需在 VMware 宿主复测。 | `src/be_text.c`（动态字模槽）；`shell.c` `cmd_text()`；`vmware/` 目录无字体相关配置 | 未走查（环境：缺 VMware 宿主） |
 
 **未闭环项与下一步定位点**：①②④ 的像素/联动结论需下一轮在 gfx24 探针里补截图断言；③ 需构造"应用摘焦点但不触发关闭路径"用例验证 key_hook 是否残留；⑥ 待 VMware 环境复测 text 往返 CJK 字模。本轮未改任何运行时代码，未引入临时打印。
+
+## 2026-11-28 R5 跨夜批次收尾（双审闭环）
+
+**基线**：main，起点 955b385 → 收尾 d286a12（全部已 push）。
+
+**已落地（按批）**
+| 批次 | 内容 | commit |
+|---|---|---|
+| A–D | 终端标题 Close 靠右（ALN_SPACE_BETWEEN）；桌面拖拽 + `/etc/desktop.layout` 持久化；双击 `on_dblclick` 接线；空桌面去面板居中；Browser 零宽块越界 | aba338b / 24de306 / 8d1cddc |
+| A–D 收尾 | 扩展名判定根因（`name+dot+1`）；双击 .ce 真运行串口留证；跨重启持久化闭环（根因=测试驱动每次开机重拷种子镜像） | 264d441 / 70e8a16 |
+| H11 | 拖动窗口/滚动条只标脏被拖块+旧矩形，damage 收敛（120×80 量级）；H12 判定「H11 已足够，不做影子缓冲」 | a7fea69 |
+| A7.1 | 菜单/浮层字母加速（`&X` 下划线、`kb_alt()`、Alt+字母预选/吞键、popover ↑↓/Enter/字母直达） | c903a7f |
+| A7.2 | `BLK_BUTTON` 改「松开命中同块」触发，进 drag 清 armed；拖动/像素回归未退化 | 64b26ba |
+| A7.3 | `gui_blit24_scaled` 最近邻铺满 + `fit` 档 + 指针逆映射；四角采样全中、误差 0、帧 7.74ms | d41fd40 |
+| A7.4 | `/dev` 虚拟设备 8 节点（cluster=0+真实 size，/dev 拒写），实机 12/12 | 0d2cfa7 |
+| A7.5 | 安装器 `/etc/builtin.ver` 版本+SHA-256 双判据；**实机验收被既有 `/appdevelop` LFN 目录缺陷阻断**（基线复现，非本批回归） | f51b9f5 |
+| H14 | MTRR-WC 复评：damage 已收敛、顺序拷贝非瓶颈 → 仍不做 | 58dddee |
+| B3 | 30 条高频成功提示双语化（trs 325→355，语义未改） | 421351e |
+| A7.7 | 坑清单走查（静态核查；① ② ④ ⑥ 实机项因时间/环境未走查） | de2e713 |
+| E5 | 「512K」查证：最可能指 `USER_HEAP_MAX 0x80000`（用户堆上限）或 CE 镜像+BSS 合计跨度；无 512K 显存常量 | 046bfa2 |
+| 桌面审美 P0 | 图标墨迹 bbox 撑满 32×32（桌面专属 `icon_fit`，其它组件像素不变）、标签去底色、间距 1–3px | d286a12 |
+
+**门禁（clean rebuild，d286a12）**：layout `--strict` RC=0；E3 2/2；GUI 像素 6/6 PASS；vprobe 10/10；drag 2/2。
+
+**双审结论**
+- 功能全量审：无新回归；R4 遗留「终端会话隔离」与「Browser 零宽越界」均闭环；七组件 `gui audit` 全 `zero=0 overflow=0`；D2 左下 `???` 残块未复现。
+- 审美复审（新代理，Windows 10/11 基准）：**认可**（无 P0 阻断）。放行剩余 P1/P2：hover+选中态、空态文案语言、长名 ≥4px 余量、标签行高 16→12–14、列锚点并 8pt 网格、可选实心字形素材。
+
+**遗留**
+- `/appdevelop` LFN 目录创建缺陷（`fat_create_nl` 簇链/`.`/`..` 未初始化）→ 需补进内核问题清单并单独修。
+- A7.6 `BOUND_LOOSE` 未做（时间）；A7.3 contain 档未做。
+- 三路分流缺实机点击探针（静态分派复核 + 组件打开旁证）。
