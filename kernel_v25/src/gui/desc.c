@@ -135,6 +135,12 @@ block_id b_free (block_id parent, const blk_spec *s)  { block *b = create_block(
 block_id b_rect (block_id parent, const blk_spec *s)  { block *b = create_block(BLK_RECT,   parent, s);  return b ? b->id : 0; }
 block_id b_surface(block_id parent, const blk_spec *s){ block *b = create_block(BLK_SURFACE,parent,s);  return b ? b->id : 0; }
 block_id b_divider(block_id parent, const blk_spec *s) { block *b = create_block(BLK_DIVIDER, parent, s); return b ? b->id : 0; }
+block_id b_icon (block_id parent, const blk_spec *s, uint8_t ic) {
+    block *b = create_block(BLK_ICON, parent, s);
+    if (!b) return 0;
+    b->icon = (uint8_t)(ic & 7);
+    return b->id;
+}
 
 static blk_spec spec_or_inherit(block_id parent, const blk_spec *s) {
     blk_spec local;

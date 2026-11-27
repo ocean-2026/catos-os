@@ -19,6 +19,7 @@ static int leaf_natural_w(block *b) {
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
         b->kind == BLK_CANVAS)
         return b->pix_w;
+    if (b->kind == BLK_ICON) return b->req_w;   /* v2.82 R3: 内置图标取显式尺寸 */
     if (b->kind == BLK_SPACER) return b->req_w;
     if (b->kind == BLK_DIVIDER) return 0;
     return 0;
@@ -60,6 +61,7 @@ static int leaf_natural_h(block *b) {
     if (b->kind == BLK_IMAGE || b->kind == BLK_SURFACE ||
         b->kind == BLK_CANVAS)
         return b->pix_h;
+    if (b->kind == BLK_ICON) return b->req_h;   /* v2.82 R3: 内置图标取显式尺寸 */
     if (b->kind == BLK_SPACER) return b->req_h;
     if (b->kind == BLK_DIVIDER) return 1;
     return 0;

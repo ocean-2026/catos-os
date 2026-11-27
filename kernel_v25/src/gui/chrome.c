@@ -677,31 +677,72 @@ static void desk_icon_click(block_id id, int32_t lx, int32_t ly) {
     desk_open_entry(i);
 }
 
+/* v2.82 R3: 桌面条目显示为"桌面上的文件"——每个条目一个图标 + 文件名，
+ * 纵向一列；目录用 folder 图标，其余（txt/bmp/ppm/其它）用 file 图标。 */
+static uint8_t desk_item_icon(int is_dir) {
+    return is_dir ? 4 : 3;
+}
+
+/* 标签截断：ASCII 记 1 单位、其余记 2 单位，上限 12 单位，超限以 ".." 结尾。 */
+static void desk_label(const char *name, char *out, int cap) {
+    int units = 0, k = 0;
+    while (name[k] && k < cap - 3) {
+        int u = ((unsigned char)name[k] < 128) ? 1 : 2;
+        if (units + u > 9) break;   /* 9 单位 + "..." ≈ 96px 列宽 */
+        units += u;
+        out[k] = name[k];
+        k++;
+    }
+    if (name[k]) { out[k++] = '.'; out[k++] = '.'; out[k++] = '.'; }
+    out[k] = 0;
+}
+
 static void build_desktop_icons(block_id root_id) {
+    static char desk_labels[DESK_MAX_ITEMS][FS_NAME_MAX];  /* b_text 只存指针，必须常驻 */
     fs_mkdir("/Desktop");   /* 已存在则忽略 */
     char names[DESK_MAX_ITEMS][FS_NAME_MAX];
     int n = fs_enum_entries("/Desktop", names, DESK_MAX_ITEMS);
     if (n < 0) n = 0;
     desk_n = n;
 
-    blk_spec col = spec_panel(LAYER_WORK, 120, 0, 0);
-    col.gap = 4; col.pad_l = 4; col.pad_r = 4;
+    blk_spec col = spec_panel(LAYER_WORK, 104, 0, 0);
+    col.gap = 8; col.pad_l = 4; col.pad_r = 4;
     block_id col_id = b_column(root_id, &col);
     block *pc = btable_get(col_id);
-    pc->x = GFX24_W - 132; pc->y = 64; pc->moved = 1;
+    pc->x = GFX24_W - 124; pc->y = 64; pc->moved = 1;
 
     if (n == 0) {
-        blk_spec t = spec_panel(LAYER_WORK, 112, 16, 0);
-        b_text(col_id, &t, "Desktop folder is empty");
+        blk_spec t = spec_panel(LAYER_WORK, 96, 16, 0);
+        t.wrap_lines = 1; t.ellipsis = 1;
+        b_text(col_id, &t, "Desktop is empty");
     } else {
         for (int i = 0; i < n; i++) {
+            char shown[FS_NAME_MAX];
             desk_copy(desk_names[i], FS_NAME_MAX, names[i]);
-            blk_spec icon = spec_panel(LAYER_WORK, 112, 32, 1);
-            icon.on_click = desk_icon_click;
-            icon.z = i;
-            icon.align_cross = XALN_CENTER;
-            block_id ic = b_row(col_id, &icon);
-            b_text(ic, 0, desk_names[i]);
+            desk_copy(shown, sizeof(shown), names[i]);
+            int sl = desk_xlen(shown);
+            int is_dir = sl && shown[sl - 1] == '/';
+            if (is_dir) shown[sl - 1] = 0;      /* 标签不带尾 '/' */
+
+            blk_spec item = spec_panel(LAYER_WORK, 96, 0, 0);
+            item.gap = 4;
+            item.align_cross = XALN_CENTER;
+            item.on_click = desk_icon_click;
+            item.z = i;
+            block_id it = b_column(col_id, &item);
+
+            blk_spec ic = spec_panel(LAYER_WORK, 32, 32, 0);
+            ic.align_cross = XALN_CENTER;
+            ic.tint_role = 3;                  /* accent：跟主题令牌走 */
+            ic.z = i;                          /* 与容器同 z：合成按 layer→z 升序，父先序在前，底色才不会盖掉子块 */
+            b_icon(it, &ic, desk_item_icon(is_dir));
+
+            desk_label(shown, desk_labels[i], sizeof(desk_labels[i]));
+            blk_spec lb = spec_panel(LAYER_WORK, 0, 16, 0);   /* 自然宽 + 居中，文件名才像 Windows 图标下标签 */
+            lb.align_cross = XALN_CENTER;
+            lb.wrap_lines = 1; lb.ellipsis = 1;
+            lb.z = i;
+            b_text(it, &lb, desk_labels[i]);
         }
     }
     ser_write("GUI:desk items="); ser_dec((uint32_t)n); ser_write("\n");
