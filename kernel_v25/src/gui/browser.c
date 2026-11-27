@@ -144,12 +144,14 @@ static int br_stream_sink(void *ud, const uint8_t *p, int len) {
 
 static const char *pool_put(const char *s, int n) {
     if (n < 0) n = 0;
-    if (br_pool_n + n >= BR_POOL) n = BR_POOL - 1 - br_pool_n;
+    /* 每条串独立 NUL 终止：游标按 n+1 推进，否则下一次追加会覆盖上一条
+     * 串尾的 NUL，块文本读出累计尾巴（D3：串界不清导致宽度/归属错乱）。 */
+    if (br_pool_n + n + 1 >= BR_POOL) n = BR_POOL - 1 - br_pool_n;
     if (n <= 0) return "";
     char *p = br_pool + br_pool_n;
     for (int i = 0; i < n; i++) p[i] = s[i];
     p[n] = 0;
-    br_pool_n += n;
+    br_pool_n += n + 1;
     return p;
 }
 
