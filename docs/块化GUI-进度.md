@@ -162,3 +162,12 @@ R19 记的"每条一个图标块"实际只是行容器、纯文字。本日补�
 ### H14 复评记录（2026-11-28）
 
 H14 24bpp MTRR-WC：H11 后拖动不再整屏标脏、damage 已收敛，顺序拷贝未成为瓶颈 → 已复评，仍不做（理由：LFB 写读混用未验证、收益未测）。未打开 MTRR-WC，未改实现。
+
+### A7.3 画布/图片最近邻缩放铺满 + 指针逆映射（2026-11-28，d41fd40）
+
+- block 新增内部字段 `fit`（FIT_NONE=0 / CONTAIN=1 留档 / FILL=2，默认 none 保持旧 1:1 贴左上），不入 blk_spec / CE ABI。
+- `gui_blit24_scaled()`：整数最近邻；列/行源索引表在进入像素循环前预计算一次、整行复用，无每像素除法；SVGA packed4 走 u32 直写快速路径（lfb/pitch/stride 一次取出，按行基址 +4B 步进），stride3 回退逐像素 `clip_putpx`。
+- BLK_IMAGE/SURFACE/CANVAS 在 `fit=FILL` 时按块框铺满；CANVAS FILL 分支整幅 blit 后 `cv_dirty_clear`。
+- `gui_fit_inv_map()`：块内局部坐标 → 源图像坐标（最近邻同口径，`mx=lx*pix_w/w`，钳制到源尺寸内）；声明式点击事件经逆映射换算到源坐标再 `decl_post_click`。
+- 探针 `gui scaled`（`tests/gui_scaled_probe.py`）：320×240 源铺满 640×480 块，四角采样=源四角（TL 红/TR 绿/BL 蓝/BR 黄），四角+中心逆映射误差 0，合成帧 5582µs ≤ 8ms。门禁：strict RC=0、E3 2/2、像素 6/6、vprobe 10/10、drag 2/2。
+- 排障要点：① 探针在文本 shell 上下文须先 `con_request_mode(CON_MODE_VBE24,0)` 激活 gfx24 后端，否则 `gfx24_active()=0`、lfb 影子读回全 0，内核 getpx 采样无效（实机像素须以 QEMU screendump PPM 为准）。② scaled 调用点参数顺序须与签名 `(dx,dy,dw,dh,src,sw,sh,mode)` 一致，源指针误放到首参会使 `dw=0` 守卫早退、循环零像素。③ 头文件新增结构体字段后须 clean 重建，避免依赖 TU 按旧偏移读字段。
