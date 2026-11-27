@@ -130,6 +130,7 @@ int       blkgen_build(void);
 void      gui_inject_press(int x, int y);
 void      gui_inject_move(int x, int y);
 void      gui_inject_release(void);
+void      gui_inject_release_at(int x, int y);   /* v2.83 探针：指定松开坐标重算命中 */
 void      gui_inject_hover(int x, int y);
 void      gui_inject_press_block(block_id id);
 void      gui_inject_hover_block(block_id id);

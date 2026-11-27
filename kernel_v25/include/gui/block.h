@@ -248,6 +248,9 @@ typedef struct block {
     void (*on_click)(block_id id, int32_t lx, int32_t ly);
     void (*on_drag )(block_id id, int32_t dx, int32_t dy, uint8_t phase);
     void (*on_dblclick)(block_id id, int32_t lx, int32_t ly);
+    /* v2.83: 1 = 松开且仍命中同块才回调 on_click（按钮/菜单行/开始菜单行）；
+     * 0 = 保持旧的按下即触发（画布/可拖面板等，本轮不推广）。 */
+    uint8_t  click_on_up;
     void (*render)(block_id id);
     void  *usr;
     uint8_t *buf;                       /* BLK_CANVAS 运行时缓冲（24bpp） */

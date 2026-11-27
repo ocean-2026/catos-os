@@ -40,6 +40,12 @@ static int       drag_off_x, drag_off_y;
 static block    *hover_block;
 static block    *pressed_block;     /* E 轮新增：左键按住期间命中的按钮（三态按下反馈） */
 
+/* v2.83 A7.2 松开命中触发：按下只记账，松开时重算命中同块才回调。仅
+ * click_on_up=1 的按钮/菜单行/开始菜单行进入此态；进 drag（位移超阈值或块
+ * 进 DRAG_*）立即清 armed。 */
+static block    *armed_block;
+static int       armed_x0, armed_y0;
+
 /* R5 双击判定：同一块在 DBLCLICK_MS 窗口内二次按下算双击；本次手势发生过
  * 超阈值拖拽则不参与配对。时间源 uptime_ms()（不走 rtc）。 */
 #define DBLCLICK_MS       450
@@ -328,9 +334,16 @@ static void on_press(int x, int y) {
         drag_block = drag_target; drag_mode = DRAG_MOVE;
         drag_off_x = x - drag_target->x; drag_off_y = y - drag_target->y;
     }
+    /* 手势进入拖拽/缩放：不再是一次点击，清掉 armed 按钮。 */
+    if (mode != DRAG_NONE) armed_block = 0;
+
+    /* A7.2：click_on_up 按钮按下只记账，松开重算命中同块才回调；其余块维持
+     * 旧的按下即触发。双击锚点（桌面图标等非 armed 块）仍走按下即派发。 */
+    int armed = act && act->click_on_up;
+    if (armed) { armed_block = act; armed_x0 = x; armed_y0 = y; }
     if (is_dbl && act_dbl && act_dbl->on_dblclick)
         act_dbl->on_dblclick(act_dbl->id, x - act_dbl->x, y - act_dbl->y);
-    else if (act && act->on_click)
+    else if (!armed && act && act->on_click)
         act->on_click(act->id, x - act->x, y - act->y);
     /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
     if (b->owner) decl_post_click(b, x - b->x, y - b->y);
@@ -348,11 +361,13 @@ static void on_drag_move(int x, int y) {
     if (!drag_block) return;
     block *b = drag_block;
     if (drag_mode == DRAG_MOVE) {
-        /* 位移超阈值即判定本次手势为拖拽，松开后不参与双击配对。 */
+        /* 位移超阈值即判定本次手势为拖拽，松开后不参与双击配对；同时清 armed。 */
         if (cur_press_block &&
             (x - press_x0 > DBL_DRAG_THRESH || press_x0 - x > DBL_DRAG_THRESH ||
-             y - press_y0 > DBL_DRAG_THRESH || press_y0 - y > DBL_DRAG_THRESH))
+             y - press_y0 > DBL_DRAG_THRESH || press_y0 - y > DBL_DRAG_THRESH)) {
             press_dragged = 1;
+            armed_block = 0;
+        }
         /* 脏矩形：改几何前缓存旧矩形，供合成层算「旧 ∪ 新」损伤条带。 */
         b->old_x = b->x; b->old_y = b->y;
         b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
@@ -416,7 +431,20 @@ static void on_drag_move(int x, int y) {
     gui_mark_dirty(b->id);
 }
 
-static void on_release(void) {
+static void on_release(int x, int y) {
+    /* A7.2 松开命中触发：armed 按钮在松开点重算命中，仍落在同一回调块上才触发；
+     * 已进拖拽 / 位移超阈值 / 移出块外都取消，不回调。 */
+    if (armed_block) {
+        block *ab = armed_block;
+        armed_block = 0;
+        if (!drag_block && !press_dragged) {
+            block *rb = hit_test(x, y);
+            block *ract = rb;
+            while (ract && !ract->on_click) ract = ract->parent;
+            if (ract == ab && ab->on_click)
+                ab->on_click(ab->id, x - ab->x, y - ab->y);
+        }
+    }
     pressed_block = 0;
     if (drag_block && drag_block->on_drag)
         drag_block->on_drag(drag_block->id, 0, 0, 2); /* phase 2 = end */
@@ -442,7 +470,8 @@ void gui_pump_input(void) {
         if (e.down && (e.changed & MOUSE_BTN_LEFT)) on_press(e.x, e.y);
         else if (!(e.buttons & MOUSE_BTN_LEFT)) {
             pressed_block = 0;
-            if (drag_mode != DRAG_NONE || sb_drag_target()) on_release();
+            if (drag_mode != DRAG_NONE || sb_drag_target()) on_release(e.x, e.y);
+            else if (armed_block) on_release(e.x, e.y);  /* armed 按钮松开重算命中 */
             else hover_block = hit_test(e.x, e.y);
             pop_bridge_note(e.x, e.y);
         } else if (drag_block) {
@@ -497,6 +526,8 @@ void gui_input_reset(void) {
     for (int i = 0; i < 4; i++) focus_stack[i] = 0;
     hover_block = 0;
     pressed_block = 0;
+    armed_block = 0;
+    armed_x0 = armed_y0 = 0;
     last_press_block = 0;
     last_press_ms = 0;
     last_press_was_drag = 0;
@@ -510,7 +541,8 @@ void gui_input_reset(void) {
 /* ---- 探针注入钩子：复用真实命中 / 拖拽路径，不另起一套模拟。 ---- */
 void gui_inject_press(int x, int y)  { on_press(x, y); }
 void gui_inject_move(int x, int y)   { on_drag_move(x, y); }
-void gui_inject_release(void)        { on_release(); }
+void gui_inject_release(void)        { on_release(armed_x0, armed_y0); }
+void gui_inject_release_at(int x, int y) { on_release(x, y); }
 void gui_inject_wheel(int x, int y, int dz) { on_wheel(x, y, dz); }
 void gui_inject_hover(int x, int y) { hover_block = hit_test(x, y); }
 void gui_inject_press_block(block_id id) { pressed_block = btable_get(id); }

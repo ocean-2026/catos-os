@@ -1006,6 +1006,7 @@ void gui_demo_build(void) {
     start.align_cross = XALN_CENTER;
     start.on_click = gui_menu_toggle;
     start_id = b_row(taskbar_id, &start);
+    { block *sb0 = btable_get(start_id); if (sb0) sb0->click_on_up = 1; }
     blk_spec start_txt = spec_panel(LAYER_CHROME, 40, 16, 0);
     start_txt.align_cross = XALN_CENTER;
     b_text(start_id, &start_txt, "Start");
@@ -1181,6 +1182,7 @@ void gui_menu_open(void) {
         row.on_click = on_menu_row;
         row.z = (int32_t)menu_ids[i];
         block_id rid = b_row(menu_root, &row);
+        { block *rb = btable_get(rid); if (rb) rb->click_on_up = 1; }
         if (menu_row_n < 32) menu_row_ids[menu_row_n++] = rid;
         id_label(menu_ids[i], menu_labels[i]);
         b_text(rid, 0, menu_labels[i]);
@@ -1192,6 +1194,7 @@ void gui_menu_open(void) {
         app.on_click = on_menu_row;
         app.z = -(a + 1);
         block_id aid = b_row(menu_root, &app);
+        { block *ab = btable_get(aid); if (ab) ab->click_on_up = 1; }
         if (menu_row_n < 32) menu_row_ids[menu_row_n++] = aid;
         b_text(aid, 0, app_labels[a]);
     }
@@ -1200,6 +1203,7 @@ void gui_menu_open(void) {
     launch.on_click = on_menu_row;
     launch.z = 0;
     block_id lid = b_row(menu_root, &launch);
+    { block *lb = btable_get(lid); if (lb) lb->click_on_up = 1; }
     if (menu_row_n < 32) menu_row_ids[menu_row_n++] = lid;
     b_text(lid, 0, "Launch &demo");
 
@@ -1915,6 +1919,54 @@ void gui_probe_menuclick(void) {
     ser_write(" raise_hit="); ser_dec(raise_hit);
     ser_write(" live_before="); ser_dec(live_before);
     ser_write(" live_after="); ser_dec(live_after);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+/* A7.2 松开命中触发探针：正常点按（press+release 同点）必须触发；按下后移出
+ * 再在块外松手不得触发。 */
+static void gui_probe_clickup(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+
+    /* 正常点按：press + release 同点 -> Notepad 激活，菜单关闭。 */
+    gui_menu_open();
+    layout_run();
+    block *mr = btable_get(menu_root);
+    block *row = 0;
+    if (mr) for (block *c = mr->first_child; c; c = c->next_sibling)
+        if (c->z == -1) { row = c; break; }
+    int fired_normal = 0, closed_normal = 0;
+    if (row) {
+        gui_inject_press(row->x + row->w / 2, row->y + row->h / 2);
+        gui_inject_release();
+        fired_normal = gui_notepad_active();
+        closed_normal = !gui_menu_is_open();
+    }
+
+    /* 按下后移出菜单外再松手：armed 重算命中落在块外，不得触发。先关掉上一例
+     * 留下的记事本，避免读到陈旧激活态。 */
+    gui_notepad_close();
+    gui_menu_open();
+    layout_run();
+    block *mr2 = btable_get(menu_root);
+    block *row2 = 0;
+    if (mr2) for (block *c = mr2->first_child; c; c = c->next_sibling)
+        if (c->z == -1) { row2 = c; break; }
+    int fired_out = 0;
+    if (row2) {
+        int cx = row2->x + row2->w / 2, cy = row2->y + row2->h / 2;
+        gui_inject_press(cx, cy);
+        gui_inject_move(400, 300);
+        gui_inject_release_at(400, 300);
+        fired_out = gui_notepad_active();
+    }
+
+    int ok = fired_normal == 1 && closed_normal && fired_out == 0;
+    ser_write("GUI:clickup normal="); ser_dec(fired_normal);
+    ser_write(" closed="); ser_dec(closed_normal);
+    ser_write(" out="); ser_dec(fired_out);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
@@ -2846,6 +2898,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "r5dbl"))   { gui_probe_r5dbl(); return; }
         if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }
         if (!strcmp_probe(arg, "menu-accel")) { gui_probe_menu_accel(); return; }
+        if (!strcmp_probe(arg, "clickup"))    { gui_probe_clickup(); return; }
         {
             char aw[16]; const char *ar = 0;
             split_word(arg, aw, sizeof(aw), &ar);
