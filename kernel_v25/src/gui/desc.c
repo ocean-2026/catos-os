@@ -110,6 +110,7 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->pix_h = s->pix_h;
     b->on_click = s->on_click;
     b->on_drag  = s->on_drag;
+    b->on_dblclick = s->on_dblclick;
     b->render   = s->render;
     b->usr      = s->usr;
 

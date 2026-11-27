@@ -624,8 +624,25 @@ static block_id demo_add_sample(void) {
 /* ---- /Desktop 图标列 ------------------------------------------------------- */
 
 #define DESK_MAX_ITEMS 6
+#define DESK_ITEM_W    96
+#define DESK_ITEM_H    52
+#define DESK_LAYOUT    "/etc/desktop.layout"
+
 static char desk_names[DESK_MAX_ITEMS][FS_NAME_MAX];
 static int  desk_n;
+static block_id desk_item_blk[DESK_MAX_ITEMS];
+
+/* R5: 拖拽位置持久层（/etc/desktop.layout，行格式 `name x y`）。开机枚举时
+ * 按名读回；无记录的条目走右侧纵向列兜底。FS 单条目内存视图上限 FS_DATA_MAX
+ * (4096B)，每行 ≈ 名称(≤48)+坐标，6 条目远低于上限；追加满则本条位置不落盘，
+ * 保留内存内几何降级。 */
+static char desk_save_name[DESK_MAX_ITEMS][FS_NAME_MAX];
+static int  desk_save_x[DESK_MAX_ITEMS];
+static int  desk_save_y[DESK_MAX_ITEMS];
+static int  desk_save_n;
+
+/* shell.c 远程命令执行入口：桌面双击 .ce/.exe 复用同一条 run 分发路径。 */
+extern int shell_ssh_exec_line(const char *line, char *out, int outmax, int *rc);
 
 static int desk_xlen(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
 
@@ -649,6 +666,106 @@ static int desk_ext_is(const char *name, const char *ext) {
     return e[desk_xlen(ext)] == 0;
 }
 
+/* 名称比较：先字节精确，再大小写不敏感兜底（FAT 卷大小写不敏感）。 */
+static int desk_name_eq(const char *a, const char *b) {
+    if (!strcmp_probe(a, b)) return 1;
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0;
+        a++; b++;
+    }
+    return *a == 0 && *b == 0;
+}
+
+/* 解析 `name x y` 行；名称不含空白。返回 0 成功。 */
+static int desk_layout_parse(const char *line, char *name, int namecap,
+                             int *x, int *y) {
+    int o = 0, k = 0;
+    while (line[k] && line[k] != ' ' && line[k] != '\t') {
+        if (o < namecap - 1) name[o++] = line[k];
+        k++;
+    }
+    name[o] = 0;
+    if (!name[0]) return -1;
+    while (line[k] == ' ' || line[k] == '\t') k++;
+    *x = 0;
+    while (line[k] >= '0' && line[k] <= '9') { *x = *x * 10 + (line[k] - '0'); k++; }
+    while (line[k] == ' ' || line[k] == '\t') k++;
+    *y = 0;
+    while (line[k] >= '0' && line[k] <= '9') { *y = *y * 10 + (line[k] - '0'); k++; }
+    return 0;
+}
+
+static void desk_append_int(char *d, int cap, int *o, int v) {
+    char tmp[12]; int n = 0;
+    if (v <= 0) tmp[n++] = '0';
+    while (v > 0 && n < 11) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n > 0 && *o < cap - 1) d[(*o)++] = tmp[--n];
+}
+
+static void desk_layout_load(void) {
+    desk_save_n = 0;
+    fs_entry_t *f = fs_open_file(DESK_LAYOUT);
+    if (!f) return;
+    int cnt = fs_line_count(f);
+    for (int i = 0; i < cnt; i++) {
+        char line[FS_NAME_MAX + 24], nm[FS_NAME_MAX];
+        int x, y;
+        if (fs_get_line(f, i, line, sizeof(line)) < 0) continue;
+        if (desk_layout_parse(line, nm, sizeof(nm), &x, &y) < 0) continue;
+        if (desk_save_n >= DESK_MAX_ITEMS) break;
+        desk_copy(desk_save_name[desk_save_n], FS_NAME_MAX, nm);
+        desk_save_x[desk_save_n] = x;
+        desk_save_y[desk_save_n] = y;
+        desk_save_n++;
+    }
+}
+
+static int desk_save_lookup(const char *name, int *x, int *y) {
+    for (int i = 0; i < desk_save_n; i++) {
+        if (desk_name_eq(desk_save_name[i], name)) {
+            *x = desk_save_x[i]; *y = desk_save_y[i]; return 1;
+        }
+    }
+    return 0;
+}
+
+/* 拖动结束：按名更新持久层（同名旧行删行后追加；无则追加），再落盘。 */
+static void desk_layout_save(int i, int x, int y) {
+    fs_entry_t *f = fs_create_file(DESK_LAYOUT);
+    if (!f) { ser_write("GUI:desk layout open fail\n"); return; }
+    int cnt = fs_line_count(f);
+    for (int k = 0; k < cnt; k++) {
+        char line[FS_NAME_MAX + 24], nm[FS_NAME_MAX];
+        int ox, oy;
+        if (fs_get_line(f, k, line, sizeof(line)) < 0) continue;
+        if (desk_layout_parse(line, nm, sizeof(nm), &ox, &oy) == 0 &&
+            desk_name_eq(nm, desk_names[i])) {
+            fs_delete_line(f, k);
+            break;
+        }
+    }
+    char rec[FS_NAME_MAX + 24]; int o = 0, k = 0;
+    while (desk_names[i][k] && o < (int)sizeof(rec) - 8) rec[o++] = desk_names[i][k++];
+    rec[o++] = ' '; desk_append_int(rec, sizeof(rec), &o, x);
+    rec[o++] = ' '; desk_append_int(rec, sizeof(rec), &o, y);
+    rec[o] = 0;
+    if (fs_append_line(f, rec) < 0) {
+        ser_write("GUI:desk layout full, pos not saved\n");
+        return;
+    }
+    fs_save(f);
+}
+
+/* 按块 id 反查条目序号（z 字段在拖拽/合成过程中会被改写，不能作为索引）。 */
+static int desk_item_index(block_id id) {
+    for (int i = 0; i < desk_n; i++)
+        if (desk_item_blk[i] == id) return i;
+    return -1;
+}
+
 static void desk_open_entry(int i) {
     char nm[FS_NAME_MAX];
     desk_copy(nm, sizeof(nm), desk_names[i]);
@@ -670,15 +787,54 @@ static void desk_open_entry(int i) {
 
 static void desk_icon_click(block_id id, int32_t lx, int32_t ly) {
     (void)lx; (void)ly;
-    block *b = btable_get(id);
-    if (!b) return;
-    int i = (int)b->z;
-    if (i < 0 || i >= desk_n) return;
+    int i = desk_item_index(id);
+    if (i < 0) return;
     desk_open_entry(i);
 }
 
-/* v2.82 R3: 桌面条目显示为"桌面上的文件"——每个条目一个图标 + 文件名，
- * 纵向一列；目录用 folder 图标，其余（txt/bmp/ppm/其它）用 file 图标。 */
+/* R5 双击：.ce/.exe 走现有 `run` 路径真运行；目录→FM；其余类型双击等同单击。 */
+static void desk_icon_dblclick(block_id id, int32_t lx, int32_t ly) {
+    (void)lx; (void)ly;
+    int i = desk_item_index(id);
+    if (i < 0) return;
+    char nm[FS_NAME_MAX];
+    desk_copy(nm, sizeof(nm), desk_names[i]);
+    int n = desk_xlen(nm);
+    int is_dir = n && nm[n - 1] == '/';
+    if (is_dir) { desk_open_entry(i); return; }
+    if (desk_ext_is(nm, "ce") || desk_ext_is(nm, "exe")) {
+        char path[FS_PATH_MAX];
+        desk_copy(path, sizeof(path), "/Desktop/");
+        { int o = desk_xlen(path); int k = 0;
+          while (nm[k] && o < (int)sizeof(path) - 1) path[o++] = nm[k++];
+          path[o] = 0; }
+        char line[FS_PATH_MAX + 8]; int lo = 0;
+        line[lo++] = 'r'; line[lo++] = 'u'; line[lo++] = 'n'; line[lo++] = ' ';
+        int p = 0;
+        while (path[p] && lo < (int)sizeof(line) - 1) line[lo++] = path[p++];
+        line[lo] = 0;
+        static char dbl_cap[1024]; int rc = 0;
+        shell_ssh_exec_line(line, dbl_cap, sizeof(dbl_cap), &rc);
+        ser_write("GUI:desk dbl run="); ser_write(path);
+        ser_write(" rc="); ser_dec((uint32_t)rc); ser_write("\n");
+        return;
+    }
+    desk_open_entry(i);
+}
+
+/* R5 拖拽结束回调：把条目桌面坐标落持久层。phase 2 = 松手。 */
+static void desk_item_drag(block_id id, int32_t dx, int32_t dy, uint8_t phase) {
+    (void)dx; (void)dy;
+    if (phase != 2) return;
+    int i = desk_item_index(id);
+    block *b = btable_get(id);
+    if (i < 0 || !b) return;
+    desk_layout_save(i, b->x, b->y);
+}
+
+/* v2.82 R3: 桌面条目显示为"桌面上的文件"——每个条目一个图标 + 文件名。
+ * R5: 条目为根块下的自由布局容器，整块可拖（BOUND_PARENT 守住桌面父框），
+ * 位置持久化到 /etc/desktop.layout；无记录条目按右侧纵向列兜底排布。 */
 static uint8_t desk_item_icon(int is_dir) {
     return is_dir ? 4 : 3;
 }
@@ -720,18 +876,25 @@ static void build_desktop_icons(block_id root_id) {
     if (n < 0) n = 0;
     if (n > DESK_MAX_ITEMS) n = DESK_MAX_ITEMS;  /* 枚举返回总数，超上限静默截断，不得越界写 desk_names/desk_labels */
     desk_n = n;
-
-    blk_spec col = spec_panel(LAYER_WORK, 104, 0, 0);
-    col.gap = 8; col.pad_l = 4; col.pad_r = 4;
-    block_id col_id = b_column(root_id, &col);
-    block *pc = btable_get(col_id);
-    pc->x = GFX24_W - 124; pc->y = 64; pc->moved = 1;
+    desk_layout_load();
 
     if (n == 0) {
-        blk_spec t = spec_panel(LAYER_WORK, 96, 16, 0);
+        /* D1: 空桌面提示为纯文字块——不带面板底色、自然宽、屏幕居中，
+         * 完整显示 "Empty"（此前 spec_panel 带 ROLE_PANEL 底且被列宽裁剪）。
+         * 根块是 STACK 布局：居中走 align_main/align_cross，不用 anchor。 */
+        blk_spec t = spec_panel(LAYER_WORK, 0, 16, 0);
+        t.role_bg = ROLE_NONE;
+        t.bg = INHERIT_COLOR;
+        t.align_main = ALN_CENTER;
+        t.align_cross = XALN_CENTER;
         t.wrap_lines = 1; t.ellipsis = 1;
-        b_text(col_id, &t, "Empty");   /* 96px 列宽，短文案不截断 */
+        block_id tb = b_free(root_id, &t);
+        b_text(tb, 0, "Empty");
     } else {
+        /* 兜底纵向列：靠右、从上到下；持久化坐标覆盖兜底位置。 */
+        int fx = GFX24_W - 64 - DESK_ITEM_W;
+        int fy0 = 64;
+        int pitch = DESK_ITEM_H + 8;
         for (int i = 0; i < n; i++) {
             char shown[FS_NAME_MAX];
             desk_copy(desk_names[i], FS_NAME_MAX, names[i]);
@@ -740,12 +903,30 @@ static void build_desktop_icons(block_id root_id) {
             int is_dir = sl && shown[sl - 1] == '/';
             if (is_dir) shown[sl - 1] = 0;      /* 标签不带尾 '/' */
 
-            blk_spec item = spec_panel(LAYER_WORK, 96, 0, 0);
+            int sx = 0, sy = 0, saved = desk_save_lookup(desk_names[i], &sx, &sy);
+
+            blk_spec item = spec_panel(LAYER_WORK, DESK_ITEM_W, DESK_ITEM_H, 0);
             item.gap = 4;
+            item.role_bg = ROLE_NONE;
+            item.bg = INHERIT_COLOR;
             item.align_cross = XALN_CENTER;
             item.on_click = desk_icon_click;
+            item.on_dblclick = desk_icon_dblclick;
+            item.on_drag = desk_item_drag;
+            item.drag_mode = DRAG_FULL;
+            item.drag_bounds = BOUND_PARENT;
             item.z = i;
-            block_id it = b_column(col_id, &item);
+            block_id it = b_column(root_id, &item);
+            desk_item_blk[i] = it;
+            block *pi = btable_get(it);
+            /* 根块是 STACK 布局：STACK 忽略子块 px_x/anchor，只保留 moved
+             * 绝对几何。兜底位置也显式落 x/y + moved=1，与可拖窗口同口径。 */
+            int ix = saved ? sx : fx;
+            int iy = saved ? sy : fy0 + i * pitch;
+            pi->x = ix; pi->y = iy;
+            pi->pos_x = ix; pi->pos_y = iy;
+            pi->px_x = ix; pi->px_y = iy;
+            pi->moved = 1;
 
             blk_spec ic = spec_panel(LAYER_WORK, 32, 32, 0);
             ic.align_cross = XALN_CENTER;
@@ -1499,6 +1680,10 @@ static void audit_walk(block *b) {
             ser_write(" kind="); ser_dec((uint32_t)c->kind);
             ser_write(" w="); ser_dec((int32_t)c->w);
             ser_write(" h="); ser_dec((int32_t)c->h);
+            { int mw = (c->kind == BLK_TEXT) ?
+                txt_measure_w(c->text, c->font_size,
+                              c->st.scale ? c->st.scale : 1, c->font_tabular) : -1;
+              ser_write(" measw="); ser_dec(mw < 0 ? 0 : (uint32_t)mw); }
             ser_write(" txt="); ser_write(c->text ? c->text : "(null)");
             ser_write("\n");
         }
@@ -2395,6 +2580,108 @@ static void gui_probe_term(void) {
     con_clear();
 }
 
+/* R5 桌面拖拽 + 持久化确定性探针：播种桌面后，内核注入一次拖拽把条目 0
+ * 从兜底位拖到 (180,180)；松手落盘后从持久层读回比对。结果串行打印：
+ *   GUI:r5desk n=.. before=(x,y) after=(x,y) saved=(x,y) moved=.. saved=.. reload=.. result=..
+ * 探针保留 GUI 帧供 HMP screendump 取证。 */
+static void gui_probe_r5desk(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:r5desk n=0 result=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    if (desk_n < 1) {
+        ser_write("GUI:r5desk n=0 result=0 reason=empty\n");
+        return;
+    }
+    block *b = btable_get(desk_item_blk[0]);
+    int bx0 = b->x, by0 = b->y;
+    gui_inject_press(b->x + 20, b->y + 20);
+    gui_inject_move(180, 180);
+    gui_inject_release();
+    layout_run();
+    gui_frame();
+    int bx1 = b->x, by1 = b->y;
+    int moved = (bx1 != bx0 || by1 != by0);
+
+    desk_layout_load();   /* 从持久层重新读回，核验落盘内容 */
+    int sx = -1, sy = -1, saved = desk_save_lookup(desk_names[0], &sx, &sy);
+    int reload = saved && sx == bx1 && sy == by1;
+    int result = moved && saved && reload;
+
+    ser_write("GUI:r5desk n="); ser_dec((uint32_t)desk_n);
+    ser_write(" before=("); ser_dec((uint32_t)bx0); ser_write(","); ser_dec((uint32_t)by0);
+    ser_write(") after=("); ser_dec((uint32_t)bx1); ser_write(","); ser_dec((uint32_t)by1);
+    ser_write(") saved=("); ser_dec((uint32_t)sx); ser_write(","); ser_dec((uint32_t)sy);
+    ser_write(") moved="); ser_dec((uint32_t)moved);
+    ser_write(" saved="); ser_dec((uint32_t)saved);
+    ser_write(" reload="); ser_dec((uint32_t)reload);
+    ser_write(" result="); ser_dec((uint32_t)result);
+    ser_write("\n");
+}
+
+/* R5 双击探针：桌面找到首个 .ce/.exe 条目，内核注入两次快速按下/松开，
+ * 触发 on_dblclick；串行回打 `GUI:desk dbl run=...`。保留帧供截图。 */
+static void gui_probe_r5dbl(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:r5dbl result=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    int idx = -1;
+    for (int i = 0; i < desk_n; i++) {
+        if (desk_ext_is(desk_names[i], "ce") || desk_ext_is(desk_names[i], "exe")) {
+            idx = i; break;
+        }
+    }
+    if (idx < 0) {
+        ser_write("GUI:r5dbl result=0 reason=no-ce\n");
+        return;
+    }
+    block *b = btable_get(desk_item_blk[idx]);
+    int cx = b->x + 20, cy = b->y + 20;
+    gui_inject_press(cx, cy); gui_inject_release();
+    gui_inject_press(cx, cy); gui_inject_release();
+    layout_run();
+    gui_frame();
+    ser_write("GUI:r5dbl idx="); ser_dec((uint32_t)idx);
+    ser_write(" name="); ser_write(desk_names[idx]);
+    ser_write("\n");
+}
+
+/* R5 终端标题栏取证探针：打开一个终端窗口，保留帧供截图（A: Close 靠右）。 */
+static void gui_probe_r5term(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:r5term result=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+    gui_term_open();
+    layout_run();
+    gui_frame();
+    ser_write("GUI:r5term opened=1\n");
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -2471,6 +2758,9 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
         if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
+        if (!strcmp_probe(arg, "r5desk"))  { gui_probe_r5desk(); return; }
+        if (!strcmp_probe(arg, "r5dbl"))   { gui_probe_r5dbl(); return; }
+        if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }
         {
             char aw[16]; const char *ar = 0;
             split_word(arg, aw, sizeof(aw), &ar);

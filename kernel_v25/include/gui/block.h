@@ -119,6 +119,7 @@ typedef struct {
     int32_t  pix_w, pix_h;
     void (*on_click)(block_id id, int32_t lx, int32_t ly);
     void (*on_drag )(block_id id, int32_t dx, int32_t dy, uint8_t phase);
+    void (*on_dblclick)(block_id id, int32_t lx, int32_t ly);
     /* 组件自绘回调：合成层在默认绘制之后、裁剪框内调用；回调只打脏位，
      * 不做嵌套提交。usr 为组件私有上下文（v1 单实例，内核内使用）。 */
     void (*render)(block_id id);
@@ -246,6 +247,7 @@ typedef struct block {
 
     void (*on_click)(block_id id, int32_t lx, int32_t ly);
     void (*on_drag )(block_id id, int32_t dx, int32_t dy, uint8_t phase);
+    void (*on_dblclick)(block_id id, int32_t lx, int32_t ly);
     void (*render)(block_id id);
     void  *usr;
     uint8_t *buf;                       /* BLK_CANVAS 运行时缓冲（24bpp） */

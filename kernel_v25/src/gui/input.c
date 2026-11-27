@@ -11,6 +11,7 @@
 #include "mouse.h"
 #include "keyboard.h"
 #include "gfx24.h"
+#include "intr.h"
 
 extern void ser_write(const char *s);
 extern void ser_putc(char c);
@@ -38,6 +39,17 @@ static uint8_t   drag_resize_dir;
 static int       drag_off_x, drag_off_y;
 static block    *hover_block;
 static block    *pressed_block;     /* E 轮新增：左键按住期间命中的按钮（三态按下反馈） */
+
+/* R5 双击判定：同一块在 DBLCLICK_MS 窗口内二次按下算双击；本次手势发生过
+ * 超阈值拖拽则不参与配对。时间源 uptime_ms()（不走 rtc）。 */
+#define DBLCLICK_MS       450
+#define DBL_DRAG_THRESH   4
+static block    *last_press_block;
+static uint32_t  last_press_ms;
+static int       last_press_was_drag;
+static block    *cur_press_block;
+static int       press_x0, press_y0;
+static int       press_dragged;
 
 /* 运行时调试开关（默认关，release 惰性）：故障注入时对硬禁拖块临时放行，
  * 仅用于核验“被拖块出现在本不该出现的位置时，兜底重合成仍不烙残影”。
@@ -281,6 +293,17 @@ static void on_press(int x, int y) {
      * Start、菜单条目这类"行 + 文本子块"永远点不动。 */
     block *act = b;
     while (act && !act->on_click) act = act->parent;
+    block *act_dbl = b;
+    while (act_dbl && !act_dbl->on_dblclick) act_dbl = act_dbl->parent;
+
+    /* R5 双击配对：同一个带 on_dblclick 的祖先块、上一次手势未拖出阈值、
+     * 间隔在窗口内才算双击。配对锚点取解析后的祖先（两次命中叶子可能
+     * 分别是图标块或标签块）。 */
+    block *dbl_anchor = act_dbl ? act_dbl : act;
+    uint32_t now_ms = uptime_ms();
+    int is_dbl = (last_press_block == dbl_anchor && !last_press_was_drag &&
+                  now_ms - last_press_ms <= DBLCLICK_MS);
+    cur_press_block = dbl_anchor; press_x0 = x; press_y0 = y; press_dragged = 0;
 
     if (act && act->focusable) focus_set(act);
     else if (b->focusable)    focus_set(b);
@@ -305,7 +328,10 @@ static void on_press(int x, int y) {
         drag_block = drag_target; drag_mode = DRAG_MOVE;
         drag_off_x = x - drag_target->x; drag_off_y = y - drag_target->y;
     }
-    if (act && act->on_click) act->on_click(act->id, x - act->x, y - act->y);
+    if (is_dbl && act_dbl && act_dbl->on_dblclick)
+        act_dbl->on_dblclick(act_dbl->id, x - act_dbl->x, y - act_dbl->y);
+    else if (act && act->on_click)
+        act->on_click(act->id, x - act->x, y - act->y);
     /* 声明式应用块：命中事件回投到所属应用队列（不带屏幕绝对坐标）。 */
     if (b->owner) decl_post_click(b, x - b->x, y - b->y);
 }
@@ -321,6 +347,11 @@ static void on_drag_move(int x, int y) {
     if (!drag_block) return;
     block *b = drag_block;
     if (drag_mode == DRAG_MOVE) {
+        /* 位移超阈值即判定本次手势为拖拽，松开后不参与双击配对。 */
+        if (cur_press_block &&
+            (x - press_x0 > DBL_DRAG_THRESH || press_x0 - x > DBL_DRAG_THRESH ||
+             y - press_y0 > DBL_DRAG_THRESH || press_y0 - y > DBL_DRAG_THRESH))
+            press_dragged = 1;
         /* 脏矩形：改几何前缓存旧矩形，供合成层算「旧 ∪ 新」损伤条带。 */
         b->old_x = b->x; b->old_y = b->y;
         b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
@@ -388,6 +419,12 @@ static void on_release(void) {
     pressed_block = 0;
     if (drag_block && drag_block->on_drag)
         drag_block->on_drag(drag_block->id, 0, 0, 2); /* phase 2 = end */
+    /* 记录本次按下供下一次双击配对；发生过拖拽的手势不参与配对。 */
+    last_press_block = cur_press_block;
+    last_press_ms = uptime_ms();
+    last_press_was_drag = press_dragged;
+    cur_press_block = 0;
+    press_dragged = 0;
     drag_block = 0;
     drag_mode = DRAG_NONE;
     block *sb = sb_drag_target();
@@ -449,6 +486,11 @@ void gui_input_reset(void) {
     for (int i = 0; i < 4; i++) focus_stack[i] = 0;
     hover_block = 0;
     pressed_block = 0;
+    last_press_block = 0;
+    last_press_ms = 0;
+    last_press_was_drag = 0;
+    cur_press_block = 0;
+    press_dragged = 0;
     key_hook = 0;
     key_ud = 0;
     sb_state_reset();
