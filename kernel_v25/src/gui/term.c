@@ -6,7 +6,8 @@
  * 输出经 tee 捕获进本会话行环，不直写真实控制台；执行前把全局 cwd 切到
  * 会话目录，执行后回读。行编辑 Left/Right/Home/End/Backspace/Up/Down；
  * Tab 不补全。输出侧剥离 SGR 与其余转义序列（不画 `?`）。Ctrl+N 新建，
- * Esc 只关当前会话，缓冲跨关闭保留，重开续上。
+ * Esc 只关当前会话；重开会话清空回看环/历史/输入行，仅保留该槽位的
+ * 工作目录（cwd）。
  */
 #include "gui/gui.h"
 #include "gui_int.h"
@@ -261,11 +262,15 @@ static void t_build(int idx) {
 
     blk_spec title = t_panel(LAYER_WORK, T_BODY_W, T_TITLE_H, 0);
     title.role_bg = ROLE_BAR;
+    title.align_cross = XALN_CENTER;
+    title.align_main = ALN_SPACE_BETWEEN;   /* 左标签 + 右 Close 分列，Close 右缘贴窗口右边距 */
     block_id bar = b_row(t->root, &title);
     char *tt = t->title_buf;
     t_copy(tt, sizeof(t->title_buf), "Terminal ");
     t_cat(tt, sizeof(t->title_buf), t_digit(idx + 1));
-    b_text(bar, 0, tt);
+    blk_spec ttxt = t_panel(LAYER_WORK, 0, T_TITLE_H - 4, 0);
+    ttxt.role_bg = ROLE_NONE;
+    b_text(bar, &ttxt, tt);
     blk_spec close = t_panel(LAYER_WORK, 56, T_TITLE_H - 4, 1);
     close.on_click = t_close_click;
     block_id cid = b_row(bar, &close);
@@ -314,7 +319,7 @@ void gui_term_close_active(void) {
     if (t->root) { b_remove(t->root); t->root = 0; }
     t->body = 0; t->status = 0;
     t->in_use = 0;
-    /* 会话缓冲保留在槽位内，重开续上；仅释放块子树。 */
+    /* 仅释放块子树；槽位内 cwd 保留，行环/历史/输入行在下次 open 时清空。 */
     active = -1;
     for (int i = 0; i < TERM_MAX; i++)
         if (terms[i].in_use) { active = i; break; }
