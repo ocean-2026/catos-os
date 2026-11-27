@@ -341,7 +341,8 @@ static void on_drag_move(int x, int y) {
     if (sb) {
         sb_mouse(sb, x, y, 1);
         sb->dirty_layout = 1; sb->dirty_paint = 1; sb->moved = 1;
-        gui_mark_dirty(gui_root_block()->id);
+        /* 只标脏滚动容器子树（含 thumb/track），旧 thumb 位由损伤矩形底色补齐。 */
+        gui_mark_dirty(sb->id);
         return;
     }
     if (!drag_block) return;
@@ -408,11 +409,11 @@ static void on_drag_move(int x, int y) {
     b->dirty_layout = 1;
     b->dirty_paint = 1;
     b->moved = 1;
-    /* 整树标脏（当前定论）：旧位置的背景补齐依赖同帧重绘的背景/兄弟节点，
-     * 条带级背景补齐（只在损伤条带内擦旧位）尚未实现，收窄脏位会在拖出
-     * 轨迹上留残影。实测拖动帧时/损伤无全屏回退、无残影，权衡与口径见
-     * evidence-fix/09-perf/dirty-rect-summary.md；条带化补齐留后续轮次。 */
-    gui_mark_dirty(gui_root_block()->id);
+    /* 损伤 = 被拖块子树新包围盒 ∪ 旧包围盒（compose 第一遍按 has_old 回推旧位，
+     * dmg_add_pad 已含阴影外扩）；损伤矩形内先以底色填实再重绘相交节点，旧位置
+     * 由背景/兄弟在同帧补齐，不再整树标脏。OVF_VISIBLE 逃逸子块的父块脏位已在
+     * 上方并入。旧位残影以 gui_pixel_assert drag 组 old-rect 断言复核。 */
+    gui_mark_dirty(b->id);
 }
 
 static void on_release(void) {
