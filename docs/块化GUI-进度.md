@@ -171,3 +171,18 @@ H14 24bpp MTRR-WC：H11 后拖动不再整屏标脏、damage 已收敛，顺序�
 - `gui_fit_inv_map()`：块内局部坐标 → 源图像坐标（最近邻同口径，`mx=lx*pix_w/w`，钳制到源尺寸内）；声明式点击事件经逆映射换算到源坐标再 `decl_post_click`。
 - 探针 `gui scaled`（`tests/gui_scaled_probe.py`）：320×240 源铺满 640×480 块，四角采样=源四角（TL 红/TR 绿/BL 蓝/BR 黄），四角+中心逆映射误差 0，合成帧 5582µs ≤ 8ms。门禁：strict RC=0、E3 2/2、像素 6/6、vprobe 10/10、drag 2/2。
 - 排障要点：① 探针在文本 shell 上下文须先 `con_request_mode(CON_MODE_VBE24,0)` 激活 gfx24 后端，否则 `gfx24_active()=0`、lfb 影子读回全 0，内核 getpx 采样无效（实机像素须以 QEMU screendump PPM 为准）。② scaled 调用点参数顺序须与签名 `(dx,dy,dw,dh,src,sw,sh,mode)` 一致，源指针误放到首参会使 `dw=0` 守卫早退、循环零像素。③ 头文件新增结构体字段后须 clean 重建，避免依赖 TU 按旧偏移读字段。
+
+### A7.7 坑清单走查结果（2026-11-28，批次 4，静态代码核查 + 时间受限说明）
+
+> 定位说明：先在 `docs/块化GUI-设计规格.md`、`docs/块化GUI-v2-规格.md` §5 及全 docs/ 检索 `△` / `A7.7`，**未找到原标 △ 的 16 条核对项表格**（grep 0 命中）。下列按任务指定的 6 类重点逐条回填；本轮 20 分钟走查窗口内以源码静态核查为主，未上机复现的项明确标注「未走查（时间/环境）」。未改写六份正文，结论仅追加本节。
+
+| # | 重点项 | 结论 | 证据（文件:行号） | 走查状态 |
+|---|---|---|---|---|
+| ① | hover 与焦点框是否互不覆盖 | 静态：hover 态走 `hover_block` 注入链（`gui_inject_hover_block`），聚焦态走 `focused`/focus 栈；两者是独立静态槽（`hover_block` / `pressed_block` / `focused`），绘制态由状态位区分。未见同一槽位被 hover 与 focus 同时复用的代码路径；像素级互不覆盖未在本轮上机复测。 | `src/gui/input.c:75` 周边槽位；`src/gui/chrome.c:330-331` hover 注入；`src/render.c:858` 角色表 `hover/focus/selectionBg` 分列 | 静态核查；像素互不覆盖 **未走查（时间）** |
+| ② | 列表滚到底是否仍带选中条 | 静态：filemgr 选中项 `fm_sel` 与滚动 `fm_scroll` 独立维护；下移到末行时 `fm_scroll = fm_sel - FM_ROWS_VIEW + 1` 钳制，选中行标签 `>` 在 `fm_row_label()` 内按 `i == fm_sel` 重绘；滚到底后 `fm_sel` 不被清空，选中条应随可视区保留。末行选中条像素未上机截图复核。 | `src/gui/filemgr.c:30-31`（fm_sel/fm_scroll）、`:84-87`（选中标签）、`:248-253`（滚动钳制）、`:192-193`（选中重绘） | 静态核查；末行选中条渲染 **未走查（时间）** |
+| ③ | `gui_focus_raise` 是否清理全局 `key_hook` | **否（静态确认）**：`gui_focus_raise()` 只做 `focus_set(b)` + `gui_raise_to_front(id)`，**不清** `key_hook`。全局钩子的清零只发生在两处：进桌面 `gui_input_reset()`（`key_hook=0; key_ud=0`），以及各应用关闭/失焦路径显式 `gui_set_key_hook(0,0)`（filemgr/browser/images/chrome/inputbox）。风险：若某应用摘挂焦点但未走自己的关闭路径，旧 key_hook 可能残留——本轮未构造该复现场景。 | `src/gui/input.c:509-516`（focus_raise 体）、`:523-541`（reset 清零）、`:85-86`（set_key_hook）；关闭路径 `src/gui/filemgr.c:230`、`browser.c:908/960`、`images.c:236`、`chrome.c:1279`、`input.c:325` | 静态核查；残留钩子复现 **未走查（时间）** |
+| ④ | `filemgr` 行高与布局是否同源 | **部分不同源（待复核）**：行高 `FM_ROW_H=18`、可视行数 `FM_ROWS_VIEW=14`、主体高 `FM_BODY_H=280` 三者是独立 `#define`；行块规格用 `FM_ROW_H`，布局容器高用 `FM_BODY_H`，不存在由行高 × 行数反推主体高的派生关系。`14×18=252 ≠ 280`，差额由标题/路径栏/ padding 占用，未在代码里以公式锁定。若以后改行高，主体高不会自动跟随。 | `src/gui/filemgr.c:21-24`（三个常量）、`:120-126`（行块规格）、`:274-292`（标题/路径/进度栏布局） | 静态核查；改行高联动 **未走查（时间）** |
+| ⑤ | 块表容量上限拒绝路径是否打点 | **是（静态确认）**：超配额/超深度/超长文本/超池宽均返回 `E_DECL_QUOTA(-35)` 等错误码，并经 `decl_reject()` 写串口打点 `GUI:decl reject code=<n> pid=<tid>`，同时累计 `toast_hints` 并打 `GUI:decl toast code=`。拒绝路径覆盖文本超长、深度超限两处校验点（提交/声明两路径对称）。 | `src/gui/decl.c:103-110`（reject 打点）、`:196/:211/:277/:292`（QUOTA 拒绝点）；错误码 `E_DECL_QUOTA -35` | 静态核查；超限实机打点序列 **未走查（时间）** |
+| ⑥ | VMware 路径 `text` 往返回字模 | **未走查（环境）**：本机 QEMU 无 VMware 宿主，`vmware/` 下仅 vmdk/vmx/scoreboard，无可执行 VMware 通道。文本后端动态字模槽路径在 `be_text.c`，`text` 命令回退 80×25 文本模式（CJK 走动态字模槽）；VMware 下往返回字模是否丢字需在 VMware 宿主复测。 | `src/be_text.c`（动态字模槽）；`shell.c` `cmd_text()`；`vmware/` 目录无字体相关配置 | 未走查（环境：缺 VMware 宿主） |
+
+**未闭环项与下一步定位点**：①②④ 的像素/联动结论需下一轮在 gfx24 探针里补截图断言；③ 需构造"应用摘焦点但不触发关闭路径"用例验证 key_hook 是否残留；⑥ 待 VMware 环境复测 text 往返 CJK 字模。本轮未改任何运行时代码，未引入临时打印。
