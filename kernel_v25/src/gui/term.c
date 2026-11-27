@@ -188,18 +188,23 @@ static void t_render(block_id id) {
     uint32_t fg = tok->fg, bg = tok->panel, accent = tok->accent;
     gui_fill_rect(b->x, b->y, b->w, b->h, bg);
 
-    int show = T_ROWS - 1;
-    int first = t->ring_n <= show ? 0 : t->ring_n - show;
+    /* 输出区行数按已产出内容动态计：输入行紧跟最后一行输出（真实 shell
+     * 语义），窗口空时输入行在第 0 行；内容满屏后取最后 T_ROWS-1 行，
+     * 输入行自然停在底行，等价于整体上滚。此前固定 29 行输出 + 底行输入，
+     * 空会话时输入行悬在窗口底部、中间一片空白。 */
+    int show_limit = T_ROWS - 1;
+    int used = t->ring_n < show_limit ? t->ring_n : show_limit;
+    int first = t->ring_n - used;
     char line[T_COLS + 2];
 
-    for (int v = 0; v < show; v++) {
+    for (int v = 0; v < used; v++) {
         const char *src = t_ring_at(t, first + v);
         t_copy(line, sizeof(line), src);
         gui_draw_text(b->x + T_PAD, b->y + T_PAD + v * 16, line, fg, 1);
     }
 
     /* 输入行：提示符 + 编辑缓冲 + 光标竖线。 */
-    int row = show;
+    int row = used;
     char prompt[T_COLS];
     t_copy(prompt, sizeof(prompt), "");       /* Windows 风格：输入行只留 ">"，cwd 见状态行 */
     t_cat(prompt, sizeof(prompt), "> ");

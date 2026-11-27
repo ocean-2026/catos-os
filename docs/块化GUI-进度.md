@@ -152,3 +152,9 @@ R19 记的"每条一个图标块"实际只是行容器、纯文字。本日补�
 - `src/gui/chrome.c` 的 `build_desktop_icons()` 重写：每项 = `b_column`（96 宽、gap 8、`align_cross=CENTER`）容器，内含 `b_icon`（32×32、accent 色）+ `b_text`（自然宽、居中、超 9 单位补 `...`）；目录 → folder 图标(4)，普通文件 → file 图标(3)；点击仍落在容器上，沿用 txt→记事本 / bmp·ppm→图片查看器 / 目录→资源管理器分流。
 - 排障要点：父容器 `z` 大于子块 `z` 时，`compose.c` 的 `sort_paint()` 把父块排到子块**之后**，父的 panel 底色整块覆盖子内容 —— 桌面只显示第一项。修法是子块给同 `z`，靠先序保证"父底先画、子内容后画"。
 - 门禁：`check_link_layout.py --strict` RC=0、E3 2/2、`gui_pixel_regress` 6/6、vprobe 10/10。
+
+### 2026-11-27 块终端输入行跟随输出（真 shell 语义）
+
+原 `t_render()` 固定"29 行输出 + 底行输入"，输入行永远贴在窗口最下面，空会话时提示符悬在底部、中间一片空。改为按已产出内容动态计行：`used = min(ring_n, T_ROWS-1)`，输出从第 0 行开始画 `used` 行，输入行落在 `row = used`；内容满屏后取最后 `T_ROWS-1` 行，输入行自然停在底行，等价于整体上滚。体块高度仍为 `T_ROWS*16+T_PAD*2`，无需改尺寸。
+
+实测（`f3ac74d` + 本改动，800×600）：空会话 `CatOS block terminal (builtins: ...)` 下一行即 `> `；`ls` 后 `> ` 紧接 `--- 8 entries` 下一行；`help` 满屏时输入行稳在框内底行。截图 `artifacts/parent-verify/pv-open.png` / `pv-ls.png` / `pv-help.png`；`check_link_layout.py --strict` RC=0。
