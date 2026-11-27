@@ -6,6 +6,11 @@
 #include "lang.h"   /* v2.76: fs diagnostics are bilingual */
 #include "hw.h"
 #include "pager.h"      /* v2.59 generic console pager */
+#include "crypto.h"     /* A7.4: crypto_random() backs /dev/random */
+#include "kvheap.h"     /* A7.4: heap usage for /dev/meminfo */
+#include "serial_log.h" /* A7.4: ser_putc() backs /dev/console */
+#include "catos_version.h"
+extern uint32_t uptime_ms(void);
 #ifdef CATOS_BENCH
 #include "perf.h"       /* fs.read segment counters (light perf follow-up) */
 #endif
@@ -182,6 +187,185 @@ static int path_under(const char *abs, const char *m) {
     return 1;
 }
 
+/* ---------- A7.4: virtual /dev character devices --------------------- *
+ * CatOS has no devfs; /dev is shadowed by an in-kernel virtual layer sitting
+ * on top of the real FAT volume.  The FS entry points consult this layer
+ * first; create / remove / copy under /dev are refused with a clear code.
+ *
+ * Virtual nodes MUST report cluster 0 together with their real (possibly
+ * bounded) size: a nonzero cluster would make fs_read_text / fs_read_at walk
+ * a FAT chain off cluster 0 on disk (known pitfall).
+ *
+ * Nodes:
+ *   null     reads EOF, writes swallowed
+ *   zero     reads NUL bytes (bounded by DEV_CAP), writes swallowed
+ *   random   reads crypto_random() bytes (demo-grade kernel RNG), writes swallowed
+ *   full     reads NUL bytes, every non-empty write returns ENOSPC
+ *   console  writes go to COM1/console, reads EOF
+ *   version  generated: kernel version string (read-only)
+ *   uptime   generated: uptime in milliseconds (read-only)
+ *   meminfo  generated: disk + kernel heap usage summary (read-only)
+ */
+enum {
+    DEV_NULL = 0, DEV_ZERO, DEV_RANDOM, DEV_FULL,
+    DEV_CONSOLE, DEV_VERSION, DEV_UPTIME, DEV_MEMINFO
+};
+struct dev_node { const char *name; uint8_t kind; };
+static const struct dev_node DEV_NODES[] = {
+    { "null",    DEV_NULL    },
+    { "zero",    DEV_ZERO    },
+    { "random",  DEV_RANDOM  },
+    { "full",    DEV_FULL    },
+    { "console", DEV_CONSOLE },
+    { "version", DEV_VERSION },
+    { "uptime",  DEV_UPTIME  },
+    { "meminfo", DEV_MEMINFO },
+};
+#define DEV_COUNT  (int)(sizeof(DEV_NODES) / sizeof(DEV_NODES[0]))
+#define DEV_CAP    4096u   /* bounded read cap for the byte-source nodes */
+
+static char dev_scratch[224];   /* ring0 single shell: no reentry */
+
+static char dev_lc(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c; }
+static int dev_eq(const char *a, const char *b) {
+    while (*a && *b) { if (dev_lc(*a) != dev_lc(*b)) return 1; a++; b++; }
+    return dev_lc(*a) - dev_lc(*b);
+}
+
+/* abs == "/dev" (case-insensitive) */
+static int dev_is_dir(const char *abs) {
+    if (!abs || abs[0] != '/') return 0;
+    const char *p = abs + 1;
+    return dev_eq(p, "dev") == 0;
+}
+
+/* match "/dev/<node>"; returns node index, or -1 */
+static int dev_match_node(const char *abs) {
+    if (!abs || abs[0] != '/') return -1;
+    const char *p = abs + 1;
+    if (dev_lc(p[0]) != 'd' || dev_lc(p[1]) != 'e' || dev_lc(p[2]) != 'v') return -1;
+    if (p[3] != '/') return -1;
+    const char *leaf = p + 4;
+    if (!*leaf) return -1;
+    for (int i = 0; i < DEV_COUNT; i++)
+        if (dev_eq(leaf, DEV_NODES[i].name) == 0) return i;
+    return -1;
+}
+
+/* any path equal to /dev or underneath it (existing node or stray name) */
+static int dev_under(const char *abs) {
+    if (dev_is_dir(abs)) return 1;
+    if (dev_match_node(abs) >= 0) return 1;
+    if (!abs || abs[0] != '/') return 0;
+    const char *p = abs + 1;
+    return dev_lc(p[0]) == 'd' && dev_lc(p[1]) == 'e' && dev_lc(p[2]) == 'v' && p[3] == '/';
+}
+
+static int dev_u2a(uint32_t v, char *out) {
+    char b[12]; int n = 0;
+    if (v == 0) b[n++] = '0';
+    while (v > 0) { b[n++] = (char)('0' + v % 10); v /= 10; }
+    int i = 0;
+    while (n > 0) out[i++] = b[--n];
+    out[i] = 0;
+    return i;
+}
+
+static const char *dev_version_text(void) {
+    int n = 0; const char *p;
+    for (p = "CatOS v"; *p && n < (int)sizeof(dev_scratch) - 2; ) dev_scratch[n++] = *p++;
+    for (p = CATOS_VERSION; *p && n < (int)sizeof(dev_scratch) - 2; ) dev_scratch[n++] = *p++;
+    dev_scratch[n++] = '\n'; dev_scratch[n] = 0;
+    return dev_scratch;
+}
+
+static const char *dev_uptime_text(void) {
+    int n = dev_u2a(uptime_ms(), dev_scratch);
+    const char *p = " ms\n";
+    while (*p && n < (int)sizeof(dev_scratch) - 1) dev_scratch[n++] = *p++;
+    dev_scratch[n] = 0;
+    return dev_scratch;
+}
+
+static const char *dev_meminfo_text(void) {
+    uint32_t tot = fat_total_clusters(), fre = fat_free_clusters();
+    uint32_t cs  = fat_cluster_size();
+    uint32_t used = tot > fre ? tot - fre : 0;
+    int n = 0;
+    const char *p = "disk : ";
+    while (*p) dev_scratch[n++] = *p++;
+    n += dev_u2a((used * cs) / 1024, dev_scratch + n);
+    p = "K used, ";
+    while (*p) dev_scratch[n++] = *p++;
+    n += dev_u2a((fre * cs) / 1024, dev_scratch + n);
+    p = "K free\nheap : ";
+    while (*p) dev_scratch[n++] = *p++;
+    n += dev_u2a(kvheap_inuse_objs(), dev_scratch + n);
+    p = " objs, ";
+    while (*p) dev_scratch[n++] = *p++;
+    n += dev_u2a(kvheap_inuse_bytes() / 1024, dev_scratch + n);
+    p = "K bytes\n";
+    while (*p && n < (int)sizeof(dev_scratch) - 1) dev_scratch[n++] = *p++;
+    dev_scratch[n] = 0;
+    return dev_scratch;
+}
+
+static const char *dev_text(int kind) {
+    switch (kind) {
+    case DEV_VERSION: return dev_version_text();
+    case DEV_UPTIME:  return dev_uptime_text();
+    default:          return dev_meminfo_text();
+    }
+}
+
+/* reported (bounded) byte size of a node */
+static uint32_t dev_node_size(int kind) {
+    switch (kind) {
+    case DEV_NULL: case DEV_CONSOLE: return 0;
+    case DEV_VERSION: case DEV_UPTIME: case DEV_MEMINFO:
+        return (uint32_t)slen(dev_text(kind));
+    default: return DEV_CAP;          /* zero / random / full */
+    }
+}
+
+/* fill buf with up to max bytes starting at offset; returns bytes filled */
+static int dev_read(int kind, char *buf, int max, uint32_t off) {
+    if (max <= 0) return 0;
+    switch (kind) {
+    case DEV_NULL: case DEV_CONSOLE: return 0;
+    case DEV_ZERO: case DEV_FULL:
+        for (int i = 0; i < max; i++) buf[i] = 0;
+        return max;
+    case DEV_RANDOM:
+        crypto_random((uint8_t *)buf, max);
+        return max;
+    default: {
+        const char *t = dev_text(kind);
+        uint32_t len = slen(t);
+        if (off >= len) return 0;
+        uint32_t n = len - off;
+        if ((uint32_t)max < n) n = (uint32_t)max;
+        memcpy_(buf, t + off, n);
+        return (int)n;
+    }
+    }
+}
+
+/* write side.  Returns FS_OK / FS_ERR_FULL / FS_ERR_RO. */
+static int dev_write(int kind, const char *data, uint32_t size) {
+    switch (kind) {
+    case DEV_NULL: case DEV_ZERO: case DEV_RANDOM:
+        return FS_OK;                 /* swallowed, no disk touch */
+    case DEV_CONSOLE:
+        for (uint32_t i = 0; i < size; i++) ser_putc(data[i]);
+        return FS_OK;
+    case DEV_FULL:
+        return size > 0 ? FS_ERR_FULL : FS_OK;
+    default:
+        return FS_ERR_RO;             /* version / uptime / meminfo: generated */
+    }
+}
+
 /* resolve an absolute path (must start with '/'); returns FAT cluster of
  * the final component, or 0 on error.  Walks through mount points: once a
  * prefix matches a mount entry, resolution continues inside that volume. */
@@ -273,6 +457,7 @@ static int create_path(const char *path, uint8_t type) {
 
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
+    if (dev_under(abs)) return FS_ERR_RO;   /* /dev is a virtual layer */
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -314,6 +499,7 @@ int fs_touch(const char *path) {
     if (!fs_ready) return FS_ERR_NOENT;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return FS_ERR_INVAL;
+    if (dev_under(abs)) return FS_ERR_RO;   /* /dev is a virtual layer */
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (clus) {
@@ -359,6 +545,17 @@ int fs_enum_entries(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+    if (dev_is_dir(abs)) {
+        int n = 0;
+        for (int i = 0; i < DEV_COUNT && n < maxn; i++) {
+            int k;
+            for (k = 0; DEV_NODES[i].name[k] && k < FS_NAME_MAX - 1; k++)
+                out[n][k] = DEV_NODES[i].name[k];
+            out[n][k] = 0;
+            n++;
+        }
+        return n;
+    }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
@@ -404,6 +601,17 @@ int fs_enum_files(const char *path, char out[][FS_NAME_MAX], int maxn) {
     if (!fs_ready || !path || maxn < 1) return -1;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+    if (dev_is_dir(abs)) {
+        int n = 0;
+        for (int i = 0; i < DEV_COUNT && n < maxn; i++) {
+            int k;
+            for (k = 0; DEV_NODES[i].name[k] && k < FS_NAME_MAX - 1; k++)
+                out[n][k] = DEV_NODES[i].name[k];
+            out[n][k] = 0;
+            n++;
+        }
+        return n;
+    }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus || !(e.attr & FAT_ATTR_DIR)) return -1;
@@ -590,6 +798,32 @@ void fs_list(const char *path) {
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) {
         vga_write(trs("catos: path too long\n", "catos: 路径太长\n")); return;
+    }
+    if (dev_is_dir(abs)) {          /* A7.4: virtual /dev listing */
+        ls_n = 0;
+        for (int i = 0; i < DEV_COUNT && ls_n < LS_MAX; i++) {
+            struct ls_ent *en = &ls_buf[ls_n];
+            scpy(en->name, DEV_NODES[i].name);
+            en->attr = FAT_ATTR_FILE;
+            en->size = dev_node_size(DEV_NODES[i].kind);
+            en->cluster = 0; en->slot = 0; en->first = 0; en->insane = 0;
+            memz(en->raw, 11);
+            ls_n++;
+        }
+        ls_sort();
+        pager_begin(1);
+        for (int i = 0; i < ls_n; i++) {
+            if (pager_quit()) break;
+            ls_print_one(&ls_buf[i], abs, longfmt, raw);
+        }
+        if (!pager_quit()) {
+            con_set_fg_rgb(pal_rgb(PAL_FG));
+            vga_write("--- ");
+            print_int(ls_n);
+            vga_write(ls_n == 1 ? " entry ---\n" : " entries ---\n");
+        }
+        pager_end();
+        return;
     }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
@@ -786,6 +1020,13 @@ int fs_resolve_file(const char *path, uint32_t *cluster, uint32_t *size) {
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
 
+    int di = dev_match_node(abs);
+    if (di >= 0) {                       /* virtual node: cluster 0, real size */
+        if (cluster) *cluster = 0;
+        if (size)    *size = dev_node_size(DEV_NODES[di].kind);
+        return 0;
+    }
+
     if (rc_valid && scmp(abs, rc_path) == 0) {
         if (cluster) *cluster = rc_clus;
         if (size)    *size = rc_size;
@@ -827,6 +1068,11 @@ int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
     if (!fs_ready || !cb) return -1;
     char abs[FS_PATH_MAX];
     if (abs_path(path ? path : "/", abs) != 0) return -1;
+    if (dev_is_dir(abs)) {
+        for (int i = 0; i < DEV_COUNT; i++)
+            cb(0, DEV_NODES[i].name, dev_node_size(DEV_NODES[i].kind), ud);
+        return 0;
+    }
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     if (!clus) return -1;
@@ -839,6 +1085,10 @@ int fs_foreach(const char *path, fs_foreach_cb cb, void *ud) {
 
 int fs_read_text(const char *path, char *buf, int max) {
     if (!fs_ready || !buf || max < 1) return -1;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return -1;
+    int di = dev_match_node(abs);
+    if (di >= 0) return dev_read(DEV_NODES[di].kind, buf, max, 0);
     uint32_t clus = 0, size = 0;
     if (fs_resolve_file(path, &clus, &size) != 0) return -1;
     uint32_t n = size;
@@ -850,6 +1100,10 @@ int fs_read_text(const char *path, char *buf, int max) {
 int fs_write_text(const char *path, const char *data, uint32_t size) {
     if (!fs_ready || !path || !*path || !data) { fs_dbg2("[F0]",0); return -1; }
     if (size >= FS_DATA_MAX) return -1;          /* room for the NUL */
+    {
+        char abs[FS_PATH_MAX];
+        if (abs_path(path, abs) == 0 && dev_under(abs)) return FS_ERR_RO;
+    }
     fs_rcache_invalidate();
     fs_entry_t *f = fs_create_file(path);
     if (!f) return -1;
@@ -867,6 +1121,10 @@ int fs_write_raw(const char *path, const char *data, uint32_t size) {
     fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+
+    int di = dev_match_node(abs);
+    if (di >= 0) return dev_write(DEV_NODES[di].kind, data, size);
+    if (dev_under(abs)) return FS_ERR_RO;   /* no new nodes under /dev */
 
     /* split parent path + leaf name */
     const char *leaf = abs;
@@ -903,6 +1161,13 @@ int fs_read_at(const char *path, char *buf, int offset, int max) {
      * cluster so files larger than any single buffer can be read in
      * chunks. */
     if (!fs_ready || !buf || max < 1) return -1;
+    char abs[FS_PATH_MAX];
+    if (abs_path(path, abs) != 0) return -1;
+    int di = dev_match_node(abs);
+    if (di >= 0) {
+        if (offset < 0) offset = 0;
+        return dev_read(DEV_NODES[di].kind, buf, max, (uint32_t)offset);
+    }
 #ifdef CATOS_BENCH
     uint64_t _t0 = perf_now();
 #endif
@@ -966,6 +1231,10 @@ int fs_write_raw_mode(const char *path, const char *data, uint32_t size, int mod
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
 
+    int di = dev_match_node(abs);
+    if (di >= 0) return dev_write(DEV_NODES[di].kind, data, size);
+    if (dev_under(abs)) return FS_ERR_RO;   /* no new nodes under /dev */
+
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
     if (!*leaf) { fs_dbg2("[F2]",0); return -1; }
@@ -1005,6 +1274,7 @@ int fs_is_dir(const char *path) {
     if (!fs_ready || !path || !*path) return 0;
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return 0;
+    if (dev_is_dir(abs)) return 1;
     fat_dirent_t e;
     uint32_t clus = resolve_path(abs, &e);
     return (clus && (e.attr & FAT_ATTR_DIR)) ? 1 : 0;
@@ -1030,6 +1300,7 @@ static int fs_rmdir_impl(const char *path, int strict) {
     fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+    if (dev_under(abs)) return FS_ERR_RO;   /* /dev is a virtual layer */
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;
     if (!*leaf) return -2;                    /* root: never deletable */
@@ -1072,6 +1343,7 @@ int fs_delete(const char *path) {
     fs_rcache_invalidate();
     char abs[FS_PATH_MAX];
     if (abs_path(path, abs) != 0) return -1;
+    if (dev_under(abs)) return FS_ERR_RO;   /* /dev is a virtual layer */
 
     const char *leaf = abs;
     for (const char *q = abs; *q; q++) if (*q == '/') leaf = q + 1;

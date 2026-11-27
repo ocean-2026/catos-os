@@ -32,11 +32,9 @@
 #include "palette.h"    /* v2.67 semantic colour roles from the hive        */
 #include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf appearance mirror       */
 
-/* v2.82 R1 P1-4: single version source for user-visible strings (about /
- * help heading / uname).  Bump this one constant instead of editing copies. */
-#ifndef CATOS_VERSION
-#define CATOS_VERSION "2.82"
-#endif
+/* v2.82 R1 P1-4: single version source for user-visible strings;
+ * the constant lives in include/catos_version.h. */
+#include "catos_version.h"
 #ifdef CATOS_BENCH
 #include "perf.h"       /* bench build: rdtsc instrumentation + `bench`     */
 #endif
@@ -201,9 +199,19 @@ static void redir_flush(void) {
     if (!g_redir_active) return;
     g_redir_buf[g_redir_len] = 0;
     if (g_redir_len > 0) {
+        int rc = 0;
         if (!g_redir_append)
-            fs_write_raw_mode(g_redir_path, "", 0, 0);      /* truncate/create */
-        fs_write_raw_mode(g_redir_path, g_redir_buf, g_redir_len, 1);
+            rc = fs_write_raw_mode(g_redir_path, "", 0, 0); /* truncate/create */
+        if (rc == 0)
+            rc = fs_write_raw_mode(g_redir_path, g_redir_buf, g_redir_len, 1);
+        if (rc == FS_ERR_FULL)
+            vga_write(trs("bash: /dev/full: No space left on device\n",
+                          "bash: /dev/full: 设备无剩余空间\n"));
+        else if (rc == FS_ERR_RO)
+            vga_write(trs("bash: /dev: read-only virtual device\n",
+                          "bash: /dev: 只读虚拟设备\n"));
+        else if (rc != 0)
+            vga_write(trs("bash: redirect write failed\n", "bash: 重定向写入失败\n"));
     }
     g_redir_active = 0;
     g_redir_len = 0; g_redir_buf[0] = 0;
@@ -1995,6 +2003,7 @@ static void cmd_touch(const char *arg) {
     if (r == FS_OK)            return;
     if (r == FS_ERR_NOENT)      vga_write(trs("touch: parent directory not found\n", "touch: 父目录不存在\n"));
     else if (r == FS_ERR_NOTDIR) vga_write("touch: is a directory\n");
+    else if (r == FS_ERR_RO)    vga_write(trs("touch: /dev: read-only virtual device\n", "touch: /dev: 只读虚拟设备\n"));
     else if (r == FS_ERR_INVAL) vga_write(trs("touch: invalid name\n", "touch: 名称无效\n"));
     else if (r == FS_ERR_FULL)  vga_write("touch: disk full (FAT32)\n");
 }
@@ -4740,6 +4749,15 @@ static void cmd_rm(const char *arg) {
         vga_write(trs("usage: rm [-d|-r] [-f] FILE|DIR\n", "用法：rm [-d|-r] [-f] 文件或目录\n"));
         return;
     }
+    {
+        char devabs[FS_PATH_MAX];
+        fs_canon_path(arg, devabs, sizeof(devabs));
+        if (!strcmp_(devabs, "/dev") ||
+            (devabs[1] == 'd' && devabs[2] == 'e' && devabs[3] == 'v' && devabs[4] == '/')) {
+            vga_write(trs("rm: /dev: read-only virtual device\n", "rm: /dev: 只读虚拟设备\n"));
+            return;
+        }
+    }
     if (dironly) {
         char abs[FS_PATH_MAX];
         fs_canon_path(arg, abs, sizeof(abs));
@@ -4776,7 +4794,8 @@ static void cmd_rm(const char *arg) {
     }
     int r = fs_delete(arg);
     if (r == 0) { acl_unset(arg); return; }
-    vga_write(trs("rm: no such file\n", "rm: 找不到文件\n"));
+    if (r == FS_ERR_RO) vga_write(trs("rm: /dev: read-only virtual device\n", "rm: /dev: 只读虚拟设备\n"));
+    else                vga_write(trs("rm: no such file\n", "rm: 找不到文件\n"));
 }
 
 /* v2.50: rmdir DIR -- remove an EMPTY directory only (no -r; non-empty
@@ -4808,7 +4827,9 @@ static int fs_copy_file(const char *src, const char *dst) {
     if (fs_perm_check(src, g_uid, g_gid, PERM_READ) != 0) return -13;
     if (fs_perm_check(dst, g_uid, g_gid, PERM_WRITE) != 0) return -13;
     static char chunk[16384];     /* ring0 single shell: no reentry */
-    if (fs_write_raw_mode(dst, "", 0, 0) != 0) return -2;   /* create/truncate */
+    int w0 = fs_write_raw_mode(dst, "", 0, 0);   /* create/truncate */
+    if (w0 == FS_ERR_RO) return FS_ERR_RO;
+    if (w0 != 0) return -2;
     /* v2.50: carry the source mode bits over; creator stays owner. */
     acl_set(dst, g_uid, g_gid, cp_src_mode(src));
     uint32_t off = 0;
@@ -4817,7 +4838,9 @@ static int fs_copy_file(const char *src, const char *dst) {
         if (want > sizeof(chunk)) want = sizeof(chunk);
         int r = fs_read_at(src, chunk, (int)off, (int)want);
         if (r <= 0) return -3;
-        if (fs_write_raw_mode(dst, chunk, (uint32_t)r, 1) != 0) return -4;
+        int w = fs_write_raw_mode(dst, chunk, (uint32_t)r, 1);
+        if (w == FS_ERR_RO) return FS_ERR_RO;
+        if (w != 0) return -4;
         off += (uint32_t)r;
     }
     return 0;
@@ -4858,6 +4881,7 @@ static void cmd_cp(char *arg) {
     int r = fs_copy_file(src, dstn);
     if (r == 0) return;
     if (r == -13) vga_write(trs("cp: permission denied\n", "cp: 权限不足\n"));
+    else if (r == FS_ERR_RO) vga_write(trs("cp: /dev: read-only virtual device\n", "cp: /dev: 只读虚拟设备\n"));
     else if (r == -1) vga_write(trs("cp: no such file\n", "cp: 找不到文件\n"));
     else if (r == -2) vga_write(trs("cp: cannot create target\n", "cp: 无法create target\n"));
     else              vga_write(trs("cp: copy failed mid-way\n", "cp: copy 失败 mid-way\n"));

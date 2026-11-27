@@ -36,6 +36,7 @@ typedef struct fs_entry {
 #define FS_ERR_INVAL  -3   /* bad name (empty, "." "..", too long, bad chars) */
 #define FS_ERR_FULL   -4   /* disk / entry pool exhausted */
 #define FS_ERR_EXIST  -5   /* already exists */
+#define FS_ERR_RO     -6   /* read-only / virtual device (e.g. /dev/*) */
 
 void       fs_init(void);                 /* probe FAT32 volume */
 int        fs_fs_ready(void);             /* 1 when a FAT32 volume is mounted */
