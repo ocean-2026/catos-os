@@ -96,6 +96,9 @@ static int scq_pop(void) {
 /* non-blocking: 1 when at least one scancode is pending (for `top`) */
 int kb_peek(void) { return scq_tail != scq_head; }
 
+/* v2.83: 只读查询 Alt 是否按住（菜单加速键用；不消费、不改修饰态）。 */
+int kb_alt(void) { return alt; }
+
 /* SAK request: consumed by the GUI / shell on poll; clears on read. */
 int  sak_requested(void) { int f = sak_flag; sak_flag = 0; return f; }
 void sak_request_clear(void) { sak_flag = 0; }

@@ -18,6 +18,7 @@
 #include "gui/gui.h"
 #include "gui_int.h"
 #include "gfx24.h"
+#include "keyboard.h"
 
 #define POP_GAP      8
 #define POP_SAFE     8
@@ -201,6 +202,78 @@ void pop_bridge_note(int x, int y) {
     prev_in_pop = in;
 }
 
+/* ---- v2.83 浮层键盘导航：↑↓ 移动高亮、Enter 触发、字母按 `&X` 直达 ------ */
+static block_id pop_sel_pop = 0;
+static int      pop_sel = -1;
+
+static int pop_act(block *b) { return b && b->on_click; }
+
+static const char *pop_label(block *b) {
+    if (!b) return 0;
+    if (b->text) return b->text;
+    if (b->first_child) return b->first_child->text;
+    return 0;
+}
+
+static int pop_count_items(block *top) {
+    int n = 0;
+    for (block *c = top->first_child; c; c = c->next_sibling)
+        if (pop_act(c)) n++;
+    return n;
+}
+
+static block *pop_item_at(block *top, int idx) {
+    for (block *c = top->first_child; c; c = c->next_sibling)
+        if (pop_act(c)) { if (idx == 0) return c; idx--; }
+    return 0;
+}
+
+static void pop_paint_sel(block *top) {
+    int i = 0;
+    for (block *c = top->first_child; c; c = c->next_sibling) {
+        if (!pop_act(c)) continue;
+        c->focused = (i == pop_sel) ? 1 : 0;
+        c->dirty_paint = 1;
+        i++;
+    }
+}
+
+/* 返回 1 = 键被浮层消费；0 = 未命中浮层/非导航键。 */
+int pop_key(int code) {
+    block *top = top_pop();
+    if (!top) { pop_sel_pop = 0; pop_sel = -1; return 0; }
+    if (pop_sel_pop != top->id) { pop_sel_pop = top->id; pop_sel = 0; pop_paint_sel(top); }
+    int n = pop_count_items(top);
+    if (n <= 0) return 0;
+    switch (code) {
+    case KB_UP:
+        pop_sel = (pop_sel <= 0) ? n - 1 : pop_sel - 1;
+        pop_paint_sel(top); return 1;
+    case KB_DOWN:
+        pop_sel = (pop_sel >= n - 1) ? 0 : pop_sel + 1;
+        pop_paint_sel(top); return 1;
+    case 10: {  /* Enter：触发当前高亮项 */
+        block *r = pop_item_at(top, pop_sel);
+        if (r && r->on_click) r->on_click(r->id, 0, 0);
+        return 1;
+    }
+    default: {
+        int c = code;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c >= 'a' && c <= 'z') {
+            for (int i = 0; i < n; i++) {
+                block *r = pop_item_at(top, i);
+                if (r && txt_accel_char(pop_label(r)) == c) {
+                    pop_sel = i; pop_paint_sel(top); return 1;
+                }
+            }
+            return 1;   /* 浮层打开：未匹配字母吞键 */
+        }
+        return 0;
+    }
+    }
+}
+
 /* ---- 探针辅助（cap2p_interact.c 本地 extern 调用） ---- */
 
 uint32_t pop_probe_dismiss_count(void) { return pop_dismiss_count; }
@@ -212,4 +285,6 @@ void     pop_probe_reset(void) {
     pop_dismiss_id = 0;
     bridge_until = 0;
     prev_in_pop = 0;
+    pop_sel_pop = 0;
+    pop_sel = -1;
 }

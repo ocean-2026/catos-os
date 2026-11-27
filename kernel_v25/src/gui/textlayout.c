@@ -61,6 +61,8 @@ typedef struct {
     uint8_t  wide;
     uint8_t  space;
     uint8_t  close;     /* 行首禁则闭合标点 */
+    uint8_t  inv;       /* 加速键前缀 `&`：不绘、不计宽 */
+    uint8_t  und;       /* 紧随 `&` 的加速键字符：绘下划线 */
     int      adv;
 } atom_t;
 
@@ -104,6 +106,7 @@ static int build_atoms(const char *s, uint8_t fs, uint8_t sc, uint8_t tabular,
                        atom_t *at, int maxa) {
     const slot_t *sl = &SLOT[slot_idx(fs)];
     int n = 0;
+    int amp_next = 0;                 /* 上一个码点是 `&`：下一可见字符加下划线 */
     const char *p = s;
     while (p && *p && n < maxa) {
         uint32_t cp;
@@ -115,8 +118,17 @@ static int build_atoms(const char *s, uint8_t fs, uint8_t sc, uint8_t tabular,
         a->wide = cp >= 0x1100u ? 1 : 0;
         a->space = (cp == ' ');
         a->close = is_close_punct(cp);
+        a->inv = 0;
+        a->und = (uint8_t)amp_next;
         int adv = a->wide ? sl->ww : sl->aw;
         if (tabular && is_digit_colon(cp)) adv = sl->aw;  /* 等宽步进 */
+        /* 加速键前缀 `&`：自身不绘、不计宽；标记下一可见字符为下划线目标。 */
+        if (cp == '&') {
+            a->inv = 1; a->und = 0; a->space = 0; a->close = 0; adv = 0;
+            amp_next = 1;
+        } else {
+            amp_next = 0;
+        }
         a->adv = adv * sc;
         n++;
         p += len;
@@ -378,10 +390,13 @@ static void draw_line(block *b, int x0, int y, const txt_line_t *ln,
     int idx = slot_idx(fs);
     const slot_t *sl = &SLOT[idx];
     int x = x0;
+    int ul_pending = 0;               /* 上一码点是 `&`：下一可见字符画下划线 */
     const char *p = ln->start, *end = p + ln->len;
     while (p < end) {
         uint32_t cp;
         int len = utf8_decode(p, &cp);
+        /* 加速键前缀 `&`：不绘、不进步进，只记下要给下一字符加下划线。 */
+        if (cp == '&') { ul_pending = 1; p += len; continue; }
         int wide = 0;
         const void *g = glyph_src(cp, &wide);
         int eight = 0;
@@ -404,6 +419,16 @@ static void draw_line(block *b, int x0, int y, const txt_line_t *ln,
                                idx, wide, g, bw, sl->h, bold, fg, eight);
         } else {
             draw_glyph(b, x, y, idx, wide, g, cw, ch, bold, fg, eight);
+        }
+        if (ul_pending) {
+            /* 下划线：贴字符底部一行，按块覆盖率混合，与文字同色。 */
+            int uy = y + ch - 1;
+            for (int ux = 0; ux < cw; ux++) {
+                int bc = blk_cov(b, x + ux, uy);
+                int cov = 255 * bc / 255;
+                if (cov > 0) blk_px_blend(x + ux, uy, fg, cov);
+            }
+            ul_pending = 0;
         }
         x += adv;
         p += len;
@@ -439,6 +464,24 @@ void txt_draw_block(block *b, uint32_t fg) {
 }
 
 /* ---- 探针导出（cap2p_text.c 经 extern 声明调用） ----------------------- */
+
+/* 加速键：返回标签中 `&` 紧随的 ASCII 字母（小写）；无 `&` 或其后非字母返回 0。
+ * 与 build_atoms / draw_line 的 `&` 口径一致：`&` 本身不计宽、不绘制。 */
+int txt_accel_char(const char *s) {
+    if (!s) return 0;
+    const char *p = s;
+    while (*p) {
+        if (*p == '&' && p[1]) {
+            char c = p[1];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c >= 'a' && c <= 'z') return (uint8_t)c;
+            return 0;
+        }
+        p++;
+    }
+    return 0;
+}
+
 int txt_probe_layout(const char *s, uint8_t fs, uint8_t sc, uint8_t tab,
                      int max_w, uint8_t wrap, uint8_t ell, uint8_t lh,
                      txt_line_t *out, int outsz) {

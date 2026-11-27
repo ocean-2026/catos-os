@@ -70,6 +70,8 @@ int       txt_wrapped_h(const char *s, uint8_t font_size, uint8_t scale,
                         uint8_t tabular, int max_w, uint8_t wrap_lines,
                         uint8_t ellipsis, uint8_t line_h_px);
 void      txt_draw_block(block *b, uint32_t fg);
+/* v2.83: 标签 `&X` 加速键字母（小写）；无则 0。 */
+int       txt_accel_char(const char *s);
 /* 旧像素口径原语（paint.c 导出）：8px/字、scale 1|2、超宽 "..." 截断 */
 int       gui_text_trim(const char *txt, int max_w, uint8_t scale,
                         char *out, int outsz);
@@ -95,6 +97,7 @@ int       anim_busy(void);
 void      pop_layout(block *b);
 int       pop_dismiss_at(int x, int y);
 int       pop_esc(void);
+int       pop_key(int code);          /* v2.83 浮层 ↑↓/Enter/字母直达，1=消费 */
 
 /* paint.c：elevation 九宫阴影（预生成 9-slice，右下光源） */
 void      sh_paint(block *b, uint8_t elevation);
@@ -149,6 +152,7 @@ void      gui_chrome_reset(void);
 void      gui_menu_open(void);
 void      gui_menu_close(void);
 int       gui_menu_is_open(void);
+int       gui_menu_accel(int code);   /* v2.83 Alt+字母：开菜单 / 直达匹配，1=已消费 */
 
 /* inputbox.c BLK_INPUT 单行输入框（v1 单实例） */
 void      ib_attach(block_id id, void (*on_submit)(block_id id, const char *text));

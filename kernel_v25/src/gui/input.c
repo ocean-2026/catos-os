@@ -452,8 +452,18 @@ void gui_pump_input(void) {
         }
     }
     int k = kb_getkey_timed(1);
-    if (k >= 0 && key_hook) {
-        if (key_hook(k, key_ud)) k = -1;          /* 组件消费，不走默认路径 */
+    if (k >= 0) {
+        int alt_held = kb_alt();
+        int alpha = (k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z');
+        if (alt_held && alpha) {
+            /* Alt+字母：菜单加速键（开菜单 / 直达匹配），一律吞键，不落输入框。 */
+            gui_menu_accel(k);
+            k = -1;
+        } else if (key_hook) {
+            if (key_hook(k, key_ud)) k = -1;          /* 组件消费，不走默认路径 */
+        } else if (pop_key(k)) {
+            k = -1;                                  /* 浮层导航消费 */
+        }
     }
     if (k == 27) {
         if (gui_sak_esc()) return;             /* SAK 面板优先消费 Esc */

@@ -1068,6 +1068,14 @@ static int menu_collect(block_id *out, int cap) {
     return n;
 }
 
+/* 行容器自身可能不挂文本，标签在其首个子文本块上；取用于加速键匹配。 */
+static const char *row_label(block *r) {
+    if (!r) return 0;
+    if (r->text) return r->text;
+    if (r->first_child) return r->first_child->text;
+    return 0;
+}
+
 static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
     block *row = btable_get(id);
     if (!row) return;
@@ -1134,8 +1142,22 @@ static int menu_key(int code, void *ud) {
     }
     case 27:   /* Esc：关闭菜单（与全局 Esc 路径一致，钩子消费） */
         gui_menu_close(); return 1;
-    default:
+    default: {
+        /* 字母直达：按行标签 `&X` 加速键匹配；菜单打开期间未匹配的字母
+         * 一律吞键，不得漏进背后的输入框。 */
+        int c = code;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c >= 'a' && c <= 'z') {
+            for (int i = 0; i < menu_row_n; i++) {
+                block *r = btable_get(menu_row_ids[i]);
+                if (r && txt_accel_char(row_label(r)) == c) {
+                    menu_sel = i; menu_paint_sel(); return 1;
+                }
+            }
+            return 1;
+        }
         return 0;
+    }
     }
 }
 
@@ -1164,7 +1186,7 @@ void gui_menu_open(void) {
         b_text(rid, 0, menu_labels[i]);
     }
 
-    static const char *app_labels[7] = { "Notepad", "Canvas demo", "Files", "Images", "Browser", "Settings", "Terminal" };
+    static const char *app_labels[7] = { "&Notepad", "&Canvas demo", "&Files", "&Images", "&Browser", "&Settings", "&Terminal" };
     for (int a = 0; a < 7; a++) {
         blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
@@ -1179,7 +1201,7 @@ void gui_menu_open(void) {
     launch.z = 0;
     block_id lid = b_row(menu_root, &launch);
     if (menu_row_n < 32) menu_row_ids[menu_row_n++] = lid;
-    b_text(lid, 0, "Launch demo");
+    b_text(lid, 0, "Launch &demo");
 
     /* 探针超高例：追加若干合成行，强制内容高度超过 max_h，走内部滚动。 */
     if (probe_menu_tall) {
@@ -1256,6 +1278,24 @@ void gui_menu_close(void) {
 }
 
 int gui_menu_is_open(void) { return menu_open; }
+
+/* v2.83 Alt+字母加速键：菜单未开则先打开（预选首项）；已开则按行标签 `&X`
+ * 直达匹配并高亮该行。任何 Alt+字母都由本路径吞掉，不落到背后输入框。
+ * 返回 1 = 已消费；非字母返回 0。 */
+int gui_menu_accel(int code) {
+    int c = code;
+    if (c >= 'A' && c <= 'Z') c += 32;
+    if (c < 'a' || c > 'z') return 0;
+    if (!menu_open) gui_menu_open();
+    if (menu_row_n <= 0) return 1;
+    for (int i = 0; i < menu_row_n; i++) {
+        block *r = btable_get(menu_row_ids[i]);
+        if (r && txt_accel_char(row_label(r)) == c) {
+            menu_sel = i; menu_paint_sel(); return 1;
+        }
+    }
+    return 1;   /* 未匹配：保持预选首项，吞键 */
+}
 
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly) {
     if (menu_open) gui_menu_close(); else gui_menu_open();
@@ -2682,6 +2722,50 @@ static void gui_probe_r5term(void) {
     ser_write("GUI:r5term opened=1\n");
 }
 
+/* A7.1 菜单加速键探针：Alt+字母开菜单并直达；未匹配字母吞键不漂移；菜单打开
+ * 时普通字母经钩子吞键、不漏进背后输入框。菜单保留在屏上供截图（下划线可见）。 */
+static void gui_probe_menu_accel(void) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("GUI:menu-accel result=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    /* Alt+N：菜单未开 -> 打开并直达 Notepad（标签 `&Notepad`，accel 'n'）。 */
+    int opened = gui_menu_accel('n');
+    layout_run();
+    gui_frame();
+    int sel_n = menu_sel;
+    block *rn = (menu_sel >= 0 && menu_sel < menu_row_n)
+                ? btable_get(menu_row_ids[menu_sel]) : 0;
+    char an = rn ? (char)txt_accel_char(row_label(rn)) : 0;
+
+    /* 未匹配字母 'z'：吞键，选中不得漂移。 */
+    int swallowed_z = gui_menu_accel('z');
+    int sel_z = menu_sel;
+
+    /* 菜单打开态下普通字母（无 Alt）经菜单钩子：必须吞键，选中不漂移。 */
+    int hook_x = menu_key('x', 0);
+    int sel_x = menu_sel;
+
+    ser_write("GUI:menu-accel opened="); ser_dec(opened);
+    ser_write(" sel_n="); ser_dec(sel_n);
+    ser_write(" accel="); ser_putc(an ? an : '-');
+    ser_write(" swallow_z="); ser_dec(swallowed_z);
+    ser_write(" sel_z="); ser_dec(sel_z);
+    ser_write(" hook_x="); ser_dec(hook_x);
+    ser_write(" sel_x="); ser_dec(sel_x);
+    ser_write(" result=");
+    ser_dec((menu_open && an == 'n' && sel_z == sel_n && sel_x == sel_n) ? 1 : 0);
+    ser_write("\n");
+}
+
 /* ---- shell 主循环 ------------------------------------------------------- */
 
 /* 生产节拍：PIT 100Hz，每 3 tick 提交一帧（≈33fps）。返回本步是否提交了帧；
@@ -2761,6 +2845,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "r5desk"))  { gui_probe_r5desk(); return; }
         if (!strcmp_probe(arg, "r5dbl"))   { gui_probe_r5dbl(); return; }
         if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }
+        if (!strcmp_probe(arg, "menu-accel")) { gui_probe_menu_accel(); return; }
         {
             char aw[16]; const char *ar = 0;
             split_word(arg, aw, sizeof(aw), &ar);
