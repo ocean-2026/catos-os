@@ -598,6 +598,13 @@ void task_exit_current(int code) {
     task_cleanup(t);
     t->exit_code = code;
     t->state = T_ZOMBIE;
+    /* 正式串口留证：ring3 CE 进程正常退出回打一行 `[CE] exited pid=.. code=.. name=..`，
+     * 与 task_spawn_ce() 的 `[CE] spawn pid=..` 按 pid 配对；ring0 内核任务不打，避免刷屏。 */
+    if (!t->ring0) {
+        ser_write("[CE] exited pid="); sd_dec(t->tid);
+        ser_write(" code="); sd_dec(code);
+        ser_write(" name="); ser_write(t->name); ser_write("\n");
+    }
 #ifdef CATOS_BENCH
     uint64_t _e1 = perf_now();
 #endif
@@ -3642,7 +3649,24 @@ static int thread_detach(int tid) {
     return 0;
 }
 
+/* 正式串口留证包装：impl 负责装载/建空间，外层在成功/失败两条路径各打一行
+ * COM1 面包屑（spawn pid / load fail code），供双击 .ce 等取证路径按 pid 配对。
+ * 签名/导出符号不变，CE ABI 不受影响。 */
+static int task_spawn_ce_impl(const char *path, int argc, char **argv, int uid);
+
 int task_spawn_ce(const char *path, int argc, char **argv, int uid) {
+    int rc = task_spawn_ce_impl(path, argc, argv, uid);
+    if (rc < 0) {
+        ser_write("[CE] spawn fail="); sd_dec(rc);
+        ser_write(" "); ser_write(path ? path : "(null)"); ser_write("\n");
+    } else {
+        ser_write("[CE] spawn pid="); sd_dec(rc);
+        ser_write(" "); ser_write(path ? path : "(null)"); ser_write("\n");
+    }
+    return rc;
+}
+
+static int task_spawn_ce_impl(const char *path, int argc, char **argv, int uid) {
 #if CATOS_SPAWN_TRACE
     ser_write("[SPAWN] enter "); ser_write(path ? path : "(null)"); ser_write("\n");
 #endif
