@@ -656,7 +656,7 @@ static int desk_ext_is(const char *name, const char *ext) {
     int dot = -1, n = desk_xlen(name);
     for (int k = 0; k < n; k++) if (name[k] == '.') dot = k;
     if (dot < 0) return 0;
-    const char *e = name + dot;
+    const char *e = name + dot + 1;
     for (int i = 0; ext[i]; i++) {
         char a = e[i], b = ext[i];
         if (a >= 'a' && a <= 'z') a -= 32;
