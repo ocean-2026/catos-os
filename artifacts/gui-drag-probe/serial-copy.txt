@@ -3,7 +3,7 @@
 [btime] 0ms K2 paging
 [intr] serial breadcrumb channel up
 [fpu] caps=0000000f  cr4=00000610  cr0=80000019 
-[link][RISK] refuse user map onto kernel static frame va=02000000  frame=02155000  pid=00000000 
+[link][RISK] refuse user map onto kernel static frame va=02000000  frame=02150000  pid=00000000 
 [guard] static-slot guard rejected=1 intact=1 result=1
 kvheap selftest: FAIL total=16 free=1 bytes=12288
 [btime] 10ms K3 intr+tasks+sti
@@ -14,34 +14,27 @@ kvheap selftest: FAIL total=16 free=1 bytes=12288
 [net] init begin
 [net] FAIL: no PCnet; PCI bus has 5 dev(s): 0x00008086:0x00001237:0x00060000 0x00008086:0x00007000:0x00060100 0x00008086:0x00007010:0x00010180 0x00008086:0x00007113:0x00068000 0x00001234:0x00001111:0x00030000
 [btime] 110ms K7 net_init
-[btime] 120ms K7b mouse_init
-[btime] 120ms S0 shell_run enter
-[btime] 120ms F0 fs_init enter
-[btime] 120ms F1 before fat_probe
-[btime] 120ms A0 ata_scan 4 slots
-[btime] 120ms A10 0
-[btime] 120ms A11 0
-[btime] 120ms A12 0
+[btime] 110ms K7b mouse_init
+[btime] 110ms S0 shell_run enter
+[btime] 110ms F0 fs_init enter
+[btime] 110ms F1 before fat_probe
+[btime] 110ms A0 ata_scan 4 slots
+[btime] 110ms A10 0
+[btime] 110ms A11 0
+[btime] 110ms A12 0
 [btime] 120ms A13 0
 [btime] 120ms A2 ata_scan done
 [btime] 120ms F2 fat_probe done
 [btime] 120ms F3 part_scan done
 [btime] 120ms S1 fs_init done
-[btime] 140ms S2 lang_init
-[btime] 140ms S3 env_init
-[btime] 150ms S4 ce_init
-[btime] 160ms S5 user/acl/session
-[boot] shell-ready
-[perf] boot uptime_ms=160 mhz=4627 tasks=1 bss_end_lo=34951288
-[btime] 160ms S9 shell prompt ready
-[perf] shell.idle cycles_hi=9 cycles_lo=3352217674 kind=0
-[perf] shell.cmd cycles_hi=0 cycles_lo=3900614011 kind=0 count=1
-[perf] shell.idle cycles_hi=6 cycles_lo=1103965641 kind=0
+[btime] 130ms S2 lang_init
+[btime] 130ms S3 env_init
+[btime] 140ms S4 ce_init
+[btime] 140ms S5 user/acl/session
+[btime] 140ms S9 shell prompt ready
 GUI:desk items=0
 GUI:warn dragdeny id=1 layer=0
+GUI:warn dragdeny id=1 layer=0
 GUI:deny denied=3 denied_moved=0 sample_moved=1 result=1
-[perf] shell.cmd cycles_hi=0 cycles_lo=41394574 kind=0 count=1
-[perf] shell.idle cycles_hi=4 cycles_lo=3689363454 kind=0
-GUI:frame first=1 us=4597 rects=1 area=768 frame_us=4597
-GUI:drag ax=0 ay=0 bx=200 by=100 measured=0 total=5 subtree=2 damage_rects=1 damage_area=768 frame_us=4597 b_same=1 result=0
-[perf] shell.cmd cycles_hi=0 cycles_lo=31824207 kind=0 count=1
+GUI:frame first=1 us=3720 rects=1 area=768 frame_us=3720
+GUI:drag ax=0 ay=0 bx=200 by=100 measured=0 total=5 subtree=2 damage_rects=1 damage_area=768 frame_us=3720 b_same=1 result=1

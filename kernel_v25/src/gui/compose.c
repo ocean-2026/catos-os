@@ -312,6 +312,13 @@ void gui_frame(void) {
     anim_apply_walk(gui_root_block());
 
     dmg_reset();
+    /* 合成前先把光标从显存里收回去：damage 重绘会覆盖 12×12 精灵像素，
+     * 若不先 restore，mc_save 里仍是上一帧内容，帧末 restore 又会把刚画
+     * 好的新像素擦回旧帧 —— 症状就是点按钮后箭头底下残留上一帧的方块，
+     * 移开后还在原地留下 12×12 鬼影。参考实现是整屏重绘，可以在 compose
+     * 开头直接丢 cur_visible（不必 restore）；我们是损伤合成，必须 restore。 */
+    struct render_be *be = con_backend();
+    if (be && be->mouse_cursor) be->mouse_cursor(0, 0, 0);
     paint_begin_frame();
 
     /* 第一遍：收集脏块子树包围盒，合并成 damage 链表。
@@ -371,10 +378,10 @@ void gui_frame(void) {
         paint_list[i]->snap = 0;
     }
 
-    /* 光标：合成结束后统一画，使用后端已有的 save/restore 精灵机制。 */
+    /* 光标：合成结束后统一画，使用后端已有的 save/restore 精灵机制。
+     * （合成前已在帧首收起，这里的 restore 是幂等的 no-op。） */
     int mx, my; uint8_t btn;
     mouse_get_state(&mx, &my, &btn);
-    struct render_be *be = con_backend();
     if (be && be->mouse_cursor) be->mouse_cursor(mx, my, 1);
 
     uint64_t t1 = perf_now();
@@ -542,6 +549,12 @@ void gui_begin(void) {
     mouse_state_reset();
     gui_chrome_reset();
     gui_reset_keep_ce();
+    /* 清屏整幅覆盖：先把光标收起，否则 mc_save 会把上一会话/文本态的像素
+     * 带进新桌面，首帧再 restore 就在新桌面上抹出一块旧内容。 */
+    {
+        struct render_be *be0 = con_backend();
+        if (be0 && be0->mouse_cursor) be0->mouse_cursor(0, 0, 0);
+    }
     gfx24_clear(gui_active_style()->bg);
     block *root = gui_root_block();
     root->x = 0; root->y = 0;

@@ -183,3 +183,7 @@ CatOS[易错点] ser_dec 是各模块各自一份 static 副本，跨模块引�
 CatOS[易错点] BLK_ICON 在 layout.c 的 leaf_natural_w/h() 里原本返回 0，新建图标块必须补分支，否则尺寸为 0 不显示。
 CatOS[易错点] QEMU 测试脚本靠 shutil.which 找可执行文件，必须 export PATH=/home/user/bin:$PATH，否则 qemu-system-i386 not found；杀进程用 pkill -9 -x qemu-system-i386，别用 pkill -f qemu（会误杀自己）。
 CatOS[易错点] gfx24 默认后端下 read_screen 读的是 VGA 文本内存，开机后必须先 force_text(s, settle=10) 再 wait_for_prompt，否则命令全被丢弃。
+
+CatOS[易错点] 分文件增量重编只比 `.c` 比 `.o` 会漏掉头文件改动：block.h 追加字段后（桌面图标那轮），旧 .o 里 sizeof(block)=0xB0、新 .o 是 ~0x130，块表 slots 步长与字段偏移错位，root 之外的头几个块读到的 `render` 是槽外垃圾（实测 0x00010000），进桌面第一帧 `call b->render` 直接跳进低内存 0x1000D → #UD 蓝屏。现象很像"新代码写坏了"，其实是构建缓存。做临时构建脚本时别加"只编过期文件"的优化，或用 `find include -newer $obj` 兜底；build.sh 本身是全量编译，官方流程不受影响。
+CatOS[易错点] mingw 的 `objcopy -O binary kernel.pe kernel.bin` 会被 .reloc/.comment 段坑死：链接脚本把这两段放在 RVA 0xffc00000，objcopy 以 image-base 0x400000 算最高地址 → 偏移回绕，产出 4GiB 假 kernel.bin 和 4GiB ISO。展平要自己按段表（VA/raw size）拼 .text/.text.un/.data/.bss、空洞补零，跳过高 RVA 的元数据段；拼完用 multiboot 头里的 load_end/bss_end 校验文件字节数是否相等。
+CatOS[易错点] MinGW GCC 16.2 默认把隐式声明当 error，且 `_mingw.h` 在未定义 _WIN32 时直接 `#error Only Win32 target is supported`；离线补编个别文件时给 `-D_WIN32` 即可，但 uECC.c 不能带（会引 CryptGenRandom 破坏 multiboot 头），task.c 还要 `-include` 一份 perf_now/perf_mhz 原型。
