@@ -683,18 +683,33 @@ static uint8_t desk_item_icon(int is_dir) {
     return is_dir ? 4 : 3;
 }
 
-/* 标签截断：ASCII 记 1 单位、其余记 2 单位，上限 12 单位，超限以 ".." 结尾。 */
+/* 一个 UTF-8 码点的字节长度（非法序列按单字节回落，与内核 utf8_to_u16 一致）。 */
+static int desk_u8_len(const char *s) {
+    unsigned char c = (unsigned char)s[0];
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) return 2;
+    if ((c & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 &&
+        (s[2] & 0xC0) == 0x80) return 3;
+    if ((c & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 &&
+        (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) return 4;
+    return 1;
+}
+
+/* 标签截断：按码点计宽——ASCII 记 1 单位、其它记 2 单位，上限 9 单位，
+ * 超限以 "..." 结尾。必须按码点步进，否则 UTF-8 续字节会被重复计宽，
+ * 中文名字被过早截断。 */
 static void desk_label(const char *name, char *out, int cap) {
-    int units = 0, k = 0;
-    while (name[k] && k < cap - 3) {
+    int units = 0, k = 0, o = 0;
+    while (name[k] && o < cap - 3) {
+        int clen = desk_u8_len(name + k);
         int u = ((unsigned char)name[k] < 128) ? 1 : 2;
-        if (units + u > 9) break;   /* 9 单位 + "..." ≈ 96px 列宽 */
+        if (units + u > 9) break;           /* 9 单位 + "..." ≈ 96px 列宽 */
+        if (o + clen > cap - 3) break;      /* 不留半截多字节字符 */
+        for (int j = 0; j < clen; j++) out[o++] = name[k++];
         units += u;
-        out[k] = name[k];
-        k++;
     }
-    if (name[k]) { out[k++] = '.'; out[k++] = '.'; out[k++] = '.'; }
-    out[k] = 0;
+    if (name[k]) { out[o++] = '.'; out[o++] = '.'; out[o++] = '.'; }
+    out[o] = 0;
 }
 
 static void build_desktop_icons(block_id root_id) {
@@ -703,6 +718,7 @@ static void build_desktop_icons(block_id root_id) {
     char names[DESK_MAX_ITEMS][FS_NAME_MAX];
     int n = fs_enum_entries("/Desktop", names, DESK_MAX_ITEMS);
     if (n < 0) n = 0;
+    if (n > DESK_MAX_ITEMS) n = DESK_MAX_ITEMS;  /* 枚举返回总数，超上限静默截断，不得越界写 desk_names/desk_labels */
     desk_n = n;
 
     blk_spec col = spec_panel(LAYER_WORK, 104, 0, 0);
@@ -714,7 +730,7 @@ static void build_desktop_icons(block_id root_id) {
     if (n == 0) {
         blk_spec t = spec_panel(LAYER_WORK, 96, 16, 0);
         t.wrap_lines = 1; t.ellipsis = 1;
-        b_text(col_id, &t, "Desktop is empty");
+        b_text(col_id, &t, "Empty");   /* 96px 列宽，短文案不截断 */
     } else {
         for (int i = 0; i < n; i++) {
             char shown[FS_NAME_MAX];
@@ -875,6 +891,10 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
     block *row = btable_get(id);
     if (!row) return;
     int32_t act = row->z;
+    /* 顺序硬约束：先收菜单再执行动作。gui_menu_close() 会把全局 key hook
+     * 清空，若先 open 组件再 close，组件刚装的键盘钩子会被这一清抹掉，
+     * 表现为"窗口打开了但一个字都打不进去"（R4 终端无法输入根因）。 */
+    gui_menu_close();
     if (act > 0) {
         gui_focus_raise((block_id)act);
     } else if (act == 0) {
@@ -890,7 +910,6 @@ static void on_menu_row(block_id id, int32_t lx, int32_t ly) {
         case 7: gui_term_open();     break;
         }
     }
-    gui_menu_close();
 }
 
 /* ---- D 轮 overlay 几何契约（规格 §16 新增规格） -------------------------- */

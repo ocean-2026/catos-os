@@ -76,6 +76,7 @@ static int clip_rect(int *x, int *y, int *w, int *h) {
 static const block *paint_cur;
 
 static void blend_px(int x, int y, uint32_t color, int cov);
+static int  clip_putpx(int x, int y, uint32_t rgb);
 static int  cap2_shape_declared(const block *b);
 
 void gui_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
@@ -129,12 +130,12 @@ void gui_draw_text(int x, int y, const char *txt, uint32_t fg, uint8_t scale) {
             for (int i = 0; i < 8; i++) {
                 if (!(row & (1u << (7 - i)))) continue;
                 if (scale == 2) {
-                    gfx24_putpx(x + i * 2,     y + j * 2,     fg);
-                    gfx24_putpx(x + i * 2 + 1, y + j * 2,     fg);
-                    gfx24_putpx(x + i * 2,     y + j * 2 + 1, fg);
-                    gfx24_putpx(x + i * 2 + 1, y + j * 2 + 1, fg);
+                    clip_putpx(x + i * 2,     y + j * 2,     fg);
+                    clip_putpx(x + i * 2 + 1, y + j * 2,     fg);
+                    clip_putpx(x + i * 2,     y + j * 2 + 1, fg);
+                    clip_putpx(x + i * 2 + 1, y + j * 2 + 1, fg);
                 } else {
-                    gfx24_putpx(x + i, y + j, fg);
+                    clip_putpx(x + i, y + j, fg);
                 }
             }
         }
@@ -352,15 +353,26 @@ int      gui_cap3_warn_count(void) { return cap3_warn_n_range; }
 
 /* ---- 覆盖率合成：out = under*(1-cov) + color*cov，under 为当前父表面结果 ---- */
 
+/* 像素级裁剪：clip 栈非空时丢弃框外像素。文本/图标/覆盖率的逐像素路径
+ * 全部经此处收口——未声明 OVF_VISIBLE 的块内容绝不越出父框（R4 硬约束）。 */
+static int clip_putpx(int x, int y, uint32_t rgb) {
+    if (clip_depth > 0) {
+        clip_rect_t *t = &clip_stack[clip_depth - 1];
+        if (x < t->x0 || y < t->y0 || x >= t->x1 || y >= t->y1) return 0;
+    }
+    gfx24_putpx(x, y, rgb);
+    return 1;
+}
+
 static void blend_px(int x, int y, uint32_t color, int cov) {
     if (cov <= 0) return;                       /* 角外：逐像素保留父表面原值 */
-    if (cov >= 255) { gfx24_putpx(x, y, color); return; }
+    if (cov >= 255) { clip_putpx(x, y, color); return; }
     uint32_t under = gfx24_getpx(x, y);
     int ia = 255 - cov;
     int r = ((int)(under >> 16 & 0xFF) * ia + (int)(color >> 16 & 0xFF) * cov) / 255;
     int g = ((int)(under >>  8 & 0xFF) * ia + (int)(color >>  8 & 0xFF) * cov) / 255;
     int b = ((int)(under      & 0xFF) * ia + (int)(color      & 0xFF) * cov) / 255;
-    gfx24_putpx(x, y, ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
+    clip_putpx(x, y, ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
 }
 
 /* ---- per-corner 贴边判定：8pt 量化后坐标精确相等（容差 0）即贴边 ---- */

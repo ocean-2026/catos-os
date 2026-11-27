@@ -10,6 +10,27 @@
 
 static void layout_node(block *b, int ax, int ay, int aw, int ah);
 
+/* ---- 溢出硬约束（R4）：未声明允许溢出的块，子块不得超出父内容框 ---- */
+/* 规则：父 overflow == OVF_CLIP 时，非 moved / 非 bleed / 非浮层（layer 更高）/
+ * 非 OVF_VISIBLE 的子块矩形收缩进父内容框；OVF_SCROLL 由滚动视口平移处理，
+ * 不做几何裁剪。这是"没有声明允许超出父块 = 绝对不能超出"的统一落点：
+ * 几何层收缩 + 绘制层像素裁剪（clip_putpx）双保险，命中也沿用祖先框判定。 */
+static void clamp_child(block *p, block *c,
+                        int cx, int cy, int cw, int ch) {
+    if (!p || !c) return;
+    if (p->overflow != OVF_CLIP) return;
+    if (c->overflow == OVF_VISIBLE || c->moved || c->bleed) return;
+    if (c->layer > p->layer) return;
+    if (c->x < cx) { c->w -= (cx - c->x); c->x = cx; }
+    if (c->y < cy) { c->h -= (cy - c->y); c->y = cy; }
+    if (c->x + c->w > cx + cw) c->w = cx + cw - c->x;
+    if (c->y + c->h > cy + ch) c->h = cy + ch - c->y;
+    if (c->w < 0) c->w = 0;
+    if (c->h < 0) c->h = 0;
+}
+
+
+
 static int leaf_natural_w(block *b) {
     if (b->kind == BLK_TEXT || b->kind == BLK_BUTTON) {
         uint8_t sc = b->st.scale ? b->st.scale : 1;
@@ -156,6 +177,7 @@ static void layout_column(block *b,
         int ox, oy, ow, oh;
         child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
         place_child(c, ox, oy, ow, oh, 0, ox, y);
+        clamp_child(b, c, ox, oy, ow, oh);
         layout_node(c, c->x, c->y, c->w, c->h);
         y += c->h + gap + slot;
     }
@@ -186,6 +208,7 @@ static void layout_row(block *b,
         int ox, oy, ow, oh;
         child_box(c, fx, fy, fw, fh, cx, cy, cw, ch, &ox, &oy, &ow, &oh);
         place_child(c, ox, oy, ow, oh, 1, x, oy);
+        clamp_child(b, c, ox, oy, ow, oh);
         layout_node(c, c->x, c->y, c->w, c->h);
         x += c->w + gap + slot;
     }
@@ -205,6 +228,7 @@ static void layout_stack(block *b,
         else if (c->align_cross == XALN_CENTER) ccy = oy + (oh - c->h) / 2;
         else if (c->align_cross == XALN_END)   ccy = oy + oh - c->h;
         if (!c->moved) { c->x = ccx; c->y = ccy; }
+        clamp_child(b, c, ox, oy, ow, oh);
         layout_node(c, c->x, c->y, c->w, c->h);
     }
 }
@@ -292,6 +316,8 @@ void layout_node(block *b, int ax, int ay, int aw, int ah) {
         for (block *c = b->first_child; c; c = c->next_sibling) {
             /* 拖拽/缩放收敛为 moved 几何：跨帧保留绝对位置，不被父内容框重置。 */
             if (!c->moved) { c->x = lx; c->y = ly; }
+            clamp_child(b, c, lx, ly, b->w - pad_l - pad_r,
+                        b->h - pad_t - pad_b);
             layout_node(c, c->x, c->y, c->w, c->h);
         }
     }

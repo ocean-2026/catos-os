@@ -27,8 +27,10 @@ extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
 #define T_RING     200
 #define T_HIST     32
 #define T_LINE     80
-#define T_BODY_W   (T_COLS * 8)
-#define T_BODY_H   ((T_ROWS - 1) * 16)   /* 末行留给输入行 */
+/* 体块尺寸必须含 T_PAD：t_render 从 (b->x+T_PAD,b->y+T_PAD) 起画 30 行
+ * （29 回看 + 1 输入），此前少算一行与双侧 padding，输入行被画到块外。 */
+#define T_BODY_W   (T_COLS * 8 + T_PAD * 2)
+#define T_BODY_H   (T_ROWS * 16 + T_PAD * 2)
 #define T_TITLE_H  24
 #define T_STAT_H   16
 #define T_PAD      4
@@ -43,6 +45,8 @@ typedef struct {
     int       hist_n;
     int       hist_idx;
     char      line[T_LINE];
+    char      title_buf[32];            /* b_text 只存指针：标题/状态必须常驻 */
+    char      status_buf[T_COLS];
     int       len, pos;
     int       view_top;                 /* 0 = 跟随末尾 */
 } term_t;
@@ -117,6 +121,11 @@ static int strcmp_(const char *a, const char *b) {
 }
 
 static void t_exec(term_t *t, const char *raw);
+/* 小数字直查：之前用 num[] 倒序拼串没有 NUL 中止，t_cat 读越界会吞掉后续字符 */
+static const char *t_digit(int v) {
+    static const char *d[5] = { "0", "1", "2", "3", "4" };
+    return (v >= 0 && v <= 4) ? d[v] : "?";
+}
 static int  t_key(int code, void *ud);
 
 /* ---- 内置命令 ----------------------------------------------------------- */
@@ -192,8 +201,8 @@ static void t_render(block_id id) {
     /* 输入行：提示符 + 编辑缓冲 + 光标竖线。 */
     int row = show;
     char prompt[T_COLS];
-    t_copy(prompt, sizeof(prompt), t->cwd);
-    t_cat(prompt, sizeof(prompt), "$ ");
+    t_copy(prompt, sizeof(prompt), "");       /* Windows 风格：输入行只留 ">"，cwd 见状态行 */
+    t_cat(prompt, sizeof(prompt), "> ");
     int pn = t_len(prompt);
     t_copy(line, sizeof(line), prompt);
     t_cat(line, sizeof(line), t->line);
@@ -207,22 +216,15 @@ static void t_render(block_id id) {
 static void t_update_status(term_t *t) {
     block *st = btable_get(t->status);
     if (!st) return;
-    char buf[T_COLS];
+    char *buf = t->status_buf;
     int used = 0;
     for (int i = 0; i < TERM_MAX; i++) if (terms[i].in_use) used++;
-    t_copy(buf, sizeof(buf), "Terminal ");
-    int idx = (int)(t - terms) + 1;
-    char num[8]; int n = 0, v = idx;
-    if (v == 0) num[n++] = '0';
-    while (v) { num[n++] = (char)('0' + v % 10); v /= 10; }
-    while (n) t_cat(buf, sizeof(buf), &num[--n]);
-    t_cat(buf, sizeof(buf), "/");
-    v = used; n = 0;
-    if (v == 0) num[n++] = '0';
-    while (v) { num[n++] = (char)('0' + v % 10); v /= 10; }
-    while (n) t_cat(buf, sizeof(buf), &num[--n]);
-    t_cat(buf, sizeof(buf), "  ");
-    t_cat(buf, sizeof(buf), t->cwd);
+    t_copy(buf, sizeof(t->status_buf), "Terminal ");
+    t_cat(buf, sizeof(t->status_buf), t_digit((int)(t - terms) + 1));
+    t_cat(buf, sizeof(t->status_buf), "/");
+    t_cat(buf, sizeof(t->status_buf), t_digit(used));
+    t_cat(buf, sizeof(t->status_buf), "   ");
+    t_cat(buf, sizeof(t->status_buf), t->cwd);
     st->text = buf;
     st->dirty_paint = 1;
 }
@@ -238,8 +240,9 @@ static void t_build(int idx) {
     term_t *t = &terms[idx];
     block_id root_id = gui_root_block()->id;
 
+    /* 高度 = pad + 标题 + gap + 体块 + gap + 状态 + pad（gap=pad=T_PAD）。 */
     blk_spec root = t_panel(LAYER_WORK, T_BODY_W + T_PAD * 2,
-                            T_TITLE_H + T_BODY_H + T_STAT_H, 1);
+                            T_TITLE_H + T_BODY_H + T_STAT_H + T_PAD * 4, 1);
     root.pad_l = T_PAD; root.pad_r = T_PAD;
     root.pad_t = T_PAD; root.pad_b = T_PAD;
     root.gap = T_PAD;
@@ -254,12 +257,9 @@ static void t_build(int idx) {
     blk_spec title = t_panel(LAYER_WORK, T_BODY_W, T_TITLE_H, 0);
     title.role_bg = ROLE_BAR;
     block_id bar = b_row(t->root, &title);
-    char tt[32];
-    t_copy(tt, sizeof(tt), "Terminal ");
-    char num[8]; int n = 0, v = idx + 1;
-    if (v == 0) num[n++] = '0';
-    while (v) { num[n++] = (char)('0' + v % 10); v /= 10; }
-    while (n) t_cat(tt, sizeof(tt), &num[--n]);
+    char *tt = t->title_buf;
+    t_copy(tt, sizeof(t->title_buf), "Terminal ");
+    t_cat(tt, sizeof(t->title_buf), t_digit(idx + 1));
     b_text(bar, 0, tt);
     blk_spec close = t_panel(LAYER_WORK, 56, T_TITLE_H - 4, 1);
     close.on_click = t_close_click;
@@ -337,8 +337,7 @@ static void t_backspace(term_t *t) {
 
 static void t_submit(term_t *t) {
     char echo[T_COLS];
-    t_copy(echo, sizeof(echo), t->cwd);
-    t_cat(echo, sizeof(echo), "$ ");
+    t_copy(echo, sizeof(echo), "> ");
     t_cat(echo, sizeof(echo), t->line);
     t_ring_push(t, echo);
     t_exec(t, t->line);
@@ -397,8 +396,7 @@ int gui_term_active_idx(void) { return active; }
 void gui_term_run(int i, const char *cmd) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return;
     char echo[T_COLS];
-    t_copy(echo, sizeof(echo), terms[i].cwd);
-    t_cat(echo, sizeof(echo), "$ ");
+    t_copy(echo, sizeof(echo), "> ");
     t_cat(echo, sizeof(echo), cmd ? cmd : "");
     t_ring_push(&terms[i], echo);
     t_exec(&terms[i], cmd ? cmd : "");
