@@ -183,3 +183,4 @@ CatOS[易错点] ser_dec 是各模块各自一份 static 副本，跨模块引�
 CatOS[易错点] BLK_ICON 在 layout.c 的 leaf_natural_w/h() 里原本返回 0，新建图标块必须补分支，否则尺寸为 0 不显示。
 CatOS[易错点] QEMU 测试脚本靠 shutil.which 找可执行文件，必须 export PATH=/home/user/bin:$PATH，否则 qemu-system-i386 not found；杀进程用 pkill -9 -x qemu-system-i386，别用 pkill -f qemu（会误杀自己）。
 CatOS[易错点] gfx24 默认后端下 read_screen 读的是 VGA 文本内存，开机后必须先 force_text(s, settle=10) 再 wait_for_prompt，否则命令全被丢弃。
+CatOS[易错点] FAT 目录项 run 跨簇边界时，末端 EOC 不是 overrun：dir_put_run() 在 wi>=per 写满当前簇后，必须先判断当前项是否为 run 最后一项；最后一项落边界直接收尾，只有后面仍有条目才 fat_get() 下一簇，EOC/断链才判失败。否则目录簇一写满，mkfs 标准目录循环（及运行期 LFN 建目录）会在边界上误失败 break，根条目丢失、已分配的孤儿簇被后续文件复用成垃圾；症状是全新 format 后某级目录 ls 报 cannot read directory、同名 mkdir 报 already exists。排查先 host 侧解析镜像 FAT/根目录项，核对目录簇 ./.. 与首簇字段是否落盘，不要先用「跳过 LFN 走短名」降级。
