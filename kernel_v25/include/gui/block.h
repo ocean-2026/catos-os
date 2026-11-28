@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include "tokens.h"
 
+struct svg_icon;                /* v3 svg.c 光栅化图标（运行时缓存句柄） */
+
 /* 声明色哨兵：0xFFFFFFFF 表示继承父块/角色，不固化具体 RGB。 */
 #define INHERIT_COLOR 0xFFFFFFFFu
 
@@ -180,6 +182,13 @@ typedef struct {
 
     /* ---- E 轮描边规格（append-only；gui-fix 合入，0=未设） ---- */
     uint8_t  stroke;                /* 描边线宽；desc.c 镜像到 block.stroke，0 时回退 border_w */
+
+    /* ---- v3 按钮图片资源（append-only；0/NULL = 未声明 ≡ 旧行为） ----
+     * img=SVG 路径；icon_sz 图标边长（0/16=16，24=24）；icon_pos 预留
+     * （0=左，默认；1=右，本轮不启用）。CE ABI 记录槽位未扩展，字段仅内核内耗。 */
+    const char   *img;
+    uint8_t  icon_sz;
+    uint8_t  icon_pos;
 } blk_spec;
 
 /* 一帧 build() 产出的描述项；gui_commit_desc 按 id 与上帧 diff。 */
@@ -243,6 +252,11 @@ typedef struct block {
     int32_t  pop_ax, pop_ay, pop_aw, pop_ah;
     int32_t  pop_content_h;
     uint8_t  stroke;                    /* E 轮描边线宽镜像（append-only） */
+
+    /* ---- v3 按钮图片资源镜像（与 blk_spec 末尾三项同序同步） ---- */
+    const char   *img;
+    uint8_t  icon_sz, icon_pos;
+    const struct svg_icon *ic;          /* 运行时缓存句柄（内部，不入 ABI） */
 
     /* v2.83 A7.3 位图/画布缩放档位：0=none（1:1 左上，旧行为）；1=contain；2=fill。
      * 内部字段，不入 blk_spec / CE ABI。 */

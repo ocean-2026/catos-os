@@ -7,6 +7,7 @@
 #include "gui/gui.h"
 #include "gui_int.h"
 #include "gui/tokens.h"
+#include "gui/svg.h"
 #include "gfx24.h"
 #include "render.h"
 #include "rtc.h"
@@ -341,6 +342,76 @@ static void shot_e1_btn_build(const char *state) {
     if (b) { ser_dec(b->x); ser_write(","); ser_dec(b->y); ser_write(",");
              ser_dec(b->w); ser_write(","); ser_dec(b->h); }
     ser_write(" state="); ser_write(state ? state : "idle"); ser_write("\n");
+}
+
+/* v3 按钮图片资源探针：shot-icons（全量截图）/ shot-icons-bad（仅坏路径）。 */
+#define ICON_BTN_N 6
+static block_id icon_btn_ids[ICON_BTN_N];
+
+static int icon_hover_on;   /* 探针：把首按钮注入 hover，验证 hover 背景下图标仍可见。 */
+static void shot_icons_build(int bad_only, int hover) {
+    icon_hover_on = hover;
+    blk_spec fr = spec_panel(LAYER_WORK, GFX24_W, GFX24_H, 0);
+    block_id F = b_free(0, &fr);
+    struct { const char *img; const char *txt; uint8_t sz; } defs[ICON_BTN_N] = {
+        { "/icons/ok.svg",      "OK",     16 },
+        { "/icons/folder.svg",  "Folder", 16 },
+        { "/icons/missing.svg", "Missing",16 },
+        { "/icons/ok.svg",      "Big 24", 24 },
+        { "/icons/folder.svg",  "",       16 },
+        { "/nope/x.svg",        "NoFile", 16 }
+    };
+    int start = bad_only ? 5 : 0;
+    int n = bad_only ? 1 : ICON_BTN_N;
+    for (int i = 0; i < n; i++) {
+        int di = start + i;
+        blk_spec btn = spec_panel(LAYER_WORK, 220, 32, 1);
+        btn.img = defs[di].img;
+        btn.icon_sz = defs[di].sz;
+        icon_btn_ids[di] = b_button(F, &btn, defs[di].txt);
+        block *bp = btable_get(icon_btn_ids[di]);
+        if (bp) { bp->x = 40; bp->y = 40 + di * 44; bp->moved = 1; }
+    }
+    if (icon_hover_on && icon_btn_ids[0])
+        gui_inject_hover_block(icon_btn_ids[0]);
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+}
+
+/* v3 图片资源自检：图标墨迹、越界、缓存槽位 / 回落计数。 */
+static void gui_probe_icon_audit(void) {
+    ser_write("GUI:icon-audit enter\n");
+    gui_begin();
+    shot_icons_build(0, 0);
+    int miss = 0, fall = 0;
+    int slots = 0;
+    int bad = 0;
+    for (int i = 0; i < ICON_BTN_N; i++) {
+        block *b = btable_get(icon_btn_ids[i]);
+        if (!b) { bad = 1; continue; }
+        const struct svg_icon *ic = b->img ? svg_resolve(b->img, b->icon_sz, 0) : 0;
+        int ink = 0;
+        if (ic) {
+            for (int k = 0; k < ic->w * ic->h; k++)
+                if (ic->mask[k]) { ink = 1; break; }
+        }
+        int inside = b->x >= 0 && b->y >= 0 &&
+                     b->x + b->w <= GFX24_W && b->y + b->h <= GFX24_H;
+        if (!ink) bad = 1;
+        if (!inside) bad = 1;
+        ser_write("GUI:icon btn="); ser_dec(i);
+        ser_write(" ink="); ser_dec(ink);
+        ser_write(" mono="); ser_dec(ic ? ic->mono : 0);
+        ser_write(" rect "); ser_dec(b->x); ser_write(","); ser_dec(b->y);
+        ser_write(","); ser_dec(b->w); ser_write(","); ser_dec(b->h);
+        ser_write("\n");
+    }
+    slots = svg_cache_stats(&miss, &fall);
+    ser_write("GUI:icon-audit slots="); ser_dec(slots);
+    ser_write(" miss="); ser_dec(miss);
+    ser_write(" fallback="); ser_dec(fall);
+    ser_write(" result="); ser_dec(bad ? 0 : 1); ser_write("\n");
+    gui_end();
 }
 
 /* E1-① 描边正反例：A 行 border=1 必显环；B 行 border=0 环上不得取到描边色。 */
@@ -3079,6 +3150,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }
         if (!strcmp_probe(arg, "menu-accel")) { gui_probe_menu_accel(); return; }
         if (!strcmp_probe(arg, "clickup"))    { gui_probe_clickup(); return; }
+        if (!strcmp_probe(arg, "icon-audit")){ gui_probe_icon_audit(); return; }
         if (!strcmp_probe(arg, "scaled"))    { gui_probe_scaled(); return; }
         {
             char aw[16]; const char *ar = 0;
@@ -3128,6 +3200,7 @@ void gui_shell_cmd(const char *arg) {
     int free_interact = 0;
     int deskev = 0;
     int shot_hov = 0, shot_sel = 0;   /* P1-1：截图态——悬停 / 选中桌面条目 */
+    int shot_icons = 0, shot_icons_bad = 0, shot_icons_hover = 0;   /* v3：按钮图片资源截图 */
     int shot_hov_gap = 0;              /* P1-1 小修：悬停条目留白（命中容器本身） */
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
@@ -3166,6 +3239,9 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-hov"))  shot_hov = 1;
     else if (!strcmp_probe(word, "shot-hov-gap")) shot_hov_gap = 1;
     else if (!strcmp_probe(word, "shot-sel"))  shot_sel = 1;
+    else if (!strcmp_probe(word, "shot-icons"))      { shot_icons = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-icons-bad")) { shot_icons_bad = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-icons-hover")) { shot_icons_hover = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; probe_no_sample = 1; }
@@ -3206,7 +3282,7 @@ void gui_shell_cmd(const char *arg) {
         return;
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
-                      free_interact || deskev;
+                      free_interact || deskev || shot_icons || shot_icons_bad || shot_icons_hover;
     int blkgen_on = (app_open == APP_BLKGEN);
     if (blkgen_on) free_sample = 1;   /* blkgen 页不挂 demo 样本（纯追加，不改既有条件） */
     int flush_probe = probe_flush_inset || probe_flush_hpair ||
@@ -3261,6 +3337,9 @@ void gui_shell_cmd(const char *arg) {
         }
         ser_write("\n");
     }
+    if (shot_icons)      shot_icons_build(0, 0);
+    if (shot_icons_bad)  shot_icons_build(1, 0);
+    if (shot_icons_hover) shot_icons_build(0, 1);
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
     if (shot_hov && desk_n > 0) {
         block *b0 = btable_get(desk_item_blk[0]);

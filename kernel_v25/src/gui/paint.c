@@ -8,6 +8,7 @@
 #include "gui/gui.h"
 #include "gui_int.h"
 #include "gui/tokens.h"
+#include "gui/svg.h"
 #include "gfx24.h"
 #include "render_be.h"
 #include "paging.h"
@@ -924,6 +925,36 @@ static void paint_halo(block *b) {
     }
 }
 
+/* v3：按钮图标 blit。返回文字区左侧应预留的宽度（图标宽 + 间距）；
+ * 0 = 无图标。mono 兜底图标取前景色；文件 SVG 保留原色。 */
+static int button_icon_blit(block *b, const struct svg_icon *ic, uint32_t fgc) {
+    if (!ic || ic->w <= 0 || ic->h <= 0) return 0;
+    int iw = ic->w, ih = ic->h;
+    int notext = !b->text || !*b->text;
+    int ix = notext ? b->x + (b->w - iw) / 2 : b->x + b->pad_l;
+    int iy = b->y + (b->h - ih) / 2;
+    if (ix < b->x) ix = b->x;
+    if (ix + iw > b->x + b->w) ix = b->x + b->w - iw;
+    if (iy < b->y) iy = b->y;
+    if (iy + ih > b->y + b->h) iy = b->y + b->h - ih;
+    for (int dy = 0; dy < ih; dy++) {
+        const uint8_t *mr = ic->mask + dy * iw;
+        const uint8_t *rr = ic->rgb ? ic->rgb + dy * iw * 3 : 0;
+        for (int dx = 0; dx < iw; dx++) {
+            int cov = mr[dx];
+            if (!cov) continue;
+            uint32_t color;
+            if (ic->mono) color = fgc;
+            else color = 0xFF000000u | ((uint32_t)rr[dx * 3] << 16) |
+                         ((uint32_t)rr[dx * 3 + 1] << 8) | rr[dx * 3 + 2];
+            int bc = blk_cov(b, ix + dx, iy + dy);
+            cov = cov * bc / 255;
+            if (cov > 0) blk_px_blend(ix + dx, iy + dy, color, cov);
+        }
+    }
+    return notext ? 0 : iw + 6;
+}
+
 /* 只画本块 body（不递归子块、不改脏位）：供 damage 矩形重合成按层序逐节点
  * 调用。paint_cur 由调用方 paint_node 维护；body-only 路径不依赖它。 */
 void paint_node_body(block *b) {
@@ -986,7 +1017,13 @@ void paint_node_body(block *b) {
         body_fill(b, bgc);
         if (border_on)
             body_border(b, tok->border, bgc, bw, b->border_sides);
-        txt_draw_block(b, fgc);     /* BUTTON 由文本层做居中；单行/折行同一入口 */
+        int l_inset = 0;
+        if (b->img && *b->img) {
+            /* 缓存命中 O(槽数) 哈希比对；失败/回落已在 svg.c 内打点一次。 */
+            const struct svg_icon *ic = svg_resolve(b->img, b->icon_sz, 0);
+            l_inset = button_icon_blit(b, ic, fgc);
+        }
+        txt_draw_block_lr(b, fgc, l_inset, 0);  /* 文字区让出左侧图标位 */
         break;
     }
     case BLK_INPUT:

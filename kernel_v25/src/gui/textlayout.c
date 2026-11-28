@@ -442,11 +442,15 @@ static void draw_line(block *b, int x0, int y, const txt_line_t *ln,
     }
 }
 
-void txt_draw_block(block *b, uint32_t fg) {
+void txt_draw_block_lr(block *b, uint32_t fg, int l_inset, int r_inset) {
     if (!b || !b->text) return;
+    if (l_inset < 0) l_inset = 0;
+    if (r_inset < 0) r_inset = 0;
+    int avail = b->w - l_inset - r_inset;
+    if (avail < 1) avail = 1;
     uint8_t sc = b->st.scale ? b->st.scale : 1;
     txt_line_t la[MAX_LINE];
-    int nl = layout_core(b->text, b->font_size, sc, b->font_tabular, b->w,
+    int nl = layout_core(b->text, b->font_size, sc, b->font_tabular, avail,
                          b->wrap_lines, b->ellipsis, la, MAX_LINE);
     if (nl == 0) return;
     int lh = line_height(b->font_size, sc, b->line_h);
@@ -455,12 +459,16 @@ void txt_draw_block(block *b, uint32_t fg) {
     int total = multi ? nl * lh : gh;       /* 单行沿用旧版字高几何 */
     int y0 = b->kind == BLK_BUTTON ? b->y + (b->h - total) / 2 : b->y;
     for (int l = 0; l < nl; l++) {
-        int x = b->x;
-        if (b->kind == BLK_BUTTON) x = b->x + (b->w - la[l].w) / 2;
+        int x = b->x + l_inset;
+        if (b->kind == BLK_BUTTON) x = b->x + l_inset + (avail - la[l].w) / 2;
         int y = y0 + (multi ? l * lh : 0);
         draw_line(b, x, y, &la[l], b->font_size, sc,
                   b->font_bold, b->font_tabular, fg);
     }
+}
+
+void txt_draw_block(block *b, uint32_t fg) {
+    txt_draw_block_lr(b, fg, 0, 0);
 }
 
 /* ---- 探针导出（cap2p_text.c 经 extern 声明调用） ----------------------- */

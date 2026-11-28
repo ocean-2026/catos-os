@@ -74,6 +74,8 @@ int       txt_wrapped_h(const char *s, uint8_t font_size, uint8_t scale,
                         uint8_t tabular, int max_w, uint8_t wrap_lines,
                         uint8_t ellipsis, uint8_t line_h_px);
 void      txt_draw_block(block *b, uint32_t fg);
+/* v3：按钮左图标 + 右文字；l_inset/r_inset 为文字区左右留白 px。 */
+void      txt_draw_block_lr(block *b, uint32_t fg, int l_inset, int r_inset);
 /* v2.83: 标签 `&X` 加速键字母（小写）；无则 0。 */
 int       txt_accel_char(const char *s);
 /* 旧像素口径原语（paint.c 导出）：8px/字、scale 1|2、超宽 "..." 截断 */

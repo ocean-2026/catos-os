@@ -104,6 +104,12 @@ static void apply_spec(block *b, const blk_spec *s) {
     b->stroke = s->stroke;
     if (!b->st.border_w) b->st.border_w = b->stroke;
 
+    /* v3 按钮图片资源镜像（append-only；旧块未声明时三项为 0/NULL）。 */
+    b->img = s->img;
+    b->icon_sz = s->icon_sz;
+    b->icon_pos = s->icon_pos;
+    b->ic = 0;                          /* 缓存句柄由绘制期按新路径重解析 */
+
     b->text = s->text;
     b->pix = s->pix;
     b->pix_w = s->pix_w;
