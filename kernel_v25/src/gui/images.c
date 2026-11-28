@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
+#include "lang.h"       /* i18n 第一刀：标题/状态 trs 内联对 */
 
 /* 毫秒级启动计时（intr.c 提供；本地声明避免拉入中断帧结构）。 */
 extern uint32_t uptime_ms(void);
@@ -201,18 +202,18 @@ static void im_pick_default(char *out, int cap) {
 
 static void im_update_status(void) {
     if (!im_ok) {
-        xcopy(im_status, sizeof(im_status), "unsupported format");
+        xcopy(im_status, sizeof(im_status), trs("unsupported format", "不支持的格式"));
     } else {
         xcopy(im_status, sizeof(im_status), im_name);
         xcat(im_status, sizeof(im_status), "  ");
         xnum(im_status, sizeof(im_status), (uint32_t)im_w);
         xcat(im_status, sizeof(im_status), "x");
         xnum(im_status, sizeof(im_status), (uint32_t)im_h);
-        xcat(im_status, sizeof(im_status), "  off=");
+        xcat(im_status, sizeof(im_status), trs("  off=", "  偏移="));
         xnum(im_status, sizeof(im_status), (uint32_t)im_off_x);
         xcat(im_status, sizeof(im_status), ",");
         xnum(im_status, sizeof(im_status), (uint32_t)im_off_y);
-        xcat(im_status, sizeof(im_status), "  decode=");
+        xcat(im_status, sizeof(im_status), trs("  decode=", "  解码="));
         xnum(im_status, sizeof(im_status), im_dec_us);
         xcat(im_status, sizeof(im_status), "us");
     }
@@ -305,7 +306,7 @@ void gui_images_open(const char *path) {
 
     blk_spec title = im_panel(LAYER_WORK, VP_W, 16, 0);
     title.role_bg = ROLE_BAR; title.bg = INHERIT_COLOR;
-    b_text(im_root, &title, "Images");
+    b_text(im_root, &title, trs("Images", "图片"));
 
     /* 视口块：缓冲为解码图，1:1 blit，超出视口由裁剪栈裁掉。 */
     block *b = btable_alloc(BLK_CANVAS);

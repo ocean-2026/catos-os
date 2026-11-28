@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
+#include "lang.h"       /* i18n 第一刀：标题 trs 内联对 */
 
 #define CV_MAX_PAGES 64
 #define CV_DEMO_W    200
@@ -279,7 +280,7 @@ void gui_canvas_demo(void) {
     pr->x = 150; pr->y = 80; pr->moved = 1;
 
     blk_spec title = cv_panel(LAYER_WORK, CV_DEMO_W, 16, 0);
-    b_text(cv_root, &title, "Canvas demo");
+    b_text(cv_root, &title, trs("Canvas demo", "画布演示"));
 
     blk_spec cv = cv_panel(LAYER_WORK, CV_DEMO_W, CV_DEMO_H, 0);
     cv.render = cv_demo_render;

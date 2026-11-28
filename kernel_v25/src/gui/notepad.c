@@ -9,6 +9,7 @@
 #include "gui_int.h"
 #include "gui/tokens.h"
 #include "fs.h"
+#include "lang.h"       /* i18n 第一刀：标题/状态 trs 内联对 */
 #include "gfx24.h"
 #include "keyboard.h"
 #include "serial_log.h"
@@ -138,10 +139,10 @@ static void np_update_status(void) {
     xnum(np_status, sizeof(np_status), np_row + 1);
     xcat(np_status, sizeof(np_status), "/");
     xnum(np_status, sizeof(np_status), np_line_count());
-    xcat(np_status, sizeof(np_status), " C");
+    xcat(np_status, sizeof(np_status), trs(" C", "  列"));
     xnum(np_status, sizeof(np_status), np_col + 1);
-    xcat(np_status, sizeof(np_status), np_dirty ? "  dirty" : "  saved");
-    if (np_full) xcat(np_status, sizeof(np_status), "  full");
+    xcat(np_status, sizeof(np_status), np_dirty ? trs("  dirty", "  未保存") : trs("  saved", "  已保存"));
+    if (np_full) xcat(np_status, sizeof(np_status), trs("  full", "  已满"));
     block *st = btable_get(np_status_blk);
     if (st) {
         st->text = np_status;
@@ -276,12 +277,12 @@ void gui_notepad_open(const char *path) {
     title.align_cross = XALN_CENTER;
     title.align_main = ALN_SPACE_BETWEEN;
     block_id bar = b_row(np_root, &title);
-    xcopy(np_title, sizeof(np_title), "Notepad");
+    xcopy(np_title, sizeof(np_title), trs("Notepad", "记事本"));
     b_text(bar, 0, np_title);
     blk_spec close = np_panel(LAYER_WORK, 56, NP_TITLE_H - 4, 1);
     close.on_click = np_close_click;
     block_id cid = b_row(bar, &close);
-    b_text(cid, 0, "Close");
+    b_text(cid, 0, trs("Close", "关闭"));
 
     /* 文本区块（自绘）。 */
     blk_spec body = np_panel(LAYER_WORK, NP_BODY_W, NP_BODY_H, 0);

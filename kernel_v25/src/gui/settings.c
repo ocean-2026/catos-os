@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
+#include "lang.h"       /* i18n 第一刀：标题/关闭按钮 trs 内联对（面板细分项留待下一刀） */
 
 void st_refresh_options(void);
 
@@ -175,11 +176,11 @@ void gui_settings_open(void) {
     title.align_cross = XALN_CENTER;
     title.align_main = ALN_SPACE_BETWEEN;   /* 08a：Settings 左、Close 右，分列不叠 */
     block_id bar = b_row(st_root, &title);
-    b_text(bar, 0, "Settings");
+    b_text(bar, 0, trs("Settings", "设置"));
     blk_spec close = st_panel(LAYER_WORK, 56, ST_TITLE_H - 4, 1);
     close.on_click = st_close_click;
     block_id cid = b_row(bar, &close);
-    b_text(cid, 0, "Close");
+    b_text(cid, 0, trs("Close", "关闭"));
 
     /* 主体：左栏分类 + 右栏选项。 */
     blk_spec body = st_panel(LAYER_WORK, ST_PANEL_W - ST_PAD * 2,

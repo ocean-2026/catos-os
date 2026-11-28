@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
+#include "lang.h"       /* i18n 第一刀：标题/状态/错误 trs 内联对 */
 
 #define FM_MAX_ENT   64
 #define FM_ROWS_VIEW 14
@@ -126,7 +127,7 @@ static void fm_refresh(fm_inst_t *f) {
     fm_clear_rows(f);
     int hidden = 0;
     f->n = fs_enum_entries_raw(f->cwd, f->raw, FM_MAX_ENT, &hidden);
-    if (f->n < 0) { f->n = 0; fm_set_status(f, "read failed"); return; }
+    if (f->n < 0) { f->n = 0; fm_set_status(f, trs("read failed", "读取失败")); return; }
     /* 名字表与 raw 表按同一序配对；目录名补 '/' 后缀。 */
     char names[FM_MAX_ENT][FS_NAME_MAX];
     int nn = fs_enum_entries(f->cwd, names, FM_MAX_ENT);
@@ -137,8 +138,8 @@ static void fm_refresh(fm_inst_t *f) {
     f->sel = 0; f->scroll = 0;
     for (int i = 0; i < f->n; i++) fm_row_label(f, i);
 
-    if (f->n == 0) fm_set_status(f, "empty");
-    else           fm_set_status(f, "ready");
+    if (f->n == 0) fm_set_status(f, trs("empty", "空目录"));
+    else           fm_set_status(f, trs("ready", "就绪"));
 
     for (int v = 0; v < FM_ROWS_VIEW && v < f->n; v++) {
         int i = f->scroll + v;
@@ -186,7 +187,7 @@ static void fm_open_entry(fm_inst_t *f, int i) {
     if (is_txt) {
         gui_notepad_open(path);   /* 钩子由记事本接管 */
     } else {
-        fm_set_status(f, "unsupported type");
+        fm_set_status(f, trs("unsupported type", "不支持的类型"));
     }
 }
 
@@ -385,14 +386,14 @@ void gui_filemgr_open(const char *path) {
     block_id bar = b_row(f->root, &title);
     f->title_blk = bar;
     char *tt = f->title_buf;
-    xcopy(tt, sizeof(f->title_buf), "Files ");
+    xcopy(tt, sizeof(f->title_buf), trs("Files ", "文件 "));
     { char d[2]; d[0] = (char)('0' + slot + 1); d[1] = 0; xcat(tt, sizeof(f->title_buf), d); }
     b_text(bar, 0, tt);
     blk_spec close = cv_panel_local(LAYER_WORK, 56, 14, 1);
     close.on_click = fm_close_click;
     close.usr = f;
     block_id cid = b_row(bar, &close);
-    b_text(cid, 0, "Close");
+    b_text(cid, 0, trs("Close", "关闭"));
 
     blk_spec pb = cv_panel_local(LAYER_WORK, FM_BODY_W, 16, 0);
     f->pathbar = b_text(f->root, &pb, f->cwd);
@@ -408,7 +409,7 @@ void gui_filemgr_open(const char *path) {
     rf.on_click = fm_tool_refresh;
     rf.usr = f;
     block_id rfid = b_row(tools, &rf);
-    b_text(rfid, 0, "Refresh");
+    b_text(rfid, 0, trs("Refresh", "刷新"));
 
     blk_spec list = cv_panel_local(LAYER_WORK, FM_BODY_W, FM_BODY_H, 0);
     f->list = b_column(f->root, &list);

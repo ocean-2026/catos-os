@@ -13,6 +13,7 @@
 #include "gui_int.h"
 #include "gui/tokens.h"
 #include "fs.h"
+#include "lang.h"       /* i18n 第一刀：标题/状态/错误 trs 内联对 */
 #include "keyboard.h"
 #include "serial_log.h"
 #include <stdint.h>
@@ -274,7 +275,7 @@ static void t_update_status(term_t *t) {
     int used = 0;
     for (int i = 0; i < TERM_MAX; i++) if (terms[i].in_use) used++;
     t_layout(t);
-    t_copy(buf, sizeof(t->status_buf), "Terminal ");
+    t_copy(buf, sizeof(t->status_buf), trs("Terminal ", "终端 "));
     t_cat(buf, sizeof(t->status_buf), t_digit(t->num));
     t_cat(buf, sizeof(t->status_buf), "/");
     t_num(buf, sizeof(t->status_buf), used);
@@ -391,7 +392,7 @@ static void t_build(int idx) {
     block_id bar = b_row(t->root, &title);
     t->title_blk = bar;
     char *tt = t->title_buf;
-    t_copy(tt, sizeof(t->title_buf), "Terminal ");
+    t_copy(tt, sizeof(t->title_buf), trs("Terminal ", "终端 "));
     t_cat(tt, sizeof(t->title_buf), t_digit(t->num));
     blk_spec ttxt = t_panel(LAYER_WORK, 0, T_TITLE_H - 4, 0);
     ttxt.role_bg = ROLE_NONE;
@@ -400,7 +401,7 @@ static void t_build(int idx) {
     close.on_click = t_close_click;
     close.usr = t;
     block_id cid = b_row(bar, &close);
-    b_text(cid, 0, "Close");
+    b_text(cid, 0, trs("Close", "关闭"));
 
     blk_spec body = t_panel(LAYER_WORK, T_BODY_W, T_BODY_H, 0);
     body.render = t_render;
@@ -420,7 +421,7 @@ void gui_term_open(void) {
     if (idx < 0) {
         /* 到上限：向当前聚焦实例回一行提示，不崩、不开新槽。 */
         if (active >= 0 && terms[active].in_use) {
-            t_ring_push(&terms[active], "terminal limit reached (4)");
+            t_ring_push(&terms[active], trs("terminal limit reached (4)", "终端已达上限（4）"));
             block *b = btable_get(terms[active].body);
             if (b) b->dirty_paint = 1;
         }
@@ -436,7 +437,8 @@ void gui_term_open(void) {
     t->len = 0; t->pos = 0; t->line[0] = 0;
     t->view_top = 0; t->follow = 1;
     if (t->cwd[0] == 0) t_copy(t->cwd, sizeof(t->cwd), "/");
-    t_ring_push(t, "CatOS block terminal (builtins: help pwd ls cd echo clear history)");
+    t_ring_push(t, trs("CatOS block terminal (builtins: help pwd ls cd echo clear history)",
+                       "CatOS 块终端（内置：help pwd ls cd echo clear history）"));
     t_build(idx);
     active = idx;
     gui_set_key_hook(t_key, t);

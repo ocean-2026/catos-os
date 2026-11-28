@@ -26,6 +26,7 @@
 extern uint32_t uptime_ms(void);
 #include "keyboard.h"
 #include "kstring.h"
+#include "lang.h"       /* i18n 第一刀：工具栏/状态/错误页 trs 内联对 */
 #include <stdint.h>
 #include <stddef.h>
 
@@ -398,15 +399,15 @@ static void br_set_status(br_inst_t *b, const char *msg) {
 
 static void br_compose_status(br_inst_t *b) {
     xcopy(b->status, sizeof(b->status), b->url);
-    xcat(b->status, sizeof(b->status), "  status=");
+    xcat(b->status, sizeof(b->status), trs("  status=", "  状态="));
     xnum(b->status, sizeof(b->status), (uint32_t)b->status_code);
-    xcat(b->status, sizeof(b->status), "  bytes=");
+    xcat(b->status, sizeof(b->status), trs("  bytes=", "  字节="));
     xnum(b->status, sizeof(b->status), (uint32_t)b->bytes);
     xcat(b->status, sizeof(b->status), "  ");
     xnum(b->status, sizeof(b->status), b->elapsed_ms);
-    xcat(b->status, sizeof(b->status), "ms  nodes=");
+    xcat(b->status, sizeof(b->status), trs("ms  nodes=", "毫秒 节点="));
     xnum(b->status, sizeof(b->status), (uint32_t)b->nodes);
-    xcat(b->status, sizeof(b->status), "  blocks=");
+    xcat(b->status, sizeof(b->status), trs("  blocks=", "  块="));
     xnum(b->status, sizeof(b->status), (uint32_t)b->blocks);
     block *st = btable_get(b->status_blk);
     if (st) { st->text = b->status; st->dirty_paint = 1; }
@@ -655,7 +656,7 @@ static void br_img_handle(br_inst_t *b, const char *src) {
     if (is_png || is_jpg) {
         ser_write("GUI:br img unsupported "); ser_write(src); ser_write("\n");
         char ph[BR_URL_MAX + 16];
-        xcopy(ph, sizeof(ph), "[img: unsupported ");
+        xcopy(ph, sizeof(ph), trs("[img: unsupported ", "[图片: 不支持 "));
         xcat(ph, sizeof(ph), src); xcat(ph, sizeof(ph), "]");
         br_add_text_block(b, ph, 1, 0);
         return;
@@ -667,7 +668,7 @@ static void br_img_handle(br_inst_t *b, const char *src) {
     }
     /* http(s) 同源图片本轮未接入内存解码；占位保留。 */
     char ph[BR_URL_MAX + 12];
-    xcopy(ph, sizeof(ph), "[img: ");
+    xcopy(ph, sizeof(ph), trs("[img: ", "[图片: "));
     xcat(ph, sizeof(ph), src); xcat(ph, sizeof(ph), "]");
     br_add_text_block(b, ph, 1, 0);
 }
@@ -816,9 +817,9 @@ static void br_parse_html(br_inst_t *b, const uint8_t *html, int len) {
 
 static int br_fetch(br_inst_t *b, const char *url) {
     b->ok = 0; b->bytes = 0; b->status_code = 0; b->elapsed_ms = 0;
-    if (br_alloc_html(b) < 0) { br_set_status(b, "out of memory"); return -1; }
+    if (br_alloc_html(b) < 0) { br_set_status(b, trs("out of memory", "内存不足")); return -1; }
 
-    if (!net_up()) { br_set_status(b, "network not ready"); return -1; }
+    if (!net_up()) { br_set_status(b, trs("network not ready", "网络未就绪")); return -1; }
 
     uint32_t t0 = uptime_ms();
     int status = 0; long total = 0;
@@ -832,15 +833,15 @@ static int br_fetch(br_inst_t *b, const char *url) {
         char msg[BR_STATUS_MAX];
         const char *why;
         switch (n) {
-        case -7:  why = "redirect https blocked"; break;
-        case -2:  why = "dns failed"; break;
-        case -3:  why = "connect failed"; break;
-        case -4:  why = "http status error"; break;
-        case -5:  why = "no reply"; break;
-        case -8:  why = "redirect loop"; break;
-        case -11: why = "truncated body"; break;
-        case -13: why = "body needs resume"; break;
-        default:  why = "fetch error"; break;
+        case -7:  why = trs("redirect https blocked", "阻止跳转 https"); break;
+        case -2:  why = trs("dns failed", "DNS 解析失败"); break;
+        case -3:  why = trs("connect failed", "连接失败"); break;
+        case -4:  why = trs("http status error", "HTTP 状态错误"); break;
+        case -5:  why = trs("no reply", "无响应"); break;
+        case -8:  why = trs("redirect loop", "跳转循环"); break;
+        case -11: why = trs("truncated body", "正文被截断"); break;
+        case -13: why = trs("body needs resume", "正文需续传"); break;
+        default:  why = trs("fetch error", "抓取失败"); break;
         }
         xcopy(msg, sizeof(msg), why);
         xcat(msg, sizeof(msg), " (");
@@ -919,7 +920,8 @@ static void br_build_ui(br_inst_t *b) {
     bar.gap = 4;
     block_id toolbar = b_row(b->root, &bar);
 
-    static const char *btns[4] = { "Back", "Fwd", "Refresh", "Stop" };
+    static const char *btn_en[4] = { "Back", "Fwd", "Refresh", "Stop" };
+    static const char *btn_zh[4] = { "后退", "前进", "刷新", "停止" };
     static void (*bclick[4])(block_id, int32_t, int32_t) = {
         br_click_back, br_click_fwd, br_click_refresh, br_click_stop
     };
@@ -928,7 +930,7 @@ static void br_build_ui(br_inst_t *b) {
         btn.on_click = bclick[i];
         btn.usr = b;
         block_id bid = b_row(toolbar, &btn);
-        b_text(bid, 0, btns[i]);
+        b_text(bid, 0, trs(btn_en[i], btn_zh[i]));
         b->blocks++;
     }
 
@@ -972,7 +974,7 @@ static int br_is_sample_url(const char *u) {
 
 /* 错误页：文字说明 + 返回入口（有历史走 Back，否则 Reload）。 */
 static void br_build_error_page(br_inst_t *b) {
-    br_add_text_block(b, "Navigation failed", 1, 0);
+    br_add_text_block(b, trs("Navigation failed", "导航失败"), 1, 0);
     br_add_text_block(b, b->err_msg, 1, 0);
     br_add_text_block(b, b->url, 1, 0);
     blk_spec row = br_panel(LAYER_WORK, -1, 20, 0);
@@ -981,10 +983,10 @@ static void br_build_error_page(br_inst_t *b) {
     back.usr = b;
     if (b->hist_cur > 0) {
         back.on_click = br_click_back;
-        b_button(brow, &back, "Back");
+        b_button(brow, &back, trs("Back", "后退"));
     } else {
         back.on_click = br_click_refresh;
-        b_button(brow, &back, "Reload");
+        b_button(brow, &back, trs("Reload", "重载"));
     }
     b->blocks++;
 }
@@ -1003,7 +1005,7 @@ static void br_navigate(br_inst_t *b, const char *url, int push_hist) {
     int rc;
     if (br_is_sample_url(b->url)) {
         /* 内嵌样本页：不起网络。 */
-        if (br_alloc_html(b) < 0) { br_build_error_page(b); xcopy(b->err_msg, sizeof(b->err_msg), "out of memory"); br_compose_status(b); return; }
+        if (br_alloc_html(b) < 0) { br_build_error_page(b); xcopy(b->err_msg, sizeof(b->err_msg), trs("out of memory", "内存不足")); br_compose_status(b); return; }
         const char *doc = (xlen(b->url) > 13 && b->url[13] == '2') ? sample_b : sample_a;
         int len = xlen(doc);
         for (int i = 0; i < len && i < BR_HTML_CAP - 1; i++) b->html[i] = (uint8_t)doc[i];
@@ -1095,7 +1097,7 @@ static void br_click_stop(block_id id, int32_t lx, int32_t ly) {
     block *bl = btable_get(id);
     br_inst_t *b = bl ? (br_inst_t *)bl->usr : 0;
     /* v0：单条阻塞请求，无异步中止；停止位仅记录状态。 */
-    if (b) br_set_status(b, "stop: v0 single request");
+    if (b) br_set_status(b, trs("stop: v0 single request", "停止：v0 单请求"));
 }
 
 static void br_addr_click(block_id id, int32_t lx, int32_t ly) {

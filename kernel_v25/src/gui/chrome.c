@@ -16,6 +16,7 @@
 #include "kstring.h"
 #include "keyboard.h"
 #include "fs.h"
+#include "lang.h"       /* i18n 第一刀：菜单/标题/任务栏/状态 trs 内联对 */
 #include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf scheme -> gui token  */
 #include "ce.h"         /* ce_blk_rec2_t：声明语法 img=/icon= 探针落地 */
 
@@ -1111,7 +1112,7 @@ static void build_desktop_icons(block_id root_id) {
         t.align_cross = XALN_CENTER;
         t.wrap_lines = 1; t.ellipsis = 1;
         block_id tb = b_free(root_id, &t);
-        b_text(tb, 0, "Empty");
+        b_text(tb, 0, trs("Empty", "空桌面"));
     } else {
         /* 兜底纵向列：靠右、从上到下；持久化坐标覆盖兜底位置。 */
         int fx = GFX24_W - 64 - DESK_ITEM_W;
@@ -1216,21 +1217,21 @@ static int tb_collect(int *kind, int *idx, char (*labels)[24], int cap) {
     for (int i = 0; i < 8 && n < cap; i++)
         if (gui_term_root(i)) {
             kind[n] = TB_KIND_TERM; idx[n] = i;
-            tb_make_label(labels[n], 24, "Terminal ", i); n++;
+            tb_make_label(labels[n], 24, trs("Terminal ", "终端 "), i); n++;
         }
     for (int i = 0; i < 8 && n < cap; i++)
         if (gui_fm_in_use(i)) {
             kind[n] = TB_KIND_FM; idx[n] = i;
-            tb_make_label(labels[n], 24, "Files ", i); n++;
+            tb_make_label(labels[n], 24, trs("Files ", "文件 "), i); n++;
         }
     for (int i = 0; i < 8 && n < cap; i++)
         if (gui_br_root(i)) {
             kind[n] = TB_KIND_BR; idx[n] = i;
-            tb_make_label(labels[n], 24, "Browser ", i); n++;
+            tb_make_label(labels[n], 24, trs("Browser ", "浏览器 "), i); n++;
         }
     if (gui_notepad_active() && n < cap) {
         kind[n] = TB_KIND_NP; idx[n] = 0;
-        xcopy_local(labels[n], 24, "Notepad"); n++;
+        xcopy_local(labels[n], 24, trs("Notepad", "记事本")); n++;
     }
     return n;
 }
@@ -1390,7 +1391,7 @@ void gui_demo_build(void) {
     { block *sb0 = btable_get(start_id); if (sb0) sb0->click_on_up = 1; }
     blk_spec start_txt = spec_panel(LAYER_CHROME, 40, 16, 0);
     start_txt.align_cross = XALN_CENTER;
-    b_text(start_id, &start_txt, "Start");
+    b_text(start_id, &start_txt, trs("Start", "开始"));
 
     /* C1：运行实例按钮容器（Start 与时钟之间）；按钮由 tb_poll 按在跑实例填充。 */
     blk_spec tb_s = spec_panel(LAYER_CHROME, 0, 24, 0);
@@ -1563,7 +1564,8 @@ void gui_menu_open(void) {
     /* C1：开始菜单只做启动器，不再列运行实例（运行态归任务栏按钮承载）。 */
     menu_row_n = 0;
 
-    static const char *app_labels[7] = { "&Notepad", "&Canvas demo", "&Files", "&Images", "&Browser", "&Settings", "&Terminal" };
+    static const char *app_en[7] = { "&Notepad", "&Canvas demo", "&Files", "&Images", "&Browser", "&Settings", "&Terminal" };
+    static const char *app_zh[7] = { "记事本(&N)", "画布演示(&C)", "文件(&F)", "图片(&I)", "浏览器(&B)", "设置(&S)", "终端(&T)" };
     for (int a = 0; a < 7; a++) {
         blk_spec app = spec_panel(LAYER_OVERLAY, 172, 24, 1);
         app.on_click = on_menu_row;
@@ -1571,7 +1573,7 @@ void gui_menu_open(void) {
         block_id aid = b_row(menu_root, &app);
         { block *ab = btable_get(aid); if (ab) ab->click_on_up = 1; }
         if (menu_row_n < 32) menu_row_ids[menu_row_n++] = aid;
-        b_text(aid, 0, app_labels[a]);
+        b_text(aid, 0, trs(app_en[a], app_zh[a]));
     }
 
     blk_spec launch = spec_panel(LAYER_OVERLAY, 172, 24, 1);
@@ -1580,7 +1582,7 @@ void gui_menu_open(void) {
     block_id lid = b_row(menu_root, &launch);
     { block *lb = btable_get(lid); if (lb) lb->click_on_up = 1; }
     if (menu_row_n < 32) menu_row_ids[menu_row_n++] = lid;
-    b_text(lid, 0, "Launch &demo");
+    b_text(lid, 0, trs("Launch &demo", "启动示例(&D)"));
 
     /* 探针超高例：追加若干合成行，强制内容高度超过 max_h，走内部滚动。 */
     if (probe_menu_tall) {
