@@ -116,6 +116,22 @@ static int      taskbar_h   = 32;
 static int      probe_tb_high = 0;
 static int      probe_menu_tall = 0;
 
+/* C1：任务栏运行实例按钮注册表。每个在跑实例一个按钮（标题沿用实例池
+ * 现有编号，不重排）；点击 = 聚焦 + raise + 键盘路由回该实例 hook；活动项
+ * 高亮口径与点窗口聚焦一致。开始菜单只做启动器，不再列运行实例。 */
+enum { TB_KIND_TERM = 1, TB_KIND_FM = 2, TB_KIND_BR = 3, TB_KIND_NP = 4 };
+typedef struct {
+    int       kind;
+    int       idx;
+    block_id  btn;
+    char      label[24];
+} tb_entry_t;
+#define TB_MAX 12
+static tb_entry_t tb_ent[TB_MAX];
+static int        tb_n;
+static block_id   tb_slot;            /* 任务栏实例按钮容器行 */
+static uint32_t   tb_sig;
+
 /* 菜单键盘选择：可点行按显示顺序常驻索引。 */
 static block_id menu_row_ids[32];
 static int      menu_row_n   = 0;
@@ -1156,6 +1172,140 @@ static void build_desktop_icons(block_id root_id) {
     ser_write("GUI:desk items="); ser_dec((uint32_t)n); ser_write("\n");
 }
 
+/* ---- C1 任务栏实例按钮 --------------------------------------------------- */
+
+static int tb_xlen(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
+
+static void tb_make_label(char *out, int cap, const char *prefix, int idx) {
+    xcopy_local(out, cap, prefix);
+    int o = tb_xlen(out);
+    int num = idx + 1;
+    char tmp[12]; int m = 0;
+    if (num == 0) tmp[m++] = '0';
+    while (num) { tmp[m++] = (char)('0' + num % 10); num /= 10; }
+    while (m && o < cap - 1) out[o++] = tmp[--m];
+    out[o] = 0;
+}
+
+static int tb_is_active(int kind, int idx) {
+    switch (kind) {
+    case TB_KIND_TERM: return gui_term_active_idx() == idx;
+    case TB_KIND_FM:   return gui_fm_active_slot() == idx;
+    case TB_KIND_BR:   return gui_br_active_idx() == idx;
+    case TB_KIND_NP:   return gui_notepad_active();
+    }
+    return 0;
+}
+
+static const char *tb_kind_name(int kind) {
+    switch (kind) {
+    case TB_KIND_TERM: return "term";
+    case TB_KIND_FM:   return "files";
+    case TB_KIND_BR:   return "browser";
+    case TB_KIND_NP:   return "notepad";
+    }
+    return "?";
+}
+
+/* 汇总当前在跑实例（编号沿用各实例池槽位，不重排）。 */
+static int tb_collect(int *kind, int *idx, char (*labels)[24], int cap) {
+    int n = 0;
+    for (int i = 0; i < 8 && n < cap; i++)
+        if (gui_term_root(i)) {
+            kind[n] = TB_KIND_TERM; idx[n] = i;
+            tb_make_label(labels[n], 24, "Terminal ", i); n++;
+        }
+    for (int i = 0; i < 8 && n < cap; i++)
+        if (gui_fm_in_use(i)) {
+            kind[n] = TB_KIND_FM; idx[n] = i;
+            tb_make_label(labels[n], 24, "Files ", i); n++;
+        }
+    for (int i = 0; i < 8 && n < cap; i++)
+        if (gui_br_root(i)) {
+            kind[n] = TB_KIND_BR; idx[n] = i;
+            tb_make_label(labels[n], 24, "Browser ", i); n++;
+        }
+    if (gui_notepad_active() && n < cap) {
+        kind[n] = TB_KIND_NP; idx[n] = 0;
+        xcopy_local(labels[n], 24, "Notepad"); n++;
+    }
+    return n;
+}
+
+static void tb_btn_click(block_id id, int32_t lx, int32_t ly) {
+    (void)lx; (void)ly;
+    block *bl = btable_get(id);
+    tb_entry_t *e = bl ? (tb_entry_t *)bl->usr : 0;
+    if (!e) return;
+    switch (e->kind) {
+    case TB_KIND_TERM: gui_term_focus(e->idx); break;
+    case TB_KIND_FM:   gui_fm_focus(e->idx); break;
+    case TB_KIND_BR:   gui_br_focus(e->idx); break;
+    case TB_KIND_NP:   gui_notepad_focus(); break;
+    }
+}
+
+static void tb_rebuild(void) {
+    if (!taskbar_id || !tb_slot) return;
+    block *slot = btable_get(tb_slot);
+    if (slot) {
+        while (slot->first_child) b_remove(slot->first_child->id);
+    }
+    tb_n = 0;
+    int kind[TB_MAX], idx[TB_MAX];
+    char labels[TB_MAX][24];
+    int n = tb_collect(kind, idx, labels, TB_MAX);
+    for (int i = 0; i < n; i++) {
+        blk_spec b = spec_panel(LAYER_CHROME, 0, 24, 1);
+        b.pad_l = 6; b.pad_r = 6;
+        b.align_cross = XALN_CENTER;
+        b.on_click = tb_btn_click;
+        tb_ent[tb_n].kind = kind[i];
+        tb_ent[tb_n].idx = idx[i];
+        xcopy_local(tb_ent[tb_n].label, 24, labels[i]);
+        b.usr = &tb_ent[tb_n];
+        tb_ent[tb_n].btn = b_button(tb_slot, &b, tb_ent[tb_n].label);
+        tb_n++;
+    }
+    layout_run();
+}
+
+/* 每帧轮询：实例集合变化才重建按钮；否则只刷新活动高亮。 */
+static void tb_poll(void) {
+    if (!taskbar_id) return;
+    int kind[TB_MAX], idx[TB_MAX];
+    char labels[TB_MAX][24];
+    int n = tb_collect(kind, idx, labels, TB_MAX);
+    uint32_t sig = 2166136261u;
+    for (int i = 0; i < n; i++) {
+        sig = sig * 31u + (uint32_t)kind[i];
+        sig = sig * 131u + (uint32_t)idx[i];
+        for (const char *p = labels[i]; *p; p++) sig = sig * 33u + (uint32_t)*p;
+    }
+    if (sig != tb_sig) {
+        tb_rebuild();
+        tb_sig = sig;
+    }
+    for (int i = 0; i < tb_n; i++) {
+        block *bb = btable_get(tb_ent[i].btn);
+        if (!bb) continue;
+        int act = tb_is_active(tb_ent[i].kind, tb_ent[i].idx);
+        if (bb->focused != act) { bb->focused = act; bb->dirty_paint = 1; }
+    }
+}
+
+/* 探针打点：转储当前任务栏条目（kind / 编号 / 标签 / 活动）。 */
+static void tb_dump(void) {
+    for (int i = 0; i < tb_n; i++) {
+        ser_write("TB:entry kind=");
+        ser_write(tb_kind_name(tb_ent[i].kind));
+        ser_write(" idx="); ser_dec((uint32_t)tb_ent[i].idx);
+        ser_write(" label="); ser_write(tb_ent[i].label);
+        ser_write(" active="); ser_dec(tb_is_active(tb_ent[i].kind, tb_ent[i].idx) ? 1 : 0);
+        ser_write("\n");
+    }
+}
+
 static void clock_refresh(int force) {
     rtc_time_t t;
     rtc_read(&t);
@@ -1222,6 +1372,12 @@ void gui_demo_build(void) {
     blk_spec start_txt = spec_panel(LAYER_CHROME, 40, 16, 0);
     start_txt.align_cross = XALN_CENTER;
     b_text(start_id, &start_txt, "Start");
+
+    /* C1：运行实例按钮容器（Start 与时钟之间）；按钮由 tb_poll 按在跑实例填充。 */
+    blk_spec tb_s = spec_panel(LAYER_CHROME, 0, 24, 0);
+    tb_s.gap = 4;
+    tb_s.align_cross = XALN_CENTER;
+    tb_slot = b_row(taskbar_id, &tb_s);
 
     blk_spec clk_s = spec_panel(LAYER_CHROME, 80, 24, 0);
     clk_s.align_main = ALN_END;
@@ -1385,20 +1541,8 @@ void gui_menu_open(void) {
     mr->moved = 1;   /* 浮层固定锚点，根 STACK 布局不得改写其绝对位置 */
     mr->st.corner_radius = 16;   /* §16.1 菜单外框 r16 */
 
+    /* C1：开始菜单只做启动器，不再列运行实例（运行态归任务栏按钮承载）。 */
     menu_row_n = 0;
-    block_id menu_ids[32];
-    int n = menu_collect(menu_ids, 32);
-    static char menu_labels[32][24];   /* 条目标签常驻，避免栈缓冲悬空 */
-    for (int i = 0; i < n; i++) {
-        blk_spec row = spec_panel(LAYER_OVERLAY, 172, 24, 1);
-        row.on_click = on_menu_row;
-        row.z = (int32_t)menu_ids[i];
-        block_id rid = b_row(menu_root, &row);
-        { block *rb = btable_get(rid); if (rb) rb->click_on_up = 1; }
-        if (menu_row_n < 32) menu_row_ids[menu_row_n++] = rid;
-        id_label(menu_ids[i], menu_labels[i]);
-        b_text(rid, 0, menu_labels[i]);
-    }
 
     static const char *app_labels[7] = { "&Notepad", "&Canvas demo", "&Files", "&Images", "&Browser", "&Settings", "&Terminal" };
     for (int a = 0; a < 7; a++) {
@@ -2787,6 +2931,55 @@ static void gui_probe_note(void) {
     gui_end();
 }
 
+/* 终端滚动自检：灌 >屏 输出；mid=1 滚轮上翻到中段留屏，mid=0 贴底跟随。
+ * 串口打印 SCROLL:term top/total，供回归与截图核验。 */
+static void gui_probe_term_scroll(int mid) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+
+    gui_term_open();
+    for (int i = 0; i < 30; i++) gui_term_run(0, "echo scroll-line");
+    block *tb = btable_get(gui_term_root(0));
+    int tcx = tb ? tb->x + tb->w / 2 : 0, tcy = tb ? tb->y + tb->h / 2 : 0;
+    gui_frame();
+    ser_write("SCROLL:term seed total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+    if (mid) {
+        gui_inject_wheel(tcx, tcy, -1);
+        gui_inject_wheel(tcx, tcy, -1);
+        gui_frame();
+        ser_write("SCROLL:term up top="); ser_dec(gui_term_scroll_top(0));
+        ser_write(" total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+    } else {
+        gui_frame();
+        ser_write("SCROLL:term bottom top="); ser_dec(gui_term_scroll_top(0));
+        ser_write(" total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+    }
+    gui_end();
+}
+
+/* 记事本滚动自检：灌 60 行，滚轮上翻到中段留屏；串口 SCROLL:note top/total。 */
+static void gui_probe_note_scroll(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+
+    gui_notepad_open("/notes.txt");
+    for (int i = 0; i < 59; i++) { gui_inject_key(10); gui_inject_key('x'); }
+    block *nb = btable_get(gui_notepad_root());
+    int ncx = nb ? nb->x + nb->w / 2 : 0, ncy = nb ? nb->y + nb->h / 2 : 0;
+    gui_frame();
+    ser_write("SCROLL:note seed total="); ser_dec(gui_notepad_lines()); ser_write("\n");
+    gui_inject_wheel(ncx, ncy, -1);
+    gui_inject_wheel(ncx, ncy, -1);
+    gui_frame();
+    ser_write("SCROLL:note up top="); ser_dec(gui_notepad_scroll_top());
+    ser_write(" total="); ser_dec(gui_notepad_lines()); ser_write("\n");
+    gui_end();
+}
+
 static void gui_probe_cv(void) {
     gui_begin();
     gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
@@ -2837,6 +3030,56 @@ static void gui_probe_br(void) {
     ser_write(" active="); ser_dec(gui_browser_active());
     ser_write(" result="); ser_dec(gui_browser_active() ? 1 : 0);
     ser_write("\n");
+    gui_end();
+}
+
+/* C2 浏览器取证探针族：edit 地址栏编辑 / hist 后退前进 / error 错误页 /
+ * two 双实例历史独立。串口打点见 BROWSER:open/nav/hist 与 BR:* 行。 */
+static void gui_probe_brcase(const char *mode) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+
+    if (!strcmp_probe(mode, "edit")) {
+        gui_browser_probe_sample();
+        gui_br_type(0, "example.com/x");
+        const char *a = gui_br_addr(0);
+        ser_write("BR:edit addr="); ser_write(a);
+        ser_write(" len="); ser_dec(tb_xlen(a));
+        ser_write(" active="); ser_dec(gui_browser_active());
+        ser_write("\n");
+    } else if (!strcmp_probe(mode, "hist")) {
+        gui_browser_probe_sample();
+        gui_br_type(0, "sample://page2");
+        gui_br_submit(0);
+        ser_write("BR:hist after-nav len="); ser_dec(gui_br_hist_len(0));
+        ser_write(" url="); ser_write(gui_br_url(0)); ser_write("\n");
+        gui_br_back(0);
+        ser_write("BR:back url="); ser_write(gui_br_url(0));
+        ser_write(" hist="); ser_dec(gui_br_hist_len(0)); ser_write("\n");
+        gui_br_fwd(0);
+        ser_write("BR:fwd url="); ser_write(gui_br_url(0));
+        ser_write(" hist="); ser_dec(gui_br_hist_len(0)); ser_write("\n");
+    } else if (!strcmp_probe(mode, "error")) {
+        gui_browser_probe_sample();
+        gui_br_type(0, "http://127.0.0.1:9/nope");
+        gui_br_submit(0);
+        ser_write("BR:error active="); ser_dec(gui_browser_active());
+        ser_write(" url="); ser_write(gui_br_url(0));
+        ser_write(" hist="); ser_dec(gui_br_hist_len(0));
+        ser_write("\n");
+    } else if (!strcmp_probe(mode, "two")) {
+        gui_browser_probe_sample();
+        gui_br_open_sample("sample://page2");
+        for (int i = 0; i < 2; i++) {
+            ser_write("BROWSER:inst idx="); ser_dec((uint32_t)i);
+            ser_write(" url="); ser_write(gui_br_url(i));
+            ser_write(" hist="); ser_dec(gui_br_hist_len(i));
+            ser_write(" active="); ser_dec(gui_br_active_idx() == i ? 1 : 0);
+            ser_write("\n");
+        }
+    }
+    layout_run();
+    gui_frame();
     gui_end();
 }
 
@@ -3186,6 +3429,26 @@ static void gui_probe_mw(const char *mode) {
         ser_write(" np_text="); ser_write(ntext);
         ser_write(" tb_after="); ser_write(ta);
         ser_write(" iso="); ser_dec(iso); ser_write("\n");
+    } else if (!strcmp_probe(mode, "tb")) {
+        /* C1：终端 + 文件管理器各一实例，任务栏各出一个按钮。 */
+        gui_term_open();
+        gui_filemgr_open("/");
+        tb_poll();
+        tb_dump();
+    } else if (!strcmp_probe(mode, "tbactive")) {
+        /* C1：两个终端实例，聚焦第二个，任务栏活动项高亮口径与窗口一致。 */
+        gui_term_open();
+        gui_term_open();
+        gui_term_focus(1);
+        tb_poll();
+        tb_dump();
+    } else if (!strcmp_probe(mode, "tbclose")) {
+        /* C1：关掉终端实例后，其任务栏按钮立即移除。 */
+        gui_term_open();
+        gui_filemgr_open("/");
+        gui_term_close_inst(0);
+        tb_poll();
+        tb_dump();
     }
     layout_run();
     gui_frame();
@@ -3265,6 +3528,9 @@ void gui_chrome_reset(void) {
     clock_row = 0;
     clock_text_blk = 0;
     clock_last[0] = 0;
+    tb_slot = 0;
+    tb_n = 0;
+    tb_sig = 0;
     s_idle_frame_tick = 0;
     gui_sak_reset();
 }
@@ -3272,6 +3538,7 @@ void gui_chrome_reset(void) {
 static int gui_idle_step(void) {
     gui_sak_poll();
     gui_pump_input();
+    tb_poll();
     clock_refresh(0);
     if (timer_ticks - s_idle_frame_tick < 3)
         return 0;
@@ -3316,10 +3583,18 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "gesture")) { gui_probe_gesture(); return; }
         if (!strcmp_probe(arg, "resize"))  { gui_probe_resize(); return; }
         if (!strcmp_probe(arg, "note"))    { gui_probe_note(); return; }
+        if (!strcmp_probe(arg, "scroll-term"))  { gui_probe_term_scroll(1); return; }
+        if (!strcmp_probe(arg, "scroll-term-bottom")) { gui_probe_term_scroll(0); return; }
+        if (!strcmp_probe(arg, "scroll-note"))  { gui_probe_note_scroll(); return; }
         if (!strcmp_probe(arg, "cv"))      { gui_probe_cv(); return; }
         if (!strcmp_probe(arg, "fm"))      { gui_probe_fm(); return; }
         if (!strcmp_probe(arg, "img"))     { gui_probe_img(); return; }
         if (!strcmp_probe(arg, "br"))      { gui_probe_br(); return; }
+        {
+            char bw[16]; const char *br2 = 0;
+            split_word(arg, bw, sizeof(bw), &br2);
+            if (!strcmp_probe(bw, "brcase")) { gui_probe_brcase(br2 ? br2 : "edit"); return; }
+        }
         if (!strcmp_probe(arg, "cvchan"))  { gui_cvchan_probe(); return; }
         if (!strcmp_probe(arg, "sak"))     { gui_sak_probe(); return; }
         if (!strcmp_probe(arg, "decl"))    { decl_self_test(); return; }

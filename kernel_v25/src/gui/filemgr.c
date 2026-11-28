@@ -464,3 +464,14 @@ void gui_fm_select(int slot, int i) {
         if (rb) { rb->text = f->labels[k]; rb->dirty_paint = 1; }
     }
 }
+
+/* ---- 任务栏实例按钮查询口径（内部，不进 CE ABI） -------------------------- */
+
+int gui_fm_in_use(int slot) { return fm_slot_inst(slot) ? 1 : 0; }
+
+block_id gui_fm_root(int slot) {
+    fm_inst_t *f = fm_slot_inst(slot);
+    return f ? f->root : 0;
+}
+
+int gui_fm_active_slot(void) { return fm_active; }

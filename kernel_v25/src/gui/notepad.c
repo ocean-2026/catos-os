@@ -31,6 +31,7 @@ static int         np_dirty;
 static int         np_full;
 static int         np_active;
 static int         np_key(int code, void *ud);
+static int         np_wheel(int dz, void *ud);
 static char        np_path[FS_PATH_MAX];
 static char        np_title[80];
 static char        np_status[120];
@@ -53,6 +54,13 @@ static void xcat(char *d, int cap, const char *s) {
     for (int i = 0; i < n && o < cap - 1; i++) d[o++] = s[i];
     d[o] = 0;
 }
+static void np_ser_dec(int v) {
+    char tmp[12]; int n = 0;
+    if (v <= 0) { ser_putc('0'); return; }
+    while (v > 0) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) ser_putc(tmp[--n]);
+}
+
 static void xnum(char *d, int cap, int v) {
     char tmp[12]; int n = 0;
     if (v == 0) tmp[n++] = '0';
@@ -87,6 +95,19 @@ static int np_line_len(int row) {
     return e - s;
 }
 
+static int np_rows_visible(void) { return NP_BODY_H / 16; }
+
+static int np_max_scroll(void) {
+    int m = np_line_count() - np_rows_visible();
+    return m < 0 ? 0 : m;
+}
+
+static void np_clamp_scroll(void) {
+    if (np_scroll < 0) np_scroll = 0;
+    int m = np_max_scroll();
+    if (np_scroll > m) np_scroll = m;
+}
+
 /* 由绝对光标下标重算行列；边界钳制，滚动跟随光标。 */
 static void np_recompute_cursor(void) {
     if (np_pos < 0) np_pos = 0;
@@ -96,17 +117,27 @@ static void np_recompute_cursor(void) {
         if (np_buf[i] == '\n') { np_row++; np_col = 0; }
         else np_col++;
     }
-    int rows_visible = NP_BODY_H / 16;
+    int rows_visible = np_rows_visible();
     if (np_row < np_scroll) np_scroll = np_row;
     if (np_row >= np_scroll + rows_visible)
         np_scroll = np_row - rows_visible + 1;
-    if (np_scroll < 0) np_scroll = 0;
+    np_clamp_scroll();
+}
+
+/* 串口滚动口径：首行(0 起) / 总行数，供探针核验。 */
+static void np_scroll_dump(void) {
+    np_clamp_scroll();
+    ser_write("SCROLL:note top="); np_ser_dec(np_scroll);
+    ser_write(" total="); np_ser_dec(np_line_count());
+    ser_write("\n");
 }
 
 static void np_update_status(void) {
     xcopy(np_status, sizeof(np_status), np_path);
-    xcat(np_status, sizeof(np_status), "  R");
+    xcat(np_status, sizeof(np_status), "  行");
     xnum(np_status, sizeof(np_status), np_row + 1);
+    xcat(np_status, sizeof(np_status), "/");
+    xnum(np_status, sizeof(np_status), np_line_count());
     xcat(np_status, sizeof(np_status), " C");
     xnum(np_status, sizeof(np_status), np_col + 1);
     xcat(np_status, sizeof(np_status), np_dirty ? "  dirty" : "  saved");
@@ -188,6 +219,7 @@ static void np_root_click(block_id id, int32_t lx, int32_t ly) {
 void gui_notepad_close(void) {
     if (!np_active) return;
     gui_set_key_hook(0, 0);
+    gui_set_wheel_hook(0, 0);
     int rx = 0, ry = 0, rw = 0, rh = 0;
     block *pr = btable_get(np_root);
     if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
@@ -199,7 +231,10 @@ void gui_notepad_close(void) {
 }
 
 static void gui_notepad_attach_keys(void) {
-    if (np_active) gui_set_key_hook(np_key, 0);
+    if (np_active) {
+        gui_set_key_hook(np_key, 0);
+        gui_set_wheel_hook(np_wheel, 0);
+    }
 }
 
 static void np_load(const char *path) {
@@ -300,7 +335,7 @@ static int np_key(int code, void *ud) {
     if (code == 27) { gui_notepad_close(); return 1; }      /* Esc 关闭 */
     if (code == 19) { np_save(); np_update_status(); return 1; } /* Ctrl+S */
 
-    int rows_visible = NP_BODY_H / 16;
+    int rows_visible = np_rows_visible();
 
     switch (code) {
     case 10: np_insert('\n'); break;                        /* Enter */
@@ -333,15 +368,34 @@ static int np_key(int code, void *ud) {
     block *b = btable_get(np_body);
     if (b) b->dirty_paint = 1;
     np_update_status();
+    np_scroll_dump();
+    return 1;
+}
+
+static int np_wheel(int dz, void *ud) {
+    (void)ud;
+    if (!np_active) return 0;
+    np_scroll += dz > 0 ? 3 : -3;
+    np_clamp_scroll();
+    block *b = btable_get(np_body);
+    if (b) b->dirty_paint = 1;
+    np_update_status();
+    np_scroll_dump();
     return 1;
 }
 
 /* 探针读取口径（chrome.c 探针打点使用）。 */
 int  gui_notepad_active(void)  { return np_active; }
 int  gui_notepad_lines(void)   { return np_line_count(); }
+int  gui_notepad_scroll_top(void) { np_clamp_scroll(); return np_scroll; }
 int  gui_notepad_col(void)      { return np_col; }
 int  gui_notepad_dirty(void)    { return np_dirty; }
 int  gui_notepad_full(void)     { return np_full; }
 int       gui_notepad_len(void)    { return np_len; }
 const char *gui_notepad_text(void) { return np_buf; }
 block_id  gui_notepad_root(void)   { return np_root; }
+
+/* 任务栏按钮聚焦：复用根块点击路径（raise + 切回记事本键盘钩子）。 */
+void gui_notepad_focus(void) {
+    if (np_active) np_root_click(np_root, 0, 0);
+}

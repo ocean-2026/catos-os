@@ -62,6 +62,8 @@ void      cv_dirty_clear(block *b);
 
 /* input.c 组件键盘钩子 */
 void      gui_set_key_hook(int (*fn)(int code, void *ud), void *ud);
+/* input.c 组件滚轮钩子（自绘组件：终端 / 记事本；返回 1 表示消费该 notch）。 */
+void      gui_set_wheel_hook(int (*fn)(int dz, void *ud), void *ud);
 
 /* layout.c */
 void      layout_run(void);
@@ -143,6 +145,7 @@ void      gui_inject_hover(int x, int y);
 void      gui_inject_press_block(block_id id);
 void      gui_inject_hover_block(block_id id);
 void      gui_inject_key(int code);
+void      gui_inject_wheel(int x, int y, int dz);
 block_id  gui_hit_test(int x, int y);
 int       gui_interaction_at(int x, int y, block_id *out, uint8_t *rdir);
 #define GUI_IT_NONE   0

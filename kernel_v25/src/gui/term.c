@@ -53,7 +53,8 @@ typedef struct {
     char      title_buf[32];            /* b_text 只存指针：标题/状态必须常驻 */
     char      status_buf[T_COLS];
     int       len, pos;
-    int       view_top;                 /* 0 = 跟随末尾 */
+    int       view_top;                 /* 回看：首行逻辑行号（ring 下标） */
+    int       follow;                   /* 1 = 贴底跟随新输出；0 = 回看位置固定 */
 } term_t;
 
 static term_t terms[TERM_MAX];
@@ -70,6 +71,14 @@ static void t_ser_dec(uint32_t v) {
     while (n) ser_putc(buf[--n]);
 }
 static int t_len(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
+static void t_num(char *d, int cap, int v) {
+    char tmp[12]; int n = 0;
+    if (v <= 0) tmp[n++] = '0';
+    while (v > 0) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    int o = t_len(d);
+    while (n && o < cap - 1) d[o++] = tmp[--n];
+    d[o] = 0;
+}
 static void t_copy(char *d, int cap, const char *s) {
     int n = t_len(s); if (n > cap - 1) n = cap - 1;
     for (int i = 0; i < n; i++) d[i] = s[i];
@@ -127,6 +136,22 @@ static const char *t_ring_at(term_t *t, int logical) {
     return t->ring[(t->ring_tail - t->ring_n + logical + T_RING) % T_RING];
 }
 
+/* 可见输出行数（不含底行输入）。 */
+static int t_show_rows(void) { return T_ROWS - 1; }
+
+/* 首行可落的最大逻辑行号。 */
+static int t_max_top(term_t *t) {
+    int m = t->ring_n - t_show_rows();
+    return m < 0 ? 0 : m;
+}
+
+/* 跟随态贴到底；再把 view_top 钳进合法区间。 */
+static void t_layout(term_t *t) {
+    if (t->follow) t->view_top = t_max_top(t);
+    if (t->view_top < 0) t->view_top = 0;
+    if (t->view_top > t_max_top(t)) t->view_top = t_max_top(t);
+}
+
 static int strcmp_(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
@@ -139,6 +164,7 @@ static const char *t_digit(int v) {
     return (v >= 0 && v <= 4) ? d[v] : "?";
 }
 static int  t_key(int code, void *ud);
+static int  t_wheel(int dz, void *ud);
 
 /* ---- 内置命令 ----------------------------------------------------------- */
 
@@ -161,6 +187,7 @@ static void t_exec(term_t *t, const char *raw) {
     /* clear/cls 只清本会话行环；其余命令交 shell.c 全内置分发。 */
     if (!strcmp_(line, "clear") || !strcmp_(line, "cls")) {
         t_ring_clear(t);
+        t->view_top = 0; t->follow = 1;
         return;
     }
 
@@ -200,23 +227,24 @@ static void t_render(block_id id) {
     uint32_t fg = tok->fg, bg = tok->panel, accent = tok->accent;
     gui_fill_rect(b->x, b->y, b->w, b->h, bg);
 
-    /* 输出区行数按已产出内容动态计：输入行紧跟最后一行输出（真实 shell
-     * 语义），窗口空时输入行在第 0 行；内容满屏后取最后 T_ROWS-1 行，
-     * 输入行自然停在底行，等价于整体上滚。此前固定 29 行输出 + 底行输入，
-     * 空会话时输入行悬在窗口底部、中间一片空白。 */
-    int show_limit = T_ROWS - 1;
-    int used = t->ring_n < show_limit ? t->ring_n : show_limit;
-    int first = t->ring_n - used;
+    /* 输出区：按 view_top 起画 show_limit 行；回看态固定首行，跟随态贴底。
+     * 输入行恒在底行（show_limit），不随回看滚动。 */
+    t_layout(t);
+    int show_limit = t_show_rows();
+    int first = t->view_top;
     char line[T_COLS + 2];
 
-    for (int v = 0; v < used; v++) {
-        const char *src = t_ring_at(t, first + v);
+    for (int v = 0; v < show_limit; v++) {
+        int logical = first + v;
+        if (logical >= t->ring_n) break;
+        const char *src = t_ring_at(t, logical);
         t_copy(line, sizeof(line), src);
         gui_draw_text(b->x + T_PAD, b->y + T_PAD + v * 16, line, fg, 1);
     }
 
-    /* 输入行：提示符 + 编辑缓冲 + 光标竖线。 */
-    int row = used;
+    /* 输入行：跟随态紧跟最后一行输出；回看态钉在框底，不随输出滚走。 */
+    int row = t->follow ? (t->ring_n < show_limit ? t->ring_n : show_limit)
+                        : show_limit;
     char prompt[T_COLS];
     t_copy(prompt, sizeof(prompt), "");       /* Windows 风格：输入行只留 ">"，cwd 见状态行 */
     t_cat(prompt, sizeof(prompt), "> ");
@@ -230,17 +258,31 @@ static void t_render(block_id id) {
     gui_fill_rect(cx, cy, 2, 16, accent);
 }
 
+/* 串口滚动口径：当前首行(1 起) / 总行数，供探针核验。 */
+static void t_scroll_dump(term_t *t) {
+    t_layout(t);
+    ser_write("SCROLL:term top="); t_ser_dec((uint32_t)t->view_top + 1);
+    ser_write(" total="); t_ser_dec((uint32_t)t->ring_n);
+    ser_write(" follow="); t_ser_dec((uint32_t)t->follow);
+    ser_write("\n");
+}
+
 static void t_update_status(term_t *t) {
     block *st = btable_get(t->status);
     if (!st) return;
     char *buf = t->status_buf;
     int used = 0;
     for (int i = 0; i < TERM_MAX; i++) if (terms[i].in_use) used++;
+    t_layout(t);
     t_copy(buf, sizeof(t->status_buf), "Terminal ");
     t_cat(buf, sizeof(t->status_buf), t_digit(t->num));
     t_cat(buf, sizeof(t->status_buf), "/");
-    t_cat(buf, sizeof(t->status_buf), t_digit(used));
-    t_cat(buf, sizeof(t->status_buf), "   ");
+    t_num(buf, sizeof(t->status_buf), used);
+    t_cat(buf, sizeof(t->status_buf), "  ↑");
+    t_num(buf, sizeof(t->status_buf), t->view_top + 1);
+    t_cat(buf, sizeof(t->status_buf), "/");
+    t_num(buf, sizeof(t->status_buf), t->ring_n);
+    t_cat(buf, sizeof(t->status_buf), "  ");
     t_cat(buf, sizeof(t->status_buf), t->cwd);
     st->text = buf;
     st->dirty_paint = 1;
@@ -263,6 +305,7 @@ static void t_focus(int idx) {
     int prev = active;
     active = idx;
     gui_set_key_hook(t_key, &terms[idx]);
+    gui_set_wheel_hook(t_wheel, &terms[idx]);
     gui_raise_to_front(terms[idx].root);
     if (prev >= 0 && terms[prev].in_use) {
         block *pb = btable_get(terms[prev].title_blk);
@@ -297,8 +340,13 @@ static void t_close_inst(int idx) {
         active = -1;
         for (int i = 0; i < TERM_MAX; i++)
             if (terms[i].in_use) { active = i; break; }
-        if (active >= 0) gui_set_key_hook(t_key, &terms[active]);
-        else gui_set_key_hook(0, 0);
+        if (active >= 0) {
+            gui_set_key_hook(t_key, &terms[active]);
+            gui_set_wheel_hook(t_wheel, &terms[active]);
+        } else {
+            gui_set_key_hook(0, 0);
+            gui_set_wheel_hook(0, 0);
+        }
     }
     gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
@@ -386,12 +434,13 @@ void gui_term_open(void) {
     t->ring_tail = 0; t->ring_n = 0;
     t->hist_n = 0; t->hist_idx = 0;
     t->len = 0; t->pos = 0; t->line[0] = 0;
-    t->view_top = 0;
+    t->view_top = 0; t->follow = 1;
     if (t->cwd[0] == 0) t_copy(t->cwd, sizeof(t->cwd), "/");
     t_ring_push(t, "CatOS block terminal (builtins: help pwd ls cd echo clear history)");
     t_build(idx);
     active = idx;
     gui_set_key_hook(t_key, t);
+    gui_set_wheel_hook(t_wheel, t);
     layout_run();
     gui_raise_to_front(t->root);
     block *pr = btable_get(t->root);
@@ -431,6 +480,26 @@ static void t_submit(term_t *t) {
     t_update_status(t);
 }
 
+/* 翻页 / 滚轮：delta>0 向下、<0 向上。跟随态先脱跟随到底部再动；落在底部
+ * 重新进入跟随。回看态收到新输出不跳位（见 t_layout）。 */
+static void t_scroll_by(term_t *t, int delta) {
+    if (t->follow) { t->follow = 0; t->view_top = t_max_top(t); }
+    t->view_top += delta;
+    t_layout(t);
+    t->follow = (t->view_top >= t_max_top(t));
+    t_update_status(t);
+    block *b = btable_get(t->body);
+    if (b) b->dirty_paint = 1;
+    t_scroll_dump(t);
+}
+
+static int t_wheel(int dz, void *ud) {
+    term_t *t = (term_t *)ud;
+    if (!t || !t->in_use) return 0;
+    t_scroll_by(t, dz > 0 ? 3 : -3);
+    return 1;
+}
+
 static int t_key(int code, void *ud) {
     term_t *t = (term_t *)ud;
     if (!t || !t->in_use) return 0;
@@ -445,6 +514,8 @@ static int t_key(int code, void *ud) {
     case KB_RIGHT: if (t->pos < t->len) t->pos++; break;
     case KB_HOME:  t->pos = 0; break;
     case KB_END:   t->pos = t->len; break;
+    case KB_PGUP:  t_scroll_by(t, -t_show_rows()); break;
+    case KB_PGDN:  t_scroll_by(t,  t_show_rows()); break;
     case KB_UP:
         if (t->hist_idx > 0) {
             t->hist_idx--;
@@ -504,6 +575,12 @@ int gui_term_lines(int i) {
     return terms[i].ring_n;
 }
 
+int gui_term_scroll_top(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return 0;
+    t_layout(&terms[i]);
+    return terms[i].view_top;
+}
+
 const char *gui_term_line(int i, int idx) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
     return t_ring_at(&terms[i], idx);
@@ -550,4 +627,5 @@ void gui_term_reset(void) {
     }
     active = -1;
     gui_set_key_hook(0, 0);
+    gui_set_wheel_hook(0, 0);
 }

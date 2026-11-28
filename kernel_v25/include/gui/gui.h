@@ -75,12 +75,14 @@ void      gui_notepad_open(const char *path);
 void      gui_notepad_close(void);
 int       gui_notepad_active(void);
 int       gui_notepad_lines(void);
+int       gui_notepad_scroll_top(void);
 int       gui_notepad_col(void);
 int       gui_notepad_dirty(void);
 int       gui_notepad_full(void);
 int       gui_notepad_len(void);
 const char *gui_notepad_text(void);
 block_id  gui_notepad_root(void);
+void      gui_notepad_focus(void);
 
 /* 画布兼容层 */
 block_id  b_canvas(block_id parent, const blk_spec *s, int w, int h);
@@ -109,6 +111,10 @@ const char *gui_fm_cwd_inst(int slot);
 int       gui_fm_count_inst(int slot);
 int       gui_fm_sel_inst(int slot);
 void      gui_fm_select(int slot, int i);
+/* 任务栏实例按钮查询口径（内部，不进 CE ABI） */
+int       gui_fm_in_use(int slot);
+block_id  gui_fm_root(int slot);
+int       gui_fm_active_slot(void);
 
 /* 图片查看器 */
 void      gui_images_open(const char *path);
@@ -119,7 +125,7 @@ int       gui_images_w(void);
 int       gui_images_h(void);
 const char *gui_images_name(void);
 
-/* ---- 浏览器 v0（块子树，自写瘦流式 tokenizer） ---- */
+/* ---- 浏览器 v0（块子树，自写瘦流式 tokenizer；多实例池） ---- */
 void      gui_browser_open(const char *url);
 void      gui_browser_close(void);
 void      gui_browser_probe_sample(void);
@@ -128,6 +134,20 @@ int       gui_browser_ok(void);
 int       gui_browser_bytes(void);
 int       gui_browser_nodes(void);
 int       gui_browser_blocks(void);
+/* 多实例池 / 任务栏按钮查询口径（内部，不进 CE ABI） */
+void      gui_br_focus(int slot);
+int       gui_br_count(void);
+int       gui_br_active_idx(void);
+block_id  gui_br_root(int slot);
+const char *gui_br_url(int slot);
+int       gui_br_hist_len(int slot);
+const char *gui_br_addr(int slot);
+void      gui_br_type(int slot, const char *s);
+void      gui_br_submit(int slot);
+void      gui_br_open_sample(const char *url);
+void      gui_br_back(int slot);
+void      gui_br_fwd(int slot);
+void      gui_br_reload(int slot);
 
 /* ---- v2.81 隔离式画布通道（应用唯一合法像素出口） ----
  * gui_cvchan_probe(): `gui cvchan` 自检一轮（建画布/写棋盘/present/销毁）。
@@ -151,6 +171,7 @@ int       gui_term_active_idx(void);
 const char *gui_term_cwd(int i);
 const char *gui_term_last_line(int i);
 int       gui_term_lines(int i);
+int       gui_term_scroll_top(int i);
 const char *gui_term_line(int i, int idx);
 void      gui_term_run(int i, const char *cmd);
 /* 多实例隔离探针口径（内部，不进 CE ABI） */

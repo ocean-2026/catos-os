@@ -75,6 +75,11 @@ block *gui_press_target(void) { return pressed_block; }
 static int       (*key_hook)(int code, void *ud);
 static void     *key_ud;
 
+/* 组件滚轮钩子：自绘组件（终端 / 记事本）在没有 OVF_SCROLL 滚动条时接管
+ * notch；返回 1 表示消费，不再走 owner 兜底回投。 */
+static int       (*wheel_hook)(int dz, void *ud);
+static void     *wheel_ud;
+
 /* popover.c 内部入口（gui_int.h 冻结清单之外）。 */
 extern void pop_bridge_note(int x, int y);
 
@@ -85,6 +90,11 @@ extern void   sb_state_reset(void);
 void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
     key_hook = fn;
     key_ud = ud;
+}
+
+void gui_set_wheel_hook(int (*fn)(int dz, void *ud), void *ud) {
+    wheel_hook = fn;
+    wheel_ud = ud;
 }
 
 static int inside(block *b, int x, int y) {
@@ -263,6 +273,9 @@ static void on_wheel(int x, int y, int dz) {
         gui_mark_dirty(sc->id);
         return;
     }
+    /* 自绘组件（终端 / 记事本）单槽滚轮钩子：无滚动条容器时优先交给当前活动
+     * 组件；钩子消费（返回 1）即不再回投 owner。 */
+    if (wheel_hook && wheel_hook(dz, wheel_ud)) return;
     block *own = b;
     while (own && !own->owner) own = own->parent;
     if (own) decl_post_wheel(own, 0, dz * 3);
@@ -563,6 +576,8 @@ void gui_input_reset(void) {
     press_dragged = 0;
     key_hook = 0;
     key_ud = 0;
+    wheel_hook = 0;
+    wheel_ud = 0;
     sb_state_reset();
 }
 
