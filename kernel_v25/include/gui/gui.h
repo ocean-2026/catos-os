@@ -78,6 +78,9 @@ int       gui_notepad_lines(void);
 int       gui_notepad_col(void);
 int       gui_notepad_dirty(void);
 int       gui_notepad_full(void);
+int       gui_notepad_len(void);
+const char *gui_notepad_text(void);
+block_id  gui_notepad_root(void);
 
 /* 画布兼容层 */
 block_id  b_canvas(block_id parent, const blk_spec *s, int w, int h);
@@ -156,6 +159,7 @@ void      gui_term_close_inst(int i);
 void      gui_term_type(int i, const char *s);
 const char *gui_term_line_buf(int i);
 int       gui_term_hist_n(int i);
+block_id  gui_term_root(int i);
 
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);

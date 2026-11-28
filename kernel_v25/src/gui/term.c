@@ -25,13 +25,15 @@ extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
 
 #define TERM_MAX   4
 #define T_COLS     80
-#define T_ROWS     30
+#define T_ROWS     24
 #define T_RING     200
 #define T_HIST     32
 #define T_LINE     80
 /* 体块尺寸必须含 T_PAD：t_render 从 (b->x+T_PAD,b->y+T_PAD) 起画 30 行
- * （29 回看 + 1 输入），此前少算一行与双侧 padding，输入行被画到块外。 */
-#define T_BODY_W   (T_COLS * 8 + T_PAD * 2)
+ * （29 回看 + 1 输入），此前少算一行与双侧 padding，输入行被画到块外。
+ * 多开并排：窗口收窄到 384 宽（行缓冲仍按 T_COLS=80，超宽部分裁剪）。 */
+#define T_WIN_W    384
+#define T_BODY_W   (T_WIN_W - T_PAD * 2)
 #define T_BODY_H   (T_ROWS * 16 + T_PAD * 2)
 #define T_TITLE_H  24
 #define T_STAT_H   16
@@ -269,6 +271,7 @@ static void t_focus(int idx) {
     block *nb = btable_get(terms[idx].title_blk);
     if (nb) nb->dirty_paint = 1;
     ser_write("TERM:focus idx="); t_ser_dec((uint32_t)idx); ser_write("\n");
+    ser_write("FOCUS:kind=term idx="); t_ser_dec((uint32_t)idx); ser_write("\n");
 }
 
 static void t_root_click(block_id id, int32_t lx, int32_t ly) {
@@ -315,8 +318,8 @@ static void t_build(int idx) {
     block_id root_id = gui_root_block()->id;
 
     /* 高度 = pad + 标题 + gap + 体块 + gap + 状态 + pad（gap=pad=T_PAD）。 */
-    blk_spec root = t_panel(LAYER_WORK, T_BODY_W + T_PAD * 2,
-                            T_TITLE_H + T_BODY_H + T_STAT_H + T_PAD * 4, 1);
+    int32_t root_h = T_TITLE_H + T_BODY_H + T_STAT_H + T_PAD * 4;
+    blk_spec root = t_panel(LAYER_WORK, T_WIN_W, root_h, 1);
     root.pad_l = T_PAD; root.pad_r = T_PAD;
     root.pad_t = T_PAD; root.pad_b = T_PAD;
     root.gap = T_PAD;
@@ -325,10 +328,11 @@ static void t_build(int idx) {
     root.usr = t;
     t->root = b_column(root_id, &root);
     block *pr = btable_get(t->root);
-    pr->x = 36 + idx * 20;
-    pr->y = 28 + idx * 16;
-    pr->moved = 1;
+    ui_cascade_place(pr, idx, T_WIN_W, root_h, 12);
     pr->z = layer_max_z(LAYER_WORK) + 1;
+    ser_write("POS:term idx="); t_ser_dec((uint32_t)idx);
+    ser_write(" x="); t_ser_dec((uint32_t)pr->x);
+    ser_write(" y="); t_ser_dec((uint32_t)pr->y); ser_write("\n");
 
     blk_spec title = t_panel(LAYER_WORK, T_BODY_W, T_TITLE_H, 0);
     title.role_bg = ROLE_BAR;
@@ -525,6 +529,11 @@ void gui_term_type(int i, const char *s) {
 const char *gui_term_line_buf(int i) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
     return terms[i].line;
+}
+
+block_id gui_term_root(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return 0;
+    return terms[i].root;
 }
 
 int gui_term_hist_n(int i) {

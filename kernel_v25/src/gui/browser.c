@@ -36,6 +36,7 @@ extern uint32_t uptime_ms(void);
 #define BR_VP_H      300
 
 static int         br_active;
+static int         br_key(int code, void *ud);
 static int         br_ok;
 static int         br_bytes;
 static int         br_nodes;
@@ -811,11 +812,21 @@ static void br_click_fwd(block_id id, int32_t lx, int32_t ly);
 static void br_click_refresh(block_id id, int32_t lx, int32_t ly);
 static void br_click_stop(block_id id, int32_t lx, int32_t ly);
 
+/* 点击窗口任意位置：raise 置前 + 切回浏览器自己的键盘钩子。 */
+static void br_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (!br_active) return;
+    gui_raise_to_front(br_root);
+    gui_set_key_hook(br_key, 0);
+    ser_write("FOCUS:kind=browser idx=0\n");
+}
+
 static void br_build_ui(void) {
     block_id root_id = gui_root_block()->id;
     blk_spec root = br_panel(LAYER_WORK, BR_VP_W + 16, BR_VP_H + 56, 1);
     root.pad_l = 8; root.pad_r = 8; root.pad_t = 8; root.pad_b = 8;
     root.gap = 4; root.focusable = 1;
+    root.on_click = br_root_click;
     br_root = b_column(root_id, &root);
     block *pr = btable_get(br_root);
     pr->x = 112; pr->y = 48; pr->moved = 1;

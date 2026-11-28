@@ -14,6 +14,7 @@
 #include "gfx24.h"
 #include "keyboard.h"
 #include "paging.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
@@ -34,6 +35,7 @@ static int         im_ok;
 static int         im_off_x, im_off_y;
 static uint32_t    im_dec_us;
 static int         im_active;
+static int         im_key(int code, void *ud);
 
 static block_id    im_root;
 static block_id    im_img_blk;
@@ -231,6 +233,15 @@ static blk_spec im_panel(uint16_t layer, int32_t w, int32_t h, uint8_t border) {
     return s;
 }
 
+/* 点击窗口任意位置：raise 置前 + 切回图片查看器自己的键盘钩子。 */
+static void im_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (!im_active) return;
+    gui_raise_to_front(im_root);
+    gui_set_key_hook(im_key, 0);
+    ser_write("FOCUS:kind=images idx=0\n");
+}
+
 void gui_images_close(void) {
     if (!im_active) return;
     gui_set_key_hook(0, 0);
@@ -287,6 +298,7 @@ void gui_images_open(const char *path) {
     root.pad_l = 8; root.pad_r = 8; root.pad_t = 8; root.pad_b = 8;
     root.gap = 4;
     root.focusable = 1;
+    root.on_click = im_root_click;
     im_root = b_column(root_id, &root);
     block *pr = btable_get(im_root);
     pr->x = 112; pr->y = 64; pr->moved = 1;

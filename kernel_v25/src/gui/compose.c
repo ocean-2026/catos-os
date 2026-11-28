@@ -419,6 +419,26 @@ static void mark_subtree_paint(block *b) {
         mark_subtree_paint(c);
 }
 
+/* 多实例瓦片摆放：第 idx 个实例按 body 宽度横排铺满一行，换行列另起一行，
+ * 越下缘回卷左上角。只改几何/摆放，不触碰实例数据。纵向不错开（同行对齐）。 */
+void ui_cascade_place(block *b, int idx, int w, int h, int gap) {
+    if (!b) return;
+    block *root = gui_root_block();
+    int Rw = root && root->w ? root->w : GFX24_W;
+    int Rh = root && root->h ? root->h : GFX24_H;
+    const int M = 8;
+    int avail_h = Rh - 40;   /* 任务栏带 + 安全边距，不压任务栏 */
+    int cols = (Rw - 2 * M + gap) / (w + gap);
+    if (cols < 1) cols = 1;
+    int col = idx % cols;
+    int row = idx / cols;
+    int x = M + col * (w + gap);
+    int y = M + row * (h + gap);
+    if (x + w > Rw - M) { x = Rw - M - w; if (x < M) x = M; }
+    if (y + h > avail_h) { x = M; y = M; }
+    b->x = x; b->y = y; b->moved = 1;
+}
+
 /* 同层当前最大 z：新开面板据此取 max+1，避免与既有工作面板同层同序。 */
 int32_t layer_max_z(uint16_t layer) {
     int32_t maxz = -1;

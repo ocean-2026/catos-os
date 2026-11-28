@@ -11,6 +11,7 @@
 #include "fs.h"
 #include "gfx24.h"
 #include "keyboard.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
@@ -29,6 +30,7 @@ static int         np_scroll;
 static int         np_dirty;
 static int         np_full;
 static int         np_active;
+static int         np_key(int code, void *ud);
 static char        np_path[FS_PATH_MAX];
 static char        np_title[80];
 static char        np_status[120];
@@ -174,6 +176,15 @@ static void np_close_click(block_id id, int32_t lx, int32_t ly) {
     gui_notepad_close();
 }
 
+/* 点击窗口任意位置：raise 置前 + 切回记事本自己的键盘钩子。 */
+static void np_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (!np_active) return;
+    gui_raise_to_front(np_root);
+    gui_set_key_hook(np_key, 0);
+    ser_write("FOCUS:kind=notepad idx=0\n");
+}
+
 void gui_notepad_close(void) {
     if (!np_active) return;
     gui_set_key_hook(0, 0);
@@ -187,7 +198,6 @@ void gui_notepad_close(void) {
     gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
-static int np_key(int code, void *ud);
 static void gui_notepad_attach_keys(void) {
     if (np_active) gui_set_key_hook(np_key, 0);
 }
@@ -217,6 +227,7 @@ void gui_notepad_open(const char *path) {
     root.pad_t = NP_PAD; root.pad_b = NP_PAD;
     root.gap = NP_PAD;
     root.focusable = 1;
+    root.on_click = np_root_click;
     np_root = b_column(root_id, &root);
     block *pr = btable_get(np_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
@@ -331,3 +342,6 @@ int  gui_notepad_lines(void)   { return np_line_count(); }
 int  gui_notepad_col(void)      { return np_col; }
 int  gui_notepad_dirty(void)    { return np_dirty; }
 int  gui_notepad_full(void)     { return np_full; }
+int       gui_notepad_len(void)    { return np_len; }
+const char *gui_notepad_text(void) { return np_buf; }
+block_id  gui_notepad_root(void)   { return np_root; }

@@ -3166,6 +3166,26 @@ static void gui_probe_mw(const char *mode) {
         ser_write("MW:close count="); ser_dec(n);
         ser_write(" cwd1="); ser_write(c1);
         ser_write(" active="); ser_dec(gui_term_active_idx()); ser_write("\n");
+    } else if (!strcmp_probe(mode, "focusnp")) {
+        gui_term_open();
+        gui_term_type(0, "xx");
+        const char *tb = gui_term_line_buf(0);
+        gui_notepad_open(0);
+        block *nb = btable_get(gui_notepad_root());
+        if (nb) { gui_inject_press(nb->x + nb->w / 2, nb->y + nb->h / 2); gui_inject_release(); }
+        gui_inject_key('a'); gui_inject_key('b'); gui_inject_key('c');
+        int nlen = gui_notepad_len();
+        const char *ntext = gui_notepad_text();
+        block *tb2 = btable_get(gui_term_root(0));
+        if (tb2) { gui_inject_press(tb2->x + 12, tb2->y + tb2->h / 2); gui_inject_release(); }
+        const char *ta = gui_term_line_buf(0);
+        int iso = (nlen == 3 && strcmp_probe(ntext, "abc") == 0 &&
+                   strcmp_probe(tb, ta) == 0);
+        ser_write("MW:focusnp tb_before="); ser_write(tb);
+        ser_write(" np_len="); ser_dec(nlen);
+        ser_write(" np_text="); ser_write(ntext);
+        ser_write(" tb_after="); ser_write(ta);
+        ser_write(" iso="); ser_dec(iso); ser_write("\n");
     }
     layout_run();
     gui_frame();

@@ -10,6 +10,7 @@
 #include "gui/tokens.h"
 #include "gfx24.h"
 #include "paging.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
@@ -257,12 +258,22 @@ void gui_canvas_close_all(void) {
     gui_mark_dirty_union(0, rx, ry, rw, rh);
 }
 
+/* 点击画布窗口：演示组件无键盘钩子，只 raise 置前并清掉前一组件钩子。 */
+static void cv_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (!cv_active) return;
+    gui_raise_to_front((block_id)cv_root);
+    gui_set_key_hook(0, 0);
+    ser_write("FOCUS:kind=canvas idx=0\n");
+}
+
 void gui_canvas_demo(void) {
     gui_canvas_close_all();
     block_id root_id = gui_root_block()->id;
     blk_spec root = cv_panel(LAYER_WORK, CV_DEMO_W + 16, CV_DEMO_H + 40, 1);
     root.pad_l = 8; root.pad_r = 8; root.pad_t = 8; root.pad_b = 8;
     root.focusable = 1;
+    root.on_click = cv_root_click;
     cv_root = b_column(root_id, &root);
     block *pr = btable_get(cv_root);
     pr->x = 150; pr->y = 80; pr->moved = 1;

@@ -12,11 +12,12 @@ DISK = os.path.join(REPO, "tests", "qemu_disk_vprobe.img")
 ART = HERE
 
 MODES = [
-    ("term",  "two-term-isolated.png"),
-    ("fm",    "two-fm-diff-dir.png"),
-    ("focus", "focus-switch.png"),
-    ("cap",   "four-term-cap.png"),
-    ("close", "close-one-keeps-other.png"),
+    ("term",   "two-term-isolated.png"),
+    ("fm",     "two-fm-diff-dir.png"),
+    ("focus",  "focus-switch.png"),
+    ("focusnp","focus-notepad-then-term.png"),
+    ("cap",    "four-term-cap.png"),
+    ("close",  "close-one-keeps-other.png"),
 ]
 
 def main():
@@ -40,7 +41,7 @@ def main():
             time.sleep(6.0)
             txt = open(serial, encoding="utf-8", errors="replace").read()
             for ln in txt.splitlines():
-                if any(k in ln for k in ("MW:", "TERM:", "FM:")):
+                if any(k in ln for k in ("MW:", "TERM:", "FM:", "POS:", "FOCUS:")):
                     print("[%s] %s" % (mode, ln))
             ppm = os.path.join(ART, png.replace(".png", ".ppm"))
             if os.path.exists(ppm): os.remove(ppm)

@@ -24,7 +24,7 @@
 
 #define FM_MAX_ENT   64
 #define FM_ROWS_VIEW 14
-#define FM_BODY_W    504
+#define FM_BODY_W    368
 #define FM_BODY_H    280
 #define FM_ROW_H     18
 #define FM_MAX       3
@@ -282,6 +282,7 @@ static void fm_focus(int slot) {
     block *nb = btable_get(pool[slot]->title_blk);
     if (nb) nb->dirty_paint = 1;
     ser_write("FM:focus idx="); fm_ser_dec((uint32_t)slot); ser_write("\n");
+    ser_write("FOCUS:kind=files idx="); fm_ser_dec((uint32_t)slot); ser_write("\n");
 }
 
 static void fm_close_inst(int slot, int report) {
@@ -362,8 +363,8 @@ void gui_filemgr_open(const char *path) {
     block_id root_id = gui_root_block()->id;
     /* 高度 = pad_t/b + 标题 + 路径条 + 工具行 + 列表 + 状态行 + 4×gap；
      * 此前漏算 padding/gap，状态行被 clamp_child 压成 h=0。 */
-    blk_spec root = cv_panel_local(LAYER_WORK, FM_BODY_W + 16,
-        16 + 16 + 20 + FM_BODY_H + 16 + 8 * 2 + 4 * 4, 1);
+    int32_t root_h = 16 + 16 + 20 + FM_BODY_H + 16 + 8 * 2 + 4 * 4;
+    blk_spec root = cv_panel_local(LAYER_WORK, FM_BODY_W + 16, root_h, 1);
     root.pad_l = 8; root.pad_r = 8; root.pad_t = 8; root.pad_b = 8;
     root.gap = 4;
     root.focusable = 1;
@@ -371,8 +372,11 @@ void gui_filemgr_open(const char *path) {
     root.usr = f;
     f->root = b_column(root_id, &root);
     block *pr = btable_get(f->root);
-    pr->x = 140 + slot * 20; pr->y = 64 + slot * 16; pr->moved = 1;
+    ui_cascade_place(pr, slot, FM_BODY_W + 16, root_h, 12);
     pr->z = layer_max_z(LAYER_WORK) + 1;
+    ser_write("POS:fm idx="); fm_ser_dec((uint32_t)slot);
+    ser_write(" x="); fm_ser_dec((uint32_t)pr->x);
+    ser_write(" y="); fm_ser_dec((uint32_t)pr->y); ser_write("\n");
 
     blk_spec title = cv_panel_local(LAYER_WORK, FM_BODY_W, 16, 0);
     title.role_bg = ROLE_BAR; title.bg = INHERIT_COLOR;

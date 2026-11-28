@@ -32,6 +32,8 @@ void      gui_mark_dirty(block_id id);
 void      gui_mark_dirty_union(block *b, int x, int y, int w, int h);
 int32_t   layer_max_z(uint16_t layer);
 void      gui_raise_to_front(block_id id);
+/* 多实例级联摆放：第 idx 个实例级联偏移 dx/dy；越右缘夹紧、越下缘回卷左上角。 */
+void      ui_cascade_place(block *b, int idx, int w, int h, int gap);
 void      stat_set_layout_nodes(uint32_t n);
 void      stat_add_layout_nodes(uint32_t n);
 void      stat_note_frame(uint64_t cycles, uint32_t damage_rects,

@@ -13,6 +13,7 @@
 #include "gui/tokens.h"
 #include "fs.h"
 #include "gfx24.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"
@@ -131,6 +132,16 @@ static void st_close_click(block_id id, int32_t lx, int32_t ly) {
     gui_settings_close();
 }
 
+/* 点击窗口：设置面板无键盘钩子，只 raise 置前并清掉前一组件钩子（不吞键，
+ * 也不让背后已切走的组件继续收键）。 */
+static void st_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (!st_active) return;
+    gui_raise_to_front(st_root);
+    gui_set_key_hook(0, 0);
+    ser_write("FOCUS:kind=settings idx=0\n");
+}
+
 void gui_settings_close(void) {
     if (!st_active) return;
     int rx = 0, ry = 0, rw = 0, rh = 0;
@@ -151,6 +162,7 @@ void gui_settings_open(void) {
     root.pad_t = ST_PAD; root.pad_b = ST_PAD;
     root.gap = ST_PAD;
     root.focusable = 1;
+    root.on_click = st_root_click;
     st_root = b_column(root_id, &root);
     block *pr = btable_get(st_root);
     pr->x = 140; pr->y = 64; pr->moved = 1;
