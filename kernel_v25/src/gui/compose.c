@@ -18,6 +18,13 @@ extern volatile uint32_t timer_ticks;
 extern uint64_t perf_now(void);
 extern uint32_t perf_mhz(void);
 
+/* 离屏影子缓冲内部接口（be_vbe24.c；kernel 内部，不进 CE ABI）。 */
+extern int  vbe24_shadow_init(void);
+extern void vbe24_shadow_sink(int on);
+extern void vbe24_shadow_blit_rect(int x, int y, int w, int h);
+extern int  vbe24_shadow_mode(void);
+static int s_shadow_ready;
+
 #define DMG_MAX 16
 static struct { int x, y, w, h; } dmg[DMG_MAX];
 static int dmg_n;
@@ -335,6 +342,9 @@ void gui_frame(void) {
     }
     dmg_coalesce();
 
+    int shadow = s_shadow_ready;
+    if (shadow) vbe24_shadow_sink(1);
+
     /* 第二遍：按 damage 矩形重合成。对每条损伤矩形，重置裁剪栈后以该矩形
      * 为裁剪口，按 layer→z→树先序（paint_list 已排好）逐节点重画 body；
      * 矩形内的背景节点先画，旧窗口像素被真背景覆盖补齐。dirty/snap 只用于
@@ -371,11 +381,18 @@ void gui_frame(void) {
         paint_list[i]->snap = 0;
     }
 
-    /* 光标：合成结束后统一画，使用后端已有的 save/restore 精灵机制。 */
+    /* 光标：合成结束后统一画到影子上；后端精灵路径自行把光标区回拷 LFB。 */
     int mx, my; uint8_t btn;
     mouse_get_state(&mx, &my, &btn);
     struct render_be *be = con_backend();
     if (be && be->mouse_cursor) be->mouse_cursor(mx, my, 1);
+
+    /* 影子 → LFB：只回拷本帧损伤矩形，不整屏拷贝。 */
+    if (shadow) {
+        vbe24_shadow_sink(0);
+        for (int r = 0; r < dmg_n; r++)
+            vbe24_shadow_blit_rect(dmg[r].x, dmg[r].y, dmg[r].w, dmg[r].h);
+    }
 
     uint64_t t1 = perf_now();
 
@@ -563,6 +580,11 @@ void gui_begin(void) {
     gui_chrome_reset();
     gui_reset_keep_ce();
     gfx24_clear(gui_active_style()->bg);
+    /* 影子缓冲在会话开始（帧计时之外）一次性分配并与首屏对齐；避免把
+     * 1.44MB 堆零写/种子拷计入首帧/拖帧的 frame_us 测量窗口。分配失败
+     * 后 s_shadow_ready=0，回退 legacy 直写 LFB，行为同基线。 */
+    vbe24_shadow_init();
+    s_shadow_ready = vbe24_shadow_mode() != 0;
     block *root = gui_root_block();
     root->x = 0; root->y = 0;
     root->w = GFX24_W; root->h = GFX24_H;

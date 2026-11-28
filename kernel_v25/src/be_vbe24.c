@@ -41,6 +41,8 @@
 #include "svga.h"
 #include "io.h"
 #include "paging.h"
+#include "kvheap.h"
+#include "serial_log.h"
 #ifdef CATOS_BENCH
 #include "perf.h"
 uint64_t g_sp_scroll_cycles;
@@ -70,6 +72,19 @@ static int      svga_backend;
 static uint32_t g_pitch  = GFX24_PITCH;
 static uint8_t  g_stride = 3;
 static uint8_t  g_r = 2, g_g = 1, g_b = 0, g_x = 3;
+
+/* ---- 离屏合成影子缓冲（运行时堆分配，绝不进 .bss） -------------------------
+ * g_shadow_mode: 0=未启用(legacy 直写 LFB) 1=800x600x3 2=降级 640x480x3。
+ * 影子内固定 BGR 三字节、stride=w*3；sink 打开时所有绘制先落影子，帧末只把
+ * 损伤矩形逐行拷回 LFB。分配失败显式返回 0，回退 legacy，不静默循环。 */
+static uint8_t  *g_shadow;
+static uint32_t  g_shadow_w, g_shadow_h, g_shadow_pitch;
+static int       g_shadow_mode;
+static int       g_sink_shadow;
+
+static int dst_is_shadow(void) { return g_sink_shadow && g_shadow != 0; }
+static void shadow_seed_from_lfb(void);
+void vbe24_shadow_blit_rect(int x, int y, int w, int h);
 
 /* v2.25 adjustable glyph scale (the ASCII font is natively 8x8; the
  * normal mode just stretches every row twice):
@@ -153,9 +168,15 @@ static inline int layout_packed4(void) {
 }
 
 static inline void put3(int x, int y, uint32_t c) {
+    uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
+    if (dst_is_shadow()) {
+        uint8_t *p = g_shadow + (uint32_t)y * g_shadow_pitch
+                              + (uint32_t)x * 3u;
+        p[0] = b; p[1] = g; p[2] = r;
+        return;
+    }
     volatile uint8_t *p = lfb + (uint32_t)y * g_pitch
                               + (uint32_t)x * g_stride;
-    uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
     if (layout_packed4()) {
         *(volatile uint32_t *)p = (uint32_t)b | ((uint32_t)g << 8)
                                 | ((uint32_t)r << 16) | (0xFFu << 24);
@@ -170,12 +191,28 @@ static inline void put3(int x, int y, uint32_t c) {
 static int clip(int *x, int *y, int *w, int *h) {
     if (*x < 0) { *w += *x; *x = 0; }
     if (*y < 0) { *h += *y; *y = 0; }
-    if (*x + *w > GFX24_W) *w = GFX24_W - *x;
-    if (*y + *h > GFX24_H) *h = GFX24_H - *y;
+    int W = dst_is_shadow() ? (int)g_shadow_w : GFX24_W;
+    int H = dst_is_shadow() ? (int)g_shadow_h : GFX24_H;
+    if (*x + *w > W) *w = W - *x;
+    if (*y + *h > H) *h = H - *y;
     return (*w > 0 && *h > 0);
 }
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
+    if (dst_is_shadow()) {
+        if (!clip(&x, &y, &w, &h)) return;
+        uint8_t b = (uint8_t)c, g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
+        for (int j = 0; j < h; j++) {
+            uint8_t *p = g_shadow + (uint32_t)(y + j) * g_shadow_pitch
+                                  + (uint32_t)x * 3u;
+            for (int i = 0; i < w; i++) {
+                p[(uint32_t)i * 3u]     = b;
+                p[(uint32_t)i * 3u + 1] = g;
+                p[(uint32_t)i * 3u + 2] = r;
+            }
+        }
+        return;
+    }
     if (!lfb || !clip(&x, &y, &w, &h)) return;
     uint8_t b = (uint8_t)(c), g = (uint8_t)(c >> 8), r = (uint8_t)(c >> 16);
 
@@ -254,7 +291,9 @@ static const uint16_t MC_ARROW[MC_H] = {
 };
 
 static void mc_restore(void) {
-    if (!mc_valid || !lfb) return;
+    if (!mc_valid) return;
+    int shadow = dst_is_shadow();
+    if (!shadow && !lfb) return;
     for (int j = 0; j < MC_H; j++) {
         int dy = mc_y + j;
         if (dy < 0 || dy >= GFX24_H) continue;
@@ -262,10 +301,16 @@ static void mc_restore(void) {
             int dx = mc_x + i;
             if (dx < 0 || dx >= GFX24_W) continue;
             const uint8_t *s = mc_save + (j * MC_W + i) * 4;
-            volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
-                                      + (uint32_t)dx * g_stride;
-            p[g_b] = s[0]; p[g_g] = s[1]; p[g_r] = s[2];
-            if (g_stride == 4u) p[g_x] = s[3];
+            if (shadow) {
+                uint8_t *p = g_shadow + (uint32_t)dy * g_shadow_pitch
+                                        + (uint32_t)dx * 3u;
+                p[0] = s[0]; p[1] = s[1]; p[2] = s[2];
+            } else {
+                volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                          + (uint32_t)dx * g_stride;
+                p[g_b] = s[0]; p[g_g] = s[1]; p[g_r] = s[2];
+                if (g_stride == 4u) p[g_x] = s[3];
+            }
         }
     }
     mc_valid = 0;
@@ -276,6 +321,7 @@ static void mc_invalidate(void) { mc_valid = 0; }
 /* Save the pixels under the arrow and draw it (no restore first). */
 static void mc_save_and_draw(int x, int y) {
     mc_x = x; mc_y = y;
+    int shadow = dst_is_shadow();
     for (int j = 0; j < MC_H; j++) {
         int dy = y + j;
         if (dy < 0 || dy >= GFX24_H) continue;
@@ -283,10 +329,16 @@ static void mc_save_and_draw(int x, int y) {
             int dx = x + i;
             if (dx < 0 || dx >= GFX24_W) continue;
             uint8_t *s = mc_save + (j * MC_W + i) * 4;
-            volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
-                                      + (uint32_t)dx * g_stride;
-            s[0] = p[g_b]; s[1] = p[g_g]; s[2] = p[g_r];
-            s[3] = (g_stride == 4u) ? p[g_x] : 0xFFu;
+            if (shadow) {
+                const uint8_t *p = g_shadow + (uint32_t)dy * g_shadow_pitch
+                                            + (uint32_t)dx * 3u;
+                s[0] = p[0]; s[1] = p[1]; s[2] = p[2]; s[3] = 0xFFu;
+            } else {
+                volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                          + (uint32_t)dx * g_stride;
+                s[0] = p[g_b]; s[1] = p[g_g]; s[2] = p[g_r];
+                s[3] = (g_stride == 4u) ? p[g_x] : 0xFFu;
+            }
         }
     }
     for (int j = 0; j < MC_H; j++) {
@@ -314,14 +366,23 @@ static void v24_mouse_over_repaint(int gx, int gy) {
 }
 
 static void v24_mouse_cursor(int x, int y, int visible) {
-    if (!lfb) return;
+    if (!lfb && !dst_is_shadow()) return;
+    int ox = mc_x, oy = mc_y, had = mc_valid;
     mc_restore();
-    if (!visible) return;
+    if (!visible) {
+        if (dst_is_shadow() && had)
+            vbe24_shadow_blit_rect(ox, oy, MC_W, MC_H);
+        return;
+    }
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x > GFX24_W - MC_W) x = GFX24_W - MC_W;
     if (y > GFX24_H - MC_H) y = GFX24_H - MC_H;
     mc_save_and_draw(x, y);
+    if (dst_is_shadow()) {
+        if (had) vbe24_shadow_blit_rect(ox, oy, MC_W, MC_H);
+        vbe24_shadow_blit_rect(x, y, MC_W, MC_H);
+    }
 }
 
 /* ---- public drawing API (gfx24.h) -------------------------------------- */
@@ -354,7 +415,27 @@ void gfx24_rect(int x, int y, int w, int h, uint32_t rgb) {
 
 void gfx24_blit_stride(const uint8_t *src, int x, int y, int w, int h,
                        int src_stride) {
-    if (!lfb || !src || w <= 0 || h <= 0 || src_stride <= 0) return;
+    if (!src || w <= 0 || h <= 0 || src_stride <= 0) return;
+    if (dst_is_shadow()) {
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > (int)g_shadow_w) w = (int)g_shadow_w - x;
+        if (y + h > (int)g_shadow_h) h = (int)g_shadow_h - y;
+        if (w <= 0 || h <= 0) return;
+        for (int j = 0; j < h; j++) {
+            uint8_t *d = g_shadow + (uint32_t)(y + j) * g_shadow_pitch
+                                  + (uint32_t)x * 3u;
+            for (int i = 0; i < w; i++) {
+                const uint8_t *s = src +
+                    ((uint32_t)j * (uint32_t)src_stride + (uint32_t)i) * 3u;
+                d[(uint32_t)i * 3u]     = s[2];   /* B */
+                d[(uint32_t)i * 3u + 1] = s[1];   /* G */
+                d[(uint32_t)i * 3u + 2] = s[0];   /* R */
+            }
+        }
+        return;
+    }
+    if (!lfb) return;
     for (int j = 0; j < h; j++) {
         int dy = y + j;
         if (dy < 0 || dy >= GFX24_H) continue;
@@ -384,16 +465,114 @@ void gfx24_blit(const uint8_t *src, int x, int y, int w, int h) {
 volatile uint8_t *gfx24_lfb_ptr(void) { return lfb; }
 uint32_t gfx24_pitch(void)            { return g_pitch; }
 uint8_t  gfx24_stride(void)           { return g_stride; }
+
+/* ---- 离屏影子缓冲公共内部接口（kernel 内部，不进 CE ABI） ------------------ */
+static void shadow_ser_dec(uint32_t v) {
+    char b[12]; int n = 0;
+    if (!v) { ser_putc('0'); return; }
+    while (v) { b[n++] = (char)('0' + v % 10u); v /= 10u; }
+    while (n) ser_putc(b[--n]);
+}
+
+int vbe24_shadow_init(void) {
+    if (g_shadow) return g_shadow_mode;
+    uint32_t ftot = 0, fused = 0; frame_stats(&ftot, &fused);
+    uint32_t before = kvheap_inuse_bytes();
+    ser_write("GUI:shadow init free_frames="); shadow_ser_dec(ftot - fused);
+    ser_write(" need_full="); shadow_ser_dec((uint32_t)GFX24_W * GFX24_H * 3u / 4096u + 1u);
+    ser_write("\n");
+    uint32_t full = (uint32_t)GFX24_W * GFX24_H * 3u;
+    g_shadow = kvmalloc(full, 0);
+    if (g_shadow) {
+        g_shadow_w = GFX24_W; g_shadow_h = GFX24_H;
+        g_shadow_pitch = GFX24_PITCH; g_shadow_mode = 1;
+    } else {
+        ser_write("GUI:shadow full-alloc failed, try half\n");
+        uint32_t half = 640u * 480u * 3u;
+        g_shadow = kvmalloc(half, 0);
+        if (g_shadow) {
+            g_shadow_w = 640; g_shadow_h = 480;
+            g_shadow_pitch = 640u * 3u; g_shadow_mode = 2;
+        } else {
+            g_shadow = 0; g_shadow_mode = 0;
+        }
+    }
+    shadow_seed_from_lfb();
+    uint32_t after = kvheap_inuse_bytes();
+    ser_write("GUI:shadow mode="); shadow_ser_dec((uint32_t)g_shadow_mode);
+    ser_write(" w="); shadow_ser_dec(g_shadow_w);
+    ser_write(" h="); shadow_ser_dec(g_shadow_h);
+    ser_write(" bytes="); shadow_ser_dec(g_shadow ? g_shadow_w * g_shadow_h * 3u : 0u);
+    ser_write(" heap_before="); shadow_ser_dec(before);
+    ser_write(" heap_after="); shadow_ser_dec(after);
+    ser_write("\n");
+    return g_shadow_mode;
+}
+
+void vbe24_shadow_sink(int on) { g_sink_shadow = on && g_shadow; }
+
+int vbe24_shadow_mode(void) { return g_shadow_mode; }
+
+/* 把影子缓冲里的一条矩形逐行拷回 LFB（损伤矩形 / 光标精灵区）。 */
+void vbe24_shadow_blit_rect(int x, int y, int w, int h) {
+    if (!g_shadow || !lfb) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > GFX24_W) w = GFX24_W - x;
+    if (y + h > GFX24_H) h = GFX24_H - y;
+    if (w <= 0 || h <= 0) return;
+    for (int j = 0; j < h; j++) {
+        int dy = y + j;
+        const uint8_t *s = g_shadow + (uint32_t)dy * g_shadow_pitch
+                                     + (uint32_t)x * 3u;
+        volatile uint8_t *p = lfb + (uint32_t)dy * g_pitch
+                                  + (uint32_t)x * g_stride;
+        for (int i = 0; i < w; i++) {
+            if (layout_packed4()) {
+                *(volatile uint32_t *)p = (uint32_t)s[0] | ((uint32_t)s[1] << 8)
+                    | ((uint32_t)s[2] << 16) | (0xFFu << 24);
+            } else {
+                p[g_b] = s[0]; p[g_g] = s[1]; p[g_r] = s[2];
+                if (g_stride == 4u) p[g_x] = 0xFFu;
+            }
+            s += 3u; p += g_stride;
+        }
+    }
+}
 void     gfx24_putpx(int x, int y, uint32_t rgb) {
     if (!lfb || x < 0 || x >= GFX24_W || y < 0 || y >= GFX24_H) return;
     put3(x, y, rgb);
 }
 
 uint32_t gfx24_getpx(int x, int y) {
+    if (dst_is_shadow()) {
+        if (x < 0 || x >= (int)g_shadow_w || y < 0 || y >= (int)g_shadow_h) return 0;
+        const uint8_t *p = g_shadow + (uint32_t)y * g_shadow_pitch
+                                   + (uint32_t)x * 3u;
+        return ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
+    }
     if (!lfb || x < 0 || x >= GFX24_W || y < 0 || y >= GFX24_H) return 0;
     volatile uint8_t *p = lfb + (uint32_t)y * g_pitch
                               + (uint32_t)x * g_stride;
     return ((uint32_t)p[g_r] << 16) | ((uint32_t)p[g_g] << 8) | (uint32_t)p[g_b];
+}
+
+/* 影子种子：分配后把当前 LFB 左上角区域拷进影子。kvmalloc 复用空闲 extent
+ * 时不清零（新帧才逐字节清零），影子若留旧堆数据，后续被遮挡区一旦露出会
+ * 烙上与本屏无关的杂色；首帧先与屏幕对齐。sink 关闭时 getpx 读 LFB。 */
+static void shadow_seed_from_lfb(void) {
+    if (!g_shadow || !lfb) return;
+    int sw = (int)g_shadow_w, sh = (int)g_shadow_h;
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            uint32_t c = gfx24_getpx(x, y);
+            uint8_t *p = g_shadow + (uint32_t)y * g_shadow_pitch
+                         + (uint32_t)x * 3u;
+            p[0] = (uint8_t)c;
+            p[1] = (uint8_t)(c >> 8);
+            p[2] = (uint8_t)(c >> 16);
+        }
+    }
 }
 
 /* Fixed picture.  Coordinates/colours are asserted byte-for-byte by

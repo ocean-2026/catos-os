@@ -114,7 +114,10 @@ static void *kv_extent(uint32_t total) {
     if (kv_cursor + need > 8192u) return 0;
     uint32_t slot0 = kv_cursor;
     kv_cursor += need;
-    uint32_t pa_tmp[8];
+    /* 回滚路径才需要保留各帧 PA；栈上按 need 开 VLA（352 帧 ≈1.4KB，
+     * 在 8KB 内核栈内）。旧版固定 pa_tmp[8]，大 extent 成功路径同样越界
+     * 写栈，是大块分配崩溃的根因。 */
+    uint32_t pa_tmp[need];
     uint32_t got = 0;
     for (uint32_t i = 0; i < need; i++) {
         uint32_t pa = frame_alloc();
