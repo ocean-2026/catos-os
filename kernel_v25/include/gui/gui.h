@@ -175,6 +175,7 @@ const char *gui_term_cwd(int i);
 const char *gui_term_last_line(int i);
 int       gui_term_lines(int i);
 int       gui_term_scroll_top(int i);
+int       gui_term_follow(int i);
 const char *gui_term_line(int i, int idx);
 void      gui_term_run(int i, const char *cmd);
 /* 多实例隔离探针口径（内部，不进 CE ABI） */

@@ -586,6 +586,12 @@ int gui_term_scroll_top(int i) {
     return terms[i].view_top;
 }
 
+/* 贴底跟随态读取（1=跟随新输出，0=回看固定）；探针摘要行直接取证，不改滚动逻辑。 */
+int gui_term_follow(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return 0;
+    return terms[i].follow;
+}
+
 const char *gui_term_line(int i, int idx) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
     return t_ring_at(&terms[i], idx);

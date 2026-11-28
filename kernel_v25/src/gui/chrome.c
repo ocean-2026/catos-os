@@ -1260,6 +1260,7 @@ static void tb_rebuild(void) {
     int n = tb_collect(kind, idx, labels, TB_MAX);
     for (int i = 0; i < n; i++) {
         blk_spec b = spec_panel(LAYER_CHROME, 0, 24, 1);
+        b.role_bg = ROLE_PANEL;   /* 按钮面板底，与任务栏 bar 底拉开层次 */
         b.pad_l = 6; b.pad_r = 6;
         b.align_cross = XALN_CENTER;
         b.on_click = tb_btn_click;
@@ -1267,10 +1268,18 @@ static void tb_rebuild(void) {
         tb_ent[tb_n].idx = idx[i];
         xcopy_local(tb_ent[tb_n].label, 24, labels[i]);
         b.usr = &tb_ent[tb_n];
-        block_id bid = b_row(tb_slot, &b);
-        blk_spec tspec = spec_panel(LAYER_CHROME, 0, 16, 0);
-        tspec.align_cross = XALN_CENTER;
-        b_text(bid, &tspec, tb_ent[tb_n].label);
+        /* BLK_BUTTON 单块承载底色/描边/聚焦反色/居中文本（同浏览器 Back/Reload）。 */
+        block_id bid = b_button(tb_slot, &b, tb_ent[tb_n].label);
+        /* 根因：同层绘制序 = layer→z→树先序。桌面静态子树在首次 raise 时被
+         * reorder_z 按先序赋了递增 z（容器 z=3…），而本批动态挂入的按钮仍带
+         * 规格默认 z=0，排序落在父容器之前；父容器不透明底色后画，把按钮整段
+         * 盖掉。这里让按钮 z 跟随父容器（与桌面条目同 z 惯用法一致：同 z 走树
+         * 先序，父先于子），按钮才不会被父底色覆盖。 */
+        {
+            int32_t pz = slot ? slot->z : 0;
+            block *bb = btable_get(bid);
+            if (bb) bb->z = pz;
+        }
         tb_ent[tb_n].btn = bid;
         tb_n++;
     }
@@ -2954,17 +2963,20 @@ static void gui_probe_term_scroll(int mid) {
     block *tb = btable_get(gui_term_root(0));
     int tcx = tb ? tb->x + tb->w / 2 : 0, tcy = tb ? tb->y + tb->h / 2 : 0;
     gui_frame();
-    ser_write("SCROLL:term seed total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+    ser_write("SCROLL:term seed total="); ser_dec(gui_term_lines(0));
+    ser_write(" follow="); ser_dec(gui_term_follow(0)); ser_write("\n");
     if (mid) {
         gui_inject_wheel(tcx, tcy, -1);
         gui_inject_wheel(tcx, tcy, -1);
         gui_frame();
         ser_write("SCROLL:term up top="); ser_dec(gui_term_scroll_top(0));
-        ser_write(" total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+        ser_write(" total="); ser_dec(gui_term_lines(0));
+        ser_write(" follow="); ser_dec(gui_term_follow(0)); ser_write("\n");
     } else {
         gui_frame();
         ser_write("SCROLL:term bottom top="); ser_dec(gui_term_scroll_top(0));
-        ser_write(" total="); ser_dec(gui_term_lines(0)); ser_write("\n");
+        ser_write(" total="); ser_dec(gui_term_lines(0));
+        ser_write(" follow="); ser_dec(gui_term_follow(0)); ser_write("\n");
     }
     gui_end();
 }
