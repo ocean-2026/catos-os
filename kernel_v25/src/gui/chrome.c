@@ -3004,7 +3004,86 @@ static void gui_probe_r5dbl(void) {
     ser_write("\n");
 }
 
-/* R5 终端标题栏取证探针：打开一个终端窗口，保留帧供截图（A: Close 靠右）。 */
+/* 多窗口隔离取证探针：`gui mw <term|fm|focus|cap|close>`。各模式自建帧并保留
+ * 供 screendump；串口打点见 REPORT.md。复用真实 open/focus/close 路径。 */
+static void gui_probe_mw(const char *mode) {
+    con_set_gui_mode(1);
+    if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
+        ser_write("MW:result=0 reason=mode\n");
+        con_set_gui_mode(0);
+        return;
+    }
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    gui_demo_build();
+    layout_run();
+    gui_frame();
+
+    if (!strcmp_probe(mode, "term")) {
+        gui_term_open();
+        gui_term_run(0, "mkdir /work");
+        gui_term_run(0, "cd /work");
+        gui_term_open();
+        gui_term_run(1, "ls");
+        gui_term_type(0, "hel");              /* A 行缓冲未提交 */
+        gui_term_focus(1);                     /* 真实点击聚焦路径：切 hook + raise */
+        gui_inject_key('x'); gui_inject_key('y');   /* 键入应落 B */
+        const char *c0 = gui_term_cwd(0);
+        const char *c1 = gui_term_cwd(1);
+        const char *b0 = gui_term_line_buf(0);
+        const char *b1 = gui_term_line_buf(1);
+        int h0 = gui_term_hist_n(0);
+        int h1 = gui_term_hist_n(1);
+        int iso = (strcmp_probe(c0, "/work") == 0 && strcmp_probe(c1, "/") == 0 &&
+                   strcmp_probe(b0, "hel") == 0 && strcmp_probe(b1, "xy") == 0);
+        ser_write("MW:term cwd0="); ser_write(c0);
+        ser_write(" cwd1="); ser_write(c1);
+        ser_write(" buf0="); ser_write(b0);
+        ser_write(" buf1="); ser_write(b1);
+        ser_write(" hist0="); ser_dec(h0);
+        ser_write(" hist1="); ser_dec(h1);
+        ser_write(" iso="); ser_dec(iso); ser_write("\n");
+    } else if (!strcmp_probe(mode, "fm")) {
+        gui_filemgr_open("/etc");
+        gui_filemgr_open("/");
+        int n0 = gui_fm_count_inst(0);
+        if (n0 > 4) gui_fm_select(0, 4);      /* A 选中第 5 行 */
+        const char *c0 = gui_fm_cwd_inst(0);
+        const char *c1 = gui_fm_cwd_inst(1);
+        int n1 = gui_fm_count_inst(1);
+        int s0 = gui_fm_sel_inst(0);
+        int s1 = gui_fm_sel_inst(1);
+        int iso = (strcmp_probe(c0, "/etc") == 0 && strcmp_probe(c1, "/") == 0 && s1 == 0);
+        ser_write("MW:fm cwd0="); ser_write(c0);
+        ser_write(" cwd1="); ser_write(c1);
+        ser_write(" n0="); ser_dec(n0);
+        ser_write(" n1="); ser_dec(n1);
+        ser_write(" sel0="); ser_dec(s0);
+        ser_write(" sel1="); ser_dec(s1);
+        ser_write(" iso="); ser_dec(iso); ser_write("\n");
+    } else if (!strcmp_probe(mode, "focus")) {
+        gui_term_open();
+        gui_term_open();
+        gui_term_focus(1);                     /* B 置前 + 标题高亮 */
+        ser_write("MW:focus active="); ser_dec(gui_term_active_idx()); ser_write("\n");
+    } else if (!strcmp_probe(mode, "cap")) {
+        gui_term_open(); gui_term_open(); gui_term_open(); gui_term_open();
+        gui_term_open();                       /* 第 5 个：到上限，回提示行不崩 */
+        ser_write("MW:cap count="); ser_dec(gui_term_count()); ser_write("\n");
+    } else if (!strcmp_probe(mode, "close")) {
+        gui_term_open();
+        gui_term_open();
+        gui_term_close_inst(0);                /* 只关被点实例 A */
+        int n = gui_term_count();
+        const char *c1 = gui_term_count() > 0 ? gui_term_cwd(1) : "-";
+        ser_write("MW:close count="); ser_dec(n);
+        ser_write(" cwd1="); ser_write(c1);
+        ser_write(" active="); ser_dec(gui_term_active_idx()); ser_write("\n");
+    }
+    layout_run();
+    gui_frame();
+}
+
 static void gui_probe_r5term(void) {
     con_set_gui_mode(1);
     if (con_request_mode(CON_MODE_VBE24, CON_ORIGIN_CONSOLE) != 0) {
@@ -3145,6 +3224,11 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "cvdirty")) { gui_probe_cvdirty(); return; }
         if (!strcmp_probe(arg, "interact")){ gui_probe_interact(); return; }
         if (!strcmp_probe(arg, "term"))    { gui_probe_term(); return; }
+        {
+            char mw[16]; const char *mr = 0;
+            split_word(arg, mw, sizeof(mw), &mr);
+            if (!strcmp_probe(mw, "mw")) { gui_probe_mw(mr ? mr : "term"); return; }
+        }
         if (!strcmp_probe(arg, "r5desk"))  { gui_probe_r5desk(); return; }
         if (!strcmp_probe(arg, "r5dbl"))   { gui_probe_r5dbl(); return; }
         if (!strcmp_probe(arg, "r5term"))  { gui_probe_r5term(); return; }

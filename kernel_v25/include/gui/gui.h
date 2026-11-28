@@ -100,6 +100,12 @@ void      gui_filemgr_open(const char *path);
 void      gui_filemgr_close(void);
 int       gui_filemgr_active(void);
 int       gui_filemgr_count(void);
+/* 多实例隔离探针口径（内部，不进 CE ABI） */
+void      gui_fm_focus(int slot);
+const char *gui_fm_cwd_inst(int slot);
+int       gui_fm_count_inst(int slot);
+int       gui_fm_sel_inst(int slot);
+void      gui_fm_select(int slot, int i);
 
 /* 图片查看器 */
 void      gui_images_open(const char *path);
@@ -144,6 +150,12 @@ const char *gui_term_last_line(int i);
 int       gui_term_lines(int i);
 const char *gui_term_line(int i, int idx);
 void      gui_term_run(int i, const char *cmd);
+/* 多实例隔离探针口径（内部，不进 CE ABI） */
+void      gui_term_focus(int i);
+void      gui_term_close_inst(int i);
+void      gui_term_type(int i, const char *s);
+const char *gui_term_line_buf(int i);
+int       gui_term_hist_n(int i);
 
 /* ---- shell 命令入口 ---- */
 void      gui_shell_cmd(const char *arg);

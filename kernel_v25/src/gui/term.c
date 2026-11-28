@@ -14,6 +14,7 @@
 #include "gui/tokens.h"
 #include "fs.h"
 #include "keyboard.h"
+#include "serial_log.h"
 #include <stdint.h>
 #include <stddef.h>
 #include "kstring.h"  /* memset() decl; <string.h> pulls host glibc headers */
@@ -38,7 +39,8 @@ extern int shell_ssh_exec_line(const char *line, char *out, int outmax,
 
 typedef struct {
     int       in_use;
-    block_id  root, body, status;
+    int       num;                      /* 展示编号 1..4；关闭不重排，空槽取最小可用 */
+    block_id  root, body, status, title_blk;
     char      cwd[FS_PATH_MAX];
     char      ring[T_RING][T_COLS];
     int       ring_tail, ring_n;
@@ -58,6 +60,13 @@ static int    active = -1;
 /* ---- 小字符串助手 ------------------------------------------------------ */
 
 static int strcmp_(const char *a, const char *b);
+
+static void t_ser_dec(uint32_t v) {
+    char buf[12]; int n = 0;
+    if (v == 0) { ser_putc('0'); return; }
+    while (v) { buf[n++] = (char)('0' + v % 10u); v /= 10u; }
+    while (n) ser_putc(buf[--n]);
+}
 static int t_len(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
 static void t_copy(char *d, int cap, const char *s) {
     int n = t_len(s); if (n > cap - 1) n = cap - 1;
@@ -226,7 +235,7 @@ static void t_update_status(term_t *t) {
     int used = 0;
     for (int i = 0; i < TERM_MAX; i++) if (terms[i].in_use) used++;
     t_copy(buf, sizeof(t->status_buf), "Terminal ");
-    t_cat(buf, sizeof(t->status_buf), t_digit((int)(t - terms) + 1));
+    t_cat(buf, sizeof(t->status_buf), t_digit(t->num));
     t_cat(buf, sizeof(t->status_buf), "/");
     t_cat(buf, sizeof(t->status_buf), t_digit(used));
     t_cat(buf, sizeof(t->status_buf), "   ");
@@ -235,11 +244,70 @@ static void t_update_status(term_t *t) {
     st->dirty_paint = 1;
 }
 
+/* 标题条自绘：聚焦实例用 accent 底高亮，其余回退 bar 令牌色。 */
+static void t_title_render(block_id id) {
+    block *b = btable_get(id);
+    if (!b) return;
+    term_t *t = (term_t *)b->usr;
+    const struct style *tok = gui_active_style();
+    int active_idx = (t && t->in_use) ? (int)(t - terms) : -1;
+    uint32_t c = (active_idx == active) ? tok->accent : tok->bar;
+    gui_fill_rect(b->x, b->y, b->w, b->h, c);
+}
+
+/* 聚焦某实例：切 active + 切键盘钩子 + 置前；新旧标题条补脏换高亮。 */
+static void t_focus(int idx) {
+    if (idx < 0 || idx >= TERM_MAX || !terms[idx].in_use) return;
+    int prev = active;
+    active = idx;
+    gui_set_key_hook(t_key, &terms[idx]);
+    gui_raise_to_front(terms[idx].root);
+    if (prev >= 0 && terms[prev].in_use) {
+        block *pb = btable_get(terms[prev].title_blk);
+        if (pb) pb->dirty_paint = 1;
+    }
+    block *nb = btable_get(terms[idx].title_blk);
+    if (nb) nb->dirty_paint = 1;
+    ser_write("TERM:focus idx="); t_ser_dec((uint32_t)idx); ser_write("\n");
+}
+
+static void t_root_click(block_id id, int32_t lx, int32_t ly) {
+    (void)lx; (void)ly;
+    block *b = btable_get(id);
+    term_t *t = b ? (term_t *)b->usr : 0;
+    if (!t || !t->in_use) return;
+    t_focus((int)(t - terms));
+}
+
+static void t_close_inst(int idx) {
+    if (idx < 0 || idx >= TERM_MAX || !terms[idx].in_use) return;
+    term_t *t = &terms[idx];
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    block *pr = btable_get(t->root);
+    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
+    if (t->root) { b_remove(t->root); t->root = 0; }
+    t->body = 0; t->status = 0; t->title_blk = 0;
+    t->in_use = 0;
+    ser_write("TERM:close idx="); t_ser_dec((uint32_t)idx); ser_write("\n");
+    /* 仅释放块子树；槽位内 cwd 保留，行环/历史/输入行在下次 open 时清空。 */
+    if (active == idx) {
+        active = -1;
+        for (int i = 0; i < TERM_MAX; i++)
+            if (terms[i].in_use) { active = i; break; }
+        if (active >= 0) gui_set_key_hook(t_key, &terms[active]);
+        else gui_set_key_hook(0, 0);
+    }
+    gui_mark_dirty_union(0, rx, ry, rw, rh);
+}
+
 /* ---- 打开 / 关闭 --------------------------------------------------------- */
 
 static void t_close_click(block_id id, int32_t lx, int32_t ly) {
-    (void)id; (void)lx; (void)ly;
-    gui_term_close_active();
+    (void)lx; (void)ly;
+    block *b = btable_get(id);
+    term_t *t = b ? (term_t *)b->usr : 0;
+    if (!t || !t->in_use) return;
+    t_close_inst((int)(t - terms));
 }
 
 static void t_build(int idx) {
@@ -253,6 +321,8 @@ static void t_build(int idx) {
     root.pad_t = T_PAD; root.pad_b = T_PAD;
     root.gap = T_PAD;
     root.focusable = 1;
+    root.on_click = t_root_click;
+    root.usr = t;
     t->root = b_column(root_id, &root);
     block *pr = btable_get(t->root);
     pr->x = 36 + idx * 20;
@@ -264,15 +334,19 @@ static void t_build(int idx) {
     title.role_bg = ROLE_BAR;
     title.align_cross = XALN_CENTER;
     title.align_main = ALN_SPACE_BETWEEN;   /* 左标签 + 右 Close 分列，Close 右缘贴窗口右边距 */
+    title.render = t_title_render;
+    title.usr = t;
     block_id bar = b_row(t->root, &title);
+    t->title_blk = bar;
     char *tt = t->title_buf;
     t_copy(tt, sizeof(t->title_buf), "Terminal ");
-    t_cat(tt, sizeof(t->title_buf), t_digit(idx + 1));
+    t_cat(tt, sizeof(t->title_buf), t_digit(t->num));
     blk_spec ttxt = t_panel(LAYER_WORK, 0, T_TITLE_H - 4, 0);
     ttxt.role_bg = ROLE_NONE;
     b_text(bar, &ttxt, tt);
     blk_spec close = t_panel(LAYER_WORK, 56, T_TITLE_H - 4, 1);
     close.on_click = t_close_click;
+    close.usr = t;
     block_id cid = b_row(bar, &close);
     b_text(cid, 0, "Close");
 
@@ -291,10 +365,20 @@ void gui_term_open(void) {
     int idx = -1;
     for (int i = 0; i < TERM_MAX; i++)
         if (!terms[i].in_use) { idx = i; break; }
-    if (idx < 0) { active = 0; return; }
+    if (idx < 0) {
+        /* 到上限：向当前聚焦实例回一行提示，不崩、不开新槽。 */
+        if (active >= 0 && terms[active].in_use) {
+            t_ring_push(&terms[active], "terminal limit reached (4)");
+            block *b = btable_get(terms[active].body);
+            if (b) b->dirty_paint = 1;
+        }
+        ser_write("TERM:full\n");
+        return;
+    }
 
     term_t *t = &terms[idx];
     t->in_use = 1;
+    t->num = idx + 1;                       /* 空槽取最小可用号；关闭后其余编号不重排 */
     t->ring_tail = 0; t->ring_n = 0;
     t->hist_n = 0; t->hist_idx = 0;
     t->len = 0; t->pos = 0; t->line[0] = 0;
@@ -308,24 +392,12 @@ void gui_term_open(void) {
     gui_raise_to_front(t->root);
     block *pr = btable_get(t->root);
     if (pr) gui_mark_dirty_union(pr, pr->x, pr->y, pr->w, pr->h);
+    ser_write("TERM:open idx="); t_ser_dec((uint32_t)idx);
+    ser_write(" cwd="); ser_write(t->cwd); ser_write("\n");
 }
 
 void gui_term_close_active(void) {
-    if (active < 0) return;
-    term_t *t = &terms[active];
-    int rx = 0, ry = 0, rw = 0, rh = 0;
-    block *pr = btable_get(t->root);
-    if (pr) { rx = pr->x; ry = pr->y; rw = pr->w; rh = pr->h; }
-    if (t->root) { b_remove(t->root); t->root = 0; }
-    t->body = 0; t->status = 0;
-    t->in_use = 0;
-    /* 仅释放块子树；槽位内 cwd 保留，行环/历史/输入行在下次 open 时清空。 */
-    active = -1;
-    for (int i = 0; i < TERM_MAX; i++)
-        if (terms[i].in_use) { active = i; break; }
-    if (active >= 0) gui_set_key_hook(t_key, &terms[active]);
-    else gui_set_key_hook(0, 0);
-    gui_mark_dirty_union(0, rx, ry, rw, rh);
+    t_close_inst(active);
 }
 
 /* ---- 行编辑 ------------------------------------------------------------- */
@@ -433,11 +505,38 @@ const char *gui_term_line(int i, int idx) {
     return t_ring_at(&terms[i], idx);
 }
 
+/* ---- 多实例隔离探针读取/注入口径（不进 CE ABI） -------------------------- */
+
+void gui_term_focus(int i) {
+    if (i >= 0 && i < TERM_MAX) t_focus(i);
+}
+
+void gui_term_close_inst(int i) {
+    if (i >= 0 && i < TERM_MAX) t_close_inst(i);
+}
+
+void gui_term_type(int i, const char *s) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use || !s) return;
+    while (*s) { t_insert(&terms[i], *s); s++; }
+    block *b = btable_get(terms[i].body);
+    if (b) b->dirty_paint = 1;
+}
+
+const char *gui_term_line_buf(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return "";
+    return terms[i].line;
+}
+
+int gui_term_hist_n(int i) {
+    if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return 0;
+    return terms[i].hist_n;
+}
+
 /* 复位（进桌面 / 退桌面时清空会话句柄，缓冲槽位保留供探针复用）。 */
 void gui_term_reset(void) {
     for (int i = 0; i < TERM_MAX; i++) {
         if (terms[i].root) b_remove(terms[i].root);
-        terms[i].root = terms[i].body = terms[i].status = 0;
+        terms[i].root = terms[i].body = terms[i].status = terms[i].title_blk = 0;
         terms[i].in_use = 0;
     }
     active = -1;

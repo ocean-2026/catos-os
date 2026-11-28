@@ -188,3 +188,5 @@ CatOS[易错点] SVG/HTML 属性解析器失配分支必须保证游标单调前
 CatOS[易错点] 定点坐标变换量纲要全篇统一 Q8.8：viewBox→像素映射时 scale 与 ox/oy 必须同一定点档；少乘一个 FIX 会把几何压到子像素缝上，扫描线按行中心取样全部错过交点，图标整块透明、被误判成「解析失败」回落。症状是解析走完、掩码 ink=0；先用宿主桩测 dump 各图元 bbox 确认坐标落在哪一档，再调 scale/ox。
 CatOS[易错点] 内核栈仅 8192B：解析器 scratch（边表/点表）这种数 KB 的结构禁止压栈，栈溢出不蓝屏、只表现为后续块不渲染且无串口。一律 kvmalloc 堆分配、失败路径成对 kvmfree。
 CatOS[易错点] 自托管 CE / rel8 构建偶发抖动：偶发 `ce_main not at image offset 0` 或 `rel8.nobss.so.elf is empty`，与本轮 GUI 改动无关，重跑一次 build.sh 即过；判断是否真通过看 kernel.bin/catos.iso 时间戳与 `OK ->` 行，不要被单次 RC=1 当成代码回归。
+CatOS[易错点] 本机 QEMU 用 `-vga vmware` 时 HMP `screendump` 可能取到陈旧前台缓冲：GUI 窗口已建块（串口 open/focus 打点齐全、块几何 bbox 正常）但截图整屏只剩桌面底色，易误判成「窗口未渲染/损伤收窄漏标」。判据：换 `-vga std` 重截即正常；排查渲染问题前先固定 VGA 后端，别在 vmware 陈旧帧上改 damage/标脏逻辑。
+CatOS[易错点] 多实例 GUI 组件：实例可变数组（目录表/标签/行缓冲等数 KB）必须 kvmalloc 堆分配、kvmfree 成对释放，只把「指针池 + active 索引」留 .bss；静态大数组复用到第二实例会读到上一实例残留。关闭实例时清 key hook / 复位 active 指针，否则后续按键落到已销毁实例。
