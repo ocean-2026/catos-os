@@ -184,3 +184,7 @@ CatOS[易错点] BLK_ICON 在 layout.c 的 leaf_natural_w/h() 里原本返回 0�
 CatOS[易错点] QEMU 测试脚本靠 shutil.which 找可执行文件，必须 export PATH=/home/user/bin:$PATH，否则 qemu-system-i386 not found；杀进程用 pkill -9 -x qemu-system-i386，别用 pkill -f qemu（会误杀自己）。
 CatOS[易错点] gfx24 默认后端下 read_screen 读的是 VGA 文本内存，开机后必须先 force_text(s, settle=10) 再 wait_for_prompt，否则命令全被丢弃。
 CatOS[易错点] FAT 目录项 run 跨簇边界时，末端 EOC 不是 overrun：dir_put_run() 在 wi>=per 写满当前簇后，必须先判断当前项是否为 run 最后一项；最后一项落边界直接收尾，只有后面仍有条目才 fat_get() 下一簇，EOC/断链才判失败。否则目录簇一写满，mkfs 标准目录循环（及运行期 LFN 建目录）会在边界上误失败 break，根条目丢失、已分配的孤儿簇被后续文件复用成垃圾；症状是全新 format 后某级目录 ls 报 cannot read directory、同名 mkdir 报 already exists。排查先 host 侧解析镜像 FAT/根目录项，核对目录簇 ./.. 与首簇字段是否落盘，不要先用「跳过 LFN 走短名」降级。
+CatOS[易错点] SVG/HTML 属性解析器失配分支必须保证游标单调前进：跳过未知 `attr=value` 时，若推进条件把 `=` 也排除在外，游标会停在 `=` 上原地打转——QEMU 静默挂起、串口停在进入该标签前、无 panic dump。修法：失配时先越过 `=`，再按引号/裸值吃到空格或 `>`。排查先在宿主侧 ASAN 桩测复现（挂起即死循环，越界才报 ASAN），别在 QEMU 上逐次重开机猜。
+CatOS[易错点] 定点坐标变换量纲要全篇统一 Q8.8：viewBox→像素映射时 scale 与 ox/oy 必须同一定点档；少乘一个 FIX 会把几何压到子像素缝上，扫描线按行中心取样全部错过交点，图标整块透明、被误判成「解析失败」回落。症状是解析走完、掩码 ink=0；先用宿主桩测 dump 各图元 bbox 确认坐标落在哪一档，再调 scale/ox。
+CatOS[易错点] 内核栈仅 8192B：解析器 scratch（边表/点表）这种数 KB 的结构禁止压栈，栈溢出不蓝屏、只表现为后续块不渲染且无串口。一律 kvmalloc 堆分配、失败路径成对 kvmfree。
+CatOS[易错点] 自托管 CE / rel8 构建偶发抖动：偶发 `ce_main not at image offset 0` 或 `rel8.nobss.so.elf is empty`，与本轮 GUI 改动无关，重跑一次 build.sh 即过；判断是否真通过看 kernel.bin/catos.iso 时间戳与 `OK ->` 行，不要被单次 RC=1 当成代码回归。
