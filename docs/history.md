@@ -198,3 +198,5 @@ CatOS[易错点] 改 .c 后若 build.sh 走条件编译，核对 build/*.o 与 c
 CatOS[易错点] kvheap extent 大分配：栈上帧 PA 暂存数组旧版固定 `pa_tmp[8]`，成功路径对每个帧都写 `pa_tmp[i]`，need>8 帧（如 800×600×3=352 帧影子缓冲）即越界写穿 8KB 内核栈，表象为首启 GUI 崩溃复位、串口停在 `shadow init need_full=352`。修法：按 `need` 开 VLA `uint32_t pa_tmp[need]`（352×4≈1.4KB 栈内）。判据：小分配 ≤8 帧不触发，别被「小大块都挂」带偏。
 CatOS[易错点] kvmalloc 复用空闲 extent 不清零（仅新分配帧逐字节清零）：从堆要一张帧缓冲（影子/离屏层）不能假设内容为零，必须在分配后显式种子拷贝（从 LFB 拷首屏或填底色），否则后续露出区烙上旧堆杂色。
 CatOS[易错点] 帧计时打点窗口 t0–t1 内不要放一次性大开销：影子 1.44MB 堆零写/种子拷若落在测量帧内，首帧/拖帧 frame_us 会飙到 11–18ms 顶穿 4000µs 门禁。把大块分配挪到会话开始（gui_begin，帧计时之外），稳态帧只做损伤矩形重合成+回拷。
+CatOS[易错点] `kernel_v25/build/` 不是纯产物目录：`apps.list`、`pkg.list`、`mkdisk.py`、`gen_builtin.py`、`patch_work_iso.py`、`catos_work.iso`、`symtab.inc` 都是**被 git 跟踪**的脚本/种子。做 clean 构建时 `rm -rf build` 会一起删掉它们，表象是 `cannot open build/apps.list` / `build/pkg.list`；恢复用 `git checkout -- kernel_v25/build`。正确做法：只删 `build/*.o build/*.pe build/*.bin` 等产物，或直接 `sh build.sh iso`。
+CatOS[易错点] 清掉产物后的首轮 `sh build.sh iso` 可能报 `undefined reference to _ce_api`（`extapp/build/blkgen.o` 等）：`ce_app.o` 需要重新生成一轮，**再跑一次**同命令即 RC=0，别当成真 bug 去改链接脚本。
