@@ -200,3 +200,4 @@ CatOS[易错点] kvmalloc 复用空闲 extent 不清零（仅新分配帧逐字�
 CatOS[易错点] 帧计时打点窗口 t0–t1 内不要放一次性大开销：影子 1.44MB 堆零写/种子拷若落在测量帧内，首帧/拖帧 frame_us 会飙到 11–18ms 顶穿 4000µs 门禁。把大块分配挪到会话开始（gui_begin，帧计时之外），稳态帧只做损伤矩形重合成+回拷。
 CatOS[易错点] `kernel_v25/build/` 不是纯产物目录：`apps.list`、`pkg.list`、`mkdisk.py`、`gen_builtin.py`、`patch_work_iso.py`、`catos_work.iso`、`symtab.inc` 都是**被 git 跟踪**的脚本/种子。做 clean 构建时 `rm -rf build` 会一起删掉它们，表象是 `cannot open build/apps.list` / `build/pkg.list`；恢复用 `git checkout -- kernel_v25/build`。正确做法：只删 `build/*.o build/*.pe build/*.bin` 等产物，或直接 `sh build.sh iso`。
 CatOS[易错点] 清掉产物后的首轮 `sh build.sh iso` 可能报 `undefined reference to _ce_api`（`extapp/build/blkgen.o` 等）：`ce_app.o` 需要重新生成一轮，**再跑一次**同命令即 RC=0，别当成真 bug 去改链接脚本。
+CatOS[易错点] 「机制对但缺打点」在功能审里会被判成未取证：终端贴底跟随当时只有 `top=max_top(61-23=38)` 的旁证，串口里没有字面 `follow=1`（唯一打印 `follow=` 的 dump 只在滚轮/翻页路径触发，探针不滚轮就永远打不出来）。判据：写探针前先问「这个结论能不能被主机直接触发打印」，每个语义状态都要留一个**探针可主动调用的 dump 出口**（如 `gui_term_follow(i)` 拼进摘要行），别指望只有真机交互才走到的路径。
