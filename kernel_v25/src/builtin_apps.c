@@ -3,6 +3,7 @@
 #include "fs.h"
 #include "hw.h"
 #include "crypto.h"
+#include "serial_log.h"
 #include "catos_version.h"
 #include "builtin_apps.inc"
 
@@ -216,6 +217,11 @@ void ce_install_builtins(void) {
             vga_write("builtin: kept user-modified ");
             vga_write(path);
             vga_write("\n");
+            /* A7.5: mirror the kept decision to COM1 so the persistence
+             * verdict survives the console scroll / gfx24->text switch. */
+            ser_write("builtin: kept user-modified ");
+            ser_write(path);
+            ser_write("\n");
             kept++;
         }
     }

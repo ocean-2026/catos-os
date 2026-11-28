@@ -833,9 +833,16 @@ static int dir_put_run(uint32_t start_c, int start_i, const uint16_t *ucs,
         touch_n[tnc - 1]++;
         dirty = 1;
         wi++;
+        int last = (k == nent);
         if (wi >= per) {
             if (fat_write_cluster(wc, wbuf) != 0) goto fail;
             loaded = 0; dirty = 0;
+            if (last) break;  /* run ends exactly at the cluster edge: a
+                                 terminal EOC chain is correct, not an
+                                 overrun.  The false failure used to abort
+                                 the mkfs std-dir loop once the root
+                                 cluster filled up, leaving appdevelop and
+                                 later top-level dirs without root entries. */
             uint32_t nx = fat_get(wc);
             if (nx < 2 || nx >= 0x0FFFFFF0) goto fail;  /* run overran */
             wc = nx; wi = 0;
