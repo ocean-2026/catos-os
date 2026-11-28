@@ -376,12 +376,20 @@ static void on_drag_move(int x, int y) {
         b->old_x = b->x; b->old_y = b->y;
         b->old_w = b->w; b->old_h = b->h; b->has_old = 1;
         int nx = x - drag_off_x, ny = y - drag_off_y;
-        /* drag_bounds：0 不限 / 1 父框 / 2 屏幕。 */
+        /* drag_bounds：0 不限 / 1 父框 / 2 屏幕 / 3 宽松出屏。 */
         if (b->drag_bounds == BOUND_SCREEN) {
             if (nx < 0) nx = 0;
             if (ny < 0) ny = 0;
             if (nx + b->w > GFX24_W) nx = GFX24_W - b->w;
             if (ny + b->h > GFX24_H) ny = GFX24_H - b->h;
+        } else if (b->drag_bounds == BOUND_LOOSE) {
+            /* 宽松：顶部标题条（高 24，块更矮时取块高）必须在屏内；水平至少留
+             * 6px 可见；块的其余部分允许出屏。与 BOUND_SCREEN 的整窗夹紧互不影响。 */
+            int th = b->h < 24 ? b->h : 24;
+            if (nx < -(b->w - 6)) nx = -(b->w - 6);
+            if (nx > GFX24_W - 6) nx = GFX24_W - 6;
+            if (ny < 0) ny = 0;
+            if (ny + th > GFX24_H) ny = GFX24_H - th;
         } else if (b->drag_bounds == BOUND_PARENT && b->parent) {
             block *p = b->parent;
             int px = p->x + p->pad_l, py = p->y + p->pad_t;

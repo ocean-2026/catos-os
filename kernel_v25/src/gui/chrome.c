@@ -833,8 +833,8 @@ static void desk_item_drag(block_id id, int32_t dx, int32_t dy, uint8_t phase) {
 }
 
 /* v2.82 R3: 桌面条目显示为"桌面上的文件"——每个条目一个图标 + 文件名。
- * R5: 条目为根块下的自由布局容器，整块可拖（BOUND_PARENT 守住桌面父框），
- * 位置持久化到 /etc/desktop.layout；无记录条目按右侧纵向列兜底排布。 */
+ * R5: 条目为根块下的自由布局容器，整块可拖；A7.6 用 BOUND_LOOSE（顶部条在屏内、
+ * 可部分出屏），位置持久化到 /etc/desktop.layout；无记录条目按右侧纵向列兜底排布。 */
 static uint8_t desk_item_icon(int is_dir) {
     return is_dir ? 4 : 3;
 }
@@ -914,7 +914,7 @@ static void build_desktop_icons(block_id root_id) {
             item.on_dblclick = desk_icon_dblclick;
             item.on_drag = desk_item_drag;
             item.drag_mode = DRAG_FULL;
-            item.drag_bounds = BOUND_PARENT;
+            item.drag_bounds = BOUND_LOOSE;
             item.z = i;
             block_id it = b_column(root_id, &item);
             desk_item_blk[i] = it;
@@ -1711,6 +1711,48 @@ void gui_probe_bounds(void) {
     if (!root_ok) bad = 1;
     bounds_walk(root, &bad);
     ser_write("GUI:bounds result="); ser_dec(bad ? 0 : 1); ser_write("\n");
+    gui_end();
+}
+
+/* A7.6 BOUND_LOOSE 自检：自建 loose 块分别拖向左上 / 右下出屏，回读夹紧坐标。
+ * 断言：顶部标题条(24px)在屏内、水平至少留 6px；左上拖后块左缘为负（确实部分出屏），
+ * 证明不是整窗夹紧。BOUND_SCREEN/PARENT 路径不在本探针覆盖内。 */
+static void gui_probe_loose(void) {
+    gui_begin();
+    gui_root_block()->w = GFX24_W; gui_root_block()->h = GFX24_H;
+    blk_spec sp = spec_panel(LAYER_WORK, 96, 52, 0);
+    sp.drag_mode = DRAG_FULL;
+    sp.drag_bounds = BOUND_LOOSE;
+    block_id id = b_column(0, &sp);
+    block *b = btable_get(id);
+    if (b) { b->x = 300; b->y = 200; b->pos_x = 300; b->pos_y = 200; b->moved = 1; }
+    layout_run();
+
+    int w = b->w, h = b->h, th = h < 24 ? h : 24;
+    /* 左上出屏 */
+    gui_inject_press(b->x + w / 2, b->y + h / 2);
+    gui_inject_move(-300, -300);
+    gui_inject_release();
+    int lx = b->x, ly = b->y;
+    /* 复位到中央，再拖右下出屏（避免上一步把按压点带出屏外导致二次命中失败）。 */
+    b->x = 300; b->y = 200; b->pos_x = 300; b->pos_y = 200;
+    gui_inject_press(b->x + w / 2, b->y + h / 2);
+    gui_inject_move(GFX24_W + 300, GFX24_H + 300);
+    gui_inject_release();
+    int rx = b->x, ry = b->y;
+
+    int top_in  = (ly >= 0) && (ly + th <= GFX24_H);
+    int bot_in  = (ry >= 0) && (ry + th <= GFX24_H);
+    int left_vis  = lx >= -(w - 6) && lx <= GFX24_W - 6;
+    int right_vis = rx >= -(w - 6) && rx <= GFX24_W - 6;
+    int partial = lx < 0;   /* 左缘出屏 = 块确实部分在屏外 */
+    int ok = top_in && bot_in && left_vis && right_vis && partial;
+
+    ser_write("GUI:loose w="); ser_dec(w); ser_write(" h="); ser_dec(h);
+    ser_write(" lx="); ser_dec(lx); ser_write(" ly="); ser_dec(ly);
+    ser_write(" rx="); ser_dec(rx); ser_write(" ry="); ser_dec(ry);
+    ser_write(" partial="); ser_dec(partial);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
 
@@ -2920,6 +2962,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "leak")) { gui_probe_leak(); return; }
         if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
         if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return; }
+        if (!strcmp_probe(arg, "loose"))  { gui_probe_loose(); return; }
         if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
         if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
         if (!strcmp_probe(arg, "deny"))  { gui_probe_deny(); return; }

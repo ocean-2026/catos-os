@@ -65,7 +65,8 @@ enum {
 enum {
     BOUND_FREE   = 0,               /* 不限 */
     BOUND_PARENT = 1,               /* 限制父框内含 padding */
-    BOUND_SCREEN = 2                /* 限制屏幕内 */
+    BOUND_SCREEN = 2,               /* 限制屏幕内 */
+    BOUND_LOOSE  = 3                /* 宽松：顶部标题条(24px)在屏内、水平至少留 6px，其余可出屏 */
 };
 
 /* 缩放方向位掩码（v2）；0 视为右下（R|B）。 */
