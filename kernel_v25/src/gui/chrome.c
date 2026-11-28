@@ -3128,6 +3128,7 @@ void gui_shell_cmd(const char *arg) {
     int free_interact = 0;
     int deskev = 0;
     int shot_hov = 0, shot_sel = 0;   /* P1-1：截图态——悬停 / 选中桌面条目 */
+    int shot_hov_gap = 0;              /* P1-1 小修：悬停条目留白（命中容器本身） */
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER, APP_SETTINGS };
@@ -3163,6 +3164,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
     else if (!strcmp_probe(word, "deskev")) deskev = 1;
     else if (!strcmp_probe(word, "shot-hov"))  shot_hov = 1;
+    else if (!strcmp_probe(word, "shot-hov-gap")) shot_hov_gap = 1;
     else if (!strcmp_probe(word, "shot-sel"))  shot_sel = 1;
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
@@ -3267,12 +3269,21 @@ void gui_shell_cmd(const char *arg) {
             b0->dirty_paint = 1;
         }
     }
+    if (shot_hov_gap && desk_n > 0) {
+        /* 条目留白处（左侧中高，避开居中的图标/标签子块）：命中叶子即容器本身，
+         * 复现「停在图标与标签之间留白」的 hover 路径。 */
+        block *b0 = btable_get(desk_item_blk[0]);
+        if (b0) {
+            gui_inject_hover(b0->x + 4, b0->y + b0->h / 2);
+            b0->dirty_paint = 1;
+        }
+    }
     if (shot_sel && desk_n > 0) {
         desk_sel = 0;
         block *b0 = btable_get(desk_item_blk[0]);
         if (b0) b0->dirty_paint = 1;
     }
-    if (shot_hov || shot_sel) gui_frame();
+    if (shot_hov || shot_hov_gap || shot_sel) gui_frame();
     if (deskev) { layout_run(); gui_frame(); decl_dump_ce_rects(); }
 
     gui_idle_loop();

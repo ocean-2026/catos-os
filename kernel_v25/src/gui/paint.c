@@ -1017,9 +1017,12 @@ void paint_node_body(block *b) {
     /* 组件自绘：在默认绘制之后、本块裁剪框内回调；回调只打脏位。 */
     if (b->render) b->render(b->id);
 
-    /* hover 高亮：可缩放/整块可拖的块，悬停走令牌 accent 描边，不硬编码配色。 */
+    /* hover 高亮：可缩放/整块可拖的块，悬停走令牌 accent 描边，不硬编码配色。
+     * 自带 render 自绘的块（桌面条目容器）其 hover/选中视觉由 render 回调统一绘制
+     * （border 令牌细描边 / 选中 accent 粗描边 + 淡底）；这里跳过，避免命中叶子时走
+     * render 灰边、命中容器留白时又走本路径 accent 蓝边，同一条目出现两种 hover 视觉。 */
     block *hov = gui_hover_target();
-    if (hov == b && (b->resize_dir || b->drag_mode == DRAG_FULL))
+    if (hov == b && !b->render && (b->resize_dir || b->drag_mode == DRAG_FULL))
         gui_draw_border(b->x, b->y, b->w, b->h, accent, 1);
 }
 
