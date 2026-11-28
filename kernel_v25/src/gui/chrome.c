@@ -1189,9 +1189,12 @@ static void tb_make_label(char *out, int cap, const char *prefix, int idx) {
 
 static int tb_is_active(int kind, int idx) {
     switch (kind) {
-    case TB_KIND_TERM: return gui_term_active_idx() == idx;
-    case TB_KIND_FM:   return gui_fm_active_slot() == idx;
-    case TB_KIND_BR:   return gui_br_active_idx() == idx;
+    case TB_KIND_TERM: return gui_term_active_idx() == idx &&
+                               gui_key_hook_owner() == gui_term_focus_ud(idx);
+    case TB_KIND_FM:   return gui_fm_active_slot() == idx &&
+                               gui_key_hook_owner() == gui_fm_focus_ud(idx);
+    case TB_KIND_BR:   return gui_br_active_idx() == idx &&
+                               gui_key_hook_owner() == gui_br_focus_ud(idx);
     case TB_KIND_NP:   return gui_notepad_active();
     }
     return 0;
@@ -1264,10 +1267,17 @@ static void tb_rebuild(void) {
         tb_ent[tb_n].idx = idx[i];
         xcopy_local(tb_ent[tb_n].label, 24, labels[i]);
         b.usr = &tb_ent[tb_n];
-        tb_ent[tb_n].btn = b_button(tb_slot, &b, tb_ent[tb_n].label);
+        block_id bid = b_row(tb_slot, &b);
+        blk_spec tspec = spec_panel(LAYER_CHROME, 0, 16, 0);
+        tspec.align_cross = XALN_CENTER;
+        b_text(bid, &tspec, tb_ent[tb_n].label);
+        tb_ent[tb_n].btn = bid;
         tb_n++;
     }
     layout_run();
+    /* 动态重建的按钮在手动 layout_run 后脏位被清：整子树补标画脏，
+     * 否则本帧损伤矩形不覆盖任务栏，按钮底色/文字不上屏。 */
+    mark_subtree_paint(btable_get(tb_slot));
 }
 
 /* 每帧轮询：实例集合变化才重建按钮；否则只刷新活动高亮。 */

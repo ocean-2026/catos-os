@@ -62,6 +62,7 @@ void      cv_dirty_clear(block *b);
 
 /* input.c 组件键盘钩子 */
 void      gui_set_key_hook(int (*fn)(int code, void *ud), void *ud);
+void     *gui_key_hook_owner(void);
 /* input.c 组件滚轮钩子（自绘组件：终端 / 记事本；返回 1 表示消费该 notch）。 */
 void      gui_set_wheel_hook(int (*fn)(int dz, void *ud), void *ud);
 

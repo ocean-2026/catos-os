@@ -475,3 +475,8 @@ block_id gui_fm_root(int slot) {
 }
 
 int gui_fm_active_slot(void) { return fm_active; }
+
+void *gui_fm_focus_ud(int slot) {
+    if (slot < 0 || slot >= FM_MAX || !pool[slot] || !pool[slot]->in_use) return 0;
+    return pool[slot];
+}

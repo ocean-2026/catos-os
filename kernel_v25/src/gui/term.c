@@ -550,6 +550,11 @@ int gui_term_count(void) {
 
 int gui_term_active_idx(void) { return active; }
 
+void *gui_term_focus_ud(int idx) {
+    if (idx < 0 || idx >= TERM_MAX || !terms[idx].in_use) return 0;
+    return &terms[idx];
+}
+
 void gui_term_run(int i, const char *cmd) {
     if (i < 0 || i >= TERM_MAX || !terms[i].in_use) return;
     char echo[T_COLS];

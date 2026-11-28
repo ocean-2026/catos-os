@@ -116,6 +116,7 @@ static int        br_active = -1;
 
 static int  br_key(int code, void *ud);
 static void br_focus(int slot);
+static void br_addr_clear(br_inst_t *b);
 
 /* ---- 小字符串助手 ------------------------------------------------------- */
 
@@ -462,7 +463,7 @@ static void run_flush(br_inst_t *b, int scale) {
     }
     if (o && out[o - 1] == ' ') o--;
     const char *txt = pool_put(b, out, o);
-    blk_spec t = br_panel(LAYER_CONTENT, -1, -1, 0);
+    blk_spec t = br_panel(LAYER_WORK, -1, -1, 0);
     t.scale = (uint8_t)scale;
     t.role_accent = b->accent ? ROLE_ACCENT : ROLE_NONE;
     t.pad_l = 2; t.pad_r = 2;
@@ -489,14 +490,14 @@ static void run_flush(br_inst_t *b, int scale) {
 }
 
 static void br_new_row(br_inst_t *b) {
-    blk_spec r = br_panel(LAYER_CONTENT, -1, -1, 0);
+    blk_spec r = br_panel(LAYER_WORK, -1, -1, 0);
     r.gap = 2;
     b->cur_row = b_row(b->content, &r);
     b->blocks++;
 }
 
 static void br_add_text_block(br_inst_t *b, const char *txt, int scale, int accent) {
-    blk_spec t = br_panel(LAYER_CONTENT, -1, -1, 0);
+    blk_spec t = br_panel(LAYER_WORK, -1, -1, 0);
     t.scale = (uint8_t)scale;
     t.role_accent = accent ? ROLE_ACCENT : ROLE_NONE;
     const char *p = pool_put(b, txt, xlen(txt));
@@ -617,7 +618,7 @@ static void br_img_embed(br_inst_t *b, const char *src) {
     bl->req_w = dw; bl->req_h = dh;
     bl->pix_w = b->img_w; bl->pix_h = b->img_h;
     bl->buf = b->img_buf;
-    bl->layer = LAYER_CONTENT; bl->visible = 1; bl->dirty_layout = 1;
+    bl->layer = LAYER_WORK; bl->visible = 1; bl->dirty_layout = 1;
     b->blocks++;
     ser_write("GUI:br img "); ser_write(src);
     ser_write(" w="); br_dec((uint32_t)b->img_w);
@@ -933,7 +934,7 @@ static void br_build_ui(br_inst_t *b) {
     b->addr_blk = b_text(toolbar, &addr, b->addr);
 
     /* 内容视口：v0 顶部排布，超出由裁剪栈裁掉。 */
-    blk_spec view = br_panel(LAYER_CONTENT, BR_VP_W, BR_VP_H, 0);
+    blk_spec view = br_panel(LAYER_WORK, BR_VP_W, BR_VP_H, 0);
     view.gap = 3; view.pad_l = 4; view.pad_r = 4; view.pad_t = 4; view.pad_b = 4;
     b->content = b_column(b->root, &view);
 
@@ -968,9 +969,9 @@ static void br_build_error_page(br_inst_t *b) {
     br_add_text_block(b, "Navigation failed", 1, 0);
     br_add_text_block(b, b->err_msg, 1, 0);
     br_add_text_block(b, b->url, 1, 0);
-    blk_spec row = br_panel(LAYER_CONTENT, -1, 20, 0);
+    blk_spec row = br_panel(LAYER_WORK, -1, 20, 0);
     block_id brow = b_row(b->content, &row);
-    blk_spec back = br_panel(LAYER_CONTENT, 72, 18, 1);
+    blk_spec back = br_panel(LAYER_WORK, 72, 18, 1);
     back.usr = b;
     if (b->hist_cur > 0) {
         back.on_click = br_click_back;
@@ -1106,6 +1107,7 @@ static void br_addr_click(block_id id, int32_t lx, int32_t ly) {
             if (ob) ob->dirty_paint = 1;
         }
     }
+    br_addr_clear(b);
 }
 
 /* ---- 实例生命周期 --------------------------------------------------------- */
@@ -1157,6 +1159,13 @@ static void br_close_inst(int slot, int report) {
 
 void gui_browser_close(void) {
     for (int i = BR_MAX - 1; i >= 0; i--) br_close_inst(i, 0);
+}
+
+/* 地址栏聚焦即全选旧 URL：首次键入为替换，而非追加到旧串尾部。 */
+static void br_addr_clear(br_inst_t *b) {
+    b->addr[0] = 0;
+    b->addr_len = 0;
+    b->addr_pos = 0;
 }
 
 static void br_addr_insert(br_inst_t *b, char c) {
@@ -1257,6 +1266,11 @@ int gui_br_count(void) {
 
 int gui_br_active_idx(void) { return br_active; }
 
+void *gui_br_focus_ud(int slot) {
+    br_inst_t *b = br_slot_inst(slot);
+    return b ? (void *)b : 0;
+}
+
 block_id gui_br_root(int slot) {
     br_inst_t *b = br_slot_inst(slot);
     return b ? b->root : 0;
@@ -1282,6 +1296,7 @@ void gui_br_type(int slot, const char *s) {
     if (!b || !s) return;
     br_focus(slot);
     b->addr_focused = 1;
+    br_addr_clear(b);
     while (*s) { br_addr_insert(b, *s); s++; }
     block *ab = btable_get(b->addr_blk);
     if (ab) ab->dirty_paint = 1;

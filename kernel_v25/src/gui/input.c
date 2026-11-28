@@ -92,6 +92,9 @@ void gui_set_key_hook(int (*fn)(int code, void *ud), void *ud) {
     key_ud = ud;
 }
 
+/* 当前键盘钩子的归属实例指针（只读）：任务栏单活动项高亮以此为唯一口径。 */
+void *gui_key_hook_owner(void) { return key_ud; }
+
 void gui_set_wheel_hook(int (*fn)(int dz, void *ud), void *ud) {
     wheel_hook = fn;
     wheel_ud = ud;

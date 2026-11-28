@@ -115,6 +115,7 @@ void      gui_fm_select(int slot, int i);
 int       gui_fm_in_use(int slot);
 block_id  gui_fm_root(int slot);
 int       gui_fm_active_slot(void);
+void     *gui_fm_focus_ud(int slot);
 
 /* 图片查看器 */
 void      gui_images_open(const char *path);
@@ -138,6 +139,7 @@ int       gui_browser_blocks(void);
 void      gui_br_focus(int slot);
 int       gui_br_count(void);
 int       gui_br_active_idx(void);
+void     *gui_br_focus_ud(int slot);
 block_id  gui_br_root(int slot);
 const char *gui_br_url(int slot);
 int       gui_br_hist_len(int slot);
@@ -168,6 +170,7 @@ void      gui_term_close_active(void);
 void      gui_term_reset(void);
 int       gui_term_count(void);
 int       gui_term_active_idx(void);
+void     *gui_term_focus_ud(int idx);
 const char *gui_term_cwd(int i);
 const char *gui_term_last_line(int i);
 int       gui_term_lines(int i);
