@@ -3,7 +3,7 @@
 [btime] 0ms K2 paging
 [intr] serial breadcrumb channel up
 [fpu] caps=0000000f  cr4=00000610  cr0=80000019 
-[link][RISK] refuse user map onto kernel static frame va=02000000  frame=0215b000  pid=00000000 
+[link][RISK] refuse user map onto kernel static frame va=02000000  frame=0215c000  pid=00000000 
 [guard] static-slot guard rejected=1 intact=1 result=1
 kvheap selftest: PASS total=13 free=0 bytes=0
 [btime] 10ms K3 intr+tasks+sti
@@ -37,5 +37,5 @@ GUI:shadow mode=1 w=800 h=600 bytes=1440000 heap_before=0 heap_after=1441792
 GUI:desk items=0
 GUI:warn dragdeny id=1 layer=0
 GUI:deny denied=3 denied_moved=0 sample_moved=1 result=1
-GUI:frame first=1 us=3896 rects=1 area=768 frame_us=3896
-GUI:drag ax=0 ay=0 bx=200 by=100 measured=0 total=5 subtree=2 damage_rects=1 damage_area=768 frame_us=3896 b_same=1 result=1
+GUI:frame first=1 us=3845 rects=1 area=768 frame_us=3845
+GUI:drag ax=0 ay=0 bx=200 by=100 measured=0 total=5 subtree=2 damage_rects=1 damage_area=768 frame_us=3845 b_same=1 result=1

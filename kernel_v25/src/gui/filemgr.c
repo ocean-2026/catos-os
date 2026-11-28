@@ -381,6 +381,8 @@ void gui_filemgr_open(const char *path) {
 
     blk_spec title = cv_panel_local(LAYER_WORK, FM_BODY_W, 16, 0);
     title.role_bg = ROLE_BAR; title.bg = INHERIT_COLOR;
+    title.align_cross = XALN_CENTER;
+    title.align_main = ALN_SPACE_BETWEEN;   /* 左标签 + 右 Close 分列，与终端/记事本/设置一致 */
     title.render = fm_title_render;
     title.usr = f;
     block_id bar = b_row(f->root, &title);
