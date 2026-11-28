@@ -17,6 +17,7 @@
 #include "keyboard.h"
 #include "fs.h"
 #include "cdeconf.h"    /* v2.82 A1.4: /etc/cde.conf scheme -> gui token  */
+#include "ce.h"         /* ce_blk_rec2_t：声明语法 img=/icon= 探针落地 */
 
 static void geom_walk(block *b);
 static void gui_menu_toggle(block_id id, int32_t lx, int32_t ly);
@@ -47,6 +48,11 @@ extern void gui_sak_reset(void);
 /* P3 声明式 ABI（src/gui/decl.c）。 */
 extern int  decl_self_test(void);
 extern void decl_dump_pid(int tid);
+extern int  decl_ce_probe_commit(int tid, const void *recs, int n,
+                                 const char *strings, int slen, uint32_t rec_size);
+extern void decl_ce_probe_cleanup(int tid);
+extern block_id decl_ce_probe_local_to_global(int tid, int lid);
+extern int  decl_ce_probe_count(int tid);
 
 static void split_word(const char *arg, char *word, int cap, const char **rest) {
     word[0] = 0; *rest = 0;
@@ -376,6 +382,87 @@ static void shot_icons_build(int bad_only, int hover) {
         gui_inject_hover_block(icon_btn_ids[0]);
     layout_run();
     mark_subtree_paint(gui_root_block());
+}
+
+/* v3 声明语法探针：按钮 img=/icon= 走 CE rec2 声明通道（validate2→apply2）落地。
+ * 三按钮：① ok.svg/16；② /nope/x.svg 回落内置；③ ok.svg icon_sz=99（非法档位，
+ * 内核忽略该项回默认档，按钮仍正常渲染）。 */
+#define DECL_IMG_N 3
+static block_id decl_img_btn_ids[DECL_IMG_N];
+
+static int decl_strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+static void decl_rec2_init(ce_blk_rec2_t *r, int id, int parent, uint8_t kind,
+                           int text_off) {
+    memset(r, 0, sizeof(*r));
+    r->base.id = id;
+    r->base.parent = parent;
+    r->base.kind = kind;
+    r->base.layer = LAYER_WORK;
+    r->base.req_w = -1;
+    r->base.req_h = -1;
+    r->base.text_off = text_off;
+    r->base.pix_off = -1;
+    r->base.res = -1;
+    r->cap_ver = CE_BLK_REC2_VER;
+}
+
+static void shot_decl_img_build(void) {
+    int tid = 10;
+    decl_ce_probe_cleanup(tid);
+
+    ce_blk_rec2_t recs[4];
+    decl_rec2_init(&recs[0], 1, 0, BLK_COLUMN, -1);
+
+    const char *p_ok  = "/icons/ok.svg";
+    const char *p_bad = "/nope/x.svg";
+    const char *t1 = "DeclSVG", *t2 = "DeclFB", *t3 = "BadIcon";
+    char pool[160]; int po = 0;
+    int off_ok  = po; memcpy(pool + po, p_ok,  (unsigned)decl_strlen(p_ok)  + 1);
+                      po += decl_strlen(p_ok)  + 1;
+    int off_bad = po; memcpy(pool + po, p_bad, (unsigned)decl_strlen(p_bad) + 1);
+                      po += decl_strlen(p_bad) + 1;
+    int off_t1  = po; memcpy(pool + po, t1,    (unsigned)decl_strlen(t1)    + 1);
+                      po += decl_strlen(t1)    + 1;
+    int off_t2  = po; memcpy(pool + po, t2,    (unsigned)decl_strlen(t2)    + 1);
+                      po += decl_strlen(t2)    + 1;
+    int off_t3  = po; memcpy(pool + po, t3,    (unsigned)decl_strlen(t3)    + 1);
+                      po += decl_strlen(t3)    + 1;
+
+    decl_rec2_init(&recs[1], 2, 1, BLK_BUTTON, off_t1);
+    recs[1].base.req_w = 220; recs[1].base.req_h = 32;
+    recs[1].img_off = off_ok;  recs[1].icon_sz = 16;
+
+    decl_rec2_init(&recs[2], 3, 1, BLK_BUTTON, off_t2);
+    recs[2].base.req_w = 220; recs[2].base.req_h = 32;
+    recs[2].img_off = off_bad; recs[2].icon_sz = 16;
+
+    decl_rec2_init(&recs[3], 4, 1, BLK_BUTTON, off_t3);
+    recs[3].base.req_w = 220; recs[3].base.req_h = 32;
+    recs[3].img_off = off_ok;  recs[3].icon_sz = 99;  /* 非法档位：应被忽略 */
+
+    int rc = decl_ce_probe_commit(tid, recs, 4, pool, (uint32_t)po,
+                                  (uint32_t)sizeof(ce_blk_rec2_t));
+    if (rc != 0) {
+        ser_write("GUI:decl-img FAIL commit rc="); ser_dec(rc); ser_putc('\n');
+        return;
+    }
+    for (int di = 0; di < DECL_IMG_N; di++) {
+        block_id gid = decl_ce_probe_local_to_global(tid, di + 2);
+        decl_img_btn_ids[di] = gid;
+        block *bp = btable_get(gid);
+        if (bp) { bp->x = 40; bp->y = 40 + di * 44; bp->moved = 1; }
+    }
+    layout_run();
+    mark_subtree_paint(gui_root_block());
+
+    for (int di = 0; di < DECL_IMG_N; di++) {
+        block *b = btable_get(decl_img_btn_ids[di]);
+        ser_write("GUI:decl-img btn="); ser_dec(di);
+        ser_write(" img="); ser_write(b && b->img ? b->img : "-");
+        ser_write(" sz="); ser_dec(b ? b->icon_sz : 0);
+        ser_putc('\n');
+    }
 }
 
 /* v3 图片资源自检：图标墨迹、越界、缓存槽位 / 回落计数。 */
@@ -3285,6 +3372,7 @@ void gui_shell_cmd(const char *arg) {
     int deskev = 0;
     int shot_hov = 0, shot_sel = 0;   /* P1-1：截图态——悬停 / 选中桌面条目 */
     int shot_icons = 0, shot_icons_bad = 0, shot_icons_hover = 0;   /* v3：按钮图片资源截图 */
+    int shot_decl_img = 0;   /* v3：声明语法 img=/icon= 按钮截图 */
     int shot_hov_gap = 0;              /* P1-1 小修：悬停条目留白（命中容器本身） */
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
@@ -3326,6 +3414,7 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-icons"))      { shot_icons = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-icons-bad")) { shot_icons_bad = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-icons-hover")) { shot_icons_hover = 1; probe_no_sample = 1; }
+    else if (!strcmp_probe(word, "shot-decl-img"))  { shot_decl_img = 1; probe_no_sample = 1; }
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; probe_no_sample = 1; }
@@ -3366,7 +3455,8 @@ void gui_shell_cmd(const char *arg) {
         return;
     }
     int free_sample = free_dash || free_side || free_float || free_overflow ||
-                      free_interact || deskev || shot_icons || shot_icons_bad || shot_icons_hover;
+                      free_interact || deskev || shot_icons || shot_icons_bad ||
+                      shot_icons_hover || shot_decl_img;
     int blkgen_on = (app_open == APP_BLKGEN);
     if (blkgen_on) free_sample = 1;   /* blkgen 页不挂 demo 样本（纯追加，不改既有条件） */
     int flush_probe = probe_flush_inset || probe_flush_hpair ||
@@ -3424,6 +3514,7 @@ void gui_shell_cmd(const char *arg) {
     if (shot_icons)      shot_icons_build(0, 0);
     if (shot_icons_bad)  shot_icons_build(1, 0);
     if (shot_icons_hover) shot_icons_build(0, 1);
+    if (shot_decl_img)   shot_decl_img_build();
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
     if (shot_hov && desk_n > 0) {
         block *b0 = btable_get(desk_item_blk[0]);

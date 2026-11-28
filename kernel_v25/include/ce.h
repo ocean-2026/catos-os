@@ -127,6 +127,12 @@ typedef struct {
     /* cap3：角形态（CE 只给默认 n=5.0，不下发 corner_n） */
     uint8_t  corner_shape;  /* 0=ARC 1=SQUIRCLE */
     uint8_t  pad_[2];
+    /* v3 按钮图片（append-only；-1/0 = 未声明 ≡ 旧行为）。
+     * img_off 指向字符串池内的 SVG 路径（-1 = 无）；icon_sz 图标边长
+     * 0/16/24，其它值由内核忽略。未知/非法/超长项只跳过该项，不整批拒绝。 */
+    int32_t  img_off;
+    uint8_t  icon_sz;
+    uint8_t  pad2_[3];
 } ce_blk_rec2_t;
 #define CE_BLK_REC2_VER 1
 

@@ -133,6 +133,10 @@ typedef struct {
     uint8_t  pop_prefer;
     uint8_t  corner_shape;
     uint8_t  pad_[2];
+    /* v3 按钮图片（append-only；-1/0 = 未声明 ≡ 旧行为）。 */
+    int32_t  img_off;
+    uint8_t  icon_sz;
+    uint8_t  pad2_[3];
 } ce_blk_rec2_t;
 #define CE_BLK_REC2_VER 1
 

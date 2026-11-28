@@ -277,6 +277,23 @@ static int validate2(const ce_blk_rec2_t *r, int n, const char *pool, int slen,
             if (tlen > DECL_MAX_TEXT) return E_DECL_QUOTA;
         }
 
+        /* v3 按钮图片：非法/越界/超长只忽略该项（清回缺省），不整批拒绝。 */
+        {
+            ce_blk_rec2_t *w2 = (ce_blk_rec2_t *)r;
+            if (w2[i].img_off != -1) {
+                int io = w2[i].img_off;
+                int ok = (io >= 0 && io < slen);
+                int ilen = 0;
+                if (ok) {
+                    const char *is = pool + io;
+                    while (ilen < 160 && is[ilen]) ilen++;
+                    if (ilen == 0 || is[ilen] != 0) ok = 0;   /* 空 / 未终止 / 超长 */
+                }
+                if (!ok) w2[i].img_off = -1;
+            }
+            if (w2[i].icon_sz != 16 && w2[i].icon_sz != 24) w2[i].icon_sz = 0;
+        }
+
         /* 父链：0 = 本应用根；否则必须是本批已出现的 id。 */
         int pidx = -1;
         if (b->parent != 0) {
@@ -341,6 +358,9 @@ static const char *decl_copy_text(struct pid_meta *p, const char *src, int len) 
     char *arena = parena(p);
     int used = 0;
     for (int i = 0; i < DECL_ARENA; i++) if (arena[i]) used = i + 1;
+    /* used 是最后一个非零字节下标+1；其尾随 NUL 同样占用一格，下一串必须从
+     * NUL 之后起，否则会覆盖前串终止符导致串粘连。 */
+    if (used > 0 && used < DECL_ARENA) used += 1;
     if (used + len + 1 > DECL_ARENA) return 0;
     char *dst = arena + used;
     for (int i = 0; i < len; i++) dst[i] = src[i];
@@ -488,6 +508,22 @@ static int decl_apply2(struct pid_meta *p, const ce_blk_rec2_t *r, int n,
         blk->pop_prefer   = d->pop_prefer;
         blk->pop_max_h    = d->pop_max_h;
         blk->corner_shape = d->corner_shape;
+
+        /* v3 按钮图片：池偏移路径复制进 pid 文本池；icon_sz 仅 16/24 落地，
+         * 其余值已在 validate2 清 0。icon_pos 本轮固定左图标，留 0。 */
+        blk->img = 0;
+        blk->icon_sz = 0;
+        blk->icon_pos = 0;
+        if (d->img_off != -1) {
+            const char *is = pool + d->img_off;
+            int ilen = 0;
+            while (ilen < 160 && is[ilen]) ilen++;
+            if (ilen > 0 && is[ilen] == 0) {
+                const char *img = decl_copy_text(p, is, ilen);
+                if (img) blk->img = img;
+            }
+        }
+        if (d->icon_sz == 16 || d->icon_sz == 24) blk->icon_sz = d->icon_sz;
 
         /* 生产路径建档点：声明了动画（anim_ms>0 且 anim_mask!=0）即按声明值
          * kick。anim_kick 内部对 ease==0 / reduced_motion 自洽空转；已在途的

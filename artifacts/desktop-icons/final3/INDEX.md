@@ -65,3 +65,11 @@ GUI:img fallback path=/nope/x.svg reason=noent icon=cancel
 
 - `clip-terminal.png`：本轮未新开终端批次；终端帧见 `final2/term-final.png`，独立 clip 截图未采。
 - `loose-offscreen.png`：`gui loose` 探针结束即 `gui_end()` 不保留帧；部分出屏坐标已由前序 `round5/serial-loose.log` 串口取证，截图未采。
+
+## 声明语法接入 img=/icon=（CE rec2 通道，本轮）
+
+- `btn-decl-svg.png`：记录声明 `img=/icons/ok.svg`、`icon_sz=16`，文件 SVG 蓝勾 + `DeclSVG`，与内核内构建视觉一致。
+- `btn-decl-fallback.png`：声明 `img=/nope/x.svg`，回落内置 cancel(X) + `DeclFB`；串口恰一条 `GUI:img fallback path=/nope/x.svg reason=noent icon=cancel`。
+- `btn-decl-badicon.png`：声明 `icon_sz=99`（非法档位）被忽略回默认 16 档，`img=/icons/ok.svg` 正常出勾 + `BadIcon`，不崩。
+- `decl-img-full.png`：三按钮整帧。串口 `GUI:decl-img btn=0/1/2 img=... sz=...`：sz=16 / 16 / 0（非法 99 清 0）。
+- 接线入口：`validate2` 软校验（非法项跳过不整批拒绝）→ `decl_apply2` 落地 `block.img/icon_sz`；探针命令 `gui shot-decl-img`，脚本 `tests/final3_decl_probe.py`。
