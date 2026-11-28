@@ -377,9 +377,15 @@ static void br_normalize(char *out, int cap, const char *in) {
     int has_scheme = 0;
     for (int k = l; k <= r && k < l + 12; k++)
         if (in[k] == ':' && in[k + 1] == '/' && in[k + 2] == '/') { has_scheme = 1; break; }
-    if (!has_scheme) xcat(out, cap, "http://");
-    for (int k = l; k <= r && xlen(out) < cap - 1; k++) out[xlen(out)] = in[k];
-    out[xlen(out)] = 0;
+    /* 显式偏移顺序写：out 可能是未清零的栈缓冲，循环内不能反复 xlen(out)
+     * 去扫未初始化尾部（扫进栈垃圾后会把字符写到错误偏移，新旧串叠印）。 */
+    int o = 0;
+    if (!has_scheme) {
+        const char *pre = "http://";
+        while (*pre && o < cap - 1) out[o++] = *pre++;
+    }
+    for (int k = l; k <= r && o < cap - 1; k++) out[o++] = in[k];
+    out[o] = 0;
 }
 
 /* ---- 状态行 ------------------------------------------------------------- */
