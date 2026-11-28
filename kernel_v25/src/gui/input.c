@@ -484,7 +484,23 @@ void gui_pump_input(void) {
             pressed_block = 0;
             if (drag_mode != DRAG_NONE || sb_drag_target()) on_release(e.x, e.y);
             else if (armed_block) on_release(e.x, e.y);  /* armed 按钮松开重算命中 */
-            else hover_block = hit_test(e.x, e.y);
+            else {
+                block *old_hov = hover_block;
+                block *new_hov = hit_test(e.x, e.y);
+                hover_block = new_hov;
+                /* hover 目标切换：旧/新目标及其祖先（到根的直接子层为止）补脏，
+                 * hover 描边/底色才进损伤矩形重绘。不改命中链，只补损伤标记。 */
+                if (old_hov != new_hov) {
+                    for (block *p = old_hov; p; p = p->parent) {
+                        p->dirty_paint = 1;
+                        if (p->parent && p->parent->kind == BLK_ROOT) break;
+                    }
+                    for (block *p = new_hov; p; p = p->parent) {
+                        p->dirty_paint = 1;
+                        if (p->parent && p->parent->kind == BLK_ROOT) break;
+                    }
+                }
+            }
             pop_bridge_note(e.x, e.y);
         } else if (drag_block) {
             on_drag_move(e.x, e.y);

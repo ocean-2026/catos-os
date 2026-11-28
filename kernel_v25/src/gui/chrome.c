@@ -631,6 +631,8 @@ static block_id demo_add_sample(void) {
 static char desk_names[DESK_MAX_ITEMS][FS_NAME_MAX];
 static int  desk_n;
 static block_id desk_item_blk[DESK_MAX_ITEMS];
+/* P1-1: 当前选中条目序号；-1 = 无选中。内部运行时状态，不入 blk_spec / CE ABI。 */
+static int  desk_sel = -1;
 
 /* R5: 拖拽位置持久层（/etc/desktop.layout，行格式 `name x y`）。开机枚举时
  * 按名读回；无记录的条目走右侧纵向列兜底。FS 单条目内存视图上限 FS_DATA_MAX
@@ -785,10 +787,55 @@ static void desk_open_entry(int i) {
                                       { gui_images_open(path); return; }
 }
 
+/* hov 是否落在块 b 的子树内（含 b 自身）。hover 目标是最深叶子，条目容器需沿父链上溯。 */
+static int desk_in_subtree(block *hov, block *b) {
+    for (block *p = hov; p; p = p->parent)
+        if (p == b) return 1;
+    return 0;
+}
+
+/* P1-1 条目自绘：hover 走 border 令牌细描边；选中走 accent 令牌粗描边 + panel 淡底。
+ * 颜色全部取活动令牌，dark/light 对版，不硬编码 RGB；命中仍走既有 leaf，本回调只读
+ * gui_hover_target() 与 desk_sel，不改命中链。render 在默认绘制之后、子块之前回调，
+ * 淡底位于图标/标签之下。 */
+static void desk_item_render(block_id id) {
+    int i = desk_item_index(id);
+    block *b = btable_get(id);
+    if (i < 0 || !b) return;
+    const struct style *tok = gui_active_style();
+    block *hov = gui_hover_target();
+    int hovered = hov && desk_in_subtree(hov, b);
+    if (desk_sel == i) {
+        gui_fill_rect(b->x, b->y, b->w, b->h, tok->panel);
+        gui_draw_border(b->x, b->y, b->w, b->h, tok->accent, 2);
+    } else if (hovered) {
+        gui_draw_border(b->x, b->y, b->w, b->h, tok->border, 1);
+    }
+}
+
+/* 点桌面空白（背景块）：取消选中，不触发任何打开动作。 */
+static void desk_blank_click(block_id id, int32_t lx, int32_t ly) {
+    (void)id; (void)lx; (void)ly;
+    if (desk_sel >= 0) {
+        block *o = btable_get(desk_item_blk[desk_sel]);
+        if (o) o->dirty_paint = 1;
+        desk_sel = -1;
+        ser_write("GUI:desk sel=-1\n");
+    }
+}
+
 static void desk_icon_click(block_id id, int32_t lx, int32_t ly) {
     (void)lx; (void)ly;
     int i = desk_item_index(id);
     if (i < 0) return;
+    /* 选中切换：再点同一条目取消，点其它条目改选；单击打开契约保持不变。 */
+    int old = desk_sel;
+    desk_sel = (desk_sel == i) ? -1 : i;
+    if (old >= 0) { block *o = btable_get(desk_item_blk[old]); if (o) o->dirty_paint = 1; }
+    block *nb = btable_get(desk_item_blk[i]); if (nb) nb->dirty_paint = 1;
+    ser_write("GUI:desk sel=");
+    if (desk_sel < 0) ser_write("-1"); else ser_dec((uint32_t)desk_sel);
+    ser_write("\n");
     desk_open_entry(i);
 }
 
@@ -876,6 +923,7 @@ static void build_desktop_icons(block_id root_id) {
     if (n < 0) n = 0;
     if (n > DESK_MAX_ITEMS) n = DESK_MAX_ITEMS;  /* 枚举返回总数，超上限静默截断，不得越界写 desk_names/desk_labels */
     desk_n = n;
+    desk_sel = -1;   /* P1-1：每轮重建桌面清空选中态 */
     desk_layout_load();
 
     if (n == 0) {
@@ -913,6 +961,7 @@ static void build_desktop_icons(block_id root_id) {
             item.on_click = desk_icon_click;
             item.on_dblclick = desk_icon_dblclick;
             item.on_drag = desk_item_drag;
+            item.render = desk_item_render;
             item.drag_mode = DRAG_FULL;
             item.drag_bounds = BOUND_LOOSE;
             item.z = i;
@@ -988,6 +1037,7 @@ void gui_demo_build(void) {
 
     /* 桌面底色：全出血贴屏，忽略父级 padding。 */
     blk_spec bg = spec_panel(LAYER_BG, GFX24_W, GFX24_H, 0);
+    bg.on_click = desk_blank_click;   /* P1-1：点桌面空白取消选中，不触发打开 */
     block_id bg_id = b_rect(root_id, &bg);
     btable_get(bg_id)->bleed = 1;
 
@@ -1752,6 +1802,34 @@ static void gui_probe_loose(void) {
     ser_write(" lx="); ser_dec(lx); ser_write(" ly="); ser_dec(ly);
     ser_write(" rx="); ser_dec(rx); ser_write(" ry="); ser_dec(ry);
     ser_write(" partial="); ser_dec(partial);
+    ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
+    gui_end();
+}
+
+/* P1-1 hover/选中态自检：hover 落在条目子树 -> 单击选中 -> 点空白取消。
+ * 命中/打开契约走既有 leaf；本探针只读 desk_sel 与 gui_hover_target() 做断言。 */
+static void gui_probe_hsel(void) {
+    gui_begin();
+    gui_demo_build();
+    layout_run();
+    if (desk_n <= 0) { ser_write("GUI:hsel items=0 result=0\n"); gui_end(); return; }
+    block *b0 = btable_get(desk_item_blk[0]);
+    int cx = b0->x + b0->w / 2, cy = b0->y + b0->h / 2;
+
+    gui_inject_hover(cx, cy);
+    block *hov = gui_hover_target();
+    int hov_in = hov && desk_in_subtree(hov, b0);
+
+    gui_inject_press(cx, cy); gui_inject_release();
+    int sel1 = desk_sel;
+
+    gui_inject_press(40, 40); gui_inject_release();
+    int sel2 = desk_sel;
+
+    int ok = hov_in && sel1 == 0 && sel2 < 0;
+    ser_write("GUI:hsel hov_in="); ser_dec((uint32_t)hov_in);
+    ser_write(" sel1="); ser_dec((uint32_t)sel1);
+    ser_write(" sel2="); ser_dec((uint32_t)sel2);
     ser_write(" result="); ser_dec(ok ? 1 : 0); ser_write("\n");
     gui_end();
 }
@@ -2963,6 +3041,7 @@ void gui_shell_cmd(const char *arg) {
         if (!strcmp_probe(arg, "geom"))  { gui_probe_geom(); return; }
         if (!strcmp_probe(arg, "bounds")) { gui_probe_bounds(); return; }
         if (!strcmp_probe(arg, "loose"))  { gui_probe_loose(); return; }
+        if (!strcmp_probe(arg, "hsel"))   { gui_probe_hsel(); return; }
         if (!strcmp_probe(arg, "dirty")) { gui_probe_dirty(); return; }
         if (!strcmp_probe(arg, "drag"))  { gui_probe_drag(); return; }
         if (!strcmp_probe(arg, "deny"))  { gui_probe_deny(); return; }
@@ -3048,6 +3127,7 @@ void gui_shell_cmd(const char *arg) {
     int free_dash = 0, free_side = 0, free_float = 0, free_overflow = 0;
     int free_interact = 0;
     int deskev = 0;
+    int shot_hov = 0, shot_sel = 0;   /* P1-1：截图态——悬停 / 选中桌面条目 */
     int shot_style = -1;   /* -1 保持档位；0 app；1 calm */
     enum gui_token shot_tok = TOK_DARK;
     enum { APP_NONE, APP_NOTEPAD, APP_CANVAS, APP_FILEMGR, APP_IMAGES, APP_BROWSER, APP_SETTINGS };
@@ -3082,6 +3162,8 @@ void gui_shell_cmd(const char *arg) {
     else if (!strcmp_probe(word, "shot-free-overflow")) free_overflow = 1;
     else if (!strcmp_probe(word, "shot-free-interact")) free_interact = 1;
     else if (!strcmp_probe(word, "deskev")) deskev = 1;
+    else if (!strcmp_probe(word, "shot-hov"))  shot_hov = 1;
+    else if (!strcmp_probe(word, "shot-sel"))  shot_sel = 1;
     else if (!strcmp_probe(word, "shot-style-calm")) shot_style = 1;
     else if (!strcmp_probe(word, "shot-style-app"))  shot_style = 0;
     else if (!strcmp_probe(word, "shot-notepad")) { app_open = APP_NOTEPAD; app_path[0] = 0; probe_no_sample = 1; }
@@ -3178,6 +3260,19 @@ void gui_shell_cmd(const char *arg) {
         ser_write("\n");
     }
     if (!shot_crop && !shot_drag && !free_sample) gui_frame();
+    if (shot_hov && desk_n > 0) {
+        block *b0 = btable_get(desk_item_blk[0]);
+        if (b0) {
+            gui_inject_hover(b0->x + b0->w / 2, b0->y + b0->h / 2);
+            b0->dirty_paint = 1;
+        }
+    }
+    if (shot_sel && desk_n > 0) {
+        desk_sel = 0;
+        block *b0 = btable_get(desk_item_blk[0]);
+        if (b0) b0->dirty_paint = 1;
+    }
+    if (shot_hov || shot_sel) gui_frame();
     if (deskev) { layout_run(); gui_frame(); decl_dump_ce_rects(); }
 
     gui_idle_loop();
